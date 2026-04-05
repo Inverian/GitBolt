@@ -1,0 +1,8 @@
+Checks: >
+    -*,
+    bugprone-*,
+    modernize-*,
+    performance-*,
+    readability-identifier-naming,
+    -modernize-use-trailing-return-type,
+    -bugprone-easily-swappable-parameters,
