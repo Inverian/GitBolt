@@ -1,4 +1,4 @@
-#include "gitbolt/views/main_window.h"
+#include "ui/MainWindow.h"
 #include <QApplication>
 #include <QStyleHints>
 
@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     // Respect system dark mode
     app.styleHints()->setColorScheme(Qt::ColorScheme::Unknown);
 
-    gitbolt::views::MainWindow window;
+    gitbolt::ui::MainWindow window;
     window.show();
 
     return app.exec();

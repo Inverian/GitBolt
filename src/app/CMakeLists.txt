@@ -4,11 +4,16 @@ qt_add_executable(gitbolt
 )
 
 target_link_libraries(gitbolt PRIVATE
-    gitbolt_views
+    gitbolt_ui
+    gitbolt_dialogs
     gitbolt_widgets
+    gitbolt_editor
     gitbolt_services
     gitbolt_models
-    gitbolt_core
+    gitbolt_git
+    gitbolt_conf
+    gitbolt_watcher
+    gitbolt_util
     gitbolt_plugins
     Qt6::Widgets
     Qt6::Concurrent

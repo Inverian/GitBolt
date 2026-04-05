@@ -1,9 +1,9 @@
 add_executable(gitbolt_tests
-    core/test_repository.cpp
+    git/TestRepository.cpp
 )
 
 target_link_libraries(gitbolt_tests PRIVATE
-    gitbolt_core
+    gitbolt_git
     Qt6::Test
 )
 
