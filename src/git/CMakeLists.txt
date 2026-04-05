@@ -12,5 +12,6 @@ elseif(TARGET git2)
     target_link_libraries(gitbolt_git PUBLIC git2)
 endif()
 
+target_link_libraries(gitbolt_git PUBLIC gitbolt_util)
 target_link_libraries(gitbolt_git PRIVATE Qt6::Core)
 gitbolt_set_warnings(gitbolt_git)

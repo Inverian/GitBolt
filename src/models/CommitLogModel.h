@@ -4,6 +4,7 @@
 #include "git/ObjectId.h"
 
 #include <QAbstractTableModel>
+#include <unordered_set>
 #include <vector>
 
 namespace gitbolt::models {
@@ -50,15 +51,29 @@ public:
     const core::CommitData* commitAt(int row) const;
     const GraphRowData* graphAt(int row) const;
 
+    // Sliding-window page cache management
+    void setMaxCachedPages(int pages);
+    int maxCachedPages() const { return maxCachedPages_; }
+    void setVisibleRange(int first, int last);
+
 signals:
     void requestMoreCommits(int offset, int count);
+    void pageEvicted(int offset);
 
 private:
     void computeGraphData();
+    void evictDistantPages();
+    int pageForRow(int row) const;
 
     std::vector<core::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
     bool hasMore_ = true;
+
+    // Sliding-window cache state
+    int maxCachedPages_ = 20;    // default: 20 pages = 5120 rows
+    int visibleFirst_ = 0;
+    int visibleLast_ = 0;
+    std::unordered_set<int> residentPages_;
 };
 
 } // namespace gitbolt::models

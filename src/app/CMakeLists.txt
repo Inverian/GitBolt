@@ -19,6 +19,15 @@ target_link_libraries(gitbolt PRIVATE
     Qt6::Concurrent
 )
 
+# libgit2 for git_libgit2_init / git_libgit2_shutdown in main
+if(TARGET PkgConfig::LIBGIT2)
+    target_link_libraries(gitbolt PRIVATE PkgConfig::LIBGIT2)
+elseif(TARGET libgit2::git2)
+    target_link_libraries(gitbolt PRIVATE libgit2::git2)
+elseif(TARGET git2)
+    target_link_libraries(gitbolt PRIVATE git2)
+endif()
+
 set_target_properties(gitbolt PROPERTIES
     MACOSX_BUNDLE TRUE
     WIN32_EXECUTABLE TRUE

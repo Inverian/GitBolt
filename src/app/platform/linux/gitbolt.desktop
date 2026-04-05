@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=GitBolt
+Comment=Fast cross-platform Git GUI client
+Exec=gitbolt %F
+Icon=gitbolt
+Terminal=false
+Type=Application
+Categories=Development;RevisionControl;
+MimeType=inode/directory;
+Keywords=git;version control;repository;
+StartupNotify=true
