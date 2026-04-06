@@ -11,8 +11,10 @@
 #include "widgets/RevisionGraphWidget.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -257,6 +259,19 @@ void MainWindow::setupConnections()
                 gitService_, &services::GitService::unstageFile);
         connect(stagingWidget_, &widgets::StagingWidget::stageAllRequested,
                 gitService_, &services::GitService::stageAll);
+        connect(stagingWidget_, &widgets::StagingWidget::unstageAllRequested,
+                gitService_, &services::GitService::unstageAll);
+        connect(stagingWidget_, &widgets::StagingWidget::discardRequested,
+                this, [this](const QString& path) {
+                    const auto answer = QMessageBox::question(this,
+                        tr("Discard changes?"),
+                        tr("Discard all uncommitted changes to %1?\n\n"
+                           "This cannot be undone.").arg(path),
+                        QMessageBox::Discard | QMessageBox::Cancel,
+                        QMessageBox::Cancel);
+                    if (answer == QMessageBox::Discard)
+                        gitService_->discardFile(path);
+                });
     }
 
     // --- Commit editor: commit requested ---
@@ -280,7 +295,21 @@ void MainWindow::setupConnections()
 // ---------------------------------------------------------------------------
 void MainWindow::openRepository()
 {
-    QString dir = QFileDialog::getExistingDirectory(this, tr("Open Repository"));
+    // Default the file picker to the parent directory of the most recently
+    // opened repository, so the common case of "open another repo from the
+    // same workspace folder" is one click away.
+    QString startDir;
+    if (settingsService_) {
+        const QStringList recent = settingsService_->recentRepositories();
+        if (!recent.isEmpty()) {
+            const QFileInfo fi(recent.first());
+            startDir = fi.absolutePath();  // the parent of the last repo
+        }
+    }
+    if (startDir.isEmpty())
+        startDir = QDir::homePath();
+
+    QString dir = QFileDialog::getExistingDirectory(this, tr("Open Repository"), startDir);
     if (!dir.isEmpty())
         openRepositoryAtPath(dir);
 }

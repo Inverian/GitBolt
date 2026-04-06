@@ -118,7 +118,13 @@ void DashboardView::setupUi()
         if (settings_)
             settings_->clearRecentRepositories();
     });
-    connect(recentList_, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
+    // Use itemActivated rather than itemDoubleClicked: itemActivated fires
+    // on both double-click AND Enter/Return (and in general respects the
+    // user's "activate item" platform preference — single-click on KDE,
+    // double-click on macOS). This is what the Qt style guide recommends
+    // for "open this item" actions, and it also means keyboard users can
+    // open a recent repo with ↓ ↓ Enter.
+    connect(recentList_, &QListWidget::itemActivated, this, [this](QListWidgetItem* item) {
         if (item)
             emit openRepositoryRequested(item->data(Qt::UserRole).toString());
     });

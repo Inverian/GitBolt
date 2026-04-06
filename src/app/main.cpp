@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QFileInfo>
 #include <QMessageBox>
 #include <QSharedMemory>
 #include <QStyleHints>
@@ -62,8 +63,13 @@ int main(int argc, char* argv[]) {
 
     const QStringList positionalArgs = parser.positionalArguments();
     QString initialRepoPath;
-    if (!positionalArgs.isEmpty())
-        initialRepoPath = positionalArgs.first();
+    if (!positionalArgs.isEmpty()) {
+        // Resolve the argument to an absolute, canonical path relative to
+        // the user's current working directory. A bare "." should become
+        // the full path, not stay as the literal ".".
+        const QFileInfo fi(positionalArgs.first());
+        initialRepoPath = fi.absoluteFilePath();
+    }
 
     // Initialize theme service and apply before showing any window
     auto* themeService = new gitbolt::conf::ThemeService(&app);

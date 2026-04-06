@@ -166,7 +166,14 @@ void StagingWidget::setupUi()
     unstagedView_->setContextMenuPolicy(Qt::CustomContextMenu);
     unstagedLayout->addWidget(unstagedView_);
 
-    connect(unstagedView_, &QListView::doubleClicked,
+    // Use `activated` rather than `doubleClicked`: activated fires on both
+    // double-click AND Enter/Return, and it respects the user's platform
+    // preference for single-vs-double-click activation. It's also more
+    // reliable with synthetic CGEvents used by tools/click.py during
+    // automated testing — QListView::doubleClicked sometimes fails to
+    // recognize synthetic click pairs even when kCGMouseEventClickState
+    // is set correctly.
+    connect(unstagedView_, &QAbstractItemView::activated,
             this, &StagingWidget::onUnstagedDoubleClicked);
     connect(unstagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &StagingWidget::onUnstagedSelectionChanged);
@@ -189,7 +196,8 @@ void StagingWidget::setupUi()
     stagedView_->setContextMenuPolicy(Qt::CustomContextMenu);
     stagedLayout->addWidget(stagedView_);
 
-    connect(stagedView_, &QListView::doubleClicked,
+    // Same reasoning as the unstaged side — use `activated`.
+    connect(stagedView_, &QAbstractItemView::activated,
             this, &StagingWidget::onStagedDoubleClicked);
     connect(stagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &StagingWidget::onStagedSelectionChanged);

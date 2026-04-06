@@ -25,6 +25,8 @@ public:
     void stageFile(const QString& path);
     void unstageFile(const QString& path);
     void stageAll();
+    void unstageAll();
+    void discardFile(const QString& path);
     void commitChanges(const QString& message, bool amend = false);
 
     void createBranch(const QString& name);

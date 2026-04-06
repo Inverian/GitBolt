@@ -80,6 +80,35 @@ void GitService::stageAll() {
     refreshStatus();
 }
 
+void GitService::unstageAll() {
+    if (!repo_) return;
+    // `git reset` with no paths unstages everything: it rewrites the
+    // index to match HEAD. This is the cleanest way to do "un-add all."
+    // We use the CLI rather than libgit2 here because libgit2's
+    // git_reset_default requires an explicit pathspec list, and building
+    // one from the current status just to undo everything is wasted work.
+    auto proc = repo_->process();
+    auto result = proc.run({"reset"});
+    if (!result) {
+        emit operationFailed(QStringLiteral("unstageAll"),
+            QString::fromStdString(result.error().message()));
+    }
+    refreshStatus();
+}
+
+void GitService::discardFile(const QString& path) {
+    if (!repo_) return;
+    // Discard working-tree changes for a single file by checking it out
+    // from the index. The caller is expected to have already confirmed
+    // with the user — this is a destructive operation.
+    auto result = repo_->discardWorkdirChanges(path.toStdString());
+    if (!result) {
+        emit operationFailed(QStringLiteral("discardFile"),
+            QString::fromStdString(result.error().message()));
+    }
+    refreshStatus();
+}
+
 void GitService::commitChanges(const QString& message, bool amend) {
     if (!repo_) return;
     auto result = repo_->commit(message.toStdString(), amend);

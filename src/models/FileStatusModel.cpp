@@ -51,20 +51,32 @@ QVariant FileStatusModel::data(const QModelIndex& index, int role) const
             const QString fullPath = QString::fromStdString(entry.path);
             return QFileInfo(fullPath).fileName();
         }
-        case Path:
-            return QString::fromStdString(entry.path);
+        case Path: {
+            // Prefix the path with the single-letter status so that
+            // single-column list views (StagingWidget) show both the
+            // status and the file without needing a delegate.
+            const QChar letter = statusLetter(entry, stagedFilter_);
+            const QString path = QString::fromStdString(entry.path);
+            return QStringLiteral("%1  %2").arg(letter).arg(path);
+        }
         default:
             break;
         }
         break;
     }
     case Qt::ForegroundRole: {
-        if (col == StatusIcon)
+        // Foreground tint on the status letter column AND on the path
+        // column, so a single-column QListView (like StagingWidget uses)
+        // still shows status colour without needing a custom delegate.
+        if (col == StatusIcon || col == Path)
             return statusColor(entry, stagedFilter_);
         break;
     }
     case Qt::DecorationRole: {
-        if (col == StatusIcon)
+        // Colored-dot icon on the status letter column AND on the path
+        // column, for the same reason as above. A QListView set to
+        // modelColumn(Path) picks up this icon without extra work.
+        if (col == StatusIcon || col == Path)
             return statusIcon(entry, stagedFilter_);
         break;
     }

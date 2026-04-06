@@ -408,7 +408,12 @@ Result<std::vector<BranchInfo>> Repository::branches(BranchType filter) const {
         info.type = (type == GIT_BRANCH_LOCAL) ? BranchType::Local : BranchType::Remote;
         const git_oid* oid = git_reference_target(ref);
         if (oid) info.tipId = ObjectId(oid);
-        info.isHead = git_branch_is_head(ref) != 0;
+        // git_branch_is_head returns 1 for the ref that HEAD points at,
+        // 0 for every other branch, and <0 on error. A negative return
+        // would leave isHead defaulted to false which would hide HEAD
+        // highlighting in the UI, so clamp explicitly.
+        const int headCheck = git_branch_is_head(ref);
+        info.isHead = (headCheck == 1);
         git_reference_free(ref);
         result.push_back(std::move(info));
     }
