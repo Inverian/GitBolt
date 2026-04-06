@@ -21,9 +21,28 @@ int main(int argc, char* argv[]) {
     app.setOrganizationName(QStringLiteral("GitBolt"));
     app.setOrganizationDomain(QStringLiteral("gitbolt.dev"));
 
-    // Single-instance guard via shared memory
+    // Single-instance guard via shared memory.
+    //
+    // QSharedMemory does NOT auto-clean on Unix when a process is killed
+    // with SIGKILL or crashes — the segment leaks and would falsely block
+    // future launches forever. The standard idiom is: try to attach first;
+    // if we can attach to an existing segment, detach immediately to release
+    // the orphan, then proceed to create our own.
+    //
+    // This still races against a *real* second instance starting at the
+    // same time, but for a desktop app that's acceptable. The behavior
+    // matches what most QSharedMemory tutorials recommend.
     QSharedMemory singleInstanceGuard(QStringLiteral("GitBolt-SingleInstance"));
+    if (singleInstanceGuard.attach()) {
+        // Either there's a real running instance, or we attached to an
+        // orphaned segment from a previous crashed run. Either way,
+        // detach to release our handle.
+        singleInstanceGuard.detach();
+    }
     if (!singleInstanceGuard.create(1)) {
+        // create() can still fail if there's a real concurrent instance
+        // (the rare race) OR if the orphan was held by another user.
+        // Surface a clear, dismissable warning rather than block silently.
         QMessageBox::warning(nullptr, QStringLiteral("GitBolt"),
                              QObject::tr("Another instance of GitBolt is already running."));
         return 1;
@@ -83,12 +102,11 @@ int main(int argc, char* argv[]) {
 
     window.show();
 
-    // Open repository from command line if provided
+    // Open repository from command line if provided. We queue the call so
+    // it runs after the event loop starts and the window is fully shown.
     if (!initialRepoPath.isEmpty()) {
-        // MainWindow will handle opening via its GitService
         QMetaObject::invokeMethod(&window, [&window, initialRepoPath]() {
-            // Access the git service through the window's public interface
-            // The main window connects repositoryOpened signals internally
+            window.openRepositoryAtPath(initialRepoPath);
         }, Qt::QueuedConnection);
     }
 

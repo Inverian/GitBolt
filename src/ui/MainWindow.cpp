@@ -276,10 +276,17 @@ void MainWindow::setupConnections()
 void MainWindow::openRepository()
 {
     QString dir = QFileDialog::getExistingDirectory(this, tr("Open Repository"));
-    if (!dir.isEmpty()) {
-        if (!gitService_->openRepository(dir))
-            QMessageBox::warning(this, tr("Error"),
-                tr("Failed to open repository at %1").arg(dir));
+    if (!dir.isEmpty())
+        openRepositoryAtPath(dir);
+}
+
+void MainWindow::openRepositoryAtPath(const QString& path)
+{
+    if (path.isEmpty())
+        return;
+    if (!gitService_->openRepository(path)) {
+        QMessageBox::warning(this, tr("Error"),
+            tr("Failed to open repository at %1").arg(path));
     }
 }
 
@@ -316,20 +323,20 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
     }
 }
 
-void MainWindow::onStatusReady(std::vector<gitbolt::git::StatusEntry> /*entries*/)
+void MainWindow::onStatusReady(std::vector<gitbolt::git::StatusEntry> entries)
 {
     // Forward status entries to the staging widget.
-    // The staging widget's full update implementation is deferred to a later phase;
-    // for now this slot exists to complete the wiring.
+    if (stagingWidget_)
+        stagingWidget_->setEntries(std::move(entries));
 }
 
-void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> /*branches*/)
+void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
 {
     // Forward branch info to the branch tree widget.
-    // Full branch tree model update is deferred to a later phase;
-    // for now this slot exists to complete the wiring.
+    if (branchTreeWidget_)
+        branchTreeWidget_->setBranches(std::move(branches));
 
-    // Also update the branch label in the status bar
+    // Also update the branch label in the status bar.
     auto* repo = gitService_->repository();
     if (repo) {
         auto branchResult = repo->headBranchName();

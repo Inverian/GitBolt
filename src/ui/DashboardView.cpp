@@ -61,11 +61,16 @@ void DashboardView::setupUi()
     cardsRow->setSpacing(16);
     cardsRow->addStretch();
 
-    openBtn_ = createActionCard(tr("Open Repository"), QStringLiteral("\xF0\x9F\x93\x82"),
+    // NOTE: emoji must be decoded from UTF-8 bytes, not interpreted as Latin-1.
+    // QStringLiteral treats each byte as one QChar, which produces mojibake.
+    openBtn_ = createActionCard(tr("Open Repository"),
+                                QString::fromUtf8("\xF0\x9F\x93\x82"),  // 📂
                                 tr("Open an existing local repository"));
-    cloneBtn_ = createActionCard(tr("Clone Repository"), QStringLiteral("\xE2\xAC\x87"),
+    cloneBtn_ = createActionCard(tr("Clone Repository"),
+                                 QString::fromUtf8("\xE2\xAC\x87"),     // ⬇
                                  tr("Clone a remote repository"));
-    initBtn_ = createActionCard(tr("Init New Repository"), QStringLiteral("\xE2\x9C\xA8"),
+    initBtn_ = createActionCard(tr("Init New Repository"),
+                                QString::fromUtf8("\xE2\x9C\xA8"),      // ✨
                                 tr("Create a new empty repository"));
 
     cardsRow->addWidget(openBtn_);
@@ -123,7 +128,7 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
                                              const QString& description)
 {
     auto* btn = new QPushButton(this);
-    btn->setFixedSize(180, 140);
+    btn->setFixedSize(220, 140);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setText(QStringLiteral("%1\n%2\n%3").arg(iconText, title, description));
     btn->setStyleSheet(QStringLiteral(

@@ -33,6 +33,10 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
+    /// Open a repository by path. Used by main() to handle the
+    /// command-line argument and by recent-repo menu actions.
+    void openRepositoryAtPath(const QString& path);
+
 private slots:
     void openRepository();
     void onRepositoryOpened(const QString& path);
