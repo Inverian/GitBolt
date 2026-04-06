@@ -222,7 +222,7 @@ Qt::ItemFlags BranchModel::flags(const QModelIndex& index) const {
     if (!index.isValid())
         return Qt::NoItemFlags;
 
-    auto flags = Qt::ItemIsEnabled;
+    Qt::ItemFlags flags = Qt::ItemIsEnabled;
 
     // Root categories are not selectable.
     if (index.internalId() != kRootInternalId)

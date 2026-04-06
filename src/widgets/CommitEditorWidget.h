@@ -1,9 +1,9 @@
 #pragma once
 
+#include <QPlainTextEdit>
 #include <QWidget>
 
 class QCheckBox;
-class QPlainTextEdit;
 class QPushButton;
 class QShortcut;
 

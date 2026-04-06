@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QGuiApplication>
 #include <QPalette>
+#include <QStyle>
 #include <QStyleHints>
 
 namespace gitbolt::conf {

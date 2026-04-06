@@ -1,6 +1,7 @@
 #include "models/ReflogModel.h"
 
 #include <QDateTime>
+#include <QFont>
 #include <QIcon>
 #include <chrono>
 

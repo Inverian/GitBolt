@@ -4,16 +4,16 @@ namespace gitbolt::services {
 
 GitService::GitService(QObject* parent)
     : QObject(parent), runner_(this), watcher_(this) {
-    connect(&watcher_, &FileWatcher::repositoryChanged, this, [this]() {
+    connect(&watcher_, &watcher::FileWatcher::repositoryChanged, this, [this]() {
         refreshStatus();
         emit repositoryChanged();
     });
 }
 
 bool GitService::openRepository(const QString& path) {
-    auto result = core::Repository::open(path.toStdString());
+    auto result = git::Repository::open(path.toStdString());
     if (!result) return false;
-    repo_ = std::make_unique<core::Repository>(std::move(*result));
+    repo_ = std::make_unique<git::Repository>(std::move(*result));
     watcher_.watchRepository(path);
     emit repositoryOpened(path);
     refreshStatus();
@@ -29,7 +29,7 @@ void GitService::closeRepository() {
 }
 
 bool GitService::isOpen() const { return repo_ != nullptr; }
-core::Repository* GitService::repository() const { return repo_.get(); }
+git::Repository* GitService::repository() const { return repo_.get(); }
 
 void GitService::refreshStatus() {
     if (!repo_) return;
@@ -46,7 +46,7 @@ void GitService::refreshLog(int offset, int count) {
     runner_.run([this, r, offset, count]() {
         auto walk = r->createRevWalk();
         if (!walk) return;
-        walk->setSorting(core::SortOrder::TopologicalTime);
+        walk->setSorting(git::SortOrder::TopologicalTime);
         walk->pushHead();
         auto commits = walk->next(static_cast<size_t>(count));
         if (commits) emit logReady(std::move(*commits), offset);

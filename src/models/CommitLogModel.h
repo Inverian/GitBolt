@@ -44,11 +44,11 @@ public:
     bool canFetchMore(const QModelIndex& parent) const override;
     void fetchMore(const QModelIndex& parent) override;
 
-    void setCommits(std::vector<core::CommitData> commits);
-    void appendCommits(const std::vector<core::CommitData>& commits);
+    void setCommits(std::vector<git::CommitData> commits);
+    void appendCommits(const std::vector<git::CommitData>& commits);
     void clear();
 
-    const core::CommitData* commitAt(int row) const;
+    const git::CommitData* commitAt(int row) const;
     const GraphRowData* graphAt(int row) const;
 
     // Sliding-window page cache management
@@ -65,7 +65,7 @@ private:
     void evictDistantPages();
     int pageForRow(int row) const;
 
-    std::vector<core::CommitData> commits_;
+    std::vector<git::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
     bool hasMore_ = true;
 

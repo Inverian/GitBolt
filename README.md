@@ -123,75 +123,27 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 
 ## Building from Source
 
-### Prerequisites
+For full step-by-step instructions on installing dependencies and building GitBolt on **macOS**, **Windows**, and **Linux**, see **[docs/BUILDING.md](docs/BUILDING.md)**.
 
-- **CMake** 3.21 or newer
-- **Qt 6.5** or newer (Widgets, Concurrent, Test modules)
-- **libgit2** 1.7 or newer
-- **C++20 compiler** (GCC 11+, Clang 14+, MSVC 19.30+)
-
-### macOS
+The short version, once your environment is set up:
 
 ```bash
-brew install cmake qt@6 libgit2
 git clone https://github.com/ThePieMonster/GitBolt.git
 cd GitBolt
-cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build --parallel
-./build/src/app/GitBolt.app/Contents/MacOS/GitBolt
 ```
 
-### Linux (Ubuntu/Debian)
+Required tools at a glance:
 
-```bash
-sudo apt install cmake qt6-base-dev libgit2-dev pkg-config build-essential
-git clone https://github.com/ThePieMonster/GitBolt.git
-cd GitBolt
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel
-./build/src/app/gitbolt
-```
+| Dependency | Minimum version |
+|---|---|
+| C++ compiler | C++20 (Apple Clang 14+, GCC 11+, MSVC 19.30+) |
+| CMake | 3.21 |
+| Qt | 6.5 |
+| libgit2 | 1.7 |
 
-### Windows
-
-```powershell
-# Install Qt 6 from qt.io and libgit2 via vcpkg
-vcpkg install libgit2
-git clone https://github.com/ThePieMonster/GitBolt.git
-cd GitBolt
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --config Release
-.\build\src\app\Release\GitBolt.exe
-```
-
-### Build Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `GITBOLT_BUILD_TESTS` | `ON` | Build unit tests |
-| `GITBOLT_BUILD_PLUGINS` | `ON` | Build plugin system and built-in plugins |
-| `GITBOLT_SANITIZERS` | `OFF` | Enable AddressSanitizer + UndefinedBehaviorSanitizer |
-
-Example:
-```bash
-cmake -B build -DGITBOLT_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
-```
-
-### Running Tests
-
-```bash
-cmake --build build --target gitbolt_tests
-ctest --test-dir build --output-on-failure
-```
-
-### Creating Installers
-
-```bash
-cmake --build build --target package
-# Outputs: GitBolt-0.1.0-Darwin-arm64.dmg (macOS)
-#          GitBolt-0.1.0-Windows-AMD64.exe (NSIS installer)
-#          GitBolt-0.1.0-Linux-x86_64.deb (Debian package)
-```
+See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on your platform, configure CMake, run the tests, build installers, and troubleshoot common issues.
 
 ---
 

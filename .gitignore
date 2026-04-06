@@ -1,0 +1,32 @@
+# CMake build directory
+build/
+build-*/
+cmake-build-*/
+
+# IDE files
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+.DS_Store
+
+# Compiled output
+*.o
+*.obj
+*.so
+*.dylib
+*.a
+*.lib
+*.exe
+*.app/
+
+# Qt
+*.moc
+moc_*.cpp
+moc_*.h
+ui_*.h
+qrc_*.cpp
+
+# Crash logs
+crash.log

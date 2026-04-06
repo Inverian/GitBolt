@@ -37,7 +37,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     // --- Central stacked widget: Dashboard / Repository views ---
     centralStack_ = new QStackedWidget(this);
-    dashboardView_ = new DashboardView(this);
+    dashboardView_ = new DashboardView(settingsService_, this);
     repoView_ = new RepositoryView(this);
     repoView_->setGitService(gitService_);
     repoView_->setCommitLogModel(commitLogModel_);

@@ -1,5 +1,8 @@
 #include "models/TagModel.h"
 
+#include <QFont>
+#include <QIcon>
+
 namespace gitbolt::models {
 
 TagModel::TagModel(QObject* parent)

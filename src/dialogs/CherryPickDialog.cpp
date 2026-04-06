@@ -58,26 +58,13 @@ void CherryPickDialog::setupUi() {
     mainLayout->addStretch();
 
     // --- Dialog buttons ---
-    auto* buttons = new QDialogButtonBox(
+    buttonBox_ = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Cherry-Pick"));
-    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    mainLayout->addWidget(buttons);
-
-    // Enable OK only when we have a valid commit shown
-    connect(this, &CherryPickDialog::commitHashChanged, this,
-            [buttons, this](const QString&) {
-                // Will be enabled when setCommitDetails is called successfully
-                Q_UNUSED(this)
-            });
-
-    // When details are set, enable OK
-    connect(summaryLabel_, &QLabel::textChanged, this,
-            [buttons](const QString& text) {
-                buttons->button(QDialogButtonBox::Ok)->setEnabled(!text.isEmpty());
-            });
+    buttonBox_->button(QDialogButtonBox::Ok)->setText(tr("Cherry-Pick"));
+    buttonBox_->button(QDialogButtonBox::Ok)->setEnabled(false);
+    connect(buttonBox_, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttonBox_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    mainLayout->addWidget(buttonBox_);
 
     // Connections
     connect(hashEdit_, &QLineEdit::textChanged,
@@ -104,6 +91,9 @@ void CherryPickDialog::setCommitDetails(const git::CommitData& commit) {
     QDateTime dt = QDateTime::fromSecsSinceEpoch(
         static_cast<qint64>(epoch), Qt::LocalTime);
     dateLabel_->setText(dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
+
+    if (buttonBox_)
+        buttonBox_->button(QDialogButtonBox::Ok)->setEnabled(true);
 }
 
 void CherryPickDialog::clearCommitDetails() {
@@ -111,6 +101,9 @@ void CherryPickDialog::clearCommitDetails() {
     summaryLabel_->clear();
     authorLabel_->clear();
     dateLabel_->clear();
+
+    if (buttonBox_)
+        buttonBox_->button(QDialogButtonBox::Ok)->setEnabled(false);
 }
 
 void CherryPickDialog::onHashEdited() {

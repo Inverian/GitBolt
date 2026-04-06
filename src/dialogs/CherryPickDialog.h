@@ -6,6 +6,7 @@
 #include <QDialog>
 #include <vector>
 
+class QDialogButtonBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -39,8 +40,9 @@ private slots:
 private:
     void setupUi();
 
-    QLineEdit*   hashEdit_      = nullptr;
-    QPushButton* browseBtn_     = nullptr;
+    QLineEdit*        hashEdit_      = nullptr;
+    QPushButton*      browseBtn_     = nullptr;
+    QDialogButtonBox* buttonBox_     = nullptr;
 
     // Details area
     QLabel* summaryLabel_  = nullptr;

@@ -113,8 +113,8 @@ signals:
 
 private:
     std::unique_ptr<git::Repository> repo_;
-    AsyncRunner runner_;
-    FileWatcher watcher_;
+    util::AsyncRunner runner_;
+    watcher::FileWatcher watcher_;
 };
 
 } // namespace gitbolt::services

@@ -160,8 +160,8 @@ protected:
 
         // X-axis labels (show every Nth)
         p.setPen(textColor);
-        int labelStep = std::max(1, points_.size() / 8);
-        for (int i = 0; i < points_.size(); i += labelStep) {
+        int labelStep = std::max(1, static_cast<int>(points_.size() / 8));
+        for (int i = 0; i < static_cast<int>(points_.size()); i += labelStep) {
             double x = leftMargin + i * step;
             p.save();
             p.translate(x, topMargin + chartH + 4);

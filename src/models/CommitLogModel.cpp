@@ -62,7 +62,7 @@ void CommitLogModel::fetchMore(const QModelIndex& parent) {
     emit requestMoreCommits(static_cast<int>(commits_.size()), PAGE_SIZE);
 }
 
-void CommitLogModel::setCommits(std::vector<core::CommitData> commits) {
+void CommitLogModel::setCommits(std::vector<git::CommitData> commits) {
     util::PerformanceTimer timer("CommitLogModel::setCommits");
     beginResetModel();
     commits_ = std::move(commits);
@@ -74,7 +74,7 @@ void CommitLogModel::setCommits(std::vector<core::CommitData> commits) {
     endResetModel();
 }
 
-void CommitLogModel::appendCommits(const std::vector<core::CommitData>& commits) {
+void CommitLogModel::appendCommits(const std::vector<git::CommitData>& commits) {
     util::PerformanceTimer timer("CommitLogModel::appendCommits");
     if (commits.empty()) { hasMore_ = false; return; }
     int first = static_cast<int>(commits_.size());
@@ -99,7 +99,7 @@ void CommitLogModel::clear() {
     endResetModel();
 }
 
-const core::CommitData* CommitLogModel::commitAt(int row) const {
+const git::CommitData* CommitLogModel::commitAt(int row) const {
     if (row < 0 || static_cast<size_t>(row) >= commits_.size()) return nullptr;
     return &commits_[static_cast<size_t>(row)];
 }
@@ -161,8 +161,8 @@ void CommitLogModel::computeGraphData() {
     graphData_.clear();
     graphData_.resize(commits_.size());
 
-    std::vector<core::ObjectId> activeLanes;
-    std::unordered_map<core::ObjectId, int, core::ObjectId::Hash> oidToLane;
+    std::vector<git::ObjectId> activeLanes;
+    std::unordered_map<git::ObjectId, int, git::ObjectId::Hash> oidToLane;
 
     for (size_t row = 0; row < commits_.size(); ++row) {
         const auto& commit = commits_[row];
@@ -180,7 +180,7 @@ void CommitLogModel::computeGraphData() {
                 if (activeLanes[static_cast<size_t>(i)].isZero()) { commitLane = i; break; }
             }
             if (commitLane >= static_cast<int>(activeLanes.size()))
-                activeLanes.push_back(core::ObjectId());
+                activeLanes.push_back(git::ObjectId());
         }
 
         rowData.commitLane = commitLane;
@@ -197,7 +197,7 @@ void CommitLogModel::computeGraphData() {
 
         // Clear this lane
         if (commitLane < static_cast<int>(activeLanes.size()))
-            activeLanes[static_cast<size_t>(commitLane)] = core::ObjectId();
+            activeLanes[static_cast<size_t>(commitLane)] = git::ObjectId();
 
         // Assign parents to lanes
         for (size_t p = 0; p < commit.parentIds.size(); ++p) {
@@ -217,7 +217,7 @@ void CommitLogModel::computeGraphData() {
                         if (activeLanes[static_cast<size_t>(i)].isZero() && i != commitLane) { parentLane = i; break; }
                     }
                     if (parentLane >= static_cast<int>(activeLanes.size()))
-                        activeLanes.push_back(core::ObjectId());
+                        activeLanes.push_back(git::ObjectId());
                 }
                 activeLanes[static_cast<size_t>(parentLane)] = parentId;
                 oidToLane[parentId] = parentLane;

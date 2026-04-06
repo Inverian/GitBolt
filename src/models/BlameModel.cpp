@@ -1,6 +1,9 @@
 #include "models/BlameModel.h"
 
+#include <QColor>
 #include <QDateTime>
+#include <QFont>
+#include <QIcon>
 #include <chrono>
 
 namespace gitbolt::models {

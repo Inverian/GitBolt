@@ -1,6 +1,7 @@
 #include "models/SearchResultsModel.h"
 
 #include <QDateTime>
+#include <QFont>
 #include <chrono>
 
 namespace gitbolt::models {
