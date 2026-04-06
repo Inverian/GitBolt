@@ -17,6 +17,7 @@ The Mac and Windows instructions are intentionally kept as parallel as possible.
 - [Running](#running)
 - [Tests](#tests)
 - [Build options](#build-options)
+- [Developer tools](#developer-tools)
 - [Common issues](#common-issues)
 - [Linux notes](#linux-notes)
 
@@ -364,6 +365,28 @@ Example — debug build with sanitizers:
 ```bash
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_SANITIZERS=ON -G Ninja
 cmake --build build-asan --parallel
+```
+
+---
+
+## Developer tools
+
+The [`tools/`](../tools) directory contains helpers for the inner development loop — scripts for the repetitive tasks you do dozens of times a day while working on GitBolt. They're entirely optional and not part of the shipped application.
+
+The two you're most likely to use:
+
+| Tool | What it does |
+|---|---|
+| **[`tools/run-dev.sh`](../tools/run-dev.sh)** | Kill any running GitBolt, rebuild the Debug target, and relaunch — optionally with a repository path to open on launch. Replaces the three-command cycle of stop/build/run with `tools/run-dev.sh .` |
+| **[`tools/click.py`](../tools/click.py)** | Synthetic mouse click via Quartz CGEvents. Bypasses overlay apps like BetterDisplay that intercept clicks, and handles proper click-count marking for synthetic double-clicks. Requires `pip3 install --user pyobjc-framework-Quartz`. macOS only. |
+
+See [`tools/README.md`](../tools/README.md) for the full list, calibration instructions, and guidelines for adding your own helpers.
+
+Typical development loop:
+
+```bash
+# Edit some code, then in the GitBolt project root:
+tools/run-dev.sh .    # rebuild, launch, and open this repo in GitBolt
 ```
 
 ---
