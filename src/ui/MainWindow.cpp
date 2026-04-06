@@ -237,11 +237,16 @@ void MainWindow::setupConnections()
             });
 
     // --- Dashboard: open-from-recent or clone/init ---
+    // The dashboard emits openRepositoryRequested with the path of a recent
+    // repo on double-click, or with an empty string when the "Open
+    // Repository" card is clicked. An empty path means "show the file
+    // picker" — route those through openRepository() to do exactly that.
     connect(dashboardView_, &DashboardView::openRepositoryRequested,
             this, [this](const QString& path) {
-                if (!gitService_->openRepository(path))
-                    QMessageBox::warning(this, tr("Error"),
-                        tr("Failed to open repository at %1").arg(path));
+                if (path.isEmpty())
+                    openRepository();           // file picker dialog
+                else
+                    openRepositoryAtPath(path); // open the named path
             });
 
     // --- Staging widget signals ---
