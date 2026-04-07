@@ -5,6 +5,24 @@
 namespace gitbolt::git {
 
 namespace {
+// libgit2 lifecycle owner.
+//
+// The GitBolt application ALSO calls git_libgit2_init/shutdown from
+// main.cpp — these two mechanisms cooperate via libgit2's internal
+// refcount. The static's job is to make sure libgit2 is initialised
+// even in test binaries and other embedders that don't go through
+// main.cpp. Keeping the static is what makes TestRepository,
+// TestRevWalk, TestDiff, and TestStatus work out of the box.
+//
+// Caveat: on macOS 15.6 + Qt 6.11, a test binary that links
+// gitbolt_git but never references any Repository symbol can still
+// crash with SIGTRAP at static teardown because the Qt threading
+// subsystem ends up calling into libgit2 during its own cleanup
+// (via TLS key destructors) *after* our static has already shut
+// libgit2 down. The workaround is for such test binaries to touch
+// libgit2 early so the refcount stays above zero for the full
+// duration of the test run — see tests/models/TestCommitLogModel.cpp
+// initTestCase() for the pattern.
 struct LibGit2Init {
     LibGit2Init() { git_libgit2_init(); }
     ~LibGit2Init() { git_libgit2_shutdown(); }
