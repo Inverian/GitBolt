@@ -136,3 +136,5 @@ If you write a helper that makes development, debugging, or testing easier, cons
 - **Explain *why*, not just *what*.** A script that `touch`es a file is obvious, but the reason you need to is not. The "Why this tool exists" section in `click.py` above is a good template — describe the original problem that motivated the tool so future contributors can tell if it's still relevant.
 - **No secrets.** Never commit API keys, tokens, passwords, or user-specific paths.
 - **No shipped behavior.** Tools here are for developers. They don't become part of the installed GitBolt application.
+
+<!-- End-to-end commit workflow test marker -->
