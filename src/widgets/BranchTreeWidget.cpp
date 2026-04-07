@@ -38,8 +38,11 @@ BranchTreeWidget::BranchTreeWidget(QWidget* parent)
 
     layout->addWidget(treeView_);
 
-    // Connections
-    connect(treeView_, &QTreeView::doubleClicked,
+    // Use `activated` rather than `doubleClicked` so both double-click
+    // AND Enter trigger checkout. Activation also respects the user's
+    // platform click preference and plays well with synthetic events
+    // from tools/click.py during automated testing.
+    connect(treeView_, &QAbstractItemView::activated,
             this, &BranchTreeWidget::onDoubleClicked);
     connect(treeView_, &QTreeView::customContextMenuRequested,
             this, &BranchTreeWidget::onCustomContextMenu);

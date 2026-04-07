@@ -24,12 +24,37 @@ SettingsService::SettingsService(QObject* parent)
 
 QStringList SettingsService::recentRepositories() const
 {
-    return settings_.value(QStringLiteral("recent/repositories")).toStringList();
+    // Filter out any empty strings that may have crept in — QSettings
+    // can persist empty list entries if we ever wrote the key with an
+    // empty value directly (which some external tools do for "clear"),
+    // and an empty entry would render in the UI as a blank row with
+    // no name. We strip them here on read rather than trying to catch
+    // every write path.
+    QStringList result = settings_.value(QStringLiteral("recent/repositories")).toStringList();
+    result.removeAll(QString{});
+    return result;
+}
+
+// Normalize a repository path to a canonical form for storage and
+// comparison. Strips trailing slashes, resolves "." and ".." segments,
+// uses native separators, and converts to an absolute path. Without
+// this, "/Users/me/proj" and "/Users/me/proj/" are stored as two
+// separate recent entries, and one of them renders with an empty
+// display name (because QFileInfo::fileName() on a trailing-slash
+// path returns the empty string).
+static QString canonicalizeRepoPath(const QString& path)
+{
+    QString abs = QFileInfo(path).absoluteFilePath();
+    // QDir::cleanPath strips redundant separators, resolves "." and
+    // "..", and normalizes a trailing slash to a non-trailing one
+    // (except for the root "/").
+    abs = QDir::cleanPath(abs);
+    return QDir::toNativeSeparators(abs);
 }
 
 void SettingsService::addRecentRepository(const QString& path)
 {
-    QString canonical = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    const QString canonical = canonicalizeRepoPath(path);
     QStringList list = recentRepositories();
     list.removeAll(canonical);
     list.prepend(canonical);
@@ -41,7 +66,7 @@ void SettingsService::addRecentRepository(const QString& path)
 
 void SettingsService::removeRecentRepository(const QString& path)
 {
-    QString canonical = QDir::toNativeSeparators(QFileInfo(path).absoluteFilePath());
+    const QString canonical = canonicalizeRepoPath(path);
     QStringList list = recentRepositories();
     if (list.removeAll(canonical) > 0) {
         settings_.setValue(QStringLiteral("recent/repositories"), list);

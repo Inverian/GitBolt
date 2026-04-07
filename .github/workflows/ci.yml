@@ -11,6 +11,7 @@ on:
 jobs:
   build:
     strategy:
+      fail-fast: false  # Don't cancel other jobs if one platform fails
       matrix:
         os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
@@ -23,6 +24,10 @@ jobs:
         with:
           version: '6.7.*'
           modules: 'qtbase'
+          cache: true    # Cache Qt between runs (~1.5 GB save)
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -30,20 +35,33 @@ jobs:
 
       - name: Install libgit2 (Ubuntu)
         if: runner.os == 'Linux'
-        run: sudo apt-get install -y libgit2-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgit2-dev pkg-config
 
       - name: Install libgit2 (Windows)
         if: runner.os == 'Windows'
-        run: vcpkg install libgit2
+        run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
 
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      # ------------------------------------------------------------------
+      # Configure, build, test. We use Ninja on every platform for
+      # consistency and speed. On Windows we need the vcpkg toolchain
+      # file so CMake can find libgit2.
+      # ------------------------------------------------------------------
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+             -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --parallel
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure -C Release
+        run: ctest --test-dir build --output-on-failure
 
   # ==========================================================================
   # Release packaging — runs only on published releases (tag push)
@@ -70,6 +88,10 @@ jobs:
         with:
           version: '6.7.*'
           modules: 'qtbase'
+          cache: true
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v6
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -83,16 +105,22 @@ jobs:
 
       - name: Install libgit2 (Windows)
         if: runner.os == 'Windows'
-        run: vcpkg install libgit2
+        run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
 
       # ----------------------------------------------------------------------
       # Configure & Build
       # ----------------------------------------------------------------------
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+      - name: Configure (Unix)
+        if: runner.os != 'Windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Configure (Windows)
+        if: runner.os == 'Windows'
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+             -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --parallel
 
       - name: Install
         run: cmake --install build --prefix build/install
