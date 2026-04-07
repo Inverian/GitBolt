@@ -28,6 +28,19 @@ struct git_repository;
 
 namespace gitbolt::git {
 
+/// Returns the runtime libgit2 version as "MAJOR.MINOR.PATCH" (e.g.
+/// "1.9.2"). This reads from libgit2's own reported version rather
+/// than the LIBGIT2_VERSION macro, so it reflects the actual shared
+/// library loaded at runtime — useful for AboutDialog and for bug
+/// reports where the user might be running against a different
+/// libgit2 than the one we built against.
+std::string libgit2Version();
+
+/// Returns the libgit2 features compiled in, as a comma-separated
+/// string: "threads, https, ssh" etc. Parses the libgit2 feature
+/// flags at runtime.
+std::string libgit2Features();
+
 class Repository {
 public:
     ~Repository();

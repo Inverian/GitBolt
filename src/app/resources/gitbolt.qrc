@@ -1,5 +1,21 @@
 <!DOCTYPE RCC>
 <RCC version="1.0">
-    <qresource prefix="/">
+    <!--
+        Application icons. Referenced as ":/icons/gitbolt-<size>.png"
+        from anywhere in the app (e.g. AboutDialog, which loads the
+        128px variant). The paths are relative to this .qrc file —
+        Qt resolves them at build time via rcc and embeds the binary
+        data into the executable so no disk lookup happens at runtime.
+    -->
+    <qresource prefix="/icons">
+        <file alias="gitbolt.png">../../../resources/icons/gitbolt.png</file>
+        <file alias="gitbolt-16.png">../../../resources/icons/gitbolt-16.png</file>
+        <file alias="gitbolt-32.png">../../../resources/icons/gitbolt-32.png</file>
+        <file alias="gitbolt-48.png">../../../resources/icons/gitbolt-48.png</file>
+        <file alias="gitbolt-64.png">../../../resources/icons/gitbolt-64.png</file>
+        <file alias="gitbolt-128.png">../../../resources/icons/gitbolt-128.png</file>
+        <file alias="gitbolt-256.png">../../../resources/icons/gitbolt-256.png</file>
+        <file alias="gitbolt-512.png">../../../resources/icons/gitbolt-512.png</file>
+        <file alias="gitbolt-1024.png">../../../resources/icons/gitbolt-1024.png</file>
     </qresource>
 </RCC>

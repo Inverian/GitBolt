@@ -1,6 +1,7 @@
 #include "ui/MainWindow.h"
 #include "ui/RepositoryView.h"
 #include "ui/DashboardView.h"
+#include "dialogs/AboutDialog.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
 #include "conf/SettingsService.h"
@@ -383,9 +384,8 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
 
 void MainWindow::showAbout()
 {
-    QMessageBox::about(this, tr("About GitBolt"),
-        tr("GitBolt - Fast Cross-Platform Git GUI\n\n"
-           "Built with Qt 6 and libgit2"));
+    dialogs::AboutDialog dlg(this);
+    dlg.exec();
 }
 
 void MainWindow::updateRecentMenu()

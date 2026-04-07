@@ -85,10 +85,30 @@ def move_cursor(x, y):
     CGEventPost(kCGHIDEventTap, ev)
 
 
+# Delay between the individual clicks in a double/triple-click burst.
+# macOS's default double-click interval is around 500 ms, but in practice
+# the NSEvent system wants the clicks to feel "intentional" — AppKit
+# considers events less than ~10 ms apart as potentially bounced/coalesced
+# hardware, and events more than ~500 ms apart as separate click events.
+# Empirically, a 60–100 ms gap reliably produces a real double-click on
+# macOS 15.6 + Qt 6.11. Tune via GITBOLT_CLICK_INTERVAL_MS if needed.
+import os
+_CLICK_INTERVAL_S = int(os.environ.get("GITBOLT_CLICK_INTERVAL_MS", "80")) / 1000.0
+
+
 def left_click(x, y, count=1):
-    """Single/double/triple left click at (x, y)."""
+    """Single/double/triple left click at (x, y).
+
+    For multi-click, we space the individual clicks by _CLICK_INTERVAL_S
+    so AppKit's double-click detector actually fires. Posting all the
+    events back-to-back (as an earlier version did) was fast enough
+    that NSEvent coalesced them into one click with a weird clickCount,
+    and Qt's QAbstractItemView::activated signal never fired.
+    """
     move_cursor(x, y)
     for n in range(1, count + 1):
+        if n > 1:
+            time.sleep(_CLICK_INTERVAL_S)
         post_click_pair(
             kCGEventLeftMouseDown,
             kCGEventLeftMouseUp,

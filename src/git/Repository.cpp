@@ -1,8 +1,35 @@
 #include "git/Repository.h"
 #include <git2.h>
 #include <cstring>
+#include <sstream>
 
 namespace gitbolt::git {
+
+std::string libgit2Version() {
+    int major = 0, minor = 0, rev = 0;
+    git_libgit2_version(&major, &minor, &rev);
+    std::ostringstream os;
+    os << major << '.' << minor << '.' << rev;
+    return os.str();
+}
+
+std::string libgit2Features() {
+    const int f = git_libgit2_features();
+    std::string out;
+    auto append = [&](const char* name) {
+        if (!out.empty())
+            out += ", ";
+        out += name;
+    };
+    if (f & GIT_FEATURE_THREADS)    append("threads");
+    if (f & GIT_FEATURE_HTTPS)      append("https");
+    if (f & GIT_FEATURE_SSH)        append("ssh");
+    if (f & GIT_FEATURE_NSEC)       append("nsec");
+    if (out.empty())
+        out = "none";
+    return out;
+}
+
 
 namespace {
 // libgit2 lifecycle owner.

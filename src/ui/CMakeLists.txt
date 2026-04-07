@@ -7,6 +7,7 @@ target_link_libraries(gitbolt_ui PUBLIC
     gitbolt_editor
     gitbolt_services
     gitbolt_conf
+    gitbolt_dialogs   # MainWindow opens AboutDialog, SettingsDialog, etc.
     Qt6::Widgets
 )
 gitbolt_set_warnings(gitbolt_ui)
