@@ -20,12 +20,40 @@
 #include <QPainter>
 #include <QProcess>
 #include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
-#include <QTabWidget>
+#include <QStackedWidget>
 #include <QTableWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
 namespace gitbolt::dialogs {
+
+namespace {
+
+// Visual tuning constants. Picked to match the GitExtensions
+// reference screenshot proportions at a 16pt body font.
+constexpr int kNavWidth        = 220;
+constexpr int kDialogWidth     = 860;
+constexpr int kDialogHeight    = 600;
+
+// Indent the category header slightly so sub-section rows sit
+// clearly under it without looking flat.
+QTreeWidgetItem* makeCategoryItem(QTreeWidget* tree, const QString& label)
+{
+    auto* item = new QTreeWidgetItem(tree, QStringList{label});
+    QFont f = item->font(0);
+    f.setBold(true);
+    item->setFont(0, f);
+    // Category rows are NOT selectable — only their sub-sections
+    // have pages. Clicking the category expands/collapses it.
+    item->setFlags(item->flags() & ~Qt::ItemIsSelectable);
+    item->setExpanded(true);
+    return item;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -39,20 +67,77 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     , theme_(theme)
 {
     setWindowTitle(tr("Settings"));
-    resize(640, 480);
+    resize(kDialogWidth, kDialogHeight);
 
-    auto* layout = new QVBoxLayout(this);
+    // ---- Root layout: tree | pages on top, buttons on bottom ----
+    auto* root = new QVBoxLayout(this);
 
-    tabs_ = new QTabWidget(this);
-    tabs_->addTab(createGeneralTab(), tr("General"));
-    tabs_->addTab(createGitConfigTab(), tr("Git Config"));
-    tabs_->addTab(createAppearanceTab(), tr("Appearance"));
-    tabs_->addTab(createShortcutsTab(), tr("Shortcuts"));
-    layout->addWidget(tabs_);
+    auto* split = new QHBoxLayout;
+    split->setContentsMargins(0, 0, 0, 0);
+    split->setSpacing(10);
 
+    // --- Left: navigation tree ---
+    nav_ = new QTreeWidget(this);
+    nav_->setHeaderHidden(true);
+    nav_->setRootIsDecorated(true);
+    nav_->setFixedWidth(kNavWidth);
+    nav_->setIndentation(16);
+    nav_->setAlternatingRowColors(true);
+    nav_->setFocusPolicy(Qt::StrongFocus);
+    split->addWidget(nav_);
+
+    // --- Right: stacked pages ---
+    pages_ = new QStackedWidget(this);
+    split->addWidget(pages_, 1);
+
+    root->addLayout(split, 1);
+
+    // ---- Populate: three top-level categories with flat leaves ----
+    //
+    // Category layout (strictly two levels deep — the user asked
+    // for "no sub-sub sections"):
+    //
+    //   GitBolt                ← category (bold, not selectable)
+    //     General
+    //     UI Design            ← new: bottom-pane ratio setting
+    //     Appearance
+    //     Shortcuts
+    //   Git
+    //     Git Config
+    //   Plugins
+    //     Manage Plugins
+    //
+    // The "GitBolt" / "Git" / "Plugins" split mirrors GitExtensions'
+    // "Git Extensions / Git / Plugins" three-category layout.
+    auto* catGitBolt  = makeCategoryItem(nav_, tr("GitBolt"));
+    QTreeWidgetItem* firstLeaf =
+        addSubsection(catGitBolt,  tr("General"),   createGeneralPage());
+    addSubsection(catGitBolt,  tr("UI Design"),  createUiDesignPage());
+    addSubsection(catGitBolt,  tr("Appearance"), createAppearancePage());
+    addSubsection(catGitBolt,  tr("Shortcuts"),  createShortcutsPage());
+
+    auto* catGit      = makeCategoryItem(nav_, tr("Git"));
+    addSubsection(catGit,      tr("Git Config"),    createGitConfigPage());
+
+    auto* catPlugins  = makeCategoryItem(nav_, tr("Plugins"));
+    addSubsection(catPlugins,  tr("Manage Plugins"), createPluginsPage());
+
+    // Expand everything so users see all sub-sections immediately.
+    nav_->expandAll();
+
+    // Select the first real leaf (General) by default so the
+    // dialog opens on a non-empty page.
+    if (firstLeaf) {
+        nav_->setCurrentItem(firstLeaf);
+    }
+
+    connect(nav_, &QTreeWidget::currentItemChanged,
+            this, &SettingsDialog::onTreeSelectionChanged);
+
+    // ---- Buttons ----
     buttons_ = new QDialogButtonBox(
         QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Apply, this);
-    layout->addWidget(buttons_);
+    root->addWidget(buttons_);
 
     connect(buttons_, &QDialogButtonBox::accepted, this, &SettingsDialog::onAccepted);
     connect(buttons_, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -64,28 +149,61 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
 }
 
 // ---------------------------------------------------------------------------
-// General tab
+// Tree <-> Stack mapping
 // ---------------------------------------------------------------------------
 
-QWidget* SettingsDialog::createGeneralTab()
+QTreeWidgetItem* SettingsDialog::addSubsection(QTreeWidgetItem* parent,
+                                               const QString& label,
+                                               QWidget* page)
+{
+    auto* item = new QTreeWidgetItem(parent, QStringList{label});
+    const int index = pages_->addWidget(page);
+    // Stash the stack index so the selection handler can look it
+    // up in O(1) — no need for a separate map.
+    item->setData(0, Qt::UserRole, index);
+    return item;
+}
+
+void SettingsDialog::onTreeSelectionChanged()
+{
+    auto* item = nav_->currentItem();
+    if (!item)
+        return;
+
+    // Category rows are un-selectable, so currentItem() will always
+    // be a leaf here. Defensive check anyway.
+    const QVariant v = item->data(0, Qt::UserRole);
+    if (!v.isValid())
+        return;
+
+    const int idx = v.toInt();
+    if (idx >= 0 && idx < pages_->count())
+        pages_->setCurrentIndex(idx);
+}
+
+// ---------------------------------------------------------------------------
+// General page
+// ---------------------------------------------------------------------------
+
+QWidget* SettingsDialog::createGeneralPage()
 {
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
 
     auto* fontRow = new QHBoxLayout;
-    fontCombo_ = new QFontComboBox(this);
+    fontCombo_ = new QFontComboBox(page);
     fontCombo_->setFontFilters(QFontComboBox::MonospacedFonts);
-    fontSizeSpin_ = new QSpinBox(this);
+    fontSizeSpin_ = new QSpinBox(page);
     fontSizeSpin_->setRange(6, 72);
     fontRow->addWidget(fontCombo_, 1);
     fontRow->addWidget(fontSizeSpin_);
     form->addRow(tr("Code Font:"), fontRow);
 
-    tabSizeSpin_ = new QSpinBox(this);
+    tabSizeSpin_ = new QSpinBox(page);
     tabSizeSpin_->setRange(1, 16);
     form->addRow(tr("Tab Size:"), tabSizeSpin_);
 
-    showWhitespaceCheck_ = new QCheckBox(tr("Show whitespace characters"), this);
+    showWhitespaceCheck_ = new QCheckBox(tr("Show whitespace characters"), page);
     form->addRow(QString(), showWhitespaceCheck_);
 
     form->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
@@ -93,34 +211,124 @@ QWidget* SettingsDialog::createGeneralTab()
 }
 
 // ---------------------------------------------------------------------------
-// Git Config tab
+// UI Design page — window layout defaults
+// ---------------------------------------------------------------------------
+//
+// Currently one setting: the default height of the bottom inspector
+// pane (Commit / Diff / File tree / GPG / Console) as a percent of
+// the revision-graph column's height. The slider and spinbox are
+// two-way bound so touching either updates the other, and the small
+// label underneath shows a live "Revision graph: 60%  Inspector: 40%"
+// summary so users can see what the number means before applying.
+
+QWidget* SettingsDialog::createUiDesignPage()
+{
+    auto* page = new QWidget(this);
+    auto* root = new QVBoxLayout(page);
+    root->setContentsMargins(0, 0, 0, 0);
+
+    auto* layoutGroup = new QGroupBox(tr("Default Pane Sizes"), page);
+    auto* form = new QFormLayout(layoutGroup);
+
+    // --- Bottom inspector pane percent --------------------------
+    auto* row = new QHBoxLayout;
+    bottomPaneSlider_ = new QSlider(Qt::Horizontal, layoutGroup);
+    bottomPaneSlider_->setRange(10, 90);
+    bottomPaneSlider_->setTickInterval(10);
+    bottomPaneSlider_->setTickPosition(QSlider::TicksBelow);
+
+    bottomPaneSpin_ = new QSpinBox(layoutGroup);
+    bottomPaneSpin_->setRange(10, 90);
+    bottomPaneSpin_->setSuffix(QStringLiteral(" %"));
+    bottomPaneSpin_->setFixedWidth(80);
+
+    row->addWidget(bottomPaneSlider_, 1);
+    row->addWidget(bottomPaneSpin_, 0);
+
+    form->addRow(tr("Bottom inspector pane:"), row);
+
+    bottomPanePreview_ = new QLabel(layoutGroup);
+    bottomPanePreview_->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); font-size: 11pt; }"));
+    form->addRow(QString(), bottomPanePreview_);
+
+    auto* note = new QLabel(
+        tr("This is the DEFAULT height of the commit inspector panel "
+           "(Commit / Diff / File tree / GPG / Console) at the bottom "
+           "of the repository view. You can still drag the splitter "
+           "at any time to override this."),
+        layoutGroup);
+    note->setWordWrap(true);
+    note->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); }"));
+    form->addRow(QString(), note);
+
+    root->addWidget(layoutGroup);
+    root->addStretch();
+
+    // Two-way binding — avoid infinite ping-pong by checking that
+    // the value actually changed before forwarding.
+    connect(bottomPaneSlider_, &QSlider::valueChanged,
+            bottomPaneSpin_, [this](int v) {
+                if (bottomPaneSpin_->value() != v)
+                    bottomPaneSpin_->setValue(v);
+            });
+    connect(bottomPaneSpin_, qOverload<int>(&QSpinBox::valueChanged),
+            bottomPaneSlider_, [this](int v) {
+                if (bottomPaneSlider_->value() != v)
+                    bottomPaneSlider_->setValue(v);
+            });
+
+    // Live preview label update.
+    auto updatePreview = [this](int pct) {
+        if (bottomPanePreview_)
+            bottomPanePreview_->setText(
+                tr("Revision graph: %1%   •   Inspector: %2%")
+                    .arg(100 - pct).arg(pct));
+    };
+    connect(bottomPaneSpin_, qOverload<int>(&QSpinBox::valueChanged),
+            this, updatePreview);
+
+    // Seed from current settings (loadSettings() will overwrite
+    // again once the dialog is fully constructed, but setting
+    // early avoids a visible 0% flash on slow hardware).
+    const int initial = settings_ ? settings_->bottomPanePercent() : 40;
+    bottomPaneSlider_->setValue(initial);
+    bottomPaneSpin_->setValue(initial);
+    updatePreview(initial);
+
+    return page;
+}
+
+// ---------------------------------------------------------------------------
+// Git config page
 // ---------------------------------------------------------------------------
 
-QWidget* SettingsDialog::createGitConfigTab()
+QWidget* SettingsDialog::createGitConfigPage()
 {
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
 
-    auto* identityGroup = new QGroupBox(tr("Identity"), this);
+    auto* identityGroup = new QGroupBox(tr("Identity"), page);
     auto* identityForm = new QFormLayout(identityGroup);
-    userNameEdit_ = new QLineEdit(this);
+    userNameEdit_ = new QLineEdit(identityGroup);
     userNameEdit_->setPlaceholderText(tr("Your Name"));
     identityForm->addRow(tr("user.name:"), userNameEdit_);
-    userEmailEdit_ = new QLineEdit(this);
+    userEmailEdit_ = new QLineEdit(identityGroup);
     userEmailEdit_->setPlaceholderText(tr("you@example.com"));
     identityForm->addRow(tr("user.email:"), userEmailEdit_);
     form->addRow(identityGroup);
 
-    auto* remoteGroup = new QGroupBox(tr("Defaults"), this);
+    auto* remoteGroup = new QGroupBox(tr("Defaults"), page);
     auto* remoteForm = new QFormLayout(remoteGroup);
-    defaultRemoteEdit_ = new QLineEdit(this);
+    defaultRemoteEdit_ = new QLineEdit(remoteGroup);
     defaultRemoteEdit_->setPlaceholderText(QStringLiteral("origin"));
     remoteForm->addRow(tr("Default Remote:"), defaultRemoteEdit_);
     form->addRow(remoteGroup);
 
-    auto* credGroup = new QGroupBox(tr("Credentials"), this);
+    auto* credGroup = new QGroupBox(tr("Credentials"), page);
     auto* credForm = new QFormLayout(credGroup);
-    credentialHelperEdit_ = new QLineEdit(this);
+    credentialHelperEdit_ = new QLineEdit(credGroup);
     credentialHelperEdit_->setReadOnly(true);
     credentialHelperEdit_->setPlaceholderText(tr("(not configured)"));
     credForm->addRow(tr("Credential Helper:"), credentialHelperEdit_);
@@ -131,26 +339,26 @@ QWidget* SettingsDialog::createGitConfigTab()
 }
 
 // ---------------------------------------------------------------------------
-// Appearance tab
+// Appearance page
 // ---------------------------------------------------------------------------
 
-QWidget* SettingsDialog::createAppearanceTab()
+QWidget* SettingsDialog::createAppearancePage()
 {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
 
     auto* form = new QFormLayout;
-    themeCombo_ = new QComboBox(this);
+    themeCombo_ = new QComboBox(page);
     if (theme_)
         themeCombo_->addItems(theme_->availableThemes());
     form->addRow(tr("Theme:"), themeCombo_);
     layout->addLayout(form);
 
     // Preview area showing sampled palette colors
-    auto* previewGroup = new QGroupBox(tr("Theme Preview"), this);
+    auto* previewGroup = new QGroupBox(tr("Theme Preview"), page);
     auto* previewLayout = new QVBoxLayout(previewGroup);
 
-    previewArea_ = new QWidget(this);
+    previewArea_ = new QWidget(previewGroup);
     previewArea_->setMinimumHeight(100);
     previewArea_->setAutoFillBackground(true);
 
@@ -180,7 +388,7 @@ QWidget* SettingsDialog::createAppearanceTab()
     // Show small colored rectangles
     auto* sampleRow = new QHBoxLayout;
     auto addSwatch = [&](const QString& label, QPalette::ColorRole role) {
-        auto* frame = new QFrame(this);
+        auto* frame = new QFrame(page);
         frame->setFixedSize(60, 30);
         frame->setAutoFillBackground(true);
         QPalette fp;
@@ -190,7 +398,7 @@ QWidget* SettingsDialog::createAppearanceTab()
         auto* col = new QVBoxLayout;
         col->setSpacing(2);
         col->addWidget(frame, 0, Qt::AlignCenter);
-        col->addWidget(new QLabel(label, this), 0, Qt::AlignCenter);
+        col->addWidget(new QLabel(label, page), 0, Qt::AlignCenter);
         sampleRow->addLayout(col);
     };
     addSwatch(tr("Window"), QPalette::Window);
@@ -206,15 +414,15 @@ QWidget* SettingsDialog::createAppearanceTab()
 }
 
 // ---------------------------------------------------------------------------
-// Shortcuts tab
+// Shortcuts page
 // ---------------------------------------------------------------------------
 
-QWidget* SettingsDialog::createShortcutsTab()
+QWidget* SettingsDialog::createShortcutsPage()
 {
     auto* page = new QWidget(this);
     auto* layout = new QVBoxLayout(page);
 
-    shortcutsTable_ = new QTableWidget(this);
+    shortcutsTable_ = new QTableWidget(page);
     shortcutsTable_->setColumnCount(2);
     shortcutsTable_->setHorizontalHeaderLabels({tr("Action"), tr("Shortcut")});
     shortcutsTable_->horizontalHeader()->setStretchLastSection(true);
@@ -227,7 +435,7 @@ QWidget* SettingsDialog::createShortcutsTab()
             this, &SettingsDialog::onShortcutCellDoubleClicked);
 
     // Key sequence edit (hidden until double-click activates it)
-    keySeqEdit_ = new QKeySequenceEdit(this);
+    keySeqEdit_ = new QKeySequenceEdit(page);
     keySeqEdit_->hide();
     connect(keySeqEdit_, &QKeySequenceEdit::editingFinished, this, [this]() {
         int row = shortcutsTable_->currentRow();
@@ -241,12 +449,40 @@ QWidget* SettingsDialog::createShortcutsTab()
 
     auto* btnRow = new QHBoxLayout;
     btnRow->addStretch();
-    auto* resetBtn = new QPushButton(tr("Reset to Default"), this);
+    auto* resetBtn = new QPushButton(tr("Reset to Default"), page);
     connect(resetBtn, &QPushButton::clicked, this, &SettingsDialog::resetShortcutsToDefault);
     btnRow->addWidget(resetBtn);
     layout->addLayout(btnRow);
 
     populateShortcutsTable();
+    return page;
+}
+
+// ---------------------------------------------------------------------------
+// Plugins page — placeholder until we have a real plugin host
+// ---------------------------------------------------------------------------
+
+QWidget* SettingsDialog::createPluginsPage()
+{
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+
+    auto* title = new QLabel(tr("Plugins"), page);
+    QFont f = title->font();
+    f.setPointSize(14);
+    f.setBold(true);
+    title->setFont(f);
+    layout->addWidget(title);
+
+    auto* body = new QLabel(
+        tr("GitBolt's plugin system is on the roadmap but isn't wired "
+           "up yet. This page is a placeholder — no action is needed."),
+        page);
+    body->setWordWrap(true);
+    body->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    layout->addWidget(body);
+
+    layout->addStretch();
     return page;
 }
 
@@ -335,6 +571,11 @@ void SettingsDialog::loadSettings()
     showWhitespaceCheck_->setChecked(settings_->showWhitespace());
     defaultRemoteEdit_->setText(settings_->defaultRemote());
 
+    // UI Design
+    const int pct = settings_->bottomPanePercent();
+    if (bottomPaneSlider_) bottomPaneSlider_->setValue(pct);
+    if (bottomPaneSpin_)   bottomPaneSpin_->setValue(pct);
+
     if (theme_) {
         int idx = themeCombo_->findText(theme_->currentTheme());
         if (idx >= 0)
@@ -384,6 +625,12 @@ void SettingsDialog::apply()
     settings_->setCodeFontSize(fontSizeSpin_->value());
     settings_->setTabSize(tabSizeSpin_->value());
     settings_->setShowWhitespace(showWhitespaceCheck_->isChecked());
+
+    // UI Design — writing this triggers settingsChanged, which
+    // RepositoryView is connected to; it re-runs applyBottomPanePercent
+    // and snaps the splitter to the new ratio live.
+    if (bottomPaneSpin_)
+        settings_->setBottomPanePercent(bottomPaneSpin_->value());
 
     // Git
     settings_->setDefaultRemote(defaultRemoteEdit_->text().trimmed());

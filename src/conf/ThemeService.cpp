@@ -262,6 +262,21 @@ QString ThemeService::darkStyleSheet() const
         QPushButton:disabled {
             color: #808080;
         }
+        QToolBar {
+            background: #2d2d2d;
+            border-bottom: 1px solid #3c3c3c;
+            spacing: 4px;
+            padding: 2px;
+        }
+        QSplitter::handle {
+            background: #3c3c3c;
+        }
+        QSplitter::handle:horizontal {
+            width: 1px;
+        }
+        QSplitter::handle:vertical {
+            height: 1px;
+        }
         QGroupBox {
             border: 1px solid #3c3c3c;
             margin-top: 8px;
@@ -298,6 +313,21 @@ QString ThemeService::lightStyleSheet() const
         QScrollBar::add-line, QScrollBar::sub-line {
             width: 0;
             height: 0;
+        }
+        QToolBar {
+            background: palette(window);
+            border-bottom: 1px solid palette(mid);
+            spacing: 4px;
+            padding: 2px;
+        }
+        QSplitter::handle {
+            background: palette(mid);
+        }
+        QSplitter::handle:horizontal {
+            width: 1px;
+        }
+        QSplitter::handle:vertical {
+            height: 1px;
         }
     )");
 }

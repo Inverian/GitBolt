@@ -91,6 +91,18 @@ else()
             DESTINATION share/nautilus-python/extensions
             PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 
+    # Install icon PNGs into the freedesktop hicolor theme so the
+    # .desktop file's "Icon=gitbolt" reference resolves at runtime.
+    # Each source PNG is pulled directly from the canonical
+    # resources/icons/ folder, so icon regeneration (e.g. via
+    # tools/generate-icon.py) automatically propagates to the next
+    # packaged DEB / TGZ with no further wiring.
+    foreach(_size 16 32 48 64 128 256 512)
+        install(FILES "${CMAKE_SOURCE_DIR}/resources/icons/gitbolt-${_size}.png"
+                DESTINATION "share/icons/hicolor/${_size}x${_size}/apps"
+                RENAME gitbolt.png)
+    endforeach()
+
     # AppImage support (used via linuxdeploy in CI, not CPack directly)
     # The CI workflow handles AppImage creation with linuxdeploy
 endif()

@@ -8,7 +8,6 @@
         data into the executable so no disk lookup happens at runtime.
     -->
     <qresource prefix="/icons">
-        <file alias="gitbolt.png">../../../resources/icons/gitbolt.png</file>
         <file alias="gitbolt-16.png">../../../resources/icons/gitbolt-16.png</file>
         <file alias="gitbolt-32.png">../../../resources/icons/gitbolt-32.png</file>
         <file alias="gitbolt-48.png">../../../resources/icons/gitbolt-48.png</file>

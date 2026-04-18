@@ -4,6 +4,7 @@
 <dict>
     <key>CFBundleDisplayName</key><string>GitBolt</string>
     <key>CFBundleExecutable</key><string>GitBolt</string>
+    <key>CFBundleIconFile</key><string>gitbolt.icns</string>
     <key>CFBundleIdentifier</key><string>com.gitbolt.app</string>
     <key>CFBundleName</key><string>GitBolt</string>
     <key>CFBundlePackageType</key><string>APPL</string>

@@ -152,6 +152,28 @@ void SettingsService::setShowWhitespace(bool show)
 }
 
 // ---------------------------------------------------------------------------
+// UI Design — repo view bottom pane default size
+// ---------------------------------------------------------------------------
+//
+// Stored as a 10..90 integer percent so it round-trips cleanly
+// through QSettings and the settings dialog's spinbox. Applied to
+// RepositoryView's inner vertical splitter by applyBottomPanePercent
+// whenever the percent changes (via settingsChanged) and by the
+// first-show restore path when there's no saved splitter state yet.
+
+int SettingsService::bottomPanePercent() const
+{
+    return settings_.value(QStringLiteral("ui/bottomPanePercent"), 40).toInt();
+}
+
+void SettingsService::setBottomPanePercent(int percent)
+{
+    settings_.setValue(QStringLiteral("ui/bottomPanePercent"),
+                       qBound(10, percent, 90));
+    emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
 // Window state
 // ---------------------------------------------------------------------------
 
@@ -173,6 +195,47 @@ void SettingsService::saveWindowState(const QByteArray& state)
 QByteArray SettingsService::restoreWindowState() const
 {
     return settings_.value(QStringLiteral("window/state")).toByteArray();
+}
+
+// ---------------------------------------------------------------------------
+// Layout persistence (splitters, dialog geometries)
+// ---------------------------------------------------------------------------
+//
+// These are thin wrappers around QSettings that namespace everything
+// under "layout/". They exist so the rest of the code doesn't have to
+// spell out the prefix every time and so there's a single place to
+// intercept reads/writes if we ever want to version-bump the whole
+// layout schema.
+
+static QString layoutKey(const QString& key)
+{
+    // Defensive: callers already pass keys like "repoSplitterH/v1",
+    // but make sure there's no leading slash that would turn into
+    // "layout//foo".
+    QString k = key;
+    while (k.startsWith(QLatin1Char('/')))
+        k.remove(0, 1);
+    return QStringLiteral("layout/") + k;
+}
+
+void SettingsService::saveSplitterState(const QString& key, const QByteArray& state)
+{
+    settings_.setValue(layoutKey(key), state);
+}
+
+QByteArray SettingsService::restoreSplitterState(const QString& key) const
+{
+    return settings_.value(layoutKey(key)).toByteArray();
+}
+
+void SettingsService::saveDialogGeometry(const QString& key, const QByteArray& geometry)
+{
+    settings_.setValue(layoutKey(key), geometry);
+}
+
+QByteArray SettingsService::restoreDialogGeometry(const QString& key) const
+{
+    return settings_.value(layoutKey(key)).toByteArray();
 }
 
 // ---------------------------------------------------------------------------

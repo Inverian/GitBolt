@@ -18,8 +18,11 @@
 #include "git/Status.h"
 #include "git/Submodule.h"
 #include "git/Tag.h"
+#include "git/Tree.h"
 #include "git/Worktree.h"
 
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -27,6 +30,40 @@
 struct git_repository;
 
 namespace gitbolt::git {
+
+/// Incremental progress report emitted by `Repository::clone()` via
+/// its optional callback. libgit2 surfaces two separate metric sets
+/// during a clone — the fetch/indexing phase (objects, bytes, deltas)
+/// and the checkout phase (files written) — and this struct flattens
+/// both into one shape that the caller can render into a single
+/// progress UI without caring which phase is active.
+struct CloneProgress {
+    enum class Phase {
+        Receiving,   ///< downloading pack objects from the remote
+        Resolving,   ///< indexing / resolving deltas after fetch
+        CheckingOut  ///< writing files to the working directory
+    };
+    Phase    phase = Phase::Receiving;
+
+    // Fetch-phase counters (valid in Receiving / Resolving phases).
+    uint32_t receivedObjects = 0;
+    uint32_t indexedObjects  = 0;
+    uint32_t totalObjects    = 0;
+    uint32_t indexedDeltas   = 0;
+    uint32_t totalDeltas     = 0;
+    uint64_t receivedBytes   = 0;
+
+    // Checkout-phase counters (valid in CheckingOut phase).
+    uint32_t completedSteps  = 0;
+    uint32_t totalSteps      = 0;
+};
+
+/// Callback type invoked from the libgit2 worker thread during
+/// `Repository::clone()`. The callback is called MANY times per
+/// second — if the receiver lives on a different thread (e.g. the
+/// GUI thread), the lambda must marshal the update safely via
+/// QMetaObject::invokeMethod or similar.
+using CloneProgressCallback = std::function<void(const CloneProgress&)>;
 
 /// Returns the runtime libgit2 version as "MAJOR.MINOR.PATCH" (e.g.
 /// "1.9.2"). This reads from libgit2's own reported version rather
@@ -53,6 +90,14 @@ public:
     static Result<Repository> init(const std::string& path, bool bare = false);
     static Result<Repository> clone(const std::string& url, const std::string& path);
 
+    /// Overload that reports fetch / checkout progress through
+    /// `onProgress`. The callback is invoked on the libgit2 worker
+    /// thread (typically a background thread); it must not touch UI
+    /// state directly — marshal across threads first.
+    static Result<Repository> clone(const std::string& url,
+                                    const std::string& path,
+                                    CloneProgressCallback onProgress);
+
     std::string path() const;
     std::string workdir() const;
     bool isBare() const;
@@ -72,6 +117,16 @@ public:
     Result<DiffResult> diffHeadToIndex() const;
     Result<DiffResult> diffTreeToTree(const ObjectId& oldTree, const ObjectId& newTree) const;
     Result<DiffResult> diffCommit(const ObjectId& commitId) const;
+
+    // Tree browsing — flat depth-first walk from a commit's root
+    // tree, plus blob content reads. Used by the File tree tab.
+    // walkTreeAtCommit returns entries in pre-order so callers can
+    // build hierarchical models in a single pass; readBlob returns
+    // the raw bytes (binary-safe) and is bounded by libgit2's own
+    // size limits — call sites should still impose a sensible
+    // upper bound before showing untrusted blobs in the UI.
+    Result<std::vector<TreeEntry>> walkTreeAtCommit(const ObjectId& commitId) const;
+    Result<std::vector<char>>      readBlob(const ObjectId& blobId) const;
 
     // Staging
     Result<void> stageFile(const std::string& path);

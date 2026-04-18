@@ -63,6 +63,8 @@ void BranchTreeWidget::setTags(std::vector<git::TagInfo> tags) {
 }
 
 void BranchTreeWidget::clear() {
+    if (filterInput_)
+        filterInput_->clear();
     model_->clear();
 }
 

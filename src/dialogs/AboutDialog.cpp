@@ -199,7 +199,7 @@ void AboutDialog::setupUi()
     textColumn->addStretch();
 
     auto* topRow = new QHBoxLayout;
-    topRow->setContentsMargins(16, 16, 16, 8);
+    topRow->setContentsMargins(0, 0, 0, 0);
     topRow->setSpacing(16);
     topRow->addWidget(iconLabel_, 0, Qt::AlignTop);
     topRow->addLayout(textColumn, 1);
@@ -208,8 +208,15 @@ void AboutDialog::setupUi()
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
 
+    // Root layout owns the dialog's outer padding. Previously this
+    // was (0,0,0,0) with the top row handling its own margins — but
+    // that left the QDialogButtonBox flush against the right and
+    // bottom edges of the window, so the Close button crowded the
+    // corner. Moving the padding here gives every child (top row
+    // AND button box) uniform breathing room from the window frame.
     auto* rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(0, 0, 0, 0);
+    rootLayout->setContentsMargins(20, 20, 20, 16);
+    rootLayout->setSpacing(12);
     rootLayout->addLayout(topRow);
     rootLayout->addWidget(buttons);
 }

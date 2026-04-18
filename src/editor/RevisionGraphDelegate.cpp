@@ -30,24 +30,68 @@ void RevisionGraphDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     int x = option.rect.x();
     int y = option.rect.y();
     int h = option.rect.height();
+    int my = y + h / 2;
 
-    // Draw lane segments
+    // ---- Lane segments ------------------------------------------
+    // Each row is conceptually split in half at the commit dot:
+    //   y .... my   (top half — incoming lines)
+    //   my ... y+h  (bottom half — outgoing lines)
+    //
+    // Segment kinds:
+    //   PassThrough — full vertical, top to bottom (no commit on
+    //                 this lane in this row)
+    //   End         — top half on the commit's own lane (the line
+    //                 coming down from above into the dot)
+    //   Start       — bottom half on the commit's own lane (the
+    //                 line going down to the first parent)
+    //   MergeRight  — bottom-half S-curve from commit lane to an
+    //                 already-active lane to the right (this is a
+    //                 merge whose other parent is on that lane)
+    //   SplitRight  — bottom-half S-curve from commit lane to a
+    //                 brand new lane to the right (a merge that
+    //                 introduces a new branch)
+    //
+    // The "Left" variants are reserved for future use.
     for (const auto& seg : graphRow->segments) {
         QPen pen(laneColor(seg.colorIndex), 2.0);
+        pen.setCapStyle(Qt::RoundCap);
         painter->setPen(pen);
-        int fx = x + seg.fromLane * LANE_WIDTH + LANE_WIDTH / 2;
-        int tx = x + seg.toLane * LANE_WIDTH + LANE_WIDTH / 2;
-        int my = y + h / 2;
+        const int fx = x + seg.fromLane * LANE_WIDTH + LANE_WIDTH / 2;
+        const int tx = x + seg.toLane   * LANE_WIDTH + LANE_WIDTH / 2;
 
-        if (seg.type == models::LaneSegmentType::PassThrough) {
-            painter->drawLine(fx, y, tx, y + h);
-        } else if (fx == tx) {
-            painter->drawLine(fx, my, tx, y + h);
-        } else {
+        switch (seg.type) {
+        case models::LaneSegmentType::PassThrough:
+            painter->drawLine(fx, y, fx, y + h);
+            break;
+
+        case models::LaneSegmentType::End:
+            // Top half — incoming line into the commit dot.
+            // Always same-lane in our current model.
+            painter->drawLine(fx, y, fx, my);
+            break;
+
+        case models::LaneSegmentType::Start:
+            // Bottom half — outgoing line on the commit's own lane.
+            painter->drawLine(fx, my, fx, y + h);
+            break;
+
+        case models::LaneSegmentType::MergeRight:
+        case models::LaneSegmentType::MergeLeft:
+        case models::LaneSegmentType::SplitRight:
+        case models::LaneSegmentType::SplitLeft: {
+            // Bottom-half S-curve from commit lane to a different
+            // lane. Cubic bezier with control points that hold each
+            // end vertical for h/3 then sweep across — gives a smooth
+            // curve that doesn't kink, regardless of horizontal
+            // distance.
             QPainterPath path;
             path.moveTo(fx, my);
-            path.cubicTo(fx, my + h/3, tx, y + 2*h/3, tx, y + h);
+            path.cubicTo(fx, my + h / 3,
+                         tx, y + 2 * h / 3,
+                         tx, y + h);
             painter->drawPath(path);
+            break;
+        }
         }
     }
 

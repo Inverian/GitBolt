@@ -100,6 +100,77 @@ Result<Repository> Repository::clone(const std::string& url, const std::string& 
     return Repository(repo, path);
 }
 
+// ---------------------------------------------------------------------------
+// Clone with progress. Wires libgit2's two progress callbacks — the
+// fetch-side `transfer_progress` (bytes, objects, deltas) and the
+// checkout-side `progress_cb` (files written) — into a single
+// CloneProgress stream so the dialog only has to render one flavour of
+// update regardless of which phase is active.
+//
+// Both callbacks receive the same `payload` pointer (a stack-allocated
+// CallbackState below). libgit2 is single-threaded per-clone, so we
+// don't need any synchronization around the state itself — but the
+// caller's onProgress lambda is invoked from the libgit2 worker thread
+// (typically a QtConcurrent pool thread), so if the lambda touches UI
+// state it must marshal back to the GUI thread itself.
+//
+// Return values: libgit2 treats a nonzero return from transfer_progress
+// as "please cancel". We always return 0 — cancellation UX isn't wired
+// up yet and the caller can still Cancel from the dialog.
+// ---------------------------------------------------------------------------
+Result<Repository> Repository::clone(const std::string& url,
+                                     const std::string& path,
+                                     CloneProgressCallback onProgress)
+{
+    struct CallbackState {
+        CloneProgressCallback cb;
+    };
+    CallbackState state{std::move(onProgress)};
+
+    git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
+
+    // ---- Fetch progress: objects received + deltas indexed ----
+    opts.fetch_opts.callbacks.transfer_progress =
+        [](const git_indexer_progress* stats, void* payload) -> int {
+            auto* s = static_cast<CallbackState*>(payload);
+            if (!s || !s->cb) return 0;
+            CloneProgress p;
+            p.receivedObjects = stats->received_objects;
+            p.indexedObjects  = stats->indexed_objects;
+            p.totalObjects    = stats->total_objects;
+            p.indexedDeltas   = stats->indexed_deltas;
+            p.totalDeltas     = stats->total_deltas;
+            p.receivedBytes   = stats->received_bytes;
+            // Deltas only start resolving after all objects are
+            // received; switch phase once libgit2 sets total_deltas.
+            p.phase = (stats->total_deltas > 0
+                       && stats->indexed_deltas < stats->total_deltas)
+                ? CloneProgress::Phase::Resolving
+                : CloneProgress::Phase::Receiving;
+            s->cb(p);
+            return 0;
+        };
+    opts.fetch_opts.callbacks.payload = &state;
+
+    // ---- Checkout progress: files written to working dir ----
+    opts.checkout_opts.progress_cb =
+        [](const char* /*file*/, size_t cur, size_t total, void* payload) {
+            auto* s = static_cast<CallbackState*>(payload);
+            if (!s || !s->cb) return;
+            CloneProgress p;
+            p.phase          = CloneProgress::Phase::CheckingOut;
+            p.completedSteps = static_cast<uint32_t>(cur);
+            p.totalSteps     = static_cast<uint32_t>(total);
+            s->cb(p);
+        };
+    opts.checkout_opts.progress_payload = &state;
+
+    git_repository* repo = nullptr;
+    int err = git_clone(&repo, url.c_str(), path.c_str(), &opts);
+    if (err < 0) return GitError::fromLibgit2(err);
+    return Repository(repo, path);
+}
+
 std::string Repository::path() const {
     const char* p = git_repository_path(repo_);
     return p ? p : "";
@@ -348,6 +419,99 @@ Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
     auto result = loadDiffResult(diff);
     git_diff_free(diff);
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Tree walking — used by the File tree tab to render the full
+// directory listing for a selected commit. We do a single
+// pre-order depth-first walk via git_tree_walk and append every
+// entry (file or directory) into a flat vector. The caller can
+// rebuild the hierarchy in O(n) by indexing on parent path.
+//
+// Sizes are populated for blobs by looking up each blob's
+// rawsize via git_blob_lookup; trees report size 0. The blob
+// lookup is fast (libgit2 has an in-memory ODB cache) and the
+// alternative — leaving sizes as 0 — would force the FileTreeWidget
+// to do its own per-row blob lookups during scroll, which is
+// strictly worse.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct TreeWalkPayload {
+    git_repository*        repo;
+    std::vector<TreeEntry>* out;
+};
+
+int treeWalkCallback(const char* root, const git_tree_entry* entry, void* payload)
+{
+    auto* ctx = static_cast<TreeWalkPayload*>(payload);
+
+    TreeEntry e;
+    e.name   = git_tree_entry_name(entry);
+    e.path   = std::string(root) + e.name;
+    e.oid    = ObjectId(git_tree_entry_id(entry));
+    e.mode   = git_tree_entry_filemode(entry);
+    e.isTree = (git_tree_entry_type(entry) == GIT_OBJECT_TREE);
+
+    if (!e.isTree) {
+        // Look up the blob just to read its size. This is a hash-
+        // table lookup against libgit2's ODB cache — cheap.
+        git_blob* blob = nullptr;
+        if (git_blob_lookup(&blob, ctx->repo, git_tree_entry_id(entry)) == 0) {
+            e.size = static_cast<uint64_t>(git_blob_rawsize(blob));
+            git_blob_free(blob);
+        }
+    }
+
+    ctx->out->push_back(std::move(e));
+    return 0;  // continue walk
+}
+
+} // namespace
+
+Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(const ObjectId& commitId) const
+{
+    git_oid oid;
+    std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
+
+    git_commit* commit = nullptr;
+    int err = git_commit_lookup(&commit, repo_, &oid);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    git_tree* tree = nullptr;
+    err = git_commit_tree(&tree, commit);
+    git_commit_free(commit);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    std::vector<TreeEntry> entries;
+    TreeWalkPayload payload{ repo_, &entries };
+    err = git_tree_walk(tree, GIT_TREEWALK_PRE, treeWalkCallback, &payload);
+    git_tree_free(tree);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    return entries;
+}
+
+Result<std::vector<char>> Repository::readBlob(const ObjectId& blobId) const
+{
+    git_oid oid;
+    std::memcpy(oid.id, blobId.raw().data(), ObjectId::RAW_SIZE);
+
+    git_blob* blob = nullptr;
+    int err = git_blob_lookup(&blob, repo_, &oid);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    const void*    data = git_blob_rawcontent(blob);
+    const git_off_t size = git_blob_rawsize(blob);
+
+    std::vector<char> bytes;
+    if (data && size > 0) {
+        bytes.assign(static_cast<const char*>(data),
+                     static_cast<const char*>(data) + static_cast<size_t>(size));
+    }
+    git_blob_free(blob);
+    return bytes;
 }
 
 Result<void> Repository::stageFile(const std::string& path) {

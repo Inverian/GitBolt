@@ -161,74 +161,143 @@ void CommitLogModel::computeGraphData() {
     graphData_.clear();
     graphData_.resize(commits_.size());
 
+    // ----- Lane assignment (greedy, one pass top-to-bottom) -----
+    //
+    // Each `activeLanes[i]` holds the OID of the commit currently
+    // expected on lane `i` (zero = free slot). Parallel to it,
+    // `laneColors[i]` carries the COLOR INDEX assigned to that lane,
+    // so the same branch line keeps a stable color from tip to root
+    // even though the commits on it have unrelated SHAs. Without
+    // this the lane would change color at every commit, producing a
+    // rainbow mess instead of a recognisable branch.
+    //
+    // Color allocation: we use a monotonic counter (mod 16) so each
+    // newly-created lane (or reused free slot) gets the next unused
+    // color in the cycle. Lanes never re-inherit a freed slot's old
+    // color — that'd defeat the visual purpose of the recycle.
     std::vector<git::ObjectId> activeLanes;
+    std::vector<int> laneColors;     // parallel to activeLanes
     std::unordered_map<git::ObjectId, int, git::ObjectId::Hash> oidToLane;
+
+    int nextColorCounter = 0;
+    auto allocColor = [&]() {
+        int c = nextColorCounter % 16;
+        ++nextColorCounter;
+        return c;
+    };
+
+    // Allocate (or reuse) a lane slot. Returns the slot index. Always
+    // assigns it a fresh color (caller must NOT call this for the
+    // first-parent inheritance case where the lane keeps its color).
+    auto allocLane = [&](int forbidLane = -1) {
+        for (int i = 0; i < static_cast<int>(activeLanes.size()); ++i) {
+            if (activeLanes[static_cast<size_t>(i)].isZero() && i != forbidLane) {
+                laneColors[static_cast<size_t>(i)] = allocColor();
+                return i;
+            }
+        }
+        activeLanes.push_back(git::ObjectId());
+        laneColors.push_back(allocColor());
+        return static_cast<int>(activeLanes.size()) - 1;
+    };
 
     for (size_t row = 0; row < commits_.size(); ++row) {
         const auto& commit = commits_[row];
         auto& rowData = graphData_[row];
 
-        // Find lane for this commit
-        int commitLane = -1;
+        // ---- Step 1: figure out which lane this commit lives on ----
+        // If a previously-walked child already reserved a lane for
+        // this commit (because we tracked it as a parent of that
+        // child), reuse it — and inherit that lane's color, which is
+        // also the color of the line coming down from above.
+        // Otherwise this commit is the first time we see its hash,
+        // which means it's a branch tip in the visible window — give
+        // it a fresh lane.
+        int  commitLane = -1;
+        bool hasIncomingLane = false;
         auto it = oidToLane.find(commit.id);
         if (it != oidToLane.end()) {
             commitLane = it->second;
             oidToLane.erase(it);
+            hasIncomingLane = true;
         } else {
-            commitLane = static_cast<int>(activeLanes.size());
-            for (int i = 0; i < static_cast<int>(activeLanes.size()); ++i) {
-                if (activeLanes[static_cast<size_t>(i)].isZero()) { commitLane = i; break; }
-            }
-            if (commitLane >= static_cast<int>(activeLanes.size()))
-                activeLanes.push_back(git::ObjectId());
+            commitLane = allocLane();
         }
 
         rowData.commitLane = commitLane;
-        rowData.colorIndex = static_cast<int>(std::hash<std::string>{}(commit.id.toHex()) % 16);
+        rowData.colorIndex = laneColors[static_cast<size_t>(commitLane)];
 
-        // Pass-through segments
+        // ---- Step 2: pass-through verticals for OTHER active lanes ----
+        // Every lane that's still tracking a future commit needs a
+        // full top-to-bottom vertical line on this row. The commit's
+        // own lane is handled separately (top half + bottom half) so
+        // it shows the dot crisply in the middle.
         for (int i = 0; i < static_cast<int>(activeLanes.size()); ++i) {
             if (i == commitLane) continue;
             if (!activeLanes[static_cast<size_t>(i)].isZero()) {
                 rowData.segments.push_back({i, i, LaneSegmentType::PassThrough,
-                    static_cast<int>(std::hash<std::string>{}(activeLanes[static_cast<size_t>(i)].toHex()) % 16)});
+                    laneColors[static_cast<size_t>(i)]});
             }
         }
 
-        // Clear this lane
-        if (commitLane < static_cast<int>(activeLanes.size()))
-            activeLanes[static_cast<size_t>(commitLane)] = git::ObjectId();
+        // ---- Step 3: top half of THIS commit's lane ----
+        // If the lane was already coming down from above (a child
+        // reserved it), draw the top half so the dot connects to
+        // the lane line coming in. Without this segment the dot
+        // appears to float, disconnected from the history above.
+        if (hasIncomingLane) {
+            rowData.segments.push_back({commitLane, commitLane,
+                LaneSegmentType::End, rowData.colorIndex});
+        }
 
-        // Assign parents to lanes
+        // Free this commit's lane slot — the first parent (if any)
+        // will reclaim it below, otherwise it becomes available for
+        // a future branch tip.
+        activeLanes[static_cast<size_t>(commitLane)] = git::ObjectId();
+
+        // ---- Step 4: bottom-half segments for each parent ----
+        // - First parent (p == 0) inherits the commit's lane and its
+        //   color. This is the "main branch continues straight down"
+        //   case — most commits are like this.
+        // - Subsequent parents are merge sources; each gets its own
+        //   new lane (or an already-in-flight lane if we've seen the
+        //   parent before from a different child).
         for (size_t p = 0; p < commit.parentIds.size(); ++p) {
             const auto& parentId = commit.parentIds[p];
             auto parentIt = oidToLane.find(parentId);
 
             if (parentIt != oidToLane.end()) {
-                rowData.segments.push_back({commitLane, parentIt->second,
-                    (p == 0) ? LaneSegmentType::Start : LaneSegmentType::MergeRight, rowData.colorIndex});
+                // Parent is already on an existing lane (because some
+                // earlier commit also has it as a parent). Draw a
+                // merge curve from this commit's lane down to that
+                // existing lane, in the destination lane's color.
+                const int destLane = parentIt->second;
+                rowData.segments.push_back({commitLane, destLane,
+                    LaneSegmentType::MergeRight,
+                    laneColors[static_cast<size_t>(destLane)]});
+            } else if (p == 0) {
+                // First parent stays on this commit's lane.
+                activeLanes[static_cast<size_t>(commitLane)] = parentId;
+                oidToLane[parentId] = commitLane;
+                rowData.segments.push_back({commitLane, commitLane,
+                    LaneSegmentType::Start, rowData.colorIndex});
             } else {
-                int parentLane;
-                if (p == 0) {
-                    parentLane = commitLane;
-                } else {
-                    parentLane = static_cast<int>(activeLanes.size());
-                    for (int i = 0; i < static_cast<int>(activeLanes.size()); ++i) {
-                        if (activeLanes[static_cast<size_t>(i)].isZero() && i != commitLane) { parentLane = i; break; }
-                    }
-                    if (parentLane >= static_cast<int>(activeLanes.size()))
-                        activeLanes.push_back(git::ObjectId());
-                }
-                activeLanes[static_cast<size_t>(parentLane)] = parentId;
-                oidToLane[parentId] = parentLane;
-                rowData.segments.push_back({commitLane, parentLane,
-                    (p == 0) ? LaneSegmentType::Start : LaneSegmentType::SplitRight, rowData.colorIndex});
+                // Merge source — split off into a new lane to the
+                // right (or reuse a free slot, but never the commit's
+                // own lane). New lane gets a fresh color.
+                const int newLane = allocLane(/*forbidLane=*/commitLane);
+                activeLanes[static_cast<size_t>(newLane)] = parentId;
+                oidToLane[parentId] = newLane;
+                rowData.segments.push_back({commitLane, newLane,
+                    LaneSegmentType::SplitRight,
+                    laneColors[static_cast<size_t>(newLane)]});
             }
         }
 
         rowData.maxLane = commitLane;
         for (const auto& seg : rowData.segments)
-            rowData.maxLane = std::max(rowData.maxLane, std::max(seg.fromLane, seg.toLane));
+            rowData.maxLane = std::max(rowData.maxLane,
+                                       std::max(seg.fromLane, seg.toLane));
     }
 }
 

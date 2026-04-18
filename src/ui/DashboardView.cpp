@@ -69,7 +69,7 @@ void DashboardView::setupUi()
     cloneBtn_ = createActionCard(tr("Clone Repository"),
                                  QString::fromUtf8("\xE2\xAC\x87"),     // ⬇
                                  tr("Clone a remote repository"));
-    initBtn_ = createActionCard(tr("Init New Repository"),
+    initBtn_ = createActionCard(tr("Create New Repository"),
                                 QString::fromUtf8("\xE2\x9C\xA8"),      // ✨
                                 tr("Create a new empty repository"));
 
@@ -133,22 +133,67 @@ void DashboardView::setupUi()
 QPushButton* DashboardView::createActionCard(const QString& title, const QString& iconText,
                                              const QString& description)
 {
+    // A composite card: a clickable QPushButton that owns three
+    // transparent QLabel children laid out vertically. Using child
+    // labels (rather than a single \n-joined button text) lets each
+    // element have its own font size — the old approach forced the
+    // icon, title, and description to all share the button's 10pt
+    // font, which rendered the emoji tiny inside a much larger card.
+    //
+    // WA_TransparentForMouseEvents on every label ensures clicks and
+    // hover events pass through to the button beneath, so the native
+    // pressed / hover / focus states all still work.
     auto* btn = new QPushButton(this);
-    btn->setFixedSize(220, 140);
+    btn->setFixedSize(290, 220);
     btn->setCursor(Qt::PointingHandCursor);
-    btn->setText(QStringLiteral("%1\n%2\n%3").arg(iconText, title, description));
     btn->setStyleSheet(QStringLiteral(
         "QPushButton {"
         "  border: 1px solid palette(mid);"
-        "  border-radius: 8px;"
-        "  padding: 16px;"
-        "  font-size: 10pt;"
+        "  border-radius: 10px;"
+        "  padding: 0px;"
         "  text-align: center;"
         "}"
         "QPushButton:hover {"
         "  border-color: palette(highlight);"
         "  background: palette(midlight);"
         "}"));
+
+    auto* layout = new QVBoxLayout(btn);
+    layout->setContentsMargins(16, 20, 16, 20);
+    layout->setSpacing(6);
+
+    auto* iconLabel = new QLabel(iconText, btn);
+    iconLabel->setAlignment(Qt::AlignCenter);
+    iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    // 44pt — dominates the card, "way larger" than the old 10pt the
+    // emoji inherited from the button's default font.
+    iconLabel->setStyleSheet(QStringLiteral(
+        "QLabel { font-size: 44pt; background: transparent; border: none; }"));
+
+    auto* titleLabel = new QLabel(title, btn);
+    titleLabel->setAlignment(Qt::AlignCenter);
+    titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    titleLabel->setStyleSheet(QStringLiteral(
+        "QLabel { font-size: 18pt; font-weight: bold;"
+        "         background: transparent; border: none; }"));
+
+    auto* descLabel = new QLabel(description, btn);
+    descLabel->setAlignment(Qt::AlignCenter);
+    descLabel->setWordWrap(true);
+    descLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    descLabel->setStyleSheet(QStringLiteral(
+        "QLabel { font-size: 13pt; color: palette(mid);"
+        "         background: transparent; border: none; }"));
+
+    // Stretch on both ends so the icon/title/description block sits
+    // vertically centered within the fixed-height card, rather than
+    // being top-aligned with dead space below the description.
+    layout->addStretch();
+    layout->addWidget(iconLabel);
+    layout->addWidget(titleLabel);
+    layout->addWidget(descLabel);
+    layout->addStretch();
+
     return btn;
 }
 

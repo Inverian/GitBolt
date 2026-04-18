@@ -172,9 +172,12 @@ jobs:
           cp build/install/bin/GitBolt AppDir/usr/bin/ || cp build/GitBolt AppDir/usr/bin/
           cp src/app/platform/linux/gitbolt.desktop AppDir/usr/share/applications/
           cp src/app/platform/linux/gitbolt.appdata.xml AppDir/usr/share/metainfo/
-          # Use icon if available, otherwise create placeholder
-          if [ -f resources/icons/gitbolt.png ]; then
-            cp resources/icons/gitbolt.png AppDir/usr/share/icons/hicolor/256x256/apps/
+          # Use icon if available, otherwise create placeholder.
+          # The hicolor spec expects the file named after the Icon=
+          # key in the .desktop file (gitbolt.png), so we rename the
+          # canonical 256-size PNG at copy time.
+          if [ -f resources/icons/gitbolt-256.png ]; then
+            cp resources/icons/gitbolt-256.png AppDir/usr/share/icons/hicolor/256x256/apps/gitbolt.png
           else
             convert -size 256x256 xc:steelblue AppDir/usr/share/icons/hicolor/256x256/apps/gitbolt.png 2>/dev/null || true
           fi

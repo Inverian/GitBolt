@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QFileInfo>
+#include <QIcon>
 #include <QMessageBox>
 #include <QSharedMemory>
 #include <QStyleHints>
@@ -21,6 +22,15 @@ int main(int argc, char* argv[]) {
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     app.setOrganizationName(QStringLiteral("GitBolt"));
     app.setOrganizationDomain(QStringLiteral("gitbolt.dev"));
+
+    // App-level window icon. Resolves via the Qt resource system
+    // (":/icons/*") which the .qrc at src/app/resources/gitbolt.qrc
+    // bundles from the canonical resources/icons/ folder — so any
+    // time that folder is regenerated (e.g. tools/generate-icon.py),
+    // the next build automatically picks up the new icon with no
+    // further wiring. Covers Linux taskbar / Windows title bar;
+    // macOS layers the .icns bundle file on top via CFBundleIconFile.
+    app.setWindowIcon(QIcon(QStringLiteral(":/icons/gitbolt-256.png")));
 
     // Single-instance guard via shared memory.
     //
@@ -95,16 +105,20 @@ int main(int argc, char* argv[]) {
     // Settings service for window geometry persistence
     gitbolt::conf::SettingsService settings;
 
-    // Create and show the main window
+    // Create and show the main window. Inject the app-wide theme
+    // service so the Settings dialog can list and switch themes
+    // from one shared instance (rather than MainWindow creating a
+    // second ThemeService that would fight over the palette).
     gitbolt::ui::MainWindow window;
+    window.setThemeService(themeService);
 
-    // Restore window geometry/state from previous session
+    // Restore window geometry from previous session. (Dock/toolbar
+    // state via QMainWindow::saveState is no longer persisted — the
+    // window has no dock widgets and the toolbar is non-movable, so
+    // there's nothing left for saveState to encode.)
     QByteArray geometry = settings.restoreWindowGeometry();
     if (!geometry.isEmpty())
         window.restoreGeometry(geometry);
-    QByteArray state = settings.restoreWindowState();
-    if (!state.isEmpty())
-        window.restoreState(state);
 
     window.show();
 
@@ -118,9 +132,9 @@ int main(int argc, char* argv[]) {
 
     int exitCode = app.exec();
 
-    // Save window geometry/state on exit
+    // Save window geometry on exit. Splitter state is persisted
+    // separately inside MainWindow::closeEvent.
     settings.saveWindowGeometry(window.saveGeometry());
-    settings.saveWindowState(window.saveState());
 
     // Clean up libgit2
     git_libgit2_shutdown();

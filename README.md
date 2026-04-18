@@ -2,7 +2,7 @@
 
 **Fast, cross-platform Git GUI client built with Qt 6, C++, and libgit2.**
 
-GitBolt is a high-performance Git client designed as a modern alternative to GitExtensions, bringing its complete feature set to macOS, Linux, and Windows. Built natively in C++ with Qt 6 for maximum rendering performance and minimal resource usage.
+GitBolt is a high-performance, feature-complete Git client for macOS, Linux, and Windows. Built natively in C++ with Qt 6 for maximum rendering performance and minimal resource usage.
 
 > **License:** GitBolt is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text. The "GitBolt" name and logo are protected trademarks — see [TRADEMARK.md](TRADEMARK.md) for the trademark policy. Forks are welcome under the GPL but must be rebranded.
 
@@ -10,7 +10,7 @@ GitBolt is a high-performance Git client designed as a modern alternative to Git
 
 ## Why GitBolt?
 
-The macOS Git GUI ecosystem is dominated by Electron-based clients (GitKraken, GitHub Desktop) or expensive native apps (Tower, Fork). On Linux, options are even more limited. GitBolt fills the gap with a single codebase that delivers:
+Most desktop Git GUIs today are either Electron-based (dragging a full JavaScript runtime along for the ride) or expensive commercial native apps — and Linux options are especially thin. GitBolt fills the gap with a single codebase that delivers:
 
 - **Native performance** — Qt 6 with libgit2, no Electron, no JavaScript runtime
 - **Power user features** — Interactive rebase, blame drill-down, three-way merge, Git Flow

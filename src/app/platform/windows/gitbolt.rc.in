@@ -1,0 +1,17 @@
+// =====================================================================
+// GitBolt — Windows resource script (auto-generated from gitbolt.rc.in)
+//
+// Embeds the application icon into GitBolt.exe so Explorer, the Start
+// menu, the Alt+Tab switcher, and the taskbar all show it. The .ico
+// file referenced below is copied into the build tree at configure
+// time from the canonical resources/icons/gitbolt.ico — see the
+// matching `configure_file(... COPYONLY)` in src/app/CMakeLists.txt.
+//
+// That copy wires the resource compiler's dependency tracking to the
+// canonical source, so replacing resources/icons/gitbolt.ico causes
+// the exe to rebuild with the new icon on the next build with no
+// further manual steps.
+// =====================================================================
+
+#define IDI_ICON1 101
+IDI_ICON1 ICON DISCARDABLE "gitbolt.ico"
