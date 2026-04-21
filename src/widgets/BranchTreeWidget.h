@@ -1,6 +1,8 @@
 #pragma once
 
 #include "models/BranchModel.h"
+#include "git/Stash.h"
+#include "git/Submodule.h"
 
 #include <QLineEdit>
 #include <QMenu>
@@ -18,6 +20,8 @@ public:
 
     void setBranches(std::vector<gitbolt::git::BranchInfo> branches);
     void setTags(std::vector<gitbolt::git::TagInfo> tags);
+    void setSubmodules(std::vector<gitbolt::git::SubmoduleInfo> submodules);
+    void setStashes(std::vector<gitbolt::git::StashEntry> stashes);
     void clear();
 
     models::BranchModel* branchModel() const { return model_; }

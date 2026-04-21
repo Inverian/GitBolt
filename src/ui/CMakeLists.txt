@@ -9,5 +9,7 @@ target_link_libraries(gitbolt_ui PUBLIC
     gitbolt_conf
     gitbolt_dialogs   # MainWindow opens AboutDialog, SettingsDialog, etc.
     Qt6::Widgets
+    Qt6::Svg     # SVG icon rendering for Commands menu (Material Symbols)
+    Qt6::Concurrent  # QtConcurrent::run for async dashboard repo probes
 )
 gitbolt_set_warnings(gitbolt_ui)

@@ -2,6 +2,8 @@
 #include "git/Branch.h"
 #include "git/Commit.h"
 #include "git/Diff.h"
+#include "git/Stash.h"
+#include "git/Submodule.h"
 #include "git/Tag.h"
 #include <QWidget>
 #include <string>
@@ -54,6 +56,8 @@ public:
     // Data push-ins from MainWindow (forward to BranchTreeWidget)
     void setBranches(std::vector<git::BranchInfo> branches);
     void setTags(std::vector<git::TagInfo> tags);
+    void setSubmodules(std::vector<git::SubmoduleInfo> submodules);
+    void setStashes(std::vector<git::StashEntry> stashes);
 
     // Accessors
     widgets::RevisionGraphWidget* revisionGraph() const;

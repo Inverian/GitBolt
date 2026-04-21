@@ -20,7 +20,7 @@ if(GITBOLT_SANITIZERS)
 endif()
 
 # Find Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg)
 qt_standard_project_setup()
 
 # Find libgit2

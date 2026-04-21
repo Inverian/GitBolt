@@ -1,7 +1,9 @@
 #pragma once
 
 #include <QByteArray>
+#include <QDateTime>
 #include <QFont>
+#include <QHash>
 #include <QObject>
 #include <QSettings>
 #include <QStringList>
@@ -18,6 +20,14 @@ public:
     void addRecentRepository(const QString& path);
     void removeRecentRepository(const QString& path);
     void clearRecentRepositories();
+
+    /// Timestamp of the last time the user opened each recent repository.
+    /// Keys are the canonical absolute paths returned by
+    /// `recentRepositories()`; values are UTC QDateTimes. Paths that
+    /// have never been opened since this key was introduced (i.e.
+    /// pre-existing entries from older builds) will be missing from
+    /// the map — the caller should treat that as "unknown".
+    QHash<QString, QDateTime> recentAccessTimes() const;
 
     // UI — code font
     QFont codeFont() const;

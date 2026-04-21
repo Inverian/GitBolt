@@ -61,6 +61,25 @@ void SettingsService::addRecentRepository(const QString& path)
     while (list.size() > kMaxRecentRepositories)
         list.removeLast();
     settings_.setValue(QStringLiteral("recent/repositories"), list);
+
+    // Record the access timestamp alongside the path list. We persist
+    // the map as a QVariantMap of ISO-8601 strings — QSettings writes
+    // QVariantMap to its INI file natively, but QDateTime values inside
+    // that map don't round-trip cleanly on every platform, so we
+    // serialize to ISO strings explicitly. We also prune any entries
+    // that aren't in the capped-at-10 recents list, to avoid unbounded
+    // growth of the map for paths that have since rotated out.
+    QVariantMap accessMap = settings_
+        .value(QStringLiteral("recent/accessedAt")).toMap();
+    accessMap[canonical] = QDateTime::currentDateTimeUtc().toString(Qt::ISODate);
+    for (auto it = accessMap.begin(); it != accessMap.end();) {
+        if (!list.contains(it.key()))
+            it = accessMap.erase(it);
+        else
+            ++it;
+    }
+    settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
+
     emit settingsChanged();
 }
 
@@ -70,6 +89,12 @@ void SettingsService::removeRecentRepository(const QString& path)
     QStringList list = recentRepositories();
     if (list.removeAll(canonical) > 0) {
         settings_.setValue(QStringLiteral("recent/repositories"), list);
+        // Drop the access timestamp too — a repo that's been removed
+        // from recents shouldn't leave its timestamp behind.
+        QVariantMap accessMap = settings_
+            .value(QStringLiteral("recent/accessedAt")).toMap();
+        if (accessMap.remove(canonical) > 0)
+            settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
         emit settingsChanged();
     }
 }
@@ -77,7 +102,25 @@ void SettingsService::removeRecentRepository(const QString& path)
 void SettingsService::clearRecentRepositories()
 {
     settings_.remove(QStringLiteral("recent/repositories"));
+    settings_.remove(QStringLiteral("recent/accessedAt"));
     emit settingsChanged();
+}
+
+QHash<QString, QDateTime> SettingsService::recentAccessTimes() const
+{
+    QHash<QString, QDateTime> result;
+    const QVariantMap accessMap = settings_
+        .value(QStringLiteral("recent/accessedAt")).toMap();
+    for (auto it = accessMap.cbegin(); it != accessMap.cend(); ++it) {
+        // Stored as ISO-8601 strings; parse back to QDateTime. If the
+        // parse fails (corrupted value), skip the entry rather than
+        // emitting an invalid QDateTime that callers would have to
+        // defensively re-check.
+        QDateTime dt = QDateTime::fromString(it.value().toString(), Qt::ISODate);
+        if (dt.isValid())
+            result.insert(it.key(), dt);
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +206,12 @@ void SettingsService::setShowWhitespace(bool show)
 
 int SettingsService::bottomPanePercent() const
 {
-    return settings_.value(QStringLiteral("ui/bottomPanePercent"), 40).toInt();
+    // Default chosen empirically: 45% for the bottom inspector (commit
+    // details / diff / file tree / GPG / console) leaves enough vertical
+    // room for a meaningful diff preview on a 1280-tall window without
+    // crowding the revision graph above. Bumped from 40 → 45 so the
+    // inspector tabs don't feel cramped at first launch.
+    return settings_.value(QStringLiteral("ui/bottomPanePercent"), 45).toInt();
 }
 
 void SettingsService::setBottomPanePercent(int percent)

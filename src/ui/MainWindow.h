@@ -57,6 +57,11 @@ private slots:
 private:
     void createMenuBar();
     void createToolBar();
+    /// Enable or disable every child action under the Navigate,
+    /// View, and Commands menus. Called with `false` when no repo
+    /// is open (home screen / after Close) and `true` after a
+    /// repo is successfully opened.
+    void setRepoOnlyMenusEnabled(bool on);
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();
@@ -89,6 +94,14 @@ private:
     // constructed in a disabled state and re-enabled inside
     // onRepositoryOpened().
     QMenu*     recentMenu_     = nullptr;
+    // Top-level menus that are only meaningful when a repository is
+    // open. Disabled (grayed out) on the home/dashboard screen and
+    // re-enabled in onRepositoryOpened(). Toggling the menu's
+    // QAction (via menuAction()) grays out the menu title itself
+    // AND prevents the dropdown from opening.
+    QMenu*     navMenu_        = nullptr;
+    QMenu*     viewMenu_       = nullptr;
+    QMenu*     cmdMenu_        = nullptr;
     QAction*   refreshAction_  = nullptr;  // repo-dependent
     QAction*   fetchAction_    = nullptr;  // repo-dependent
     QAction*   pullAction_     = nullptr;  // repo-dependent

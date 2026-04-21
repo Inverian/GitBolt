@@ -292,7 +292,9 @@ QWidget* SettingsDialog::createUiDesignPage()
     // Seed from current settings (loadSettings() will overwrite
     // again once the dialog is fully constructed, but setting
     // early avoids a visible 0% flash on slow hardware).
-    const int initial = settings_ ? settings_->bottomPanePercent() : 40;
+    // Keep the fallback in sync with SettingsService::bottomPanePercent()'s
+    // default — both should show the same value when there's no saved pref.
+    const int initial = settings_ ? settings_->bottomPanePercent() : 45;
     bottomPaneSlider_->setValue(initial);
     bottomPaneSpin_->setValue(initial);
     updatePreview(initial);

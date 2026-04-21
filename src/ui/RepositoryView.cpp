@@ -355,6 +355,18 @@ void RepositoryView::setTags(std::vector<git::TagInfo> tags)
         branchTreeWidget_->setTags(std::move(tags));
 }
 
+void RepositoryView::setSubmodules(std::vector<git::SubmoduleInfo> submodules)
+{
+    if (branchTreeWidget_)
+        branchTreeWidget_->setSubmodules(std::move(submodules));
+}
+
+void RepositoryView::setStashes(std::vector<git::StashEntry> stashes)
+{
+    if (branchTreeWidget_)
+        branchTreeWidget_->setStashes(std::move(stashes));
+}
+
 widgets::RevisionGraphWidget* RepositoryView::revisionGraph() const
 {
     return graphWidget_;

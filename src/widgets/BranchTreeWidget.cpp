@@ -62,6 +62,14 @@ void BranchTreeWidget::setTags(std::vector<git::TagInfo> tags) {
     model_->setTags(std::move(tags));
 }
 
+void BranchTreeWidget::setSubmodules(std::vector<git::SubmoduleInfo> submodules) {
+    model_->setSubmodules(std::move(submodules));
+}
+
+void BranchTreeWidget::setStashes(std::vector<git::StashEntry> stashes) {
+    model_->setStashes(std::move(stashes));
+}
+
 void BranchTreeWidget::clear() {
     if (filterInput_)
         filterInput_->clear();

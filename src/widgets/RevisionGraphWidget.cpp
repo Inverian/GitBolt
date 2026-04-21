@@ -42,8 +42,15 @@ void RevisionGraphWidget::setModel(models::CommitLogModel* model)
             this, &RevisionGraphWidget::resizeGraphColumn);
     connect(model, &QAbstractItemModel::rowsInserted,
             this, &RevisionGraphWidget::resizeGraphColumn);
+    connect(model, &QAbstractItemModel::modelReset,
+            this, &RevisionGraphWidget::resizeMetaColumns);
+    connect(model, &QAbstractItemModel::rowsInserted,
+            this, &RevisionGraphWidget::resizeMetaColumns);
 
-    // Configure column sizing
+    // Configure column sizing. Author/Date/Hash are Interactive because
+    // ResizeToContents jams text right up against the next column — we
+    // compute "contents + padding" in resizeMetaColumns() so each column
+    // has visible breathing room between it and its neighbor.
     auto* header = tableView_->horizontalHeader();
     header->setSectionResizeMode(
         static_cast<int>(models::CommitLogColumn::Graph),
@@ -53,15 +60,37 @@ void RevisionGraphWidget::setModel(models::CommitLogModel* model)
         QHeaderView::Stretch);
     header->setSectionResizeMode(
         static_cast<int>(models::CommitLogColumn::Author),
-        QHeaderView::ResizeToContents);
+        QHeaderView::Interactive);
     header->setSectionResizeMode(
         static_cast<int>(models::CommitLogColumn::Date),
-        QHeaderView::ResizeToContents);
+        QHeaderView::Interactive);
     header->setSectionResizeMode(
         static_cast<int>(models::CommitLogColumn::Hash),
-        QHeaderView::ResizeToContents);
+        QHeaderView::Interactive);
 
     resizeGraphColumn();
+    resizeMetaColumns();
+}
+
+void RevisionGraphWidget::resizeMetaColumns()
+{
+    if (!model_ || model_->rowCount() == 0)
+        return;
+
+    // Pixel padding added on top of the natural "fit contents" width for
+    // Author/Date/Hash. Roughly two characters' worth of space so the
+    // text doesn't butt up against the next column's content.
+    constexpr int kColumnPadding = 24;
+
+    const int metaColumns[] = {
+        static_cast<int>(models::CommitLogColumn::Author),
+        static_cast<int>(models::CommitLogColumn::Date),
+        static_cast<int>(models::CommitLogColumn::Hash),
+    };
+    for (int col : metaColumns) {
+        tableView_->resizeColumnToContents(col);
+        tableView_->setColumnWidth(col, tableView_->columnWidth(col) + kColumnPadding);
+    }
 }
 
 models::CommitLogModel* RevisionGraphWidget::model() const

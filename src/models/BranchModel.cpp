@@ -80,6 +80,10 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                 return tr("Remote Branches");
             case RootCategory::Tags:
                 return tr("Tags");
+            case RootCategory::Submodules:
+                return tr("Submodules");
+            case RootCategory::Stashes:
+                return tr("Stashes");
             default:
                 return {};
             }
@@ -97,6 +101,10 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                 return QIcon::fromTheme(QStringLiteral("network-server"));
             case RootCategory::Tags:
                 return QIcon::fromTheme(QStringLiteral("tag"));
+            case RootCategory::Submodules:
+                return QIcon::fromTheme(QStringLiteral("folder"));
+            case RootCategory::Stashes:
+                return QIcon::fromTheme(QStringLiteral("document-save"));
             default:
                 return {};
             }
@@ -209,6 +217,49 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         }
     }
 
+    if (cat == RootCategory::Submodules) {
+        if (row < 0 || row >= static_cast<int>(submodules_.size()))
+            return {};
+        const auto& sm = submodules_[row];
+
+        switch (role) {
+        case Qt::DisplayRole:
+            return QString::fromStdString(sm.name);
+        case Qt::DecorationRole:
+            return QIcon::fromTheme(QStringLiteral("folder"));
+        case Qt::ToolTipRole: {
+            QString tip = QString::fromStdString(sm.name);
+            if (!sm.url.empty())
+                tip += QStringLiteral("\nURL: ") + QString::fromStdString(sm.url);
+            if (!sm.branch.empty())
+                tip += QStringLiteral("\nBranch: ") + QString::fromStdString(sm.branch);
+            return tip;
+        }
+        default:
+            return {};
+        }
+    }
+
+    if (cat == RootCategory::Stashes) {
+        if (row < 0 || row >= static_cast<int>(stashes_.size()))
+            return {};
+        const auto& s = stashes_[row];
+
+        switch (role) {
+        case Qt::DisplayRole:
+            return QString::fromStdString(s.message);
+        case Qt::DecorationRole:
+            return QIcon::fromTheme(QStringLiteral("document-save"));
+        case Qt::ToolTipRole: {
+            QString tip = QStringLiteral("stash@{%1}").arg(s.index);
+            tip += QStringLiteral("\n") + QString::fromStdString(s.message);
+            return tip;
+        }
+        default:
+            return {};
+        }
+    }
+
     return {};
 }
 
@@ -268,11 +319,30 @@ void BranchModel::setTags(std::vector<git::TagInfo> tags) {
     endResetModel();
 }
 
+void BranchModel::setSubmodules(std::vector<git::SubmoduleInfo> submodules) {
+    beginResetModel();
+    submodules_ = std::move(submodules);
+    std::sort(submodules_.begin(), submodules_.end(),
+              [](const git::SubmoduleInfo& a, const git::SubmoduleInfo& b) {
+                  return a.name < b.name;
+              });
+    endResetModel();
+}
+
+void BranchModel::setStashes(std::vector<git::StashEntry> stashes) {
+    beginResetModel();
+    stashes_ = std::move(stashes);
+    // Stashes are already ordered by index (most recent first).
+    endResetModel();
+}
+
 void BranchModel::clear() {
     beginResetModel();
     localBranches_.clear();
     remoteBranches_.clear();
     tags_.clear();
+    submodules_.clear();
+    stashes_.clear();
     endResetModel();
 }
 
@@ -309,6 +379,10 @@ int BranchModel::categoryChildCount(RootCategory cat) const {
         return static_cast<int>(remoteBranches_.size());
     case RootCategory::Tags:
         return static_cast<int>(tags_.size());
+    case RootCategory::Submodules:
+        return static_cast<int>(submodules_.size());
+    case RootCategory::Stashes:
+        return static_cast<int>(stashes_.size());
     default:
         return 0;
     }

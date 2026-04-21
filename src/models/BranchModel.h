@@ -1,6 +1,8 @@
 #pragma once
 
 #include "git/Branch.h"
+#include "git/Stash.h"
+#include "git/Submodule.h"
 #include "git/Tag.h"
 
 #include <QAbstractItemModel>
@@ -17,7 +19,9 @@ public:
         LocalBranches = 0,
         RemoteBranches = 1,
         Tags = 2,
-        Count = 3,
+        Submodules = 3,
+        Stashes = 4,
+        Count = 5,
     };
 
     enum Roles {
@@ -43,6 +47,8 @@ public:
     // Data setters
     void setBranches(std::vector<gitbolt::git::BranchInfo> branches);
     void setTags(std::vector<gitbolt::git::TagInfo> tags);
+    void setSubmodules(std::vector<gitbolt::git::SubmoduleInfo> submodules);
+    void setStashes(std::vector<gitbolt::git::StashEntry> stashes);
     void clear();
 
     // Queries
@@ -56,6 +62,8 @@ private:
     std::vector<gitbolt::git::BranchInfo> localBranches_;
     std::vector<gitbolt::git::BranchInfo> remoteBranches_;
     std::vector<gitbolt::git::TagInfo> tags_;
+    std::vector<gitbolt::git::SubmoduleInfo> submodules_;
+    std::vector<gitbolt::git::StashEntry> stashes_;
 };
 
 } // namespace gitbolt::models

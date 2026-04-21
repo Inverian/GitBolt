@@ -17,7 +17,18 @@ int main(int argc, char* argv[]) {
     // Install crash handler before anything else
     gitbolt::util::CrashHandler::install();
 
+    // macOS hides menu icons by default in Qt. We want GitExtensions-style
+    // colored glyphs in the Commands menu, so force them on. Must be set
+    // BEFORE the QApplication is constructed.
+    QApplication::setAttribute(Qt::AA_DontShowIconsInMenus, false);
+
     QApplication app(argc, argv);
+
+    // Use Fusion style on macOS so QMenu honors our per-action icons
+    // (the native QMacStyle ignores iconVisibleInMenu/AA_DontShowIconsInMenus).
+    // Fusion matches cross-platform GitExtensions look-and-feel.
+    app.setStyle(QStringLiteral("fusion"));
+
     app.setApplicationName(QStringLiteral("GitBolt"));
     app.setApplicationVersion(QStringLiteral("0.1.0"));
     app.setOrganizationName(QStringLiteral("GitBolt"));

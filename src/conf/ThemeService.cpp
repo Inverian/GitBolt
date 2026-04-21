@@ -320,6 +320,26 @@ QString ThemeService::lightStyleSheet() const
             spacing: 4px;
             padding: 2px;
         }
+        QToolBar QToolButton {
+            color: #333;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 3px;
+            padding: 3px 6px;
+        }
+        QToolBar QToolButton:hover {
+            color: #111;
+            background: rgba(0, 0, 0, 0.08);
+            border-color: palette(mid);
+        }
+        QToolBar QToolButton:pressed {
+            color: #111;
+            background: rgba(0, 0, 0, 0.14);
+            border-color: palette(mid);
+        }
+        QToolBar QToolButton:disabled {
+            color: #aaa;
+        }
         QSplitter::handle {
             background: palette(mid);
         }

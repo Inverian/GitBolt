@@ -19,6 +19,8 @@
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
@@ -27,6 +29,20 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QToolBar>
+
+#include <functional>
+
+namespace {
+
+// Load a Material Symbols icon from the Qt resource system.
+// SVGs live under :/icons/menu/<name>.svg and are already tinted
+// with their semantic color (see gitbolt.qrc and resources/icons/menu/).
+static QIcon menuIcon(const QString& name)
+{
+    return QIcon(QStringLiteral(":/icons/menu/") + name + QStringLiteral(".svg"));
+}
+
+} // namespace
 
 namespace gitbolt::ui {
 
@@ -171,17 +187,31 @@ void MainWindow::createMenuBar()
 
     // ---- File ----
     auto* fileMenu = menuBar()->addMenu(tr("&File"));
-    fileMenu->addAction(tr("&Open Repository..."), this,
-                        &MainWindow::openRepository, QKeySequence::Open);
-    fileMenu->addAction(tr("&Clone Repository..."), this,
-                        &MainWindow::cloneRepository);
-    addPlaceholder(fileMenu, tr("Create &New Repository..."), status);
+
+    auto* openAction = new QAction(menuIcon(QStringLiteral("open_repo")),
+                                   tr("&Open Repository..."), this);
+    openAction->setShortcut(QKeySequence::Open);
+    connect(openAction, &QAction::triggered, this, &MainWindow::openRepository);
+    fileMenu->addAction(openAction);
+
+    auto* cloneAction = new QAction(menuIcon(QStringLiteral("clone_repo")),
+                                    tr("&Clone Repository..."), this);
+    connect(cloneAction, &QAction::triggered, this, &MainWindow::cloneRepository);
+    fileMenu->addAction(cloneAction);
+
+    addPlaceholder(fileMenu, tr("Create &New Repository..."), status)
+        ->setIcon(menuIcon(QStringLiteral("new_repo")));
 
     recentMenu_ = fileMenu->addMenu(tr("Recent Repositories"));
+    recentMenu_->setIcon(menuIcon(QStringLiteral("recent")));
     updateRecentMenu();
 
     fileMenu->addSeparator();
-    fileMenu->addAction(tr("&Quit"), qApp, &QApplication::quit, QKeySequence::Quit);
+    auto* quitAction = new QAction(menuIcon(QStringLiteral("quit")),
+                                   tr("&Quit"), this);
+    quitAction->setShortcut(QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
+    fileMenu->addAction(quitAction);
 
     // ---- Repository ----
     //
@@ -191,7 +221,8 @@ void MainWindow::createMenuBar()
     // state is managed in exactly one place (onRepositoryOpened).
     auto* repoMenu = menuBar()->addMenu(tr("&Repository"));
 
-    refreshAction_ = new QAction(tr("&Refresh"), this);
+    refreshAction_ = new QAction(menuIcon(QStringLiteral("refresh")),
+                                 tr("&Refresh"), this);
     refreshAction_->setShortcut(QKeySequence::Refresh);
     refreshAction_->setEnabled(false);
     connect(refreshAction_, &QAction::triggered, this, [this]() {
@@ -200,106 +231,188 @@ void MainWindow::createMenuBar()
         gitService_->refreshStatus();
         gitService_->refreshLog();
         gitService_->refreshBranches();
+        gitService_->refreshStashes();
+        gitService_->refreshSubmodules();
     });
     repoMenu->addAction(refreshAction_);
 
-    addPlaceholder(repoMenu, tr("File E&xplorer"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
+    {
+        auto* a = addPlaceholder(repoMenu, tr("File E&xplorer"), status);
+        a->setIcon(menuIcon(QStringLiteral("file_explorer")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
+    }
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Remote &repositories..."), status);
+    addPlaceholder(repoMenu, tr("Remote &repositories..."), status)
+        ->setIcon(menuIcon(QStringLiteral("remote")));
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Manage &submodules..."), status);
-    addPlaceholder(repoMenu, tr("&Update all submodules"), status);
-    addPlaceholder(repoMenu, tr("S&ynchronize all submodules"), status);
+    addPlaceholder(repoMenu, tr("Manage &submodules..."), status)
+        ->setIcon(menuIcon(QStringLiteral("submodule")));
+    addPlaceholder(repoMenu, tr("&Update all submodules"), status)
+        ->setIcon(menuIcon(QStringLiteral("submodule_update")));
+    addPlaceholder(repoMenu, tr("S&ynchronize all submodules"), status)
+        ->setIcon(menuIcon(QStringLiteral("submodule_sync")));
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Manage &worktrees..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_W));
+    {
+        auto* a = addPlaceholder(repoMenu, tr("Manage &worktrees..."), status);
+        a->setIcon(menuIcon(QStringLiteral("worktrees")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_W));
+    }
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Edit .&gitignore"), status);
-    addPlaceholder(repoMenu, tr("Edit .git/&info/exclude"), status);
-    addPlaceholder(repoMenu, tr("Edit .git&attributes"), status);
-    addPlaceholder(repoMenu, tr("Edit .&mailmap"), status);
-    addPlaceholder(repoMenu, tr("Sparse &Working Copy"), status);
+    addPlaceholder(repoMenu, tr("Edit .&gitignore"), status)
+        ->setIcon(menuIcon(QStringLiteral("edit")));
+    addPlaceholder(repoMenu, tr("Edit .git/&info/exclude"), status)
+        ->setIcon(menuIcon(QStringLiteral("edit")));
+    addPlaceholder(repoMenu, tr("Edit .git&attributes"), status)
+        ->setIcon(menuIcon(QStringLiteral("edit")));
+    addPlaceholder(repoMenu, tr("Edit .&mailmap"), status)
+        ->setIcon(menuIcon(QStringLiteral("edit")));
+    addPlaceholder(repoMenu, tr("Sparse &Working Copy"), status)
+        ->setIcon(menuIcon(QStringLiteral("sparse")));
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Git mai&ntenance"), status);
+    addPlaceholder(repoMenu, tr("Git mai&ntenance"), status)
+        ->setIcon(menuIcon(QStringLiteral("maintenance")));
 
     repoMenu->addSeparator();
-    addPlaceholder(repoMenu, tr("Repository &settings..."), status);
+    addPlaceholder(repoMenu, tr("Repository &settings..."), status)
+        ->setIcon(menuIcon(QStringLiteral("settings")));
 
     repoMenu->addSeparator();
-    auto* closeAction = new QAction(tr("&Close (go to Dashboard)"), this);
+    auto* closeAction = new QAction(menuIcon(QStringLiteral("close")),
+                                    tr("&Close"), this);
     closeAction->setShortcut(QKeySequence::Close);
     connect(closeAction, &QAction::triggered, this, [this]() {
         centralStack_->setCurrentWidget(dashboardView_);
         setWindowTitle(QStringLiteral("GitBolt"));
+        // Back to the home screen — gray out every item in the
+        // repo-only menus again, mirroring the initial state set at
+        // the end of createMenuBar().
+        setRepoOnlyMenusEnabled(false);
+        // Also disable the repo-dependent toolbar/menu actions
+        // shared between the Repository menu and the toolbar.
+        if (refreshAction_) refreshAction_->setEnabled(false);
+        if (fetchAction_)   fetchAction_->setEnabled(false);
+        if (pullAction_)    pullAction_->setEnabled(false);
+        if (pushAction_)    pushAction_->setEnabled(false);
+        if (commitAction_)  commitAction_->setEnabled(false);
+        if (filterInput_)   filterInput_->setEnabled(false);
     });
     repoMenu->addAction(closeAction);
 
     // ---- Navigate ----
-    auto* navMenu = menuBar()->addMenu(tr("&Navigate"));
-    addPlaceholder(navMenu, tr("Go to &current revision"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
-    addPlaceholder(navMenu, tr("Go to c&ommit..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
+    navMenu_ = menuBar()->addMenu(tr("&Navigate"));
+    auto* navMenu = navMenu_;
+    {
+        auto* a = addPlaceholder(navMenu, tr("Go to &current revision"), status);
+        a->setIcon(menuIcon(QStringLiteral("current_rev")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
+    }
+    {
+        auto* a = addPlaceholder(navMenu, tr("Go to c&ommit..."), status);
+        a->setIcon(menuIcon(QStringLiteral("go_to_commit")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
+    }
 
     navMenu->addSeparator();
-    addPlaceholder(navMenu, tr("Go to &child commit"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_N));
-    addPlaceholder(navMenu, tr("Go to &parent commit"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_P));
-    addPlaceholder(navMenu, tr("Go to &first parent commit"), status);
-    addPlaceholder(navMenu, tr("Go to &last parent commit"), status);
+    {
+        auto* a = addPlaceholder(navMenu, tr("Go to &child commit"), status);
+        a->setIcon(menuIcon(QStringLiteral("child_commit")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_N));
+    }
+    {
+        auto* a = addPlaceholder(navMenu, tr("Go to &parent commit"), status);
+        a->setIcon(menuIcon(QStringLiteral("parent_commit")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_P));
+    }
+    addPlaceholder(navMenu, tr("Go to &first parent commit"), status)
+        ->setIcon(menuIcon(QStringLiteral("first_parent")));
+    addPlaceholder(navMenu, tr("Go to &last parent commit"), status)
+        ->setIcon(menuIcon(QStringLiteral("last_parent")));
 
     navMenu->addSeparator();
-    addPlaceholder(navMenu, tr("Navigate &backward"), status)
-        ->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Left));
-    addPlaceholder(navMenu, tr("Navigate f&orward"), status)
-        ->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Right));
+    {
+        auto* a = addPlaceholder(navMenu, tr("Navigate &backward"), status);
+        a->setIcon(menuIcon(QStringLiteral("back")));
+        a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Left));
+    }
+    {
+        auto* a = addPlaceholder(navMenu, tr("Navigate f&orward"), status);
+        a->setIcon(menuIcon(QStringLiteral("forward")));
+        a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Right));
+    }
 
     navMenu->addSeparator();
-    addPlaceholder(navMenu, tr("Quick &search"), status);
-    addPlaceholder(navMenu, tr("Quick search pre&vious"), status)
-        ->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Up));
-    addPlaceholder(navMenu, tr("Quick search ne&xt"), status)
-        ->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Down));
+    addPlaceholder(navMenu, tr("Quick &search"), status)
+        ->setIcon(menuIcon(QStringLiteral("go_to_commit")));
+    {
+        auto* a = addPlaceholder(navMenu, tr("Quick search pre&vious"), status);
+        a->setIcon(menuIcon(QStringLiteral("parent_commit")));
+        a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Up));
+    }
+    {
+        auto* a = addPlaceholder(navMenu, tr("Quick search ne&xt"), status);
+        a->setIcon(menuIcon(QStringLiteral("child_commit")));
+        a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Down));
+    }
 
     // ---- View ----
-    auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu_ = menuBar()->addMenu(tr("&View"));
+    auto* viewMenu = viewMenu_;
 
     // -- Branches section --
-    addPlaceholder(viewMenu, tr("Show &all branches"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
-    addPlaceholder(viewMenu, tr("Show c&urrent branch only"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_U));
-    addPlaceholder(viewMenu, tr("Show &filtered branches"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));
-    addPlaceholder(viewMenu, tr("Show &reflog references"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L));
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Show &all branches"), status);
+        a->setIcon(menuIcon(QStringLiteral("visibility")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
+    }
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Show c&urrent branch only"), status);
+        a->setIcon(menuIcon(QStringLiteral("visibility")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_U));
+    }
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Show &filtered branches"), status);
+        a->setIcon(menuIcon(QStringLiteral("filter")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));
+    }
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Show &reflog references"), status);
+        a->setIcon(menuIcon(QStringLiteral("reflog")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L));
+    }
 
     viewMenu->addSeparator();
-    addPlaceholder(viewMenu, tr("Ad&vanced filter..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Ad&vanced filter..."), status);
+        a->setIcon(menuIcon(QStringLiteral("filter")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    }
 
     viewMenu->addSeparator();
     // -- Commits section --
     auto* showStashes = addPlaceholder(viewMenu, tr("Show s&tashes"), status);
+    showStashes->setIcon(menuIcon(QStringLiteral("stashes")));
     showStashes->setCheckable(true);
     showStashes->setChecked(true);
-    addPlaceholder(viewMenu, tr("Show git &notes"), status)
-        ->setCheckable(true);
+    {
+        auto* a = addPlaceholder(viewMenu, tr("Show git &notes"), status);
+        a->setIcon(menuIcon(QStringLiteral("notes")));
+        a->setCheckable(true);
+    }
 
     viewMenu->addSeparator();
     // -- Grid labels section --
     auto* showRemote = addPlaceholder(viewMenu, tr("Show &remote branches"), status);
+    showRemote->setIcon(menuIcon(QStringLiteral("remote")));
     showRemote->setCheckable(true);
     showRemote->setChecked(true);
     showRemote->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
     auto* showTags = addPlaceholder(viewMenu, tr("Show ta&gs"), status);
+    showTags->setIcon(menuIcon(QStringLiteral("tag_create")));
     showTags->setCheckable(true);
     showTags->setChecked(true);
     showTags->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_T));
@@ -307,48 +420,64 @@ void MainWindow::createMenuBar()
     viewMenu->addSeparator();
     // -- Grid info section --
     auto* showMsgBody = addPlaceholder(viewMenu, tr("Show commit &message body"), status);
+    showMsgBody->setIcon(menuIcon(QStringLiteral("description")));
     showMsgBody->setCheckable(true);
     showMsgBody->setChecked(true);
     auto* showAuthorDate = addPlaceholder(viewMenu, tr("Show a&uthor date"), status);
+    showAuthorDate->setIcon(menuIcon(QStringLiteral("schedule")));
     showAuthorDate->setCheckable(true);
     showAuthorDate->setChecked(true);
     auto* showRelDate = addPlaceholder(viewMenu, tr("Show relati&ve date"), status);
+    showRelDate->setIcon(menuIcon(QStringLiteral("schedule")));
     showRelDate->setCheckable(true);
     showRelDate->setChecked(true);
 
     viewMenu->addSeparator();
     // -- Columns section --
     auto* showGraph = addPlaceholder(viewMenu, tr("Show revision &graph column"), status);
+    showGraph->setIcon(menuIcon(QStringLiteral("submodule")));
     showGraph->setCheckable(true);
     showGraph->setChecked(true);
     auto* showAvatar = addPlaceholder(viewMenu, tr("Show author a&vatar column"), status);
+    showAvatar->setIcon(menuIcon(QStringLiteral("person")));
     showAvatar->setCheckable(true);
     showAvatar->setChecked(true);
     auto* showAuthorName = addPlaceholder(viewMenu, tr("Show author &name column"), status);
+    showAuthorName->setIcon(menuIcon(QStringLiteral("badge")));
     showAuthorName->setCheckable(true);
     showAuthorName->setChecked(true);
     auto* showDateCol = addPlaceholder(viewMenu, tr("Show &date column"), status);
+    showDateCol->setIcon(menuIcon(QStringLiteral("date")));
     showDateCol->setCheckable(true);
     showDateCol->setChecked(true);
     auto* showHashCol = addPlaceholder(viewMenu, tr("Show SHA-&1 column"), status);
+    showHashCol->setIcon(menuIcon(QStringLiteral("hash")));
     showHashCol->setCheckable(true);
     showHashCol->setChecked(true);
 
     // ---- Commands ----
-    auto* cmdMenu = menuBar()->addMenu(tr("&Commands"));
+    //
+    // Each item gets a Google Material Symbols icon tinted with a
+    // semantic color (see resources/icons/menu/*.svg). The helper
+    // menuIcon() loads the tinted SVG from the Qt resource system.
+    cmdMenu_ = menuBar()->addMenu(tr("&Commands"));
+    auto* cmdMenu = cmdMenu_;
 
     commitAction_ = new QAction(tr("Co&mmit..."), this);
+    commitAction_->setIcon(menuIcon(QStringLiteral("commit")));
     commitAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Space));
     commitAction_->setEnabled(false);
     connect(commitAction_, &QAction::triggered,
             this, &MainWindow::showCommitDialog);
     cmdMenu->addAction(commitAction_);
 
-    addPlaceholder(cmdMenu, tr("&Undo last commit..."), status);
+    addPlaceholder(cmdMenu, tr("&Undo last commit..."), status)
+        ->setIcon(menuIcon(QStringLiteral("undo")));
 
     cmdMenu->addSeparator();
 
-    fetchAction_ = new QAction(tr("Pull/&Fetch..."), this);
+    fetchAction_ = new QAction(tr("&Fetch"), this);
+    fetchAction_->setIcon(menuIcon(QStringLiteral("fetch")));
     fetchAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Down));
     fetchAction_->setEnabled(false);
     connect(fetchAction_, &QAction::triggered, this,
@@ -356,11 +485,13 @@ void MainWindow::createMenuBar()
     cmdMenu->addAction(fetchAction_);
 
     pullAction_ = new QAction(tr("Pu&ll"), this);
+    pullAction_->setIcon(menuIcon(QStringLiteral("pull")));
     pullAction_->setEnabled(false);
     connect(pullAction_, &QAction::triggered, this,
             [this]() { gitService_->pull("origin", ""); });
 
     pushAction_ = new QAction(tr("&Push..."), this);
+    pushAction_->setIcon(menuIcon(QStringLiteral("push")));
     pushAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Up));
     pushAction_->setEnabled(false);
     connect(pushAction_, &QAction::triggered, this,
@@ -368,72 +499,164 @@ void MainWindow::createMenuBar()
     cmdMenu->addAction(pushAction_);
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("Manage &stashes..."), status);
-    addPlaceholder(cmdMenu, tr("&Reset changes..."), status);
-    addPlaceholder(cmdMenu, tr("Clea&n working directory..."), status);
+    addPlaceholder(cmdMenu, tr("Manage &stashes..."), status)
+        ->setIcon(menuIcon(QStringLiteral("stashes")));
+    addPlaceholder(cmdMenu, tr("&Reset changes..."), status)
+        ->setIcon(menuIcon(QStringLiteral("reset")));
+    addPlaceholder(cmdMenu, tr("Clea&n working directory..."), status)
+        ->setIcon(menuIcon(QStringLiteral("clean")));
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("Create &branch..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
-    addPlaceholder(cmdMenu, tr("&Delete branch..."), status);
-    addPlaceholder(cmdMenu, tr("Check&out branch..."), status);
-    addPlaceholder(cmdMenu, tr("Mer&ge branches..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
-    addPlaceholder(cmdMenu, tr("R&ebase..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
+    {
+        auto* a = addPlaceholder(cmdMenu, tr("Create &branch..."), status);
+        a->setIcon(menuIcon(QStringLiteral("branch_create")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
+    }
+    addPlaceholder(cmdMenu, tr("&Delete branch..."), status)
+        ->setIcon(menuIcon(QStringLiteral("branch_delete")));
+    addPlaceholder(cmdMenu, tr("Check&out branch..."), status)
+        ->setIcon(menuIcon(QStringLiteral("branch_checkout")));
+    {
+        auto* a = addPlaceholder(cmdMenu, tr("Mer&ge branches..."), status);
+        a->setIcon(menuIcon(QStringLiteral("merge")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
+    }
+    {
+        auto* a = addPlaceholder(cmdMenu, tr("R&ebase..."), status);
+        a->setIcon(menuIcon(QStringLiteral("rebase")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
+    }
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("Create &tag..."), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
-    addPlaceholder(cmdMenu, tr("De&lete tag..."), status);
+    {
+        auto* a = addPlaceholder(cmdMenu, tr("Create &tag..."), status);
+        a->setIcon(menuIcon(QStringLiteral("tag_create")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
+    }
+    addPlaceholder(cmdMenu, tr("De&lete tag..."), status)
+        ->setIcon(menuIcon(QStringLiteral("tag_delete")));
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("C&herry pick..."), status);
-    addPlaceholder(cmdMenu, tr("&Archive revision..."), status);
-    addPlaceholder(cmdMenu, tr("Checko&ut revision..."), status);
+    addPlaceholder(cmdMenu, tr("C&herry pick..."), status)
+        ->setIcon(menuIcon(QStringLiteral("cherry_pick")));
+    addPlaceholder(cmdMenu, tr("&Archive revision..."), status)
+        ->setIcon(menuIcon(QStringLiteral("archive")));
+    addPlaceholder(cmdMenu, tr("Checko&ut revision..."), status)
+        ->setIcon(menuIcon(QStringLiteral("checkout")));
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("&Bisect..."), status);
+    addPlaceholder(cmdMenu, tr("&Bisect..."), status)
+        ->setIcon(menuIcon(QStringLiteral("bisect")));
 
     cmdMenu->addSeparator();
-    addPlaceholder(cmdMenu, tr("&Format patch..."), status);
-    addPlaceholder(cmdMenu, tr("A&pply patch..."), status);
+    addPlaceholder(cmdMenu, tr("&Format patch..."), status)
+        ->setIcon(menuIcon(QStringLiteral("format_patch")));
+    addPlaceholder(cmdMenu, tr("A&pply patch..."), status)
+        ->setIcon(menuIcon(QStringLiteral("apply_patch")));
 
     // ---- Plugins ----
     auto* pluginsMenu = menuBar()->addMenu(tr("&Plugins"));
-    addPlaceholder(pluginsMenu, tr("&Delete obsolete branches"), status);
-    addPlaceholder(pluginsMenu, tr("&Find large files"), status);
-    addPlaceholder(pluginsMenu, tr("&GitFlow"), status);
-    addPlaceholder(pluginsMenu, tr("&Impact Graph"), status);
-    addPlaceholder(pluginsMenu, tr("&Periodic background fetch"), status);
-    addPlaceholder(pluginsMenu, tr("&Statistics"), status);
+    addPlaceholder(pluginsMenu, tr("&Delete obsolete branches"), status)
+        ->setIcon(menuIcon(QStringLiteral("auto_delete")));
+    addPlaceholder(pluginsMenu, tr("&Find large files"), status)
+        ->setIcon(menuIcon(QStringLiteral("find_files")));
+    addPlaceholder(pluginsMenu, tr("&GitFlow"), status)
+        ->setIcon(menuIcon(QStringLiteral("submodule")));
+    addPlaceholder(pluginsMenu, tr("&Impact Graph"), status)
+        ->setIcon(menuIcon(QStringLiteral("insights")));
+    addPlaceholder(pluginsMenu, tr("&Periodic background fetch"), status)
+        ->setIcon(menuIcon(QStringLiteral("submodule_update")));
+    addPlaceholder(pluginsMenu, tr("&Statistics"), status)
+        ->setIcon(menuIcon(QStringLiteral("stats")));
     pluginsMenu->addSeparator();
-    addPlaceholder(pluginsMenu, tr("Plugin &Manager"), status);
-    addPlaceholder(pluginsMenu, tr("Plugins &settings..."), status);
+    addPlaceholder(pluginsMenu, tr("Plugin &Manager"), status)
+        ->setIcon(menuIcon(QStringLiteral("extension")));
+    addPlaceholder(pluginsMenu, tr("Plugins &settings..."), status)
+        ->setIcon(menuIcon(QStringLiteral("tune")));
 
     // ---- Tools ----
     auto* toolsMenu = menuBar()->addMenu(tr("&Tools"));
-    addPlaceholder(toolsMenu, tr("Git &bash"), status)
-        ->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
-    addPlaceholder(toolsMenu, tr("Git&K"), status);
+    {
+        auto* a = addPlaceholder(toolsMenu, tr("Git &bash"), status);
+        a->setIcon(menuIcon(QStringLiteral("terminal")));
+        a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    }
+    addPlaceholder(toolsMenu, tr("Git&K"), status)
+        ->setIcon(menuIcon(QStringLiteral("visibility")));
     toolsMenu->addSeparator();
-    addPlaceholder(toolsMenu, tr("Git &command log"), status)
-        ->setShortcut(QKeySequence(Qt::Key_F12));
+    {
+        auto* a = addPlaceholder(toolsMenu, tr("Git &command log"), status);
+        a->setIcon(menuIcon(QStringLiteral("command_log")));
+        a->setShortcut(QKeySequence(Qt::Key_F12));
+    }
     toolsMenu->addSeparator();
-    toolsMenu->addAction(tr("&Settings..."),
-                         QKeySequence::Preferences,
-                         this, &MainWindow::showSettingsDialog);
+    auto* settingsAct = new QAction(menuIcon(QStringLiteral("settings")),
+                                    tr("&Settings..."), this);
+    settingsAct->setShortcut(QKeySequence::Preferences);
+    connect(settingsAct, &QAction::triggered,
+            this, &MainWindow::showSettingsDialog);
+    toolsMenu->addAction(settingsAct);
 
     // ---- Help ----
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
-    addPlaceholder(helpMenu, tr("&User manual"), status)
-        ->setShortcut(QKeySequence::HelpContents);
-    addPlaceholder(helpMenu, tr("&Changelog"), status);
+    {
+        auto* a = addPlaceholder(helpMenu, tr("&User manual"), status);
+        a->setIcon(menuIcon(QStringLiteral("manual")));
+        a->setShortcut(QKeySequence::HelpContents);
+    }
+    addPlaceholder(helpMenu, tr("&Changelog"), status)
+        ->setIcon(menuIcon(QStringLiteral("changelog")));
     helpMenu->addSeparator();
-    addPlaceholder(helpMenu, tr("&Report an issue"), status);
-    addPlaceholder(helpMenu, tr("&Check for updates"), status);
+    addPlaceholder(helpMenu, tr("&Report an issue"), status)
+        ->setIcon(menuIcon(QStringLiteral("bug")));
+    addPlaceholder(helpMenu, tr("&Check for updates"), status)
+        ->setIcon(menuIcon(QStringLiteral("update")));
     helpMenu->addSeparator();
-    helpMenu->addAction(tr("&About GitBolt"), this, &MainWindow::showAbout);
+    auto* aboutMenuAct = new QAction(menuIcon(QStringLiteral("about")),
+                                     tr("&About GitBolt"), this);
+    connect(aboutMenuAct, &QAction::triggered, this, &MainWindow::showAbout);
+    helpMenu->addAction(aboutMenuAct);
+
+    // Force icon visibility on every QAction in the menu bar and its
+    // submenus. macOS-specific: even with AA_DontShowIconsInMenus set
+    // to false, Qt6 sometimes defaults per-action visibility to false.
+    std::function<void(QWidget*)> enableIcons = [&](QWidget* w) {
+        for (QAction* a : w->actions()) {
+            a->setIconVisibleInMenu(true);
+            if (a->menu()) enableIcons(a->menu());
+        }
+    };
+    enableIcons(menuBar());
+
+    // Navigate, View, and Commands only make sense with a repository
+    // open. Gray out every child action on the dashboard/home screen
+    // so the menus still open but every item is disabled — matching
+    // GitExtensions' behavior. We disable the children (not the
+    // top-level menu via menuAction()) because Qt's Fusion style on
+    // macOS does not visibly dim a disabled menu bar title, but it
+    // DOES dim each disabled item in the dropdown. Toggling in
+    // onRepositoryOpened() and the Close action keeps this in sync.
+    setRepoOnlyMenusEnabled(false);
+}
+
+// Walk the Navigate / View / Commands menus and enable or disable
+// every child action. Repo-shared QActions (refreshAction_, fetchAction_,
+// pullAction_, pushAction_, commitAction_) are toggled independently
+// in onRepositoryOpened() and the close-action lambda, so skipping
+// them here does not lose correctness — it just avoids a redundant
+// write from two places.
+void MainWindow::setRepoOnlyMenusEnabled(bool on)
+{
+    auto toggleChildren = [on](QMenu* m) {
+        if (!m) return;
+        for (QAction* a : m->actions()) {
+            if (a->isSeparator()) continue;
+            a->setEnabled(on);
+        }
+    };
+    toggleChildren(navMenu_);
+    toggleChildren(viewMenu_);
+    toggleChildren(cmdMenu_);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +768,16 @@ void MainWindow::setupConnections()
 
     connect(gitService_, &services::GitService::branchesReady,
             this, &MainWindow::onBranchesReady);
+
+    connect(gitService_, &services::GitService::submodulesReady,
+            this, [this](std::vector<git::SubmoduleInfo> subs) {
+                if (repoView_) repoView_->setSubmodules(std::move(subs));
+            });
+
+    connect(gitService_, &services::GitService::stashesReady,
+            this, [this](std::vector<git::StashEntry> stashes) {
+                if (repoView_) repoView_->setStashes(std::move(stashes));
+            });
 
     // Status-bar only surfacing for git op results. The Console
     // tab is an interactive terminal now — it's not the right
@@ -674,6 +907,9 @@ void MainWindow::onRepositoryOpened(const QString& path)
     if (commitAction_)  commitAction_->setEnabled(true);
     if (filterInput_)   filterInput_->setEnabled(true);
 
+    // Light up every item under Navigate / View / Commands.
+    setRepoOnlyMenusEnabled(true);
+
     repoPathLabel_->setText(path);
 
     auto* repo = gitService_->repository();
@@ -686,6 +922,10 @@ void MainWindow::onRepositoryOpened(const QString& path)
             branchLabel_->setText(tr("HEAD (detached)"));
         }
     }
+
+    // Refresh submodules and stashes for the sidebar.
+    gitService_->refreshStashes();
+    gitService_->refreshSubmodules();
 
     statusBar()->showMessage(tr("Opened: %1").arg(path), 3000);
 }

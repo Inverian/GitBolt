@@ -19,6 +19,12 @@ signals:
 private slots:
     void onSelectionChanged();
     void resizeGraphColumn();
+    /// Size Author/Date/Hash by content then add a padding margin so text
+    /// isn't cramped against the next column. ResizeToContents alone packs
+    /// columns tight with zero breathing room; we switch those columns to
+    /// Interactive and recompute their widths ourselves whenever the row
+    /// set changes.
+    void resizeMetaColumns();
 
 private:
     QTableView* tableView_ = nullptr;

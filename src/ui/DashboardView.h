@@ -3,8 +3,9 @@
 #include <QWidget>
 
 class QLabel;
-class QListWidget;
 class QPushButton;
+class QTreeWidget;
+class QTreeWidgetItem;
 
 namespace gitbolt::conf {
 class SettingsService;
@@ -28,9 +29,24 @@ signals:
 protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    /// Watch recentList_ for QEvent::Resize. DashboardView's own
+    /// resizeEvent fires BEFORE the nested tree widget gets laid out,
+    /// so its viewport() width is stale at that moment; watching the
+    /// tree directly catches the moment it actually gets its real size.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void setupUi();
+    /// Apply the percentage split to the tree's columns. Pulled out of
+    /// eventFilter() so it can also be invoked after refresh when the
+    /// item set changes (scrollbar visibility may shift the viewport).
+    void updateRecentColumnWidths();
+    /// Kick off a background probe for one repo and populate the
+    /// corresponding row's columns when it completes. Row lookup is by
+    /// path stashed in column 0's UserRole, not by index, so rows that
+    /// reshuffle (e.g. because the user opened a different repo) don't
+    /// get crossed data.
+    void probeAndPopulate(QTreeWidgetItem* row, const QString& path);
     QPushButton* createActionCard(const QString& title, const QString& iconText,
                                   const QString& description);
 
@@ -40,7 +56,18 @@ private:
     QPushButton* openBtn_ = nullptr;
     QPushButton* cloneBtn_ = nullptr;
     QPushButton* initBtn_ = nullptr;
-    QListWidget* recentList_ = nullptr;
+    /// Six-column table of recent repositories:
+    ///   0 Name     — QFileInfo::fileName() of the path
+    ///   1 Branch   — current branch name, or "(detached)"
+    ///   2 Status   — dirty file count, e.g. "●3" or blank if clean
+    ///   3 ↑↓       — ahead/behind vs. upstream, e.g. "↑2 ↓1" or "—"
+    ///   4 Accessed — relative time since last opened in GitBolt
+    ///   5 Committed — relative time since HEAD committer timestamp
+    ///   6 Path     — full absolute path
+    /// Columns 1-5 are populated asynchronously per-row via a worker
+    /// thread pool (see probeAndPopulate) so slow repos don't block
+    /// the dashboard paint.
+    QTreeWidget* recentList_ = nullptr;
     QPushButton* clearRecentBtn_ = nullptr;
     QLabel* noRecentLabel_ = nullptr;
 };

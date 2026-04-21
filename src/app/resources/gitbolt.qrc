@@ -17,4 +17,90 @@
         <file alias="gitbolt-512.png">../../../resources/icons/gitbolt-512.png</file>
         <file alias="gitbolt-1024.png">../../../resources/icons/gitbolt-1024.png</file>
     </qresource>
+    <!--
+        Google Material Symbols (Outlined) for the Commands menu.
+        Downloaded from fonts.gstatic.com and tinted with semantic
+        colors (green=create, red=delete, blue=remote, orange=modify,
+        purple=merge, teal=rebase, gray=info/archive) via an injected
+        `fill` attribute on the root <svg> element.
+    -->
+    <qresource prefix="/icons/menu">
+        <!-- Commands menu -->
+        <file alias="commit.svg">../../../resources/icons/menu/commit.svg</file>
+        <file alias="undo.svg">../../../resources/icons/menu/undo.svg</file>
+        <file alias="fetch.svg">../../../resources/icons/menu/fetch.svg</file>
+        <file alias="pull.svg">../../../resources/icons/menu/pull.svg</file>
+        <file alias="push.svg">../../../resources/icons/menu/push.svg</file>
+        <file alias="stashes.svg">../../../resources/icons/menu/stashes.svg</file>
+        <file alias="reset.svg">../../../resources/icons/menu/reset.svg</file>
+        <file alias="clean.svg">../../../resources/icons/menu/clean.svg</file>
+        <file alias="branch_create.svg">../../../resources/icons/menu/branch_create.svg</file>
+        <file alias="branch_delete.svg">../../../resources/icons/menu/branch_delete.svg</file>
+        <file alias="branch_checkout.svg">../../../resources/icons/menu/branch_checkout.svg</file>
+        <file alias="merge.svg">../../../resources/icons/menu/merge.svg</file>
+        <file alias="rebase.svg">../../../resources/icons/menu/rebase.svg</file>
+        <file alias="tag_create.svg">../../../resources/icons/menu/tag_create.svg</file>
+        <file alias="tag_delete.svg">../../../resources/icons/menu/tag_delete.svg</file>
+        <file alias="cherry_pick.svg">../../../resources/icons/menu/cherry_pick.svg</file>
+        <file alias="archive.svg">../../../resources/icons/menu/archive.svg</file>
+        <file alias="checkout.svg">../../../resources/icons/menu/checkout.svg</file>
+        <file alias="bisect.svg">../../../resources/icons/menu/bisect.svg</file>
+        <file alias="format_patch.svg">../../../resources/icons/menu/format_patch.svg</file>
+        <file alias="apply_patch.svg">../../../resources/icons/menu/apply_patch.svg</file>
+        <!-- File menu -->
+        <file alias="open_repo.svg">../../../resources/icons/menu/open_repo.svg</file>
+        <file alias="clone_repo.svg">../../../resources/icons/menu/clone_repo.svg</file>
+        <file alias="new_repo.svg">../../../resources/icons/menu/new_repo.svg</file>
+        <file alias="recent.svg">../../../resources/icons/menu/recent.svg</file>
+        <file alias="quit.svg">../../../resources/icons/menu/quit.svg</file>
+        <!-- Repository menu -->
+        <file alias="refresh.svg">../../../resources/icons/menu/refresh.svg</file>
+        <file alias="file_explorer.svg">../../../resources/icons/menu/file_explorer.svg</file>
+        <file alias="remote.svg">../../../resources/icons/menu/remote.svg</file>
+        <file alias="submodule.svg">../../../resources/icons/menu/submodule.svg</file>
+        <file alias="submodule_update.svg">../../../resources/icons/menu/submodule_update.svg</file>
+        <file alias="submodule_sync.svg">../../../resources/icons/menu/submodule_sync.svg</file>
+        <file alias="worktrees.svg">../../../resources/icons/menu/worktrees.svg</file>
+        <file alias="edit.svg">../../../resources/icons/menu/edit.svg</file>
+        <file alias="sparse.svg">../../../resources/icons/menu/sparse.svg</file>
+        <file alias="maintenance.svg">../../../resources/icons/menu/maintenance.svg</file>
+        <file alias="settings.svg">../../../resources/icons/menu/settings.svg</file>
+        <file alias="close.svg">../../../resources/icons/menu/close.svg</file>
+        <!-- Navigate menu -->
+        <file alias="current_rev.svg">../../../resources/icons/menu/current_rev.svg</file>
+        <file alias="go_to_commit.svg">../../../resources/icons/menu/go_to_commit.svg</file>
+        <file alias="child_commit.svg">../../../resources/icons/menu/child_commit.svg</file>
+        <file alias="parent_commit.svg">../../../resources/icons/menu/parent_commit.svg</file>
+        <file alias="first_parent.svg">../../../resources/icons/menu/first_parent.svg</file>
+        <file alias="last_parent.svg">../../../resources/icons/menu/last_parent.svg</file>
+        <file alias="back.svg">../../../resources/icons/menu/back.svg</file>
+        <file alias="forward.svg">../../../resources/icons/menu/forward.svg</file>
+        <!-- View menu -->
+        <file alias="visibility.svg">../../../resources/icons/menu/visibility.svg</file>
+        <file alias="filter.svg">../../../resources/icons/menu/filter.svg</file>
+        <file alias="reflog.svg">../../../resources/icons/menu/reflog.svg</file>
+        <file alias="notes.svg">../../../resources/icons/menu/notes.svg</file>
+        <file alias="description.svg">../../../resources/icons/menu/description.svg</file>
+        <file alias="schedule.svg">../../../resources/icons/menu/schedule.svg</file>
+        <file alias="date.svg">../../../resources/icons/menu/date.svg</file>
+        <file alias="person.svg">../../../resources/icons/menu/person.svg</file>
+        <file alias="badge.svg">../../../resources/icons/menu/badge.svg</file>
+        <file alias="hash.svg">../../../resources/icons/menu/hash.svg</file>
+        <!-- Plugins menu -->
+        <file alias="auto_delete.svg">../../../resources/icons/menu/auto_delete.svg</file>
+        <file alias="find_files.svg">../../../resources/icons/menu/find_files.svg</file>
+        <file alias="insights.svg">../../../resources/icons/menu/insights.svg</file>
+        <file alias="stats.svg">../../../resources/icons/menu/stats.svg</file>
+        <file alias="extension.svg">../../../resources/icons/menu/extension.svg</file>
+        <file alias="tune.svg">../../../resources/icons/menu/tune.svg</file>
+        <!-- Tools menu -->
+        <file alias="terminal.svg">../../../resources/icons/menu/terminal.svg</file>
+        <file alias="command_log.svg">../../../resources/icons/menu/command_log.svg</file>
+        <!-- Help menu -->
+        <file alias="manual.svg">../../../resources/icons/menu/manual.svg</file>
+        <file alias="changelog.svg">../../../resources/icons/menu/changelog.svg</file>
+        <file alias="bug.svg">../../../resources/icons/menu/bug.svg</file>
+        <file alias="update.svg">../../../resources/icons/menu/update.svg</file>
+        <file alias="about.svg">../../../resources/icons/menu/about.svg</file>
+    </qresource>
 </RCC>
