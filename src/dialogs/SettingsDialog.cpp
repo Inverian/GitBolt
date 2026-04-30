@@ -14,12 +14,15 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QKeySequenceEdit>
+#include <QButtonGroup>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPainter>
 #include <QProcess>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QSlider>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -115,6 +118,8 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     addSubsection(catGitBolt,  tr("UI Design"),  createUiDesignPage());
     addSubsection(catGitBolt,  tr("Appearance"), createAppearancePage());
     addSubsection(catGitBolt,  tr("Shortcuts"),  createShortcutsPage());
+    addSubsection(catGitBolt,  tr("Recent Repositories"),
+                  createRecentReposPage());
 
     auto* catGit      = makeCategoryItem(nav_, tr("Git"));
     addSubsection(catGit,      tr("Git Config"),    createGitConfigPage());
@@ -558,6 +563,96 @@ void SettingsDialog::populateShortcutsTable()
 }
 
 // ---------------------------------------------------------------------------
+// Recent Repositories page
+// ---------------------------------------------------------------------------
+//
+// Mirrors the GitExtensions "Recent repositories settings" dialog,
+// scoped to the options we actually support. We omit the "top
+// repositories" section (separate pinned-favorites feature that
+// hasn't been built yet) and the "combobox minimum width" option
+// (we render recents as a table on the dashboard, not a combobox —
+// the column widths are already user-draggable via the header).
+
+QWidget* SettingsDialog::createRecentReposPage()
+{
+    auto* page = new QWidget(this);
+    auto* root = new QHBoxLayout(page);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(12);
+
+    // --- Left column: the knobs ---
+    auto* leftCol = new QVBoxLayout;
+    leftCol->setSpacing(8);
+
+    // Max count row.
+    auto* countRow = new QHBoxLayout;
+    auto* countLabel = new QLabel(tr("Maximum number of recent repositories:"), page);
+    recentMaxCountSpin_ = new QSpinBox(page);
+    recentMaxCountSpin_->setRange(1, 200);
+    recentMaxCountSpin_->setFixedWidth(80);
+    countRow->addWidget(countLabel, 1);
+    countRow->addWidget(recentMaxCountSpin_, 0);
+    leftCol->addLayout(countRow);
+
+    // Alphabetical sort.
+    recentSortCheck_ = new QCheckBox(
+        tr("Sort recent repositories alphabetically"), page);
+    leftCol->addWidget(recentSortCheck_);
+
+    // Shortening strategy group.
+    auto* shortenGroup = new QGroupBox(tr("Shortening strategy"), page);
+    auto* shortenLayout = new QVBoxLayout(shortenGroup);
+    recentShortenNone_   = new QRadioButton(tr("Do not shorten"), shortenGroup);
+    recentShortenMiddle_ = new QRadioButton(
+        tr("Replace middle part with dots"), shortenGroup);
+    recentShortenSigDir_ = new QRadioButton(
+        tr("Show the most significant directory"), shortenGroup);
+    shortenLayout->addWidget(recentShortenNone_);
+    shortenLayout->addWidget(recentShortenMiddle_);
+    shortenLayout->addWidget(recentShortenSigDir_);
+
+    // Group them so mutual exclusion is explicit (they'd be mutually
+    // exclusive anyway as direct QRadioButton siblings, but an
+    // explicit button group makes intent obvious and survives any
+    // future reparenting).
+    auto* shortenButtons = new QButtonGroup(page);
+    shortenButtons->addButton(recentShortenNone_,
+        static_cast<int>(conf::SettingsService::RecentShortening::None));
+    shortenButtons->addButton(recentShortenMiddle_,
+        static_cast<int>(conf::SettingsService::RecentShortening::MiddleEllipsis));
+    shortenButtons->addButton(recentShortenSigDir_,
+        static_cast<int>(conf::SettingsService::RecentShortening::SignificantDir));
+
+    leftCol->addWidget(shortenGroup);
+
+    auto* note = new QLabel(
+        tr("These options control how the Recent Repositories list on "
+           "the home screen is ordered and how each path is rendered. "
+           "Clearing the list itself is done from the home screen's "
+           "\"Clear Recent\" button."),
+        page);
+    note->setWordWrap(true);
+    note->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    leftCol->addWidget(note);
+    leftCol->addStretch();
+
+    // --- Right column: current list preview ---
+    auto* rightCol = new QVBoxLayout;
+    rightCol->setSpacing(6);
+    auto* listHeader = new QLabel(tr("Current recent repositories:"), page);
+    rightCol->addWidget(listHeader);
+    recentListPreview_ = new QListWidget(page);
+    recentListPreview_->setSelectionMode(QAbstractItemView::NoSelection);
+    recentListPreview_->setFocusPolicy(Qt::NoFocus);
+    rightCol->addWidget(recentListPreview_, 1);
+
+    root->addLayout(leftCol, 1);
+    root->addLayout(rightCol, 1);
+
+    return page;
+}
+
+// ---------------------------------------------------------------------------
 // Load / Save
 // ---------------------------------------------------------------------------
 
@@ -582,6 +677,27 @@ void SettingsDialog::loadSettings()
         int idx = themeCombo_->findText(theme_->currentTheme());
         if (idx >= 0)
             themeCombo_->setCurrentIndex(idx);
+    }
+
+    // Recent Repositories
+    if (recentMaxCountSpin_)
+        recentMaxCountSpin_->setValue(settings_->maxRecentRepositories());
+    if (recentSortCheck_)
+        recentSortCheck_->setChecked(settings_->sortRecentAlphabetically());
+    if (recentShortenNone_) {
+        switch (settings_->recentShorteningStrategy()) {
+        case conf::SettingsService::RecentShortening::MiddleEllipsis:
+            recentShortenMiddle_->setChecked(true); break;
+        case conf::SettingsService::RecentShortening::SignificantDir:
+            recentShortenSigDir_->setChecked(true); break;
+        case conf::SettingsService::RecentShortening::None:
+        default:
+            recentShortenNone_->setChecked(true); break;
+        }
+    }
+    if (recentListPreview_) {
+        recentListPreview_->clear();
+        recentListPreview_->addItems(settings_->recentRepositories());
     }
 }
 
@@ -641,6 +757,21 @@ void SettingsDialog::apply()
     // Theme
     if (theme_)
         theme_->setTheme(themeCombo_->currentText());
+
+    // Recent Repositories
+    if (recentMaxCountSpin_)
+        settings_->setMaxRecentRepositories(recentMaxCountSpin_->value());
+    if (recentSortCheck_)
+        settings_->setSortRecentAlphabetically(recentSortCheck_->isChecked());
+    if (recentShortenNone_) {
+        using RS = conf::SettingsService::RecentShortening;
+        RS strategy = RS::None;
+        if (recentShortenMiddle_ && recentShortenMiddle_->isChecked())
+            strategy = RS::MiddleEllipsis;
+        else if (recentShortenSigDir_ && recentShortenSigDir_->isChecked())
+            strategy = RS::SignificantDir;
+        settings_->setRecentShorteningStrategy(strategy);
+    }
 
     // Shortcuts
     for (int i = 0; i < shortcutsTable_->rowCount(); ++i) {

@@ -1,8 +1,11 @@
 #include "ui/DashboardView.h"
 #include "conf/SettingsService.h"
 #include "services/RecentRepoProbe.h"
+#include "widgets/BoltLogoWidget.h"
 
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
@@ -11,11 +14,13 @@
 #include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
+#include <QMenu>
 #include <QLabel>
 #include <QMimeData>
 #include <QPointer>
 #include <QPushButton>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -143,6 +148,99 @@ void DashboardView::setupUi()
     noRecentLabel_->setWordWrap(true);
     root->addWidget(noRecentLabel_, 1);
 
+    // ---- Contribute section ------------------------------------------
+    //
+    // A single compact row: the "Contribute:" label sits inline
+    // with the quick links (Develop / Donate / Issues), and the
+    // animated bolt logo anchors the far right. Everything on one
+    // line keeps the footer tight — the previous two-row layout
+    // (header above, links below) left a lot of vertical air for a
+    // section that's really just three links.
+    //
+    // Translate is intentionally omitted — no localization workflow
+    // is set up yet, so a link would lead nowhere useful.
+    //
+    // 28 px spacer gives the Recent Repositories table enough
+    // breathing room below its bottom border so it doesn't butt
+    // right up against the Contribute row or the corner bolt. 8 px
+    // felt too tight once the bolt was placed absolutely in the
+    // corner — the table's bottom edge sat almost on top of it.
+    root->addSpacing(28);
+
+    auto* contributeRow = new QHBoxLayout;
+    contributeRow->setSpacing(10);
+    contributeRow->setContentsMargins(0, 0, 0, 0);
+
+    auto* contributeLabel = new QLabel(tr("Contribute:"), this);
+    // Use palette(text) rather than a fixed "black" so the label
+    // tracks the active theme — dark themes still get a readable
+    // foreground color, and it matches the link labels' color.
+    // Font size matches the link buttons below so they read as one
+    // uniform row rather than a small label + big links.
+    contributeLabel->setStyleSheet(
+        QStringLiteral("font-weight: bold; font-size: 14pt; color: palette(text);"));
+    contributeRow->addWidget(contributeLabel);
+
+    // Helper: build a flat QToolButton with an emoji "icon" prefix
+    // and a caption. Styled transparent with a highlighted hover
+    // color so the row reads as a cluster of links rather than
+    // heavy buttons. Padding kept minimal so adjacent links sit
+    // close together.
+    auto makeLink = [this](const QString& iconText, const QString& label,
+                           const QString& url) -> QToolButton* {
+        auto* btn = new QToolButton(this);
+        btn->setText(QStringLiteral("%1  %2").arg(iconText, label));
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        btn->setAutoRaise(true);
+        // 14pt text matches the other dashboard controls — the
+        // action cards above use 13pt for their descriptions and
+        // the Recent Repositories header is 13pt, so anything under
+        // ~13pt here reads as "small print". The emoji "icon" renders
+        // in-line with the text at the same point size, so bumping
+        // the font up also scales up the visible icon.
+        btn->setStyleSheet(QStringLiteral(
+            "QToolButton {"
+            "  border: none;"
+            "  padding: 4px 6px;"
+            "  font-size: 14pt;"
+            "  color: palette(text);"
+            "}"
+            "QToolButton:hover {"
+            "  color: palette(highlight);"
+            "}"));
+        connect(btn, &QToolButton::clicked, this, [url]() {
+            QDesktopServices::openUrl(QUrl(url));
+        });
+        return btn;
+    };
+
+    // UTF-8 emoji literals (same QStringLiteral-vs-Latin-1 caveat as
+    // the action cards above — encode as raw bytes).
+    contributeRow->addWidget(
+        makeLink(QString::fromUtf8("\xF0\x9F\x92\xBB"),   // 💻
+                 tr("Develop"),
+                 QStringLiteral("https://github.com/ThePieMonster/GitBolt")));
+    contributeRow->addWidget(
+        makeLink(QString::fromUtf8("\xF0\x9F\x92\xB5"),   // 💵
+                 tr("Donate"),
+                 QStringLiteral("https://github.com/sponsors/ThePieMonster")));
+    contributeRow->addWidget(
+        makeLink(QString::fromUtf8("\xF0\x9F\x90\x9E"),   // 🐞 ladybug
+                 tr("Issues"),
+                 QStringLiteral("https://github.com/ThePieMonster/GitBolt/issues")));
+    contributeRow->addStretch();
+
+    root->addLayout(contributeRow);
+
+    // The decorative bolt logo lives OUTSIDE the layout — parented
+    // directly to `this` so resizeEvent can pin it to the bottom-
+    // right corner with equal margins. Putting it inside the
+    // Contribute row forced it to vertical-center with the text,
+    // which made it hover mid-row rather than sit in the corner.
+    cornerBolt_ = new widgets::BoltLogoWidget(this);
+    cornerBolt_->raise();
+
     // Connections
     connect(openBtn_, &QPushButton::clicked, this, [this]() {
         emit openRepositoryRequested(QString());
@@ -166,6 +264,35 @@ void DashboardView::setupUi()
                 if (item)
                     emit openRepositoryRequested(item->data(0, Qt::UserRole).toString());
             });
+
+    // Right-click context menu: "Open" and "Forget this repo".
+    // Forget removes JUST the selected entry from the recent list
+    // (vs. the Clear Recent button which wipes the whole list).
+    // Useful for pruning stale paths after directory renames or
+    // moved clones — the user noticed `~/Developer/test-repos/...`
+    // entries that lingered after switching the clone destination.
+    recentList_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(recentList_, &QTreeWidget::customContextMenuRequested,
+            this, [this](const QPoint& pos) {
+        QTreeWidgetItem* item = recentList_->itemAt(pos);
+        if (!item) return;
+        const QString path = item->data(0, Qt::UserRole).toString();
+        if (path.isEmpty()) return;
+
+        QMenu menu(this);
+        auto* openAct = menu.addAction(tr("&Open"));
+        auto* forgetAct = menu.addAction(tr("&Forget this repository"));
+        QAction* picked = menu.exec(
+            recentList_->viewport()->mapToGlobal(pos));
+        if (picked == openAct) {
+            emit openRepositoryRequested(path);
+        } else if (picked == forgetAct && settings_) {
+            settings_->removeRecentRepository(path);
+            // SettingsService doesn't emit a change signal today;
+            // refresh the table directly.
+            refreshRecentList();
+        }
+    });
 }
 
 QPushButton* DashboardView::createActionCard(const QString& title, const QString& iconText,
@@ -258,12 +385,74 @@ static QString formatRelativeTime(const QDateTime& when)
     return DashboardView::tr("%1y ago").arg(secs / (365LL * 86400));
 }
 
+// Apply the user-chosen shortening strategy to a single absolute path,
+// producing the string shown in the "Path" column and row tooltips.
+// Pulled out of refreshRecentList for readability — the three
+// strategies each have a short implementation that would otherwise
+// visually clutter the loop body.
+static QString applyShortening(
+    const QString& path,
+    gitbolt::conf::SettingsService::RecentShortening strategy)
+{
+    using RS = gitbolt::conf::SettingsService::RecentShortening;
+    if (strategy == RS::None)
+        return path;
+
+    // Normalize to native separators; the split below relies on
+    // QDir::separator() to pick the right delimiter per platform.
+    const QChar sep = QDir::separator();
+    const QStringList parts = path.split(sep, Qt::SkipEmptyParts);
+    if (parts.size() < 4)
+        return path;  // Too short to shorten meaningfully.
+
+    if (strategy == RS::SignificantDir) {
+        // Just the deepest directory name, prefixed by an ellipsis
+        // so the user can see it's been truncated. Keeps the UI
+        // scannable when the screen is narrow.
+        return QStringLiteral("…%1%2").arg(sep).arg(parts.last());
+    }
+
+    // RS::MiddleEllipsis: keep the first 1-2 and last 1-2 segments,
+    // collapse everything between them. This matches the "replace
+    // middle part with dots" option from GitExtensions.
+    const int keepFront = parts.size() > 5 ? 2 : 1;
+    const int keepBack  = parts.size() > 5 ? 2 : 1;
+    QStringList out;
+    out << parts.mid(0, keepFront);
+    out << QStringLiteral("…");
+    out << parts.mid(parts.size() - keepBack);
+    QString joined = out.join(sep);
+    // Preserve a leading separator on POSIX absolute paths
+    // (split+join would otherwise drop it).
+    if (path.startsWith(sep) && !joined.startsWith(sep))
+        joined.prepend(sep);
+    return joined;
+}
+
 void DashboardView::refreshRecentList()
 {
     recentList_->clear();
     QStringList repos = settings_ ? settings_->recentRepositories() : QStringList{};
     const QHash<QString, QDateTime> accessedAt =
         settings_ ? settings_->recentAccessTimes() : QHash<QString, QDateTime>{};
+
+    // Respect the "Sort recent repositories alphabetically" preference.
+    // We sort by basename (QFileInfo::fileName) rather than the full
+    // path so the visible Name column ordering matches what the user
+    // reads — sorting by full path groups by parent directory, which
+    // is surprising when all repos live under the same parent.
+    if (settings_ && settings_->sortRecentAlphabetically()) {
+        std::sort(repos.begin(), repos.end(),
+                  [](const QString& a, const QString& b) {
+                      return QFileInfo(a).fileName().compare(
+                                 QFileInfo(b).fileName(),
+                                 Qt::CaseInsensitive) < 0;
+                  });
+    }
+
+    const auto shortening = settings_
+        ? settings_->recentShorteningStrategy()
+        : conf::SettingsService::RecentShortening::None;
 
     bool hasRecent = !repos.isEmpty();
     recentList_->setVisible(hasRecent);
@@ -285,7 +474,7 @@ void DashboardView::refreshRecentList()
         item->setText(3, pending);                  // ↑↓
         item->setText(4, formatRelativeTime(accessedAt.value(path)));
         item->setText(5, pending);                  // Committed
-        item->setText(6, fi.absoluteFilePath());
+        item->setText(6, applyShortening(fi.absoluteFilePath(), shortening));
         // Stash the canonical path on column 0 so itemActivated can
         // retrieve it regardless of which column the user clicked in.
         item->setData(0, Qt::UserRole, path);
@@ -417,6 +606,30 @@ void DashboardView::updateRecentColumnWidths()
     // a 1-2px gap or overflow — this way columns always fill the
     // viewport exactly.
     recentList_->setColumnWidth(6, qMax(50, total - assigned));
+}
+
+void DashboardView::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    // Pin the floating bolt so its right edge aligns with the
+    // right edge of the Recent Repositories table above. The root
+    // layout uses 40 px left/right content margins (see setupUi),
+    // so setting the bolt's right margin to the same 40 px lines
+    // the bolt up with the table's right border exactly.
+    //
+    // The bottom margin is smaller (12 px) on purpose — the user
+    // wants the bolt to sit low in the corner rather than align
+    // with the layout's 30 px bottom margin. Splitting the two
+    // sides like this gives: bolt's right edge aligned with the
+    // table, bolt's bottom edge tucked close to the dashboard's
+    // bottom border.
+    if (cornerBolt_) {
+        constexpr int kRightMargin  = 40;
+        constexpr int kBottomMargin = 12;
+        const int x = width()  - cornerBolt_->width()  - kRightMargin;
+        const int y = height() - cornerBolt_->height() - kBottomMargin;
+        cornerBolt_->move(x, y);
+    }
 }
 
 bool DashboardView::eventFilter(QObject* watched, QEvent* event)

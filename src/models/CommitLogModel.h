@@ -56,6 +56,29 @@ public:
     int maxCachedPages() const { return maxCachedPages_; }
     void setVisibleRange(int first, int last);
 
+    /// Toggle between absolute "yyyy-MM-dd hh:mm" formatting and
+    /// relative "X minutes/hours/days ago" formatting in the Date
+    /// column. Forwards a dataChanged signal for the column so the
+    /// view repaints.
+    void setRelativeDate(bool relative);
+    bool relativeDate() const { return relativeDate_; }
+
+    /// Toggle whether the Date column shows the author date (when
+    /// the commit was originally written) or the committer date
+    /// (when it was last rewritten via rebase / amend). Default
+    /// is author date — matches `git log`'s default and is what
+    /// GitExtensions shows. Emits dataChanged for the Date column.
+    void setUseAuthorDate(bool useAuthor);
+    bool useAuthorDate() const { return useAuthorDate_; }
+
+    /// Toggle whether the Message column shows just the commit
+    /// summary (first line) or the full body. When on and the
+    /// body is non-empty, the cell renders "summary\n\nbody"
+    /// — Qt expands the row height accordingly when the table
+    /// has wordWrap enabled.
+    void setShowMessageBody(bool showBody);
+    bool showMessageBody() const { return showMessageBody_; }
+
 signals:
     void requestMoreCommits(int offset, int count);
     void pageEvicted(int offset);
@@ -68,6 +91,16 @@ private:
     std::vector<git::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
     bool hasMore_ = true;
+
+    // When true, the Date column renders "X ago" instead of an
+    // absolute timestamp. Persisted by MainWindow via QSettings.
+    bool relativeDate_ = false;
+    // When true, Date column reflects the author timestamp; when
+    // false, it shows the committer timestamp.
+    bool useAuthorDate_ = true;
+    // When true, Message column renders summary + full body
+    // (separated by a blank line). Default is summary only.
+    bool showMessageBody_ = false;
 
     // Sliding-window cache state
     int maxCachedPages_ = 20;    // default: 20 pages = 5120 rows

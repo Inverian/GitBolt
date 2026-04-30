@@ -1,4 +1,6 @@
 #include "git/GitProcess.h"
+#include "git/GitProcessLog.h"
+#include <QElapsedTimer>
 #include <QFile>
 #include <QProcess>
 #include <QStandardPaths>
@@ -17,13 +19,29 @@ Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int 
     for (const auto& arg : args)
         qargs.append(QString::fromStdString(arg));
 
+    // Wall-clock timing the run so the command log can show per-
+    // command latency. Cheap (no allocations after start()).
+    QElapsedTimer timer;
+    timer.start();
+
     process.start(QString::fromStdString(gitPath_), qargs);
 
-    if (!process.waitForStarted(5000))
+    if (!process.waitForStarted(5000)) {
+        // Still log the failed-to-start case with exit code -1 so
+        // it shows up in the command log; users debugging "why
+        // didn't this run?" want to see attempts as well as
+        // successes.
+        GitProcessLog::instance().emitCommand(
+            QString::fromStdString(workDir_), qargs, -1,
+            timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
+    }
 
     if (!process.waitForFinished(timeoutMs)) {
         process.kill();
+        GitProcessLog::instance().emitCommand(
+            QString::fromStdString(workDir_), qargs, -1,
+            timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Git process timed out");
     }
 
@@ -31,6 +49,11 @@ Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int 
     output.exitCode = process.exitCode();
     output.stdoutData = process.readAllStandardOutput().toStdString();
     output.stderrData = process.readAllStandardError().toStdString();
+
+    GitProcessLog::instance().emitCommand(
+        QString::fromStdString(workDir_), qargs, output.exitCode,
+        timer.elapsed());
+
     return output;
 }
 
@@ -63,13 +86,26 @@ Result<std::string> GitProcess::showFile(const std::string& revision, const std:
 }
 
 Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::string& branch, bool force) const {
-    std::vector<std::string> args = {"push", remote, branch};
-    if (force) args.insert(args.begin() + 1, "--force-with-lease");
+    // git is strict about empty refspecs: `git push origin ""` errors
+    // with "fatal: invalid refspec ''" instead of doing the sensible
+    // thing (push the current branch to its upstream). Drop empty
+    // arguments so the toolbar's "Push" with no specific branch hits
+    // the bare `git push origin` form, which honors push.default.
+    std::vector<std::string> args = {"push"};
+    if (force) args.emplace_back("--force-with-lease");
+    if (!remote.empty()) args.push_back(remote);
+    if (!branch.empty()) args.push_back(branch);
     return run(args, 120000);
 }
 
 Result<ProcessOutput> GitProcess::pull(const std::string& remote, const std::string& branch) const {
-    return run({"pull", remote, branch}, 120000);
+    // Same empty-arg avoidance as push — `git pull origin ""` errors
+    // out, but bare `git pull origin` (or just `git pull`) honors the
+    // tracking branch.
+    std::vector<std::string> args = {"pull"};
+    if (!remote.empty()) args.push_back(remote);
+    if (!branch.empty()) args.push_back(branch);
+    return run(args, 120000);
 }
 
 Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) const {

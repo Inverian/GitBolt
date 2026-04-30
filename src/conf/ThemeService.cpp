@@ -296,23 +296,39 @@ QString ThemeService::lightStyleSheet() const
     return QStringLiteral(R"(
         QScrollBar:vertical {
             width: 12px;
+            background: #d4d4d4;
         }
         QScrollBar::handle:vertical {
             min-height: 20px;
             border-radius: 4px;
             margin: 2px;
+            background: #a4a4a4;
+        }
+        QScrollBar::handle:vertical:hover {
+            background: #8c8c8c;
         }
         QScrollBar:horizontal {
             height: 12px;
+            background: #d4d4d4;
         }
         QScrollBar::handle:horizontal {
             min-width: 20px;
             border-radius: 4px;
             margin: 2px;
+            background: #a4a4a4;
+        }
+        QScrollBar::handle:horizontal:hover {
+            background: #8c8c8c;
         }
         QScrollBar::add-line, QScrollBar::sub-line {
             width: 0;
             height: 0;
+        }
+        /* The corner where vertical + horizontal scrollbars meet —
+           previously left as the default light gray which clashed
+           visually against the new darker track. Match the track. */
+        QAbstractScrollArea::corner {
+            background: #d4d4d4;
         }
         QToolBar {
             background: palette(window);

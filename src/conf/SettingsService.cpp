@@ -58,7 +58,8 @@ void SettingsService::addRecentRepository(const QString& path)
     QStringList list = recentRepositories();
     list.removeAll(canonical);
     list.prepend(canonical);
-    while (list.size() > kMaxRecentRepositories)
+    const int cap = maxRecentRepositories();
+    while (list.size() > cap)
         list.removeLast();
     settings_.setValue(QStringLiteral("recent/repositories"), list);
 
@@ -121,6 +122,62 @@ QHash<QString, QDateTime> SettingsService::recentAccessTimes() const
             result.insert(it.key(), dt);
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Recent repositories — display / retention preferences
+// ---------------------------------------------------------------------------
+//
+// These live under the same "recent/" namespace as the list itself so
+// a user wiping the whole recent-repos state (e.g. to migrate between
+// machines) only has to clear a single prefix.
+
+int SettingsService::maxRecentRepositories() const
+{
+    const int raw = settings_.value(QStringLiteral("recent/maxCount"),
+                                    kDefaultMaxRecentRepositories).toInt();
+    // Clamp here rather than only on set() — older builds may have
+    // written an out-of-range value, and we want read() to be robust
+    // against that without a silent migration.
+    return qBound(1, raw, 200);
+}
+
+void SettingsService::setMaxRecentRepositories(int count)
+{
+    settings_.setValue(QStringLiteral("recent/maxCount"), qBound(1, count, 200));
+    emit settingsChanged();
+}
+
+bool SettingsService::sortRecentAlphabetically() const
+{
+    return settings_.value(QStringLiteral("recent/sortAlphabetically"), false).toBool();
+}
+
+void SettingsService::setSortRecentAlphabetically(bool sort)
+{
+    settings_.setValue(QStringLiteral("recent/sortAlphabetically"), sort);
+    emit settingsChanged();
+}
+
+SettingsService::RecentShortening SettingsService::recentShorteningStrategy() const
+{
+    const int raw = settings_.value(QStringLiteral("recent/shortening"),
+                                    static_cast<int>(RecentShortening::None)).toInt();
+    // Defensive cast — any unknown value rounds back to None so the
+    // UI doesn't render as blank when the user has a future-schema
+    // settings file from a newer build.
+    if (raw == static_cast<int>(RecentShortening::MiddleEllipsis))
+        return RecentShortening::MiddleEllipsis;
+    if (raw == static_cast<int>(RecentShortening::SignificantDir))
+        return RecentShortening::SignificantDir;
+    return RecentShortening::None;
+}
+
+void SettingsService::setRecentShorteningStrategy(RecentShortening strategy)
+{
+    settings_.setValue(QStringLiteral("recent/shortening"),
+                       static_cast<int>(strategy));
+    emit settingsChanged();
 }
 
 // ---------------------------------------------------------------------------

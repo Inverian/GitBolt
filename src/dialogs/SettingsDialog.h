@@ -16,6 +16,8 @@ class QTreeWidget;
 class QTreeWidgetItem;
 class QWidget;
 class QLabel;
+class QListWidget;
+class QRadioButton;
 
 namespace gitbolt::conf {
 class SettingsService;
@@ -57,6 +59,7 @@ private:
     QWidget* createUiDesignPage();
     QWidget* createAppearancePage();
     QWidget* createShortcutsPage();
+    QWidget* createRecentReposPage();
     QWidget* createGitConfigPage();
     QWidget* createPluginsPage();
 
@@ -108,6 +111,18 @@ private:
     // Shortcuts page
     QTableWidget* shortcutsTable_ = nullptr;
     QKeySequenceEdit* keySeqEdit_ = nullptr;
+
+    // Recent Repositories page — mirrors GitExtensions' dialog:
+    // a max-count spinbox, an alphabetical-sort toggle, three
+    // radio buttons for the path-shortening strategy, and a live
+    // list of the current recents (read-only; Clear happens from
+    // the dashboard).
+    QSpinBox*     recentMaxCountSpin_   = nullptr;
+    QCheckBox*    recentSortCheck_      = nullptr;
+    QRadioButton* recentShortenNone_    = nullptr;
+    QRadioButton* recentShortenMiddle_  = nullptr;
+    QRadioButton* recentShortenSigDir_  = nullptr;
+    QListWidget*  recentListPreview_    = nullptr;
 };
 
 } // namespace gitbolt::dialogs

@@ -24,6 +24,14 @@ public:
     void setStashes(std::vector<gitbolt::git::StashEntry> stashes);
     void clear();
 
+    /// Show or hide a top-level category (Local/Remote branches,
+    /// Tags, Submodules, Stashes) in the tree view. Used by the
+    /// View menu's "Show remote branches / Show tags / Show
+    /// stashes" toggles. Hiding via QTreeView::setRowHidden so
+    /// the underlying model is left untouched — toggling back on
+    /// is instant.
+    void setCategoryVisible(int rootCategory, bool visible);
+
     models::BranchModel* branchModel() const { return model_; }
 
 signals:

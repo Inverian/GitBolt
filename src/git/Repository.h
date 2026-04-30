@@ -12,6 +12,7 @@
 #include "git/Merge.h"
 #include "git/ObjectId.h"
 #include "git/Rebase.h"
+#include "git/Reflog.h"
 #include "git/Remote.h"
 #include "git/Revwalk.h"
 #include "git/Stash.h"
@@ -109,6 +110,13 @@ public:
     Result<std::string> headBranchName() const;
     Result<CommitData> lookupCommit(const ObjectId& id) const;
 
+    /// Resolve any revision spec — full sha, short sha, branch name,
+    /// tag, HEAD, HEAD~3, refs/foo/bar, etc. — to a concrete ObjectId.
+    /// Wraps `git_revparse_single`. Useful when you want to accept
+    /// flexible user input in dialogs (Cherry pick, Go to commit) and
+    /// resolve down to a single commit ID before mutating the repo.
+    Result<ObjectId> resolveRef(const std::string& spec) const;
+
     // Status
     Result<std::vector<StatusEntry>> status() const;
 
@@ -162,6 +170,17 @@ public:
 
     // Blame
     Result<BlameResult> blame(const std::string& path) const;
+
+    // Reflog
+    /// Read the reflog for `refName` (e.g. "HEAD",
+    /// "refs/heads/main"). Returns entries in chronological
+    /// order — oldest first — flipping libgit2's natural
+    /// newest-first iteration so the UI can show "what
+    /// happened, in order" without rewriting the list. Empty
+    /// vector if the ref has no reflog (a ref freshly created
+    /// without `core.logAllRefUpdates` won't have one).
+    Result<std::vector<ReflogEntry>> reflog(
+        const std::string& refName = "HEAD") const;
 
     // Stash
     Result<std::vector<StashEntry>> stashes() const;

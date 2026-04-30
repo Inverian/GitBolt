@@ -4,6 +4,7 @@
 
 class QLabel;
 class QPushButton;
+class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -34,6 +35,11 @@ protected:
     /// so its viewport() width is stale at that moment; watching the
     /// tree directly catches the moment it actually gets its real size.
     bool eventFilter(QObject* watched, QEvent* event) override;
+    /// The decorative bolt logo isn't in the main layout — it's a
+    /// floating child anchored to the bottom-right corner of the
+    /// view. We reposition it on every resize so it stays in the
+    /// corner regardless of window size.
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     void setupUi();
@@ -70,6 +76,12 @@ private:
     QTreeWidget* recentList_ = nullptr;
     QPushButton* clearRecentBtn_ = nullptr;
     QLabel* noRecentLabel_ = nullptr;
+
+    // Floating decorative bolt — parented to DashboardView (not to
+    // any layout) so it sits "on top of" the dashboard at an
+    // absolute position that resizeEvent keeps pinned to the
+    // bottom-right corner regardless of window size.
+    QWidget* cornerBolt_ = nullptr;
 };
 
 } // namespace gitbolt::ui

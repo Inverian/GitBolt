@@ -15,7 +15,7 @@ class SettingsService : public QObject {
 public:
     explicit SettingsService(QObject* parent = nullptr);
 
-    // Recent repositories (max 10)
+    // Recent repositories
     QStringList recentRepositories() const;
     void addRecentRepository(const QString& path);
     void removeRecentRepository(const QString& path);
@@ -28,6 +28,35 @@ public:
     /// pre-existing entries from older builds) will be missing from
     /// the map — the caller should treat that as "unknown".
     QHash<QString, QDateTime> recentAccessTimes() const;
+
+    // Recent repositories — display / retention preferences.
+    //
+    // The cap used by addRecentRepository() when trimming the list.
+    // Existing entries are NOT proactively pruned when the cap is
+    // lowered — the list naturally shrinks on the next add. Clamped
+    // to [1, 200] to keep pathological values from breaking the UI.
+    int maxRecentRepositories() const;
+    void setMaxRecentRepositories(int count);
+
+    /// Sort the recent-repos list alphabetically by path basename
+    /// when true. When false, the list is ordered by most-recent-use
+    /// (the default, same as traditional MRU behavior).
+    bool sortRecentAlphabetically() const;
+    void setSortRecentAlphabetically(bool sort);
+
+    /// Strategy for abbreviating a long repo path in the UI. These
+    /// map to the three options shown in GitExtensions' Recent
+    /// Repositories settings page:
+    ///   0 = None            — show the path as-is
+    ///   1 = MiddleEllipsis  — collapse the middle with "…"
+    ///   2 = SignificantDir  — show only the deepest directory name
+    enum class RecentShortening {
+        None = 0,
+        MiddleEllipsis = 1,
+        SignificantDir = 2,
+    };
+    RecentShortening recentShorteningStrategy() const;
+    void setRecentShorteningStrategy(RecentShortening strategy);
 
     // UI — code font
     QFont codeFont() const;
@@ -85,7 +114,10 @@ signals:
     void settingsChanged();
 
 private:
-    static constexpr int kMaxRecentRepositories = 10;
+    // Fallback cap used when the user hasn't set one yet. The
+    // configurable `maxRecentRepositories()` setter overrides this
+    // for any new add-to-recents operation.
+    static constexpr int kDefaultMaxRecentRepositories = 10;
     QSettings settings_;
 };
 

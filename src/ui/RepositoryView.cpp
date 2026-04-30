@@ -529,6 +529,40 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
     if (!commitModel_)
         return;
 
+    // Empty hash means the user deselected the current commit
+    // (modifier-click on the selected row in the revision graph).
+    // Wipe the commit-specific inspector content so stale data
+    // from the previous commit doesn't sit in the panels. We
+    // explicitly DON'T touch the branch tree here — that's owned
+    // by the repo, not by the current selection — only the commit
+    // details, diff, and file-tree views get blanked.
+    if (commitHash.isEmpty()) {
+        if (avatarLabel_) {
+            avatarLabel_->clear();
+            avatarLabel_->setStyleSheet(QStringLiteral(
+                "QLabel { background: transparent; color: transparent; }"));
+        }
+        if (detailBrowser_)
+            detailBrowser_->clear();
+        if (messageBrowser_) {
+            messageBrowser_->clear();
+            messageBrowser_->setPlaceholderText(
+                tr("Select a commit to view details"));
+        }
+        if (diffHeaderLabel_)
+            diffHeaderLabel_->setText(
+                tr("Select a commit to view its diff"));
+        if (diffFilterInput_)
+            diffFilterInput_->clear();
+        if (changedFilesList_)
+            changedFilesList_->clear();
+        if (diffWidget_)
+            diffWidget_->clear();
+        if (fileTreeWidget_)
+            fileTreeWidget_->clear();
+        return;
+    }
+
     git::ObjectId targetId = git::ObjectId::fromHex(commitHash.toStdString());
 
     for (int row = 0; row < commitModel_->rowCount(); ++row) {

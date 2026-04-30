@@ -8,10 +8,12 @@
 #include <vector>
 
 class QStackedWidget;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QMenu;
 class QAction;
+class QTimer;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
@@ -67,6 +69,17 @@ private:
     void updateRecentMenu();
     void persistLayout();
 
+    /// Refresh the right-side status-bar label that shows whether
+    /// the Periodic fetch plugin is currently active. Called after
+    /// every toggle and start/stop of the timer.
+    void updatePeriodicFetchStatus();
+
+    /// Push the current commit hash onto the back-history stack,
+    /// invoked when the user navigates to a NEW commit (not via the
+    /// back/forward buttons). Clears the forward stack — same model
+    /// browsers use: a fresh navigation invalidates the redo path.
+    void pushHistory(const QString& commitHash);
+
     services::GitService*   gitService_   = nullptr;
     conf::SettingsService*  settingsService_ = nullptr;
     conf::ThemeService*     themeService_    = nullptr;  // owned by main()
@@ -99,6 +112,7 @@ private:
     // re-enabled in onRepositoryOpened(). Toggling the menu's
     // QAction (via menuAction()) grays out the menu title itself
     // AND prevents the dropdown from opening.
+    QMenu*     repoMenu_       = nullptr;
     QMenu*     navMenu_        = nullptr;
     QMenu*     viewMenu_       = nullptr;
     QMenu*     cmdMenu_        = nullptr;
@@ -107,9 +121,78 @@ private:
     QAction*   pullAction_     = nullptr;  // repo-dependent
     QAction*   pushAction_     = nullptr;  // repo-dependent
     QAction*   commitAction_   = nullptr;  // repo-dependent
-    QAction*   stashAction_    = nullptr;  // toolbar Stash (placeholder)
-    QAction*   settingsAction_ = nullptr;  // toolbar Settings (placeholder)
+    QAction*   stashAction_    = nullptr;  // shared menu "Manage
+                                           // stashes..." + toolbar Stash
     QLineEdit* filterInput_    = nullptr;  // toolbar quick filter (placeholder)
+    // The "Filter:" label and its input belong to the Repository
+    // workflow — irrelevant on the home screen. Hidden initially
+    // and shown when a repo opens (onRepositoryOpened), hidden
+    // again on Close. Stored as QActions because QToolBar
+    // addWidget() returns them and setVisible() on the action is
+    // what actually hides the wrapped widget in the toolbar.
+    QAction*   filterLabelAction_ = nullptr;
+    QAction*   filterInputAction_ = nullptr;
+
+    // Quick-switch branch dropdown that lives on the toolbar.
+    // Populated from each branchesReady signal with the list of
+    // local branches, current branch pre-selected. Choosing a
+    // different entry triggers checkoutBranch(); the next
+    // branchesReady refresh repaints the selection. Hidden until
+    // a repo opens (mirroring filterInput_).
+    QComboBox* branchCombo_      = nullptr;
+    QAction*   branchLabelAction_ = nullptr;
+    QAction*   branchComboAction_ = nullptr;
+
+    // Browser-style commit history. backHistory_ holds the commits
+    // BEFORE the current one (top = most recent visited); the
+    // currently-selected commit lives in `currentNavCommit_`;
+    // forwardHistory_ is populated by pressing Back. A fresh
+    // navigation (the user clicks a row, or selects via Go to
+    // commit / current revision) clears forwardHistory_. The
+    // suppress flag distinguishes selection signals fired by
+    // pushHistory's own selectCommit calls from genuine new
+    // navigation, so back/forward don't mangle their own stacks.
+    QStringList backHistory_;
+    QStringList forwardHistory_;
+    QString     currentNavCommit_;
+    bool        suppressHistoryPush_ = false;
+
+    // (action, columnIndex) for each View menu column-visibility
+    // toggle. Re-applied to the revision graph after a repo opens
+    // so saved hidden columns stay hidden across restarts.
+    struct ColumnToggle { QAction* action; int columnIndex; };
+    std::vector<ColumnToggle> columnToggles_;
+
+    // (action, branchModel category index) for branch-tree section
+    // toggles. Same pattern as columnToggles_ — restored from
+    // settings at construction, re-applied after the repo opens
+    // because the model is empty until then.
+    struct BranchTreeToggle { QAction* action; int categoryIndex; };
+    std::vector<BranchTreeToggle> branchTreeToggles_;
+
+    // Plugins → Periodic background fetch. Lazily constructed when
+    // the user enables the feature; kept alive for the window's
+    // lifetime so toggling off/on doesn't lose the connection.
+    QTimer* periodicFetchTimer_ = nullptr;
+    QLabel* periodicFetchStatus_ = nullptr;
+
+    // Set true by the operationFailed handler when fetch/pull/push
+    // emit a failure. Read by the toolbar action handlers right
+    // after the synchronous git op returns: if the flag is still
+    // false the op succeeded silently and we show our own
+    // confirmation message; if true, the failed-message that the
+    // operationFailed handler put on the status bar stays.
+    bool lastRemoteOpFailed_ = false;
+
+    // Inline activity indicator that lives on the toolbar between the
+    // push button and the Commit button. Shown in italic-color text
+    // while a fetch/pull/push is running, and again in green/red for
+    // a few seconds after it completes — gives the user noticeable
+    // feedback about whether the click did anything, since the status
+    // bar at the bottom of the window is easy to miss.
+    QLabel*  remoteOpLabel_      = nullptr;
+    QAction* remoteOpLabelAction_ = nullptr;
+    QTimer*  remoteOpClearTimer_ = nullptr;
 };
 
 } // namespace gitbolt::ui

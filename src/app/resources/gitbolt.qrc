@@ -7,6 +7,13 @@
         Qt resolves them at build time via rcc and embeds the binary
         data into the executable so no disk lookup happens at runtime.
     -->
+    <!--
+        In-app content viewed by dialogs (currently only the Help →
+        Changelog viewer). Paths resolve via ":/content/<alias>".
+    -->
+    <qresource prefix="/content">
+        <file alias="CHANGELOG.md">../../../resources/CHANGELOG.md</file>
+    </qresource>
     <qresource prefix="/icons">
         <file alias="gitbolt-16.png">../../../resources/icons/gitbolt-16.png</file>
         <file alias="gitbolt-32.png">../../../resources/icons/gitbolt-32.png</file>

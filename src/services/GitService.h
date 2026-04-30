@@ -5,6 +5,7 @@
 #include <QObject>
 #include <QStringList>
 #include <memory>
+#include <mutex>
 
 namespace gitbolt::services {
 
@@ -18,9 +19,51 @@ public:
     bool isOpen() const;
     git::Repository* repository() const;
 
+    /// Mutex that serializes all libgit2 access through this service.
+    /// UI code that calls Repository methods directly (via
+    /// `gitService->repository()->...`) should take this lock for the
+    /// duration of those calls — otherwise it races against the
+    /// background workers that GitService spawns for refreshStatus /
+    /// refreshLog / refreshBranches. libgit2 is not safe for
+    /// concurrent access on a single git_repository*. The seen-in-the-
+    /// wild crash was a malloc_zone_error inside git_pool_clear under
+    /// git_status_list_new while another worker was reading the log.
+    std::mutex& repoMutex() const { return repoMutex_; }
+
+    /// Thread-safe construction of a GitProcess for the open repository.
+    /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
+    /// returns by value. Once you have the GitProcess object you can
+    /// run shell commands on it without holding the lock — QProcess is
+    /// independent of libgit2 state.
+    git::GitProcess process() const;
+
     void refreshStatus();
     void refreshLog(int offset = 0, int count = 256);
     void refreshBranches();
+
+    /// Choose which refs the log walk starts from. Default is
+    /// `Head` (just the current branch and its ancestors).
+    /// `AllLocalBranches` pushes every local branch tip onto the
+    /// walk so the log shows commits across the whole repo.
+    /// `SelectedBranches` pushes only the branches named in
+    /// `selectedBranches_` (set via setSelectedBranches). The
+    /// scope persists across subsequent refreshLog() calls until
+    /// changed again.
+    enum class LogScope {
+        Head,
+        AllLocalBranches,
+        SelectedBranches,
+    };
+    void setLogScope(LogScope scope);
+    LogScope logScope() const { return logScope_; }
+
+    /// Configure which branches feed the walk when `LogScope` is
+    /// `SelectedBranches`. Names are short refs (e.g. "main"), no
+    /// "refs/heads/" prefix needed. Setting the list while the
+    /// active scope is already SelectedBranches triggers an
+    /// immediate refreshLog().
+    void setSelectedBranches(const QStringList& branchNames);
+    QStringList selectedBranches() const { return selectedBranches_; }
 
     void stageFile(const QString& path);
     void unstageFile(const QString& path);
@@ -117,6 +160,19 @@ private:
     std::unique_ptr<git::Repository> repo_;
     util::AsyncRunner runner_;
     watcher::FileWatcher watcher_;
+    LogScope logScope_ = LogScope::Head;
+    QStringList selectedBranches_;
+
+    // libgit2 is not safe for concurrent access on a single
+    // git_repository*. AsyncRunner submits to the global QThreadPool,
+    // so two refreshStatus / refreshLog / refreshBranches calls can
+    // land on different worker threads and corrupt libgit2's internal
+    // pool state. Real crash seen in the wild was a malloc_zone_error
+    // inside git_pool_clear under git_status_list_new while another
+    // worker was reading the log. Every Repository call from worker
+    // threads (and from the main-thread mutators that compete with
+    // them) acquires this mutex first.
+    mutable std::mutex repoMutex_;
 };
 
 } // namespace gitbolt::services

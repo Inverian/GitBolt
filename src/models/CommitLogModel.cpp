@@ -28,11 +28,47 @@ QVariant CommitLogModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::DisplayRole) {
         switch (static_cast<CommitLogColumn>(index.column())) {
             case CommitLogColumn::Graph: return {};
-            case CommitLogColumn::Message: return QString::fromStdString(commit.summary);
+            case CommitLogColumn::Message: {
+                if (showMessageBody_) {
+                    // Full message includes the summary as its
+                    // first line. If there's a body (anything past
+                    // the first blank line) keep the cell as-is;
+                    // otherwise fall back to summary-only so the
+                    // toggle doesn't add a redundant copy.
+                    const QString full = QString::fromStdString(commit.message)
+                        .trimmed();
+                    if (!full.isEmpty()) return full;
+                }
+                return QString::fromStdString(commit.summary);
+            }
             case CommitLogColumn::Author: return QString::fromStdString(commit.author.name);
             case CommitLogColumn::Date: {
-                auto t = std::chrono::system_clock::to_time_t(commit.author.when);
-                return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(t)).toString("yyyy-MM-dd hh:mm");
+                const auto& sig = useAuthorDate_ ? commit.author
+                                                 : commit.committer;
+                auto t = std::chrono::system_clock::to_time_t(sig.when);
+                const auto when = QDateTime::fromSecsSinceEpoch(
+                    static_cast<qint64>(t));
+                if (relativeDate_) {
+                    // Coarse-grained relative format. We avoid
+                    // libraries here — this is a plain integer
+                    // bucket lookup (seconds → minutes → hours →
+                    // days → months → years). "X ago" matches
+                    // GitHub / GitLab / GitExtensions conventions.
+                    const qint64 secs = when.secsTo(
+                        QDateTime::currentDateTime());
+                    if (secs < 60)
+                        return tr("just now");
+                    if (secs < 3600)
+                        return tr("%1 min ago").arg(secs / 60);
+                    if (secs < 86400)
+                        return tr("%1 hr ago").arg(secs / 3600);
+                    if (secs < 86400LL * 30)
+                        return tr("%1 day(s) ago").arg(secs / 86400);
+                    if (secs < 86400LL * 365)
+                        return tr("%1 mo ago").arg(secs / (86400LL * 30));
+                    return tr("%1 yr(s) ago").arg(secs / (86400LL * 365));
+                }
+                return when.toString("yyyy-MM-dd hh:mm");
             }
             case CommitLogColumn::Hash: return QString::fromStdString(commit.id.toShortHex());
             default: return {};
@@ -116,6 +152,42 @@ const GraphRowData* CommitLogModel::graphAt(int row) const {
 void CommitLogModel::setMaxCachedPages(int pages) {
     maxCachedPages_ = std::max(1, pages);
     evictDistantPages();
+}
+
+void CommitLogModel::setRelativeDate(bool relative) {
+    if (relativeDate_ == relative) return;
+    relativeDate_ = relative;
+    if (commits_.empty()) return;
+    const QModelIndex top = index(
+        0, static_cast<int>(CommitLogColumn::Date));
+    const QModelIndex bot = index(
+        static_cast<int>(commits_.size()) - 1,
+        static_cast<int>(CommitLogColumn::Date));
+    emit dataChanged(top, bot, {Qt::DisplayRole});
+}
+
+void CommitLogModel::setUseAuthorDate(bool useAuthor) {
+    if (useAuthorDate_ == useAuthor) return;
+    useAuthorDate_ = useAuthor;
+    if (commits_.empty()) return;
+    const QModelIndex top = index(
+        0, static_cast<int>(CommitLogColumn::Date));
+    const QModelIndex bot = index(
+        static_cast<int>(commits_.size()) - 1,
+        static_cast<int>(CommitLogColumn::Date));
+    emit dataChanged(top, bot, {Qt::DisplayRole});
+}
+
+void CommitLogModel::setShowMessageBody(bool showBody) {
+    if (showMessageBody_ == showBody) return;
+    showMessageBody_ = showBody;
+    if (commits_.empty()) return;
+    const QModelIndex top = index(
+        0, static_cast<int>(CommitLogColumn::Message));
+    const QModelIndex bot = index(
+        static_cast<int>(commits_.size()) - 1,
+        static_cast<int>(CommitLogColumn::Message));
+    emit dataChanged(top, bot, {Qt::DisplayRole});
 }
 
 void CommitLogModel::setVisibleRange(int first, int last) {

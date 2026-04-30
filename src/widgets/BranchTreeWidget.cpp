@@ -76,6 +76,24 @@ void BranchTreeWidget::clear() {
     model_->clear();
 }
 
+void BranchTreeWidget::setCategoryVisible(int rootCategory, bool visible) {
+    // Top-level categories live as direct children of the invisible
+    // root model index. The proxy's row order matches the source
+    // model since we don't reorder. Map the source row to its
+    // proxy row and call setRowHidden on the tree view.
+    if (!model_ || !filterProxy_ || !treeView_) return;
+    if (rootCategory < 0 ||
+        rootCategory >= static_cast<int>(
+            models::BranchModel::RootCategory::Count))
+        return;
+    const QModelIndex srcIdx = model_->index(rootCategory, 0,
+                                             QModelIndex());
+    if (!srcIdx.isValid()) return;
+    const QModelIndex proxyIdx = filterProxy_->mapFromSource(srcIdx);
+    if (!proxyIdx.isValid()) return;
+    treeView_->setRowHidden(proxyIdx.row(), QModelIndex(), !visible);
+}
+
 void BranchTreeWidget::setupToolbar() {
     toolbar_->setIconSize(QSize(16, 16));
     toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);

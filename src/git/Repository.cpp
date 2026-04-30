@@ -206,6 +206,25 @@ Result<std::string> Repository::headBranchName() const {
     return result;
 }
 
+Result<ObjectId> Repository::resolveRef(const std::string& spec) const {
+    // git_revparse_single handles every flavor of revision spec we
+    // care about: full / short SHAs, branch names, tag names, HEAD,
+    // HEAD~3, refs/heads/foo, etc. It returns a generic git_object,
+    // which we narrow down to its OID — for non-commit refs (a tag
+    // pointing at a tree, say) the returned OID is still meaningful
+    // for the caller; Cherry pick and Go to commit lookup the OID as
+    // a commit downstream and surface a clean error if it isn't one.
+    if (spec.empty())
+        return GitError(GitErrorCode::InvalidSpec,
+                        "empty revision spec");
+    git_object* obj = nullptr;
+    int err = git_revparse_single(&obj, repo_, spec.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    ObjectId result(git_object_id(obj));
+    git_object_free(obj);
+    return result;
+}
+
 Result<CommitData> Repository::lookupCommit(const ObjectId& id) const {
     git_oid oid;
     std::memcpy(oid.id, id.raw().data(), ObjectId::RAW_SIZE);
@@ -851,6 +870,39 @@ Result<BlameResult> Repository::blame(const std::string& path) const {
         result.hunks.push_back(std::move(bh));
     }
     git_blame_free(bl);
+    return result;
+}
+
+Result<std::vector<ReflogEntry>> Repository::reflog(
+        const std::string& refName) const {
+    git_reflog* log = nullptr;
+    int err = git_reflog_read(&log, repo_, refName.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    const size_t count = git_reflog_entrycount(log);
+    std::vector<ReflogEntry> result;
+    result.reserve(count);
+
+    // libgit2 indexes reflog entries newest-first (index 0 == most
+    // recent). The UI wants oldest-first for chronological "first
+    // X happened, then Y" reading; iterate backwards so the result
+    // vector ends up in chronological order.
+    for (size_t i = count; i-- > 0;) {
+        const git_reflog_entry* entry =
+            git_reflog_entry_byindex(log, i);
+        if (!entry) continue;
+        ReflogEntry e;
+        const git_oid* oldId = git_reflog_entry_id_old(entry);
+        const git_oid* newId = git_reflog_entry_id_new(entry);
+        if (oldId) e.oldId = ObjectId(oldId);
+        if (newId) e.newId = ObjectId(newId);
+        const git_signature* sig = git_reflog_entry_committer(entry);
+        if (sig) e.committer = Signature::fromGit(sig);
+        const char* msg = git_reflog_entry_message(entry);
+        e.message = msg ? msg : "";
+        result.push_back(std::move(e));
+    }
+    git_reflog_free(log);
     return result;
 }
 

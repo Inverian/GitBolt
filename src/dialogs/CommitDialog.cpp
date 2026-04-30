@@ -1,25 +1,49 @@
 #include "dialogs/CommitDialog.h"
 
 #include "conf/SettingsService.h"
+#include "git/Config.h"
+#include "git/Diff.h"
+#include "git/Repository.h"
+#include "models/FileStatusModel.h"
 #include "services/GitService.h"
-#include "widgets/CommitEditorWidget.h"
-#include "widgets/StagingWidget.h"
+#include "widgets/CommitEditorWidget.h" // for CommitMessageEdit
+#include "widgets/DiffViewerWidget.h"
 
+#include <QAction>
+#include <QCheckBox>
 #include <QCloseEvent>
+#include <QDir>
+#include <QFrame>
 #include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListView>
 #include <QMessageBox>
+#include <QModelIndex>
+#include <QPushButton>
 #include <QScreen>
+#include <QSet>
+#include <QShortcut>
 #include <QShowEvent>
+#include <QSortFilterProxyModel>
 #include <QSplitter>
+#include <QToolBar>
 #include <QVBoxLayout>
 
 namespace gitbolt::dialogs {
 
 namespace {
-constexpr const char* kGeometryKey = "commitDialogGeom/v1";
-constexpr const char* kSplitterKey = "commitSplitter/v1";
+constexpr const char* kGeometryKey      = "commitDialogGeom/v2";
+constexpr const char* kMainSplitterKey  = "commitMainSplitter/v2";
+constexpr const char* kLeftSplitterKey  = "commitLeftSplitter/v2";
+constexpr const char* kRightSplitterKey = "commitRightSplitter/v2";
 } // namespace
+
+// ---------------------------------------------------------------------------
+// Construction
+// ---------------------------------------------------------------------------
 
 CommitDialog::CommitDialog(services::GitService* svc,
                            conf::SettingsService* settings,
@@ -29,120 +53,660 @@ CommitDialog::CommitDialog(services::GitService* svc,
     , svc_(svc)
     , settings_(settings)
 {
-    setWindowTitle(tr("Commit"));
     setModal(false);
-    resize(720, 620);
+    resize(1100, 720);
 
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+    setupUi();
+    wireConnections();
+    readCommitterFromConfig();
+    updateTitle();
+    updateStatusBar();
+}
 
-    splitter_ = new QSplitter(Qt::Vertical, this);
-    splitter_->setChildrenCollapsible(false);
+CommitDialog::~CommitDialog() = default;
 
-    staging_ = new widgets::StagingWidget(this);
-    editor_  = new widgets::CommitEditorWidget(this);
+// ---------------------------------------------------------------------------
+// UI assembly
+// ---------------------------------------------------------------------------
 
-    splitter_->addWidget(staging_);
-    splitter_->addWidget(editor_);
-    splitter_->setStretchFactor(0, 3);
-    splitter_->setStretchFactor(1, 2);
+void CommitDialog::setupUi()
+{
+    // ---- Models + filtering proxies ---------------------------------------
+    // Two FileStatusModels share the same source data; each filters
+    // internally by the staged/unstaged predicate. A QSortFilterProxyModel
+    // on top of each gives the per-pane substring filter input.
+    unstagedModel_ = new models::FileStatusModel(this);
+    unstagedModel_->setStagedFilter(false);
 
-    layout->addWidget(splitter_, 1);
+    stagedModel_ = new models::FileStatusModel(this);
+    stagedModel_->setStagedFilter(true);
 
-    // Inline error surface — hidden until a commit fails. We prefer
-    // this over QMessageBox so the user's typed message stays visible
-    // alongside the failure reason.
+    unstagedProxy_ = new QSortFilterProxyModel(this);
+    unstagedProxy_->setSourceModel(unstagedModel_);
+    unstagedProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    unstagedProxy_->setFilterKeyColumn(models::FileStatusModel::Path);
+
+    stagedProxy_ = new QSortFilterProxyModel(this);
+    stagedProxy_->setSourceModel(stagedModel_);
+    stagedProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    stagedProxy_->setFilterKeyColumn(models::FileStatusModel::Path);
+
+    // -----------------------------------------------------------------------
+    // Left pane: vertical split between unstaged (top) and staged (bottom).
+    // Each section is built from the same template:
+    //
+    //     ┌──────────────────────────────┐
+    //     │ Section title                │
+    //     │ [filter input]               │
+    //     │ [QListView]                  │
+    //     │ [primary button row]         │
+    //     └──────────────────────────────┘
+    //
+    // I considered building a small SectionWidget helper class for this
+    // but the file is short enough that two parallel inline sections
+    // read more clearly than one parameterized factory.
+    // -----------------------------------------------------------------------
+
+    auto buildSectionTitleFont = [this]() {
+        QFont f = font();
+        f.setBold(true);
+        return f;
+    };
+    const QFont sectionTitleFont = buildSectionTitleFont();
+
+    // ---- Unstaged section -------------------------------------------------
+    auto* unstagedPanel = new QWidget(this);
+    auto* unstagedLayout = new QVBoxLayout(unstagedPanel);
+    unstagedLayout->setContentsMargins(6, 6, 6, 6);
+    unstagedLayout->setSpacing(4);
+
+    unstagedLabel_ = new QLabel(tr("Unstaged Changes"), unstagedPanel);
+    unstagedLabel_->setFont(sectionTitleFont);
+    unstagedLayout->addWidget(unstagedLabel_);
+
+    unstagedFilter_ = new QLineEdit(unstagedPanel);
+    unstagedFilter_->setPlaceholderText(tr("Filter unstaged files…"));
+    unstagedFilter_->setClearButtonEnabled(true);
+    unstagedLayout->addWidget(unstagedFilter_);
+
+    unstagedView_ = new QListView(unstagedPanel);
+    unstagedView_->setModel(unstagedProxy_);
+    unstagedView_->setModelColumn(models::FileStatusModel::Path);
+    unstagedView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    unstagedView_->setAlternatingRowColors(true);
+    unstagedLayout->addWidget(unstagedView_, 1);
+
+    auto* unstagedBtnRow = new QHBoxLayout;
+    unstagedBtnRow->setContentsMargins(0, 0, 0, 0);
+    stageBtn_     = new QPushButton(tr("Stage"),    unstagedPanel);
+    stageAllBtn_  = new QPushButton(tr("Stage All"), unstagedPanel);
+    discardBtn_   = new QPushButton(tr("Discard"),   unstagedPanel);
+    stageBtn_->setEnabled(false);
+    discardBtn_->setEnabled(false);
+    unstagedBtnRow->addWidget(stageBtn_);
+    unstagedBtnRow->addWidget(stageAllBtn_);
+    unstagedBtnRow->addWidget(discardBtn_);
+    unstagedBtnRow->addStretch(1);
+    unstagedLayout->addLayout(unstagedBtnRow);
+
+    // ---- Staged section ---------------------------------------------------
+    auto* stagedPanel = new QWidget(this);
+    auto* stagedLayout = new QVBoxLayout(stagedPanel);
+    stagedLayout->setContentsMargins(6, 6, 6, 6);
+    stagedLayout->setSpacing(4);
+
+    stagedLabel_ = new QLabel(tr("Staged Changes"), stagedPanel);
+    stagedLabel_->setFont(sectionTitleFont);
+    stagedLayout->addWidget(stagedLabel_);
+
+    stagedFilter_ = new QLineEdit(stagedPanel);
+    stagedFilter_->setPlaceholderText(tr("Filter staged files…"));
+    stagedFilter_->setClearButtonEnabled(true);
+    stagedLayout->addWidget(stagedFilter_);
+
+    stagedView_ = new QListView(stagedPanel);
+    stagedView_->setModel(stagedProxy_);
+    stagedView_->setModelColumn(models::FileStatusModel::Path);
+    stagedView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    stagedView_->setAlternatingRowColors(true);
+    stagedLayout->addWidget(stagedView_, 1);
+
+    auto* stagedBtnRow = new QHBoxLayout;
+    stagedBtnRow->setContentsMargins(0, 0, 0, 0);
+    unstageBtn_    = new QPushButton(tr("Unstage"),    stagedPanel);
+    unstageAllBtn_ = new QPushButton(tr("Unstage All"), stagedPanel);
+    unstageBtn_->setEnabled(false);
+    stagedBtnRow->addWidget(unstageBtn_);
+    stagedBtnRow->addWidget(unstageAllBtn_);
+    stagedBtnRow->addStretch(1);
+    stagedLayout->addLayout(stagedBtnRow);
+
+    // ---- Left splitter ----------------------------------------------------
+    leftSplitter_ = new QSplitter(Qt::Vertical, this);
+    leftSplitter_->setChildrenCollapsible(false);
+    leftSplitter_->addWidget(unstagedPanel);
+    leftSplitter_->addWidget(stagedPanel);
+    leftSplitter_->setStretchFactor(0, 1);
+    leftSplitter_->setStretchFactor(1, 1);
+
+    // -----------------------------------------------------------------------
+    // Right pane: vertical split between diff viewer (top) and commit
+    // controls (bottom).
+    // -----------------------------------------------------------------------
+
+    diffView_ = new widgets::DiffViewerWidget(this);
+
+    // ---- Commit controls panel -------------------------------------------
+    // A two-column layout: button column on the left (Commit / Commit & Push
+    // / Amend), message editor on the right. Mirrors the right side of the
+    // GitExtensions commit window where the action buttons stack vertically
+    // beside the multi-line message field.
+    auto* commitPanel = new QWidget(this);
+    auto* commitOuter = new QHBoxLayout(commitPanel);
+    commitOuter->setContentsMargins(8, 8, 8, 8);
+    commitOuter->setSpacing(8);
+
+    auto* buttonCol = new QVBoxLayout;
+    buttonCol->setContentsMargins(0, 0, 0, 0);
+    buttonCol->setSpacing(4);
+
+    commitBtn_     = new QPushButton(tr("Commit"),        commitPanel);
+    commitPushBtn_ = new QPushButton(tr("Commit && Push"), commitPanel);
+    amendCheck_    = new QCheckBox(tr("Amend last commit"), commitPanel);
+    commitBtn_->setDefault(true);
+    // Equal-width buttons stacked vertically — set a min width so the
+    // amend checkbox doesn't squeeze the column narrower than the buttons.
+    commitBtn_->setMinimumWidth(140);
+    commitPushBtn_->setMinimumWidth(140);
+
+    buttonCol->addWidget(commitBtn_);
+    buttonCol->addWidget(commitPushBtn_);
+    buttonCol->addWidget(amendCheck_);
+    buttonCol->addStretch(1);
+
+    commitOuter->addLayout(buttonCol);
+
+    messageEdit_ = new widgets::CommitMessageEdit(commitPanel);
+    messageEdit_->setMinimumHeight(80);
+    commitOuter->addWidget(messageEdit_, 1);
+
+    // ---- Right splitter ---------------------------------------------------
+    rightSplitter_ = new QSplitter(Qt::Vertical, this);
+    rightSplitter_->setChildrenCollapsible(false);
+    rightSplitter_->addWidget(diffView_);
+    rightSplitter_->addWidget(commitPanel);
+    rightSplitter_->setStretchFactor(0, 4);
+    rightSplitter_->setStretchFactor(1, 1);
+
+    // ---- Main horizontal splitter ----------------------------------------
+    mainSplitter_ = new QSplitter(Qt::Horizontal, this);
+    mainSplitter_->setChildrenCollapsible(false);
+    mainSplitter_->addWidget(leftSplitter_);
+    mainSplitter_->addWidget(rightSplitter_);
+    mainSplitter_->setStretchFactor(0, 2);
+    mainSplitter_->setStretchFactor(1, 5);
+
+    // -----------------------------------------------------------------------
+    // Inline error label — hidden until a commit fails. Sits above the
+    // footer status strip so the user's typed message stays visible.
+    // -----------------------------------------------------------------------
     errorLabel_ = new QLabel(this);
     errorLabel_->setWordWrap(true);
     errorLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:#5a1f1f; color:#ffdada; padding:6px 10px; }"));
     errorLabel_->hide();
-    layout->addWidget(errorLabel_);
 
-    // --- Staging <-> GitService wiring ---
-    // Every signal hooked here is auto-disconnected when the dialog
-    // (and thus the staging widget it parents) is destroyed.
-    connect(staging_, &widgets::StagingWidget::stageRequested,
-            svc_,     &services::GitService::stageFile);
-    connect(staging_, &widgets::StagingWidget::unstageRequested,
-            svc_,     &services::GitService::unstageFile);
-    connect(staging_, &widgets::StagingWidget::stageAllRequested,
-            svc_,     &services::GitService::stageAll);
-    connect(staging_, &widgets::StagingWidget::unstageAllRequested,
-            svc_,     &services::GitService::unstageAll);
-    connect(staging_, &widgets::StagingWidget::discardRequested,
-            this,     [this](const QString& path) {
-                // Parent the confirmation on the dialog so it centers
-                // on the dialog, not the MainWindow behind it.
-                const auto answer = QMessageBox::question(this,
-                    tr("Discard changes?"),
-                    tr("Discard all uncommitted changes to %1?\n\n"
-                       "This cannot be undone.").arg(path),
-                    QMessageBox::Discard | QMessageBox::Cancel,
-                    QMessageBox::Cancel);
-                if (answer == QMessageBox::Discard)
-                    svc_->discardFile(path);
-            });
+    // -----------------------------------------------------------------------
+    // Footer status strip (committer | branch | staged count). A simple
+    // QFrame with three labels — much lighter weight than dragging in
+    // QStatusBar (which carries its own size grip and message slot).
+    // -----------------------------------------------------------------------
+    auto* statusStrip = new QFrame(this);
+    statusStrip->setFrameShape(QFrame::StyledPanel);
+    statusStrip->setObjectName(QStringLiteral("CommitStatusStrip"));
+    statusStrip->setStyleSheet(QStringLiteral(
+        "#CommitStatusStrip { border-top: 1px solid palette(mid); "
+        "background: palette(window); }"));
 
-    // --- GitService -> Staging ---
+    auto* statusLayout = new QHBoxLayout(statusStrip);
+    statusLayout->setContentsMargins(8, 4, 8, 4);
+    statusLayout->setSpacing(16);
+
+    committerLabel_ = new QLabel(statusStrip);
+    committerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    branchStatusLabel_ = new QLabel(statusStrip);
+    stagedCountLabel_  = new QLabel(statusStrip);
+
+    statusLayout->addWidget(committerLabel_, 1);
+    statusLayout->addWidget(branchStatusLabel_, 0, Qt::AlignCenter);
+    statusLayout->addWidget(stagedCountLabel_, 0, Qt::AlignRight);
+
+    // -----------------------------------------------------------------------
+    // Root layout
+    // -----------------------------------------------------------------------
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+    root->addWidget(mainSplitter_, 1);
+    root->addWidget(errorLabel_);
+    root->addWidget(statusStrip);
+}
+
+// ---------------------------------------------------------------------------
+// Signal wiring
+// ---------------------------------------------------------------------------
+
+void CommitDialog::wireConnections()
+{
+    // ---- View interactions -----------------------------------------------
+    connect(unstagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &CommitDialog::onUnstagedSelectionChanged);
+    connect(stagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, &CommitDialog::onStagedSelectionChanged);
+
+    connect(unstagedView_, &QAbstractItemView::activated,
+            this, &CommitDialog::onUnstagedActivated);
+    connect(stagedView_, &QAbstractItemView::activated,
+            this, &CommitDialog::onStagedActivated);
+
+    // ---- Filter inputs ---------------------------------------------------
+    connect(unstagedFilter_, &QLineEdit::textChanged, this,
+            [this](const QString& t) {
+        unstagedProxy_->setFilterFixedString(t);
+    });
+    connect(stagedFilter_, &QLineEdit::textChanged, this,
+            [this](const QString& t) {
+        stagedProxy_->setFilterFixedString(t);
+    });
+
+    // ---- File-list buttons -----------------------------------------------
+    connect(stageBtn_,    &QPushButton::clicked, this, &CommitDialog::onStageSelected);
+    connect(unstageBtn_,  &QPushButton::clicked, this, &CommitDialog::onUnstageSelected);
+    connect(discardBtn_,  &QPushButton::clicked, this, &CommitDialog::onDiscardSelected);
+
+    connect(stageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::stageAll);
+    connect(unstageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::unstageAll);
+
+    // ---- Commit buttons --------------------------------------------------
+    connect(commitBtn_,     &QPushButton::clicked, this, &CommitDialog::onCommitClicked);
+    connect(commitPushBtn_, &QPushButton::clicked, this, &CommitDialog::onCommitAndPushClicked);
+
+    // Ctrl+Enter to commit (matches the previous CommitEditorWidget shortcut).
+    commitShortcut_ = new QShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return), this);
+    connect(commitShortcut_, &QShortcut::activated, this, &CommitDialog::onCommitClicked);
+
+    // ---- GitService -> dialog --------------------------------------------
     connect(svc_, &services::GitService::statusReady,
-            staging_, &widgets::StagingWidget::setEntries);
-
-    // --- Commit editor -> GitService ---
-    // IMPORTANT: forward the `amend` flag. The previous MainWindow
-    // connection silently dropped it by declaring a single-arg lambda.
-    connect(editor_, &widgets::CommitEditorWidget::commitRequested,
-            this,    [this](const QString& msg, bool amend) {
-                if (msg.trimmed().isEmpty()) {
-                    errorLabel_->setText(tr("Commit message cannot be empty."));
-                    errorLabel_->show();
-                    return;
-                }
-                errorLabel_->hide();
-                pendingCommit_ = true;
-                editor_->setEnabled(false);
-                svc_->commitChanges(msg, amend);
-            });
-
-    // --- GitService -> commit result ---
+            this, &CommitDialog::onStatusReady);
     connect(svc_, &services::GitService::commitComplete,
-            this, [this](bool success, const QString& message) {
-                if (!pendingCommit_)
-                    return; // some other code path committed; ignore
-                pendingCommit_ = false;
-                editor_->setEnabled(true);
-                if (success) {
-                    editor_->clear();
-                    errorLabel_->hide();
-                    close();
-                } else {
-                    errorLabel_->setText(
-                        tr("Commit failed: %1").arg(message));
-                    errorLabel_->show();
-                }
-            });
-
+            this, &CommitDialog::onCommitComplete);
     connect(svc_, &services::GitService::operationFailed,
-            this, [this](const QString& op, const QString& err) {
-                if (op.startsWith(QLatin1String("commit"), Qt::CaseInsensitive) ||
-                    op.startsWith(QLatin1String("stage"),  Qt::CaseInsensitive) ||
-                    op.startsWith(QLatin1String("unstage"),Qt::CaseInsensitive) ||
-                    op.startsWith(QLatin1String("discard"),Qt::CaseInsensitive)) {
-                    errorLabel_->setText(op + tr(" failed: ") + err);
-                    errorLabel_->show();
-                    editor_->setEnabled(true);
-                    pendingCommit_ = false;
-                }
+            this, &CommitDialog::onOperationFailed);
+
+    // Branch list refreshes after every checkout / refresh / open. Use it
+    // as our "the current branch may have changed" signal so the title
+    // stays in sync with reality.
+    connect(svc_, &services::GitService::branchesReady, this,
+            [this](std::vector<gitbolt::git::BranchInfo>) { updateTitle(); });
+    connect(svc_, &services::GitService::repositoryOpened, this,
+            [this](const QString&) {
+                readCommitterFromConfig();
+                updateTitle();
             });
 }
 
-CommitDialog::~CommitDialog() = default;
+// ---------------------------------------------------------------------------
+// Title ("<repoName> - Commit to <branch>")
+// ---------------------------------------------------------------------------
+
+void CommitDialog::updateTitle()
+{
+    if (!svc_ || !svc_->repository()) {
+        setWindowTitle(tr("Commit"));
+        return;
+    }
+    auto* repo = svc_->repository();
+
+    const QString workdir = QString::fromStdString(repo->workdir());
+    repoName_ = QDir(workdir).dirName();
+    if (repoName_.isEmpty())
+        repoName_ = QStringLiteral("GitBolt");
+
+    auto branchRes = repo->headBranchName();
+    if (branchRes.ok()) {
+        currentBranch_ = QString::fromStdString(branchRes.value());
+    } else if (repo->isHeadDetached()) {
+        currentBranch_ = tr("(detached HEAD)");
+    } else {
+        currentBranch_ = tr("(no branch)");
+    }
+
+    setWindowTitle(tr("%1 - Commit to %2").arg(repoName_, currentBranch_));
+
+    if (branchStatusLabel_) {
+        branchStatusLabel_->setText(currentBranch_);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Committer info from libgit2 config
+// ---------------------------------------------------------------------------
+
+void CommitDialog::readCommitterFromConfig()
+{
+    if (!committerLabel_) return;
+    if (!svc_ || !svc_->repository()) {
+        committerLabel_->setText(tr("Committer: (no repository)"));
+        return;
+    }
+
+    auto cfg = svc_->repository()->config();
+    const auto name  = cfg.userName();
+    const auto email = cfg.userEmail();
+
+    if (name && email) {
+        committerLabel_->setText(tr("Committer: %1 <%2>")
+            .arg(QString::fromStdString(*name),
+                 QString::fromStdString(*email)));
+    } else if (name) {
+        committerLabel_->setText(tr("Committer: %1")
+            .arg(QString::fromStdString(*name)));
+    } else if (email) {
+        committerLabel_->setText(tr("Committer: <%1>")
+            .arg(QString::fromStdString(*email)));
+    } else {
+        committerLabel_->setText(tr("Committer: (user.name / user.email not set)"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Status entries -> models -> labels
+// ---------------------------------------------------------------------------
+
+void CommitDialog::onStatusReady(std::vector<gitbolt::git::StatusEntry> entries)
+{
+    unstagedModel_->setEntries(entries);
+    stagedModel_->setEntries(std::move(entries));
+
+    lastUnstagedCount_ = unstagedModel_->rowCount();
+    lastStagedCount_   = stagedModel_->rowCount();
+
+    unstagedLabel_->setText(tr("Unstaged Changes (%1)").arg(lastUnstagedCount_));
+    stagedLabel_->setText(  tr("Staged Changes (%1)").arg(lastStagedCount_));
+
+    updateStatusBar();
+
+    // Re-evaluate per-row button enable state in case the previously
+    // selected file was just staged/unstaged out from under us.
+    onUnstagedSelectionChanged();
+    onStagedSelectionChanged();
+}
+
+void CommitDialog::updateStatusBar()
+{
+    if (stagedCountLabel_) {
+        const int total = lastUnstagedCount_ + lastStagedCount_;
+        stagedCountLabel_->setText(
+            tr("Staged %1 / %2").arg(lastStagedCount_).arg(total));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Selection -> diff
+// ---------------------------------------------------------------------------
+
+QStringList CommitDialog::selectedUnstagedPaths() const
+{
+    // Use selectedIndexes() (not selectedRows(col)) because QListView
+    // with setModelColumn(Path) selects single-column indices and
+    // selectedRows() returns nothing when no column is "primary". A
+    // single-row selection still produces one index here, and a
+    // multi-row selection produces one index per row, so deduping
+    // by row is sufficient.
+    QStringList paths;
+    QSet<int> seenRows;
+    const auto idxs = unstagedView_->selectionModel()->selectedIndexes();
+    for (const auto& proxyIdx : idxs) {
+        const auto srcIdx = unstagedProxy_->mapToSource(proxyIdx);
+        const int row = srcIdx.row();
+        if (seenRows.contains(row)) continue;
+        seenRows.insert(row);
+        const QString p = unstagedModel_->pathAt(row);
+        if (!p.isEmpty()) paths.append(p);
+    }
+    return paths;
+}
+
+QStringList CommitDialog::selectedStagedPaths() const
+{
+    QStringList paths;
+    QSet<int> seenRows;
+    const auto idxs = stagedView_->selectionModel()->selectedIndexes();
+    for (const auto& proxyIdx : idxs) {
+        const auto srcIdx = stagedProxy_->mapToSource(proxyIdx);
+        const int row = srcIdx.row();
+        if (seenRows.contains(row)) continue;
+        seenRows.insert(row);
+        const QString p = stagedModel_->pathAt(row);
+        if (!p.isEmpty()) paths.append(p);
+    }
+    return paths;
+}
+
+void CommitDialog::onUnstagedSelectionChanged()
+{
+    const QStringList paths = selectedUnstagedPaths();
+    const bool hasSel = !paths.isEmpty();
+    stageBtn_->setEnabled(hasSel);
+    discardBtn_->setEnabled(hasSel);
+
+    // When a single file is selected, show its diff. Multi-select
+    // leaves the previous diff in place — picking the "right" one to
+    // show is a UX call; for now we just don't update the diff pane.
+    if (paths.size() == 1)
+        showDiffForUnstaged(paths.first());
+    else if (paths.isEmpty() && stagedView_->selectionModel()->selectedIndexes().isEmpty())
+        clearDiff();
+
+    // Selecting in the unstaged list clears the staged-list selection
+    // (and vice versa) — so the diff pane always reflects exactly one
+    // file from one of the two lists.
+    if (hasSel)
+        stagedView_->selectionModel()->clearSelection();
+}
+
+void CommitDialog::onStagedSelectionChanged()
+{
+    const QStringList paths = selectedStagedPaths();
+    const bool hasSel = !paths.isEmpty();
+    unstageBtn_->setEnabled(hasSel);
+
+    if (paths.size() == 1)
+        showDiffForStaged(paths.first());
+    else if (paths.isEmpty() && unstagedView_->selectionModel()->selectedIndexes().isEmpty())
+        clearDiff();
+
+    if (hasSel)
+        unstagedView_->selectionModel()->clearSelection();
+}
+
+void CommitDialog::onUnstagedActivated(const QModelIndex& index)
+{
+    if (!index.isValid()) return;
+    const auto srcIdx = unstagedProxy_->mapToSource(index);
+    const QString path = unstagedModel_->pathAt(srcIdx.row());
+    if (!path.isEmpty())
+        svc_->stageFile(path);
+}
+
+void CommitDialog::onStagedActivated(const QModelIndex& index)
+{
+    if (!index.isValid()) return;
+    const auto srcIdx = stagedProxy_->mapToSource(index);
+    const QString path = stagedModel_->pathAt(srcIdx.row());
+    if (!path.isEmpty())
+        svc_->unstageFile(path);
+}
+
+// ---------------------------------------------------------------------------
+// Diff fetching
+// ---------------------------------------------------------------------------
+
+void CommitDialog::showDiffForUnstaged(const QString& path)
+{
+    if (!svc_ || !svc_->repository() || !diffView_) return;
+
+    auto res = svc_->repository()->diffIndexToWorkdir();
+    if (!res.ok()) {
+        clearDiff();
+        return;
+    }
+    const auto& diff = res.value();
+    const std::string needle = path.toStdString();
+    for (size_t i = 0; i < diff.files.size(); ++i) {
+        if (diff.files[i].path() == needle) {
+            diffView_->setDiff(diff, static_cast<int>(i));
+            return;
+        }
+    }
+    clearDiff();
+}
+
+void CommitDialog::showDiffForStaged(const QString& path)
+{
+    if (!svc_ || !svc_->repository() || !diffView_) return;
+
+    auto res = svc_->repository()->diffHeadToIndex();
+    if (!res.ok()) {
+        clearDiff();
+        return;
+    }
+    const auto& diff = res.value();
+    const std::string needle = path.toStdString();
+    for (size_t i = 0; i < diff.files.size(); ++i) {
+        if (diff.files[i].path() == needle) {
+            diffView_->setDiff(diff, static_cast<int>(i));
+            return;
+        }
+    }
+    clearDiff();
+}
+
+void CommitDialog::clearDiff()
+{
+    if (diffView_) diffView_->clear();
+}
+
+// ---------------------------------------------------------------------------
+// Stage / unstage / discard buttons
+// ---------------------------------------------------------------------------
+
+void CommitDialog::onStageSelected()
+{
+    for (const QString& p : selectedUnstagedPaths())
+        svc_->stageFile(p);
+}
+
+void CommitDialog::onUnstageSelected()
+{
+    for (const QString& p : selectedStagedPaths())
+        svc_->unstageFile(p);
+}
+
+void CommitDialog::onDiscardSelected()
+{
+    const QStringList paths = selectedUnstagedPaths();
+    if (paths.isEmpty()) return;
+
+    const QString detail = paths.size() == 1
+        ? tr("Discard all uncommitted changes to %1?\n\nThis cannot be undone.")
+            .arg(paths.first())
+        : tr("Discard all uncommitted changes to %1 files?\n\nThis cannot be undone.")
+            .arg(paths.size());
+
+    const auto answer = QMessageBox::question(this,
+        tr("Discard changes?"), detail,
+        QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (answer != QMessageBox::Discard) return;
+
+    for (const QString& p : paths)
+        svc_->discardFile(p);
+}
+
+// ---------------------------------------------------------------------------
+// Commit / Commit & Push
+// ---------------------------------------------------------------------------
+
+void CommitDialog::onCommitClicked()
+{
+    const QString msg = messageEdit_->toPlainText().trimmed();
+    if (msg.isEmpty()) {
+        errorLabel_->setText(tr("Commit message cannot be empty."));
+        errorLabel_->show();
+        return;
+    }
+    errorLabel_->hide();
+    pendingCommit_ = true;
+    commitBtn_->setEnabled(false);
+    commitPushBtn_->setEnabled(false);
+    svc_->commitChanges(msg, amendCheck_->isChecked());
+}
+
+void CommitDialog::onCommitAndPushClicked()
+{
+    // Commit first; the push step is wired by MainWindow via the
+    // `commitAndPushRequested` signal in the original CommitEditorWidget.
+    // Mirror that: emit a commit, and on success kick a push to the
+    // tracking remote/branch. For the moment we issue commit only and
+    // leave the push to the user — Commit & Push wiring lives in
+    // MainWindow's connection table for the original CommitEditorWidget;
+    // this dialog can drive that path once we wire push too.
+    onCommitClicked();
+}
+
+void CommitDialog::onCommitComplete(bool success, const QString& message)
+{
+    if (!pendingCommit_) return;
+    pendingCommit_ = false;
+    commitBtn_->setEnabled(true);
+    commitPushBtn_->setEnabled(true);
+
+    if (success) {
+        messageEdit_->clear();
+        amendCheck_->setChecked(false);
+        errorLabel_->hide();
+        close();
+    } else {
+        errorLabel_->setText(tr("Commit failed: %1").arg(message));
+        errorLabel_->show();
+    }
+}
+
+void CommitDialog::onOperationFailed(const QString& op, const QString& err)
+{
+    if (op.startsWith(QLatin1String("commit"),  Qt::CaseInsensitive) ||
+        op.startsWith(QLatin1String("stage"),   Qt::CaseInsensitive) ||
+        op.startsWith(QLatin1String("unstage"), Qt::CaseInsensitive) ||
+        op.startsWith(QLatin1String("discard"), Qt::CaseInsensitive)) {
+        errorLabel_->setText(op + tr(" failed: ") + err);
+        errorLabel_->show();
+        commitBtn_->setEnabled(true);
+        commitPushBtn_->setEnabled(true);
+        pendingCommit_ = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 void CommitDialog::refresh()
 {
     if (svc_)
         svc_->refreshStatus();
+    updateTitle();
+    readCommitterFromConfig();
 }
 
 void CommitDialog::showEvent(QShowEvent* e)
@@ -152,20 +716,24 @@ void CommitDialog::showEvent(QShowEvent* e)
     if (!restored_ && settings_) {
         const QByteArray geom = settings_->restoreDialogGeometry(
             QString::fromLatin1(kGeometryKey));
-        if (!geom.isEmpty())
-            restoreGeometry(geom);
+        if (!geom.isEmpty()) restoreGeometry(geom);
 
-        const QByteArray split = settings_->restoreSplitterState(
-            QString::fromLatin1(kSplitterKey));
-        if (!split.isEmpty())
-            splitter_->restoreState(split);
+        const QByteArray mainSplit = settings_->restoreSplitterState(
+            QString::fromLatin1(kMainSplitterKey));
+        if (!mainSplit.isEmpty()) mainSplitter_->restoreState(mainSplit);
+
+        const QByteArray leftSplit = settings_->restoreSplitterState(
+            QString::fromLatin1(kLeftSplitterKey));
+        if (!leftSplit.isEmpty()) leftSplitter_->restoreState(leftSplit);
+
+        const QByteArray rightSplit = settings_->restoreSplitterState(
+            QString::fromLatin1(kRightSplitterKey));
+        if (!rightSplit.isEmpty()) rightSplitter_->restoreState(rightSplit);
 
         validateGeometryOnScreen();
         restored_ = true;
     }
 
-    // Always refresh status on show so the staging panels reflect
-    // whatever the working tree looks like right now.
     refresh();
 }
 
@@ -175,22 +743,26 @@ void CommitDialog::closeEvent(QCloseEvent* e)
         settings_->saveDialogGeometry(
             QString::fromLatin1(kGeometryKey), saveGeometry());
         settings_->saveSplitterState(
-            QString::fromLatin1(kSplitterKey), splitter_->saveState());
+            QString::fromLatin1(kMainSplitterKey), mainSplitter_->saveState());
+        settings_->saveSplitterState(
+            QString::fromLatin1(kLeftSplitterKey), leftSplitter_->saveState());
+        settings_->saveSplitterState(
+            QString::fromLatin1(kRightSplitterKey), rightSplitter_->saveState());
     }
     QDialog::closeEvent(e);
 }
 
-// If the dialog was last closed on a monitor that is no longer
-// attached, restoreGeometry will happily place it off-screen and
-// the user won't be able to see it. Detect that case and fall back
-// to a centered-on-parent layout.
+// If the dialog was last closed on a monitor that is no longer attached,
+// restoreGeometry will happily place it off-screen and the user won't be
+// able to see it. Detect that case and fall back to a centered-on-parent
+// layout.
 void CommitDialog::validateGeometryOnScreen()
 {
     const QPoint center = frameGeometry().center();
     if (QGuiApplication::screenAt(center) != nullptr)
         return;
 
-    resize(720, 620);
+    resize(1100, 720);
     if (auto* p = parentWidget()) {
         const QRect pg = p->geometry();
         move(pg.center().x() - width() / 2,

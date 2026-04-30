@@ -1,4 +1,5 @@
 #include "editor/RevisionGraphDelegate.h"
+#include <QAbstractProxyModel>
 #include <QPainter>
 #include <QPainterPath>
 
@@ -20,11 +21,22 @@ void RevisionGraphDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
     if (option.state & QStyle::State_Selected)
         painter->fillRect(option.rect, option.palette.highlight());
 
-    auto* model = qobject_cast<const models::CommitLogModel*>(index.model());
-    if (!model) { painter->restore(); return; }
+    // The view may have a QSortFilterProxyModel (or any other proxy)
+    // sitting between the table and our CommitLogModel — that's how
+    // the toolbar Filter input applies to the grid. Walk through any
+    // chained proxies to find the real CommitLogModel and the
+    // matching source row before we look up graph + commit data.
+    const QAbstractItemModel* m = index.model();
+    QModelIndex idx = index;
+    while (auto* proxy = qobject_cast<const QAbstractProxyModel*>(m)) {
+        idx = proxy->mapToSource(idx);
+        m = proxy->sourceModel();
+    }
+    auto* model = qobject_cast<const models::CommitLogModel*>(m);
+    if (!model || !idx.isValid()) { painter->restore(); return; }
 
-    const auto* graphRow = model->graphAt(index.row());
-    const auto* commit = model->commitAt(index.row());
+    const auto* graphRow = model->graphAt(idx.row());
+    const auto* commit = model->commitAt(idx.row());
     if (!graphRow || !commit) { painter->restore(); return; }
 
     int x = option.rect.x();
@@ -118,10 +130,19 @@ void RevisionGraphDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
 }
 
 QSize RevisionGraphDelegate::sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const {
-    auto* model = qobject_cast<const models::CommitLogModel*>(index.model());
+    // Same proxy-walk dance as paint() — the row's natural width
+    // depends on the source model's graph data, not whatever the
+    // table view has attached.
+    const QAbstractItemModel* m = index.model();
+    QModelIndex idx = index;
+    while (auto* proxy = qobject_cast<const QAbstractProxyModel*>(m)) {
+        idx = proxy->mapToSource(idx);
+        m = proxy->sourceModel();
+    }
+    auto* model = qobject_cast<const models::CommitLogModel*>(m);
     int w = 80;
-    if (model) {
-        const auto* g = model->graphAt(index.row());
+    if (model && idx.isValid()) {
+        const auto* g = model->graphAt(idx.row());
         if (g) w = std::max(w, (g->maxLane + 2) * LANE_WIDTH);
     }
     return QSize(w, option.fontMetrics.height() + 4);
