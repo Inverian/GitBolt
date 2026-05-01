@@ -52,7 +52,18 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - Light, Dark, and System theme modes
 - Customizable code font and tab size
 - Configurable keyboard shortcuts
-- Recent repositories with drag-and-drop
+- Recent repositories with drag-and-drop, max-count + alphabetical-sort
+  + path-shortening preferences
+- Configurable default window size (with min-size enforcement) and a
+  single global default size for every popup dialog; both with optional
+  "restore previous" persistence per launch
+- Per-dialog geometry persistence so each popup remembers its last
+  drag-resized shape independently
+- "Contained in branches" lookup on every commit detail (resolves via
+  `git branch --all --contains` so it covers both local and remote
+  tracking branches)
+- File-status legend tooltip in the Commit dialog headers (hover the
+  ⓘ icon to see what M / A / D / R / U / ? mean)
 - Plugin system with built-in extensions:
   - Background fetch with new commit notifications
   - Repository statistics with charts
@@ -167,7 +178,7 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 11 — Git Flow & Maintenance | Complete |
 | Phase 12 — Performance & Hardening | Complete |
 
-**~16,500 lines of C++ across 157 source files.**
+**~28,900 lines of C++ across 185 source files.**
 
 ---
 

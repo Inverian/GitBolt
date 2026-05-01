@@ -19,6 +19,8 @@
 #include <QSplitter>
 #include <QStandardItem>
 #include <QStandardItemModel>
+#include <QTextBlock>
+#include <QTextCursor>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -37,6 +39,22 @@ constexpr int kSizeRole    = Qt::UserRole + 4;
 // certainly binary or generated and the user can't usefully scroll
 // through it in a small inspector pane anyway.
 constexpr quint64 kMaxPreviewBytes = 1 * 1024 * 1024;
+
+// Same single-line-height fix as DiffViewerWidget — without this,
+// the file preview pane shows lines with QPlainTextEdit's default
+// leading, while the Diff tab shows them packed tight. The two
+// inspector tabs read as inconsistent until both apply this.
+// Wired up via QTextDocument::contentsChange in setupUi() so every
+// setPlainText() call (and there are several — directory listings,
+// blob contents, error placeholders) picks it up automatically.
+void applySingleLineHeight(QPlainTextEdit* editor)
+{
+    QTextCursor c(editor->document());
+    c.select(QTextCursor::Document);
+    QTextBlockFormat fmt;
+    fmt.setLineHeight(100, QTextBlockFormat::ProportionalHeight);
+    c.mergeBlockFormat(fmt);
+}
 } // namespace
 
 FileTreeWidget::FileTreeWidget(QWidget* parent)
@@ -101,6 +119,17 @@ void FileTreeWidget::setupUi()
     preview_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     preview_->setLineWrapMode(QPlainTextEdit::NoWrap);
     preview_->setPlaceholderText(tr("(no file selected)"));
+    // Reapply single-line-height after every text replacement so
+    // freshly inserted content (file body, directory listing,
+    // error placeholder) gets the same tight spacing as the diff
+    // viewer. contentsChange fires once per setPlainText, and
+    // mergeBlockFormat doesn't itself fire contentsChange, so
+    // this won't recurse. Editor is read-only so no key-event
+    // edits are possible — only setPlainText triggers this.
+    connect(preview_->document(), &QTextDocument::contentsChange,
+            preview_, [this](int, int, int) {
+        applySingleLineHeight(preview_);
+    });
     rightLayout->addWidget(preview_, 1);
 
     splitter_->addWidget(rightPane);

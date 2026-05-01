@@ -125,6 +125,48 @@ void CommitDialog::setupUi()
     };
     const QFont sectionTitleFont = buildSectionTitleFont();
 
+    // Tooltip explaining the status-code letters that appear in
+    // both file lists. Built once and reused on both info icons —
+    // the codes are universal (mirroring `git status --short`),
+    // so duplicating the explanation per section would just be
+    // noise. Rich HTML so QToolTip renders the table cleanly.
+    const QString statusLegendTip = tr(
+        "<b>File status codes</b>"
+        "<table cellspacing='4'>"
+        "<tr><td><b>M</b></td><td>Modified — content changed</td></tr>"
+        "<tr><td><b>A</b></td><td>Added — new file, staged</td></tr>"
+        "<tr><td><b>D</b></td><td>Deleted — removed from the working tree</td></tr>"
+        "<tr><td><b>R</b></td><td>Renamed — moved to a new path</td></tr>"
+        "<tr><td><b>U</b></td><td>Unmerged — has merge conflicts</td></tr>"
+        "<tr><td><b>?</b></td><td>Untracked — new file, not yet staged</td></tr>"
+        "</table>");
+
+    // Builds a section header layout: bold title on the left,
+    // spacer, and a small (i) icon on the right whose tooltip
+    // shows the legend above. Used identically for both the
+    // unstaged and staged sections.
+    auto makeSectionHeader = [&](QLabel* title) {
+        auto* row = new QHBoxLayout;
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(6);
+        row->addWidget(title);
+        row->addStretch(1);
+        // ⓘ (U+24D8) is the standard "info" glyph and renders
+        // consistently across macOS / Windows / Linux without
+        // needing a new SVG asset.
+        auto* info = new QLabel(QStringLiteral("ⓘ"),
+                                title->parentWidget());
+        info->setToolTip(statusLegendTip);
+        info->setCursor(Qt::WhatsThisCursor);
+        // Muted gray so it doesn't compete with the bold title;
+        // slightly larger so the glyph is easy to hit and read.
+        info->setStyleSheet(QStringLiteral(
+            "QLabel { color: palette(mid); font-size: 15px; "
+            "padding: 0 2px; }"));
+        row->addWidget(info);
+        return row;
+    };
+
     // ---- Unstaged section -------------------------------------------------
     auto* unstagedPanel = new QWidget(this);
     auto* unstagedLayout = new QVBoxLayout(unstagedPanel);
@@ -133,7 +175,7 @@ void CommitDialog::setupUi()
 
     unstagedLabel_ = new QLabel(tr("Unstaged Changes"), unstagedPanel);
     unstagedLabel_->setFont(sectionTitleFont);
-    unstagedLayout->addWidget(unstagedLabel_);
+    unstagedLayout->addLayout(makeSectionHeader(unstagedLabel_));
 
     unstagedFilter_ = new QLineEdit(unstagedPanel);
     unstagedFilter_->setPlaceholderText(tr("Filter unstaged files…"));
@@ -168,7 +210,7 @@ void CommitDialog::setupUi()
 
     stagedLabel_ = new QLabel(tr("Staged Changes"), stagedPanel);
     stagedLabel_->setFont(sectionTitleFont);
-    stagedLayout->addWidget(stagedLabel_);
+    stagedLayout->addLayout(makeSectionHeader(stagedLabel_));
 
     stagedFilter_ = new QLineEdit(stagedPanel);
     stagedFilter_->setPlaceholderText(tr("Filter staged files…"));

@@ -21,6 +21,30 @@ namespace {
 const QColor kAddBg(200, 255, 200);
 const QColor kDelBg(255, 220, 220);
 const QColor kHunkBg(220, 230, 255);
+
+// Force every block in the document to single line-height. Without
+// this, QPlainTextEdit's default leaves visible ascender/descender
+// gaps between lines that read as "double-spaced" once the hunk
+// background colors are applied — consecutive `+` lines look like
+// stacked green strips with white slivers between them. Setting
+// LineHeight=100 with ProportionalHeight collapses each line to
+// exactly the font's natural height with no extra leading, so
+// colored backgrounds run together cleanly (matches the GitHub /
+// GitExtensions diff look).
+//
+// Called after every setPlainText() in both unified and side-by-
+// side renderers so freshly inserted text picks up the spacing.
+// Uses mergeBlockFormat (not setBlockFormat) so any block-level
+// background applied later by the side-by-side renderer is
+// preserved — the merge only overrides the line-height property.
+void applySingleLineHeight(QPlainTextEdit* editor)
+{
+    QTextCursor c(editor->document());
+    c.select(QTextCursor::Document);
+    QTextBlockFormat fmt;
+    fmt.setLineHeight(100, QTextBlockFormat::ProportionalHeight);
+    c.mergeBlockFormat(fmt);
+}
 } // anonymous namespace
 
 // ---------------------------------------------------------------------------
@@ -243,6 +267,7 @@ void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
     }
 
     unifiedEditor_->setPlainText(lines.join(QLatin1Char('\n')));
+    applySingleLineHeight(unifiedEditor_);
 }
 
 // ---------------------------------------------------------------------------
@@ -316,6 +341,8 @@ void DiffViewerWidget::renderSideBySide(const gitbolt::git::DiffFileEntry& file)
 
     leftEditor_->setPlainText(leftLines.join(QLatin1Char('\n')));
     rightEditor_->setPlainText(rightLines.join(QLatin1Char('\n')));
+    applySingleLineHeight(leftEditor_);
+    applySingleLineHeight(rightEditor_);
 
     // Apply background colours block-by-block
     auto applyBg = [](QPlainTextEdit* editor, const std::vector<LineStyle>& styles) {

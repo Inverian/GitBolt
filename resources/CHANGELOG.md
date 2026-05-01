@@ -6,6 +6,49 @@ kept most-recent-first.
 ## Unreleased
 
 ### Added
+- Settings → UI Design page: new "Default Pane Sizes" group with a
+  bottom-inspector-pane percent slider (10–90%) that drives the
+  default split between the revision graph and the inspector tabs;
+  live preview label shows the implied "Revision graph: N% ·
+  Inspector: M%" pair so the user can see what the number means
+  before clicking Apply.
+- Settings → UI Design: "Default Window Size" group — width × height
+  spinboxes plus a "Restore previous window size on launch" toggle.
+  When the toggle is on, the window remembers wherever it was last
+  left; when off, it always opens at the configured size and Apply
+  resizes the running window immediately. Min size 1024 × 700 with
+  CorrectToNearestValue snapping any sub-min typed value up to the
+  floor on focus-out.
+- Settings → UI Design: "Default Dialog Size" group — one global
+  width × height applied to every popup dialog (Commit, Clone, Tag,
+  Stash, Rebase, Reflog, Cherry-Pick, Worktree, Remotes, TextEditor,
+  Stash Manager, Settings) on next open. Same "Restore previous"
+  toggle as the window-size group, with a current-dialog-size live
+  readout under the spinboxes for picking values empirically (drag
+  the dialog, click Apply, read off the size). Min 400 × 300.
+- Per-dialog size persistence via
+  `SettingsService::applyConfiguredSize(QDialog*, key)` helper.
+  Each popup gets its own `layout/dialog/<key>/geom` storage slot
+  and remembers its last drag-resized shape independently. The
+  helper wires up save-on-close via `QDialog::finished` so any
+  dialog that calls it once in its constructor gets persistence
+  for free. Eleven popup dialogs adopted; CommitDialog gates its
+  existing `showEvent` on the new `restoreLastDialogSize()` toggle.
+- "Contained in branches" footer in the Commit inspector tab now
+  resolves to a real branch list via `git branch --all --contains
+  <sha> --format=%(refname:short)`. Skips `<remote>/HEAD` symbolic
+  refs (alias noise), caps display at the first 10 branches with
+  "+N more" for commits reachable from many heads, and falls back
+  gracefully to `(none)` / `(unable to query)` / `(no repo open)`
+  when the lookup is empty or fails.
+- Pull is now in the Commands menu next to Fetch and Push. Was
+  reachable only from the toolbar; the QAction was created and
+  wired up but never `addAction`'d to the menu.
+- Commit dialog section headers ("Unstaged Changes" / "Staged
+  Changes") gained a small ⓘ info icon on the right with a rich
+  tooltip explaining the file-status letters: M Modified, A Added,
+  D Deleted, R Renamed, U Unmerged, ? Untracked. Same tooltip
+  reused on both icons since the codes are universal.
 - Inline activity indicator now also drives the Refresh button and the
   branch quick-switch combo. Refresh shows "Refreshing…" for ~1.5s
   (no completion signal exists since refresh fires five async ops in
@@ -153,6 +196,26 @@ kept most-recent-first.
   zero-selection state without having to switch repos.
 
 ### Changed
+- Settings dialog input widths constrained across all pages so they
+  no longer sprawl across a dragged-wide dialog. Every form layout
+  uses `FieldsStayAtSizeHint`; QLineEdits cap at 360 px (still wide
+  enough for a long GitHub no-reply email), QSpinBoxes for size
+  values cap at 140 px, the Code Font picker at 260 px, the Theme
+  combo at 260 px, and the bottom-pane slider at 480 px. The empty
+  space to the right of inputs stays empty, matching the
+  GitExtensions reference.
+- Diff viewer (used by both the Commit dialog's diff pane and the
+  RepositoryView Diff inspector tab) now uses single line-height
+  for every block via `QTextBlockFormat::ProportionalHeight = 100`.
+  Previously the default `QPlainTextEdit` leading left visible white
+  slivers between consecutively colored hunk lines, reading as
+  "double-spaced". Consecutive `+` (or `-`) lines now form a
+  contiguous green (or red) block, matching the GitHub /
+  GitExtensions diff look.
+- File Tree inspector preview applies the same single line-height
+  via a `contentsChange` connection so every `setPlainText` (file
+  body, directory listing, error placeholder) picks it up. The two
+  inspector tabs now render text at identical density.
 - Bolt logo's digit ink and body fill sampled from
   `resources/icons/gitbolt-256.png` so colors stay in lock-step with
   the artwork (bright amber outline, transparent interior, bright
@@ -222,6 +285,15 @@ kept most-recent-first.
   lets the new toolbar indicator render the red ✗ state correctly.
 
 ### Removed
+- Three misleading "not yet implemented" placeholder menu items that
+  flashed a status-bar message on click but did nothing real:
+  View → Show git notes (model has no Notes category), View → Show
+  author avatar column (CommitLogModel has no avatar column), and
+  Plugins → Impact Graph (no impact-analysis plugin yet). Dropped
+  the now-unused `addPlaceholder()` helper.
+- Unused `diffHeaderLabel_` from RepositoryView's Diff inspector
+  tab. The "(N) Diff with <sha>" title row was redundant with the
+  selected commit row in the log table.
 - Repository → Repository settings… menu item. Git Extensions' model
   of one unified Tools → Settings (scope determined by storage
   location) applies here too.
