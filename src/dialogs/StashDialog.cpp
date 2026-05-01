@@ -1,4 +1,5 @@
 #include "dialogs/StashDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -20,7 +21,10 @@ StashDialog::StashDialog(QWidget* parent)
 
 void StashDialog::setupUi() {
     setWindowTitle(tr("Save Stash"));
-    resize(420, 200);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "stash");
 
     auto* layout = new QVBoxLayout(this);
 

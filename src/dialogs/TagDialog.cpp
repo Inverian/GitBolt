@@ -1,4 +1,5 @@
 #include "dialogs/TagDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QFormLayout>
 #include <QGroupBox>
@@ -76,7 +77,10 @@ void TagDialog::validateInput() {
 
 void TagDialog::setupUI() {
     setWindowTitle(tr("Create Tag"));
-    resize(460, 340);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "tag");
 
     auto* mainLayout = new QVBoxLayout(this);
 

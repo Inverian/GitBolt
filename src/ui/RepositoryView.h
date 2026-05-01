@@ -11,10 +11,12 @@
 
 class QLabel;
 class QLineEdit;
-class QListWidget;
+class QSortFilterProxyModel;
 class QSplitter;
+class QStandardItemModel;
 class QTabWidget;
 class QTextBrowser;
+class QTreeView;
 class QShowEvent;
 
 namespace gitbolt::models   { class CommitLogModel; }
@@ -124,11 +126,12 @@ private:
     QTextBrowser*                 messageBrowser_   = nullptr;
 
     // Diff tab
-    QLabel*                       diffHeaderLabel_  = nullptr;
-    QLineEdit*                    diffFilterInput_  = nullptr;
-    QListWidget*                  changedFilesList_ = nullptr;
-    widgets::DiffViewerWidget*    diffWidget_       = nullptr;
-    QSplitter*                    diffSplitter_     = nullptr;
+    QLineEdit*                    diffFilterInput_   = nullptr;
+    QTreeView*                    changedFilesTree_  = nullptr;
+    QStandardItemModel*           changedFilesModel_ = nullptr;
+    QSortFilterProxyModel*        changedFilesProxy_ = nullptr;
+    widgets::DiffViewerWidget*    diffWidget_        = nullptr;
+    QSplitter*                    diffSplitter_      = nullptr;
 
     // File tree tab — interactive browser of the repo at the
     // selected commit, with filter + preview pane.

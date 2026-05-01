@@ -1,4 +1,5 @@
 #include "dialogs/RemotesDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -46,7 +47,10 @@ void RemotesDialog::setRemotes(
 
 void RemotesDialog::setupUi() {
     setWindowTitle(tr("Remote Repositories"));
-    resize(640, 360);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "remotes");
 
     auto* layout = new QVBoxLayout(this);
 

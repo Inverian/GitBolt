@@ -54,7 +54,18 @@ CommitDialog::CommitDialog(services::GitService* svc,
     , settings_(settings)
 {
     setModal(false);
-    resize(1100, 720);
+    // Global dialog default — applied as the initial size. The
+    // showEvent below may overwrite this with restoreGeometry
+    // if the user has previously dragged the dialog AND the
+    // "Restore previous dialog size" toggle is on (the default).
+    // See Settings → UI Design → Default Dialog Size.
+    //
+    // CommitDialog uses its own kGeometryKey (commitDialogGeom/v2)
+    // rather than the generic applyConfiguredSize() helper because
+    // it also persists three internal splitter states alongside
+    // the geometry — keeping all four reads in one showEvent path
+    // is simpler than splitting them across two mechanisms.
+    resize(conf::SettingsService::loadDefaultDialogSize());
 
     setupUi();
     wireConnections();
@@ -714,9 +725,15 @@ void CommitDialog::showEvent(QShowEvent* e)
     QDialog::showEvent(e);
 
     if (!restored_ && settings_) {
-        const QByteArray geom = settings_->restoreDialogGeometry(
-            QString::fromLatin1(kGeometryKey));
-        if (!geom.isEmpty()) restoreGeometry(geom);
+        // Geometry restore is gated on the "Restore previous dialog
+        // size" toggle. Splitter states are always restored — they
+        // describe the user's preferred internal layout and aren't
+        // really a "size", so the toggle doesn't apply to them.
+        if (settings_->restoreLastDialogSize()) {
+            const QByteArray geom = settings_->restoreDialogGeometry(
+                QString::fromLatin1(kGeometryKey));
+            if (!geom.isEmpty()) restoreGeometry(geom);
+        }
 
         const QByteArray mainSplit = settings_->restoreSplitterState(
             QString::fromLatin1(kMainSplitterKey));
@@ -762,7 +779,9 @@ void CommitDialog::validateGeometryOnScreen()
     if (QGuiApplication::screenAt(center) != nullptr)
         return;
 
-    resize(1100, 720);
+    // Off-screen recovery — fall back to the user's configured
+    // global dialog default and re-center over the parent.
+    resize(conf::SettingsService::loadDefaultDialogSize());
     if (auto* p = parentWidget()) {
         const QRect pg = p->geometry();
         move(pg.center().x() - width() / 2,

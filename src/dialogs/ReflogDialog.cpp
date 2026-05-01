@@ -1,4 +1,5 @@
 #include "dialogs/ReflogDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QComboBox>
 #include <QDateTime>
@@ -79,7 +80,10 @@ void ReflogDialog::setEntries(
 
 void ReflogDialog::setupUi() {
     setWindowTitle(tr("Reflog"));
-    resize(820, 460);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "reflog");
 
     auto* layout = new QVBoxLayout(this);
 

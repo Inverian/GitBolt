@@ -12,25 +12,43 @@
 
 #include <QColor>
 #include <QDateTime>
+#include <QFileIconProvider>
 #include <QHBoxLayout>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
-#include <QListWidget>
-#include <QListWidgetItem>
 #include <QRegularExpression>
 #include <QShowEvent>
+#include <QSortFilterProxyModel>
 #include <QSplitter>
+#include <QStandardItem>
+#include <QStandardItemModel>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTreeView>
 #include <QVBoxLayout>
 #include <memory>
+#include <set>
+#include <unordered_map>
 
 namespace gitbolt::ui {
 
 namespace {
 constexpr const char* kRepoSplitterHKey = "repoSplitterH/v1";
 constexpr const char* kRepoSplitterVKey = "repoSplitterV/v1";
-constexpr const char* kDiffSplitterKey  = "diffSplitter/v1";
+// Bumped to v2 when the diff splitter's stretch factors were
+// retuned to match the File Tree tab (2:5 instead of 1:3) — wiping
+// any saved v1 state so users get the new matching default on next
+// launch. They can still drag it to taste; the v2 key persists.
+constexpr const char* kDiffSplitterKey  = "diffSplitter/v2";
+
+// Item-data roles for the diff tab's file tree. Path is the full
+// file/dir path used for filter matching. FileIndex is the offset
+// into DiffResult::files for leaf items so a click can jump the
+// diff viewer to that file; -1 marks a directory row.
+constexpr int kPathRole      = Qt::UserRole + 1;
+constexpr int kIsDirRole     = Qt::UserRole + 2;
+constexpr int kFileIndexRole = Qt::UserRole + 3;
 } // namespace
 
 RepositoryView::RepositoryView(QWidget* parent)
@@ -239,10 +257,12 @@ QWidget* RepositoryView::buildConsoleTab()
 
 // Diff tab — file list on the left, full diff viewer on the right.
 //
-// Above the file list we mirror the GitExtensions layout: a header
-// label that names the diff base (e.g. "(7) Diff with A a20605b0:
-// Initial commit") and a placeholder filter input that will let
-// users narrow the file list by regex once the model is wired up.
+// Above the file list sits a placeholder filter input that lets
+// users narrow the changed-files tree by substring. The diff
+// base used to be named in a small gray header above the filter,
+// but that information already shows up in the commit row the
+// user just clicked, so we drop the header to reclaim vertical
+// space for the file tree.
 QWidget* RepositoryView::buildDiffTab()
 {
     auto* page = new QWidget(this);
@@ -259,45 +279,57 @@ QWidget* RepositoryView::buildDiffTab()
     leftLayout->setContentsMargins(4, 4, 2, 4);
     leftLayout->setSpacing(4);
 
-    diffHeaderLabel_ = new QLabel(tr("Select a commit to view its diff"), leftPane);
-    diffHeaderLabel_->setWordWrap(true);
-    diffHeaderLabel_->setStyleSheet(QStringLiteral("color: #444; padding: 2px;"));
-    leftLayout->addWidget(diffHeaderLabel_);
-
     diffFilterInput_ = new QLineEdit(leftPane);
     diffFilterInput_->setPlaceholderText(tr("Filter files…"));
     diffFilterInput_->setClearButtonEnabled(true);
     diffFilterInput_->setToolTip(
-        tr("Substring filter for the changed files list"));
-    // Live-filter the changed files list. Items are hidden in
-    // place rather than removed so the underlying row indices
-    // stay aligned with the cached DiffResult — the diff viewer's
-    // currentRowChanged hook still maps back to the right file.
+        tr("Substring filter for the changed files tree"));
+    // Live-filter the changed files tree. The proxy filters on the
+    // full-path role with recursive filtering enabled, so typing
+    // a directory name keeps that subtree visible and typing a
+    // basename surfaces matching leaves with their ancestors.
     connect(diffFilterInput_, &QLineEdit::textChanged,
             this, [this](const QString& text) {
-                if (!changedFilesList_)
+                if (!changedFilesProxy_ || !changedFilesTree_)
                     return;
-                const QString needle = text.trimmed();
-                for (int i = 0; i < changedFilesList_->count(); ++i) {
-                    auto* item = changedFilesList_->item(i);
-                    if (!item)
-                        continue;
-                    const bool match = needle.isEmpty() ||
-                        item->text().contains(needle, Qt::CaseInsensitive);
-                    item->setHidden(!match);
-                }
+                changedFilesProxy_->setFilterFixedString(text.trimmed());
+                // Diffs are usually small enough that "everything
+                // expanded" is the most useful default — both for
+                // unfiltered scanning and for showing matches.
+                changedFilesTree_->expandAll();
             });
     leftLayout->addWidget(diffFilterInput_);
 
-    changedFilesList_ = new QListWidget(leftPane);
-    leftLayout->addWidget(changedFilesList_, 1);
+    changedFilesTree_ = new QTreeView(leftPane);
+    changedFilesTree_->setHeaderHidden(true);
+    changedFilesTree_->setUniformRowHeights(true);
+    changedFilesTree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    changedFilesTree_->setAnimated(false);
+    changedFilesTree_->setIndentation(16);
+
+    changedFilesModel_ = new QStandardItemModel(this);
+    changedFilesProxy_ = new QSortFilterProxyModel(this);
+    changedFilesProxy_->setSourceModel(changedFilesModel_);
+    changedFilesProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
+    changedFilesProxy_->setRecursiveFilteringEnabled(true);
+    // Filter on the full-path role rather than the display string —
+    // leaf items show only their basename, so a substring like
+    // "src/foo" only matches via the path role on directories and
+    // their leaf descendants.
+    changedFilesProxy_->setFilterRole(kPathRole);
+    changedFilesTree_->setModel(changedFilesProxy_);
+
+    leftLayout->addWidget(changedFilesTree_, 1);
 
     diffWidget_ = new widgets::DiffViewerWidget(page);
 
     diffSplitter_->addWidget(leftPane);
     diffSplitter_->addWidget(diffWidget_);
-    diffSplitter_->setStretchFactor(0, 1);
-    diffSplitter_->setStretchFactor(1, 3);
+    // Same 2:5 ratio as FileTreeWidget's splitter so the Diff and
+    // File Tree tabs give the user the same amount of horizontal
+    // space for their left-pane file list.
+    diffSplitter_->setStretchFactor(0, 2);
+    diffSplitter_->setStretchFactor(1, 5);
 
     l->addWidget(diffSplitter_);
     return page;
@@ -414,13 +446,11 @@ void RepositoryView::resetInspectorTabs()
         messageBrowser_->setPlaceholderText(tr("Select a commit to view details"));
     }
 
-    // Diff tab — clear file list and diff viewer
-    if (diffHeaderLabel_)
-        diffHeaderLabel_->setText(tr("Select a commit to view its diff"));
+    // Diff tab — clear file tree and diff viewer
     if (diffFilterInput_)
         diffFilterInput_->clear();
-    if (changedFilesList_)
-        changedFilesList_->clear();
+    if (changedFilesModel_)
+        changedFilesModel_->clear();
     if (diffWidget_)
         diffWidget_->clear();
 
@@ -549,13 +579,10 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
             messageBrowser_->setPlaceholderText(
                 tr("Select a commit to view details"));
         }
-        if (diffHeaderLabel_)
-            diffHeaderLabel_->setText(
-                tr("Select a commit to view its diff"));
         if (diffFilterInput_)
             diffFilterInput_->clear();
-        if (changedFilesList_)
-            changedFilesList_->clear();
+        if (changedFilesModel_)
+            changedFilesModel_->clear();
         if (diffWidget_)
             diffWidget_->clear();
         if (fileTreeWidget_)
@@ -592,11 +619,14 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
 // rows, then the commit message body, then a footer listing the
 // branches and tags that contain this commit.
 //
-// "Contained in branches" is currently a placeholder — implementing
-// it properly needs a `git branch --contains <sha>` style call,
-// which we'll add to GitService in a follow-up. The visible row is
-// kept so the chrome matches the GitExtensions reference and so
-// users can see the slot exists.
+// "Contained in branches" is computed via `git branch --all
+// --contains <sha>`. We shell out to git rather than walk libgit2
+// branches manually because libgit2 has no direct equivalent —
+// you'd have to walk every branch and check reachability, which
+// is O(branches × commits). Git's own implementation is fast.
+// The call is synchronous on the UI thread; on a typical repo it
+// returns in <50ms, and we cap branch enumeration with the timeout
+// in the GitProcess::run call below to avoid hangs.
 void RepositoryView::showCommitDetails(const git::CommitData& commit)
 {
     const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
@@ -759,6 +789,74 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         }
     }
 
+    // ----- "Contained in branches" -------------------------------
+    // Shell out to `git branch --all --contains <sha>` so we get
+    // both local and remote-tracking branches that have this commit
+    // in their history. `--format=%(refname:short)` gives us clean
+    // branch names with no leading "* " marker for the current
+    // branch. Sha is a 40-char hex (or 64 for SHA-256 repos), so
+    // there's no shell-escaping concern even though we're passing
+    // it as a process arg directly.
+    //
+    // Failure modes we handle:
+    //   - no repo open       → "(no repo open)"
+    //   - git CLI missing /
+    //     timeout / non-zero → "(unable to query)"
+    //   - empty list (orphan
+    //     commit, or only on
+    //     a detached HEAD)   → "(none)"
+    //   - too many to fit    → first 10, then "+N more"
+    //
+    // We cap output at 10 names because commits early in history
+    // can be reachable from hundreds of branches in active repos,
+    // which would blow out the inspector's vertical space.
+    QString containsBranchesText;
+    if (gitService_ && gitService_->repository()) {
+        const std::string sha = commit.id.toHex();
+        auto out = gitService_->repository()->process().run(
+            {"branch", "--all", "--contains", sha,
+             "--format=%(refname:short)"},
+            /*timeoutMs=*/5000);
+        if (out && out->success()) {
+            QStringList branches;
+            const QString stdoutText =
+                QString::fromStdString(out->stdoutData);
+            const auto lines = stdoutText.split(QChar('\n'),
+                                                Qt::SkipEmptyParts);
+            for (const auto& line : lines) {
+                const QString trimmed = line.trimmed();
+                if (trimmed.isEmpty())
+                    continue;
+                // Skip "<remote>/HEAD" symbolic refs — they're
+                // aliases for whatever branch HEAD points at on the
+                // remote (typically already in our list as
+                // "<remote>/main"), so listing them is just noise.
+                if (trimmed.endsWith(QLatin1String("/HEAD")))
+                    continue;
+                branches << trimmed.toHtmlEscaped();
+            }
+            if (branches.isEmpty()) {
+                containsBranchesText = QStringLiteral(
+                    "<span class='muted'>(none)</span>");
+            } else {
+                constexpr int kMaxShown = 10;
+                QStringList shown = branches.mid(0, kMaxShown);
+                containsBranchesText = shown.join(QStringLiteral(", "));
+                if (branches.size() > kMaxShown) {
+                    containsBranchesText += QStringLiteral(
+                        " <span class='muted'>+%1 more</span>")
+                        .arg(branches.size() - kMaxShown);
+                }
+            }
+        } else {
+            containsBranchesText = QStringLiteral(
+                "<span class='muted'>(unable to query)</span>");
+        }
+    } else {
+        containsBranchesText = QStringLiteral(
+            "<span class='muted'>(no repo open)</span>");
+    }
+
     // ----- Top browser: 2-column metadata grid ------------------
     // No summary/body/footer here — those live in messageBrowser_
     // below the full-width separator. The avatar lives outside
@@ -853,11 +951,11 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 
 <hr class="sep" />
 
-<div class="contains">Contained in branches: <span class="muted">(coming soon)</span></div>
+<div class="contains">Contained in branches: %3</div>
 <div class="contains">Contained in no tag</div>
 <div class="contains">Derives from no tag</div>
 )HTML")
-        .arg(summary, bodyHtml);
+        .arg(summary, bodyHtml, containsBranchesText);
 
     messageBrowser_->setHtml(messageHtml);
 
@@ -898,76 +996,80 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 
 void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
 {
-    disconnect(changedFilesList_, &QListWidget::currentRowChanged, this, nullptr);
+    // Drop any previous click handler — each call to showCommitDiff
+    // captures a fresh DiffResult shared_ptr in its lambda, and we
+    // don't want stale captures firing after the model is cleared.
+    if (changedFilesTree_ && changedFilesTree_->selectionModel()) {
+        disconnect(changedFilesTree_->selectionModel(),
+                   &QItemSelectionModel::currentChanged,
+                   this, nullptr);
+    }
 
-    changedFilesList_->clear();
+    if (changedFilesModel_)
+        changedFilesModel_->clear();
     diffWidget_->clear();
-    if (diffHeaderLabel_)
-        diffHeaderLabel_->setText(tr("Loading diff…"));
 
     if (!gitService_ || !gitService_->repository())
         return;
 
     auto* repo = gitService_->repository();
     auto diffResult = repo->diffCommit(commitId);
-    if (!diffResult) {
-        if (diffHeaderLabel_)
-            diffHeaderLabel_->setText(tr("(no diff)"));
+    if (!diffResult)
         return;
-    }
 
     auto diff = std::make_shared<git::DiffResult>(std::move(*diffResult));
 
-    // Populate the header label so it mirrors GitExtensions:
-    //   "(N) Diff with A <parent_short>: <parent_summary>"
-    // We need the parent commit's data for the summary; if the
-    // commit is a root or we can't find the parent we degrade
-    // gracefully to just the file count.
-    if (diffHeaderLabel_) {
-        const int n = static_cast<int>(diff->files.size());
-        QString headerText;
-        if (commitModel_) {
-            // Locate the commit in the model so we can read its
-            // parent IDs (CommitData carries them).
-            for (int row = 0; row < commitModel_->rowCount(); ++row) {
-                const auto* commit = commitModel_->commitAt(row);
-                if (!commit || !(commit->id == commitId))
-                    continue;
-                if (!commit->parentIds.empty()) {
-                    const auto& parentId = commit->parentIds.front();
-                    const QString parentShort = QString::fromStdString(
-                        parentId.toShortHex());
-                    // Look up the parent's summary in the same model
-                    // for the GitExtensions-style "Diff with A <hex>:
-                    // <message>" header. If the parent isn't in the
-                    // current page just show its hash.
-                    QString parentSummary;
-                    for (int r2 = 0; r2 < commitModel_->rowCount(); ++r2) {
-                        const auto* p = commitModel_->commitAt(r2);
-                        if (p && p->id == parentId) {
-                            parentSummary = QString::fromStdString(p->summary);
-                            break;
-                        }
-                    }
-                    if (parentSummary.isEmpty()) {
-                        headerText = tr("(%1) Diff with parent %2")
-                            .arg(n).arg(parentShort);
-                    } else {
-                        headerText = tr("(%1) Diff with %2: %3")
-                            .arg(n).arg(parentShort, parentSummary);
-                    }
-                } else {
-                    headerText = tr("(%1) Initial commit").arg(n);
-                }
-                break;
-            }
+    // Build the changed-files tree. Two passes so directory rows
+    // come before file rows at every level: pass 1 collects each
+    // unique ancestor path into a sorted std::set and creates a
+    // QStandardItem for each, pass 2 appends the file leaves under
+    // their parents.
+    std::set<std::string> dirPaths;
+    for (const auto& file : diff->files) {
+        const std::string& p = file.path();
+        auto slash = p.rfind('/');
+        while (slash != std::string::npos) {
+            std::string anc = p.substr(0, slash);
+            dirPaths.insert(anc);
+            slash = anc.rfind('/');
         }
-        if (headerText.isEmpty())
-            headerText = tr("(%1) Diff").arg(n);
-        diffHeaderLabel_->setText(headerText);
     }
 
-    for (const auto& file : diff->files) {
+    QFileIconProvider iconProvider;
+    const QIcon folderIcon = iconProvider.icon(QFileIconProvider::Folder);
+    const QIcon fileIcon   = iconProvider.icon(QFileIconProvider::File);
+
+    // path → item. Empty key represents the model root.
+    std::unordered_map<std::string, QStandardItem*> dirByPath;
+    dirByPath.reserve(dirPaths.size() + 1);
+    dirByPath[std::string{}] = changedFilesModel_->invisibleRootItem();
+
+    for (const std::string& dirPath : dirPaths) {
+        std::string parentPath;
+        const auto slash = dirPath.rfind('/');
+        if (slash != std::string::npos)
+            parentPath = dirPath.substr(0, slash);
+        const std::string name = (slash == std::string::npos)
+                                     ? dirPath : dirPath.substr(slash + 1);
+
+        auto* dirItem = new QStandardItem(folderIcon,
+                                          QString::fromStdString(name));
+        QFont f = dirItem->font();
+        f.setBold(true);
+        dirItem->setFont(f);
+        dirItem->setEditable(false);
+        dirItem->setData(QString::fromStdString(dirPath), kPathRole);
+        dirItem->setData(true, kIsDirRole);
+        dirItem->setData(-1, kFileIndexRole);
+
+        QStandardItem* parent = dirByPath[parentPath];
+        parent->appendRow(dirItem);
+        dirByPath[dirPath] = dirItem;
+    }
+
+    for (size_t i = 0; i < diff->files.size(); ++i) {
+        const auto& file = diff->files[i];
+
         QString prefix;
         switch (file.status) {
             case git::DiffStatus::Added:    prefix = QStringLiteral("[A] "); break;
@@ -978,9 +1080,9 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
             default:                        prefix = QStringLiteral("[?] "); break;
         }
 
-        // Per-file +N/-M stats. We don't have these on DiffFileEntry
-        // directly, so tally them by walking the hunk lines. Binary
-        // files report (binary) instead.
+        // Per-file +N/-M stats. DiffFileEntry doesn't carry these
+        // pre-tallied so we walk the hunk lines. Binary files
+        // report (binary) instead.
         int adds = 0;
         int dels = 0;
         for (const auto& hunk : file.hunks) {
@@ -990,44 +1092,59 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
             }
         }
 
-        QString label = prefix + QString::fromStdString(file.path());
+        const std::string& fullPath = file.path();
+        std::string parentPath;
+        const auto slash = fullPath.rfind('/');
+        if (slash != std::string::npos)
+            parentPath = fullPath.substr(0, slash);
+        const std::string basename = (slash == std::string::npos)
+                                         ? fullPath
+                                         : fullPath.substr(slash + 1);
+
+        QString label = prefix + QString::fromStdString(basename);
         if (file.isBinary)
             label += QStringLiteral("   (binary)");
         else if (adds || dels)
             label += QStringLiteral("   +%1 −%2").arg(adds).arg(dels);
 
-        auto* item = new QListWidgetItem(label, changedFilesList_);
-        // Color tint the suffix area via tooltip; the visual tint
-        // for adds/dels would need a custom delegate which is
-        // out of scope for this pass.
-        if (file.isBinary) {
+        auto* item = new QStandardItem(fileIcon, label);
+        item->setEditable(false);
+        item->setData(QString::fromStdString(fullPath), kPathRole);
+        item->setData(false, kIsDirRole);
+        item->setData(static_cast<int>(i), kFileIndexRole);
+        if (file.isBinary)
             item->setForeground(QColor(0x88, 0x88, 0x88));
-        }
+
+        QStandardItem* parent = dirByPath[parentPath];
+        parent->appendRow(item);
     }
 
-    // Re-apply the current filter so any newly populated items
-    // respect what the user typed before clicking another commit.
-    if (diffFilterInput_) {
-        const QString needle = diffFilterInput_->text().trimmed();
-        if (!needle.isEmpty()) {
-            for (int i = 0; i < changedFilesList_->count(); ++i) {
-                auto* item = changedFilesList_->item(i);
-                if (!item)
-                    continue;
-                item->setHidden(
-                    !item->text().contains(needle, Qt::CaseInsensitive));
-            }
-        }
-    }
+    changedFilesTree_->expandAll();
 
     if (!diff->files.empty()) {
         diffWidget_->setDiff(*diff, 0);
     }
 
-    connect(changedFilesList_, &QListWidget::currentRowChanged,
-            this, [this, diff](int row) {
-                if (row >= 0 && row < static_cast<int>(diff->files.size())) {
-                    diffWidget_->setDiff(*diff, row);
+    // Selection model handles both clicks and arrow-key navigation,
+    // so users can scrub through the file list with the keyboard
+    // the same way QListWidget supported it.
+    connect(changedFilesTree_->selectionModel(),
+            &QItemSelectionModel::currentChanged,
+            this,
+            [this, diff](const QModelIndex& proxyIndex,
+                         const QModelIndex& /*previous*/) {
+                if (!proxyIndex.isValid())
+                    return;
+                const QModelIndex sourceIndex =
+                    changedFilesProxy_->mapToSource(proxyIndex);
+                QStandardItem* item =
+                    changedFilesModel_->itemFromIndex(sourceIndex);
+                if (!item)
+                    return;
+                const int fileIndex = item->data(kFileIndexRole).toInt();
+                if (fileIndex >= 0
+                    && fileIndex < static_cast<int>(diff->files.size())) {
+                    diffWidget_->setDiff(*diff, fileIndex);
                 }
             });
 }

@@ -1,4 +1,5 @@
 #include "dialogs/RebaseDialog.h"
+#include "conf/SettingsService.h"
 #include "widgets/InteractiveRebaseWidget.h"
 
 #include <QComboBox>
@@ -27,7 +28,10 @@ RebaseDialog::RebaseDialog(QWidget* parent)
 
 void RebaseDialog::setupUi() {
     setWindowTitle(tr("Interactive Rebase"));
-    resize(720, 560);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "rebase");
 
     auto* mainLayout = new QVBoxLayout(this);
 

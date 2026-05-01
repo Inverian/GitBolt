@@ -91,6 +91,68 @@ public:
     void saveWindowState(const QByteArray& state);
     QByteArray restoreWindowState() const;
 
+    // Startup window size — the dimensions the main window opens at
+    // when there's no saved geometry (first launch) OR when
+    // `restoreLastWindowSize()` is false. Defaults scale to ~80% of
+    // the primary screen so the values feel right both on small
+    // laptops and on ultrawides, then clamp to [1280, 2400] ×
+    // [800, 1500] so we never pick something silly. Setters also
+    // clamp to wider hard-bounds so a typoed huge value can't break
+    // the UI.
+    int startupWindowWidth() const;
+    void setStartupWindowWidth(int width);
+    int startupWindowHeight() const;
+    void setStartupWindowHeight(int height);
+
+    // When true (the default), the main window restores its previous
+    // geometry on launch via QMainWindow::restoreGeometry, so the
+    // user's last-dragged size persists across launches. When false,
+    // the window always opens at the configured `startupWindowWidth`
+    // × `startupWindowHeight`, ignoring any saved geometry — useful
+    // for users who want a consistent first-frame on every launch.
+    bool restoreLastWindowSize() const;
+    void setRestoreLastWindowSize(bool restore);
+
+    // ----- Dialog default size -----
+    //
+    // One W × H pair shared across every popup dialog the user
+    // can resize (Commit, Clone, Tag, Stash, Rebase, Reflog, …).
+    // Each dialog calls applyConfiguredSize() in its constructor
+    // and the helper handles initial sizing + per-dialog
+    // persistence. Dialogs whose layout needs more space than the
+    // configured default auto-grow via Qt's minimum-size-hint
+    // propagation, so a small global value doesn't break
+    // content-heavy dialogs.
+    //
+    // Setters clamp to wide hard-bounds for typo safety; the
+    // settings UI applies a tighter functional minimum.
+    QSize defaultDialogSize() const;
+    void setDefaultDialogSize(QSize size);
+
+    // Static convenience — reads the configured default size
+    // without requiring a SettingsService instance.
+    static QSize loadDefaultDialogSize();
+
+    // Whether each dialog should remember its drag-resized
+    // geometry across opens. ON (default): on open, restore the
+    // dialog's last size from layout/dialog/<key>/geom if one is
+    // saved, else fall back to the configured default. OFF: every
+    // open uses the configured default, ignoring any saved size.
+    // Mirrors restoreLastWindowSize for the main window.
+    bool restoreLastDialogSize() const;
+    void setRestoreLastDialogSize(bool restore);
+
+    // One-stop helper called by every resizable popup dialog from
+    // its constructor. Handles: (1) the initial resize — restoring
+    // a previously-saved geometry if `restoreLastDialogSize()` is
+    // on and a saved size exists for `key`, otherwise applying
+    // the configured default; and (2) wiring up the dialog's
+    // `finished` signal so the geometry is saved on close.
+    // The save happens regardless of the toggle's current state,
+    // so toggling the setting back on later still picks up the
+    // most recent drag-resized size.
+    static void applyConfiguredSize(class QDialog* dlg, const char* key);
+
     // Layout persistence — generic splitter + dialog geometry helpers
     // keyed under "layout/<key>". All keys used by the app carry a
     // schema-version suffix (e.g. ".../v1") so future layout changes

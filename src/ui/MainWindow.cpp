@@ -116,11 +116,30 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     setWindowTitle(QStringLiteral("GitBolt"));
-    resize(1280, 800);
 
     // --- Core services ---
     gitService_ = new services::GitService(this);
     settingsService_ = new conf::SettingsService(this);
+
+    // Apply startup window size. Two modes, controlled by the user
+    // setting `restoreLastWindowSize()`:
+    //   ON  (default) — restore the previous geometry on launch via
+    //                    QMainWindow::restoreGeometry, so dragged
+    //                    sizes persist. Falls through to the fixed-
+    //                    size resize if no geometry has been saved
+    //                    yet (first launch).
+    //   OFF           — always resize to startupWindowWidth ×
+    //                    startupWindowHeight, ignoring saved geom.
+    bool sized = false;
+    if (settingsService_->restoreLastWindowSize()) {
+        const QByteArray geom = settingsService_->restoreWindowGeometry();
+        if (!geom.isEmpty())
+            sized = restoreGeometry(geom);
+    }
+    if (!sized) {
+        resize(settingsService_->startupWindowWidth(),
+               settingsService_->startupWindowHeight());
+    }
 
     // Auto-prune Recent Repositories entries whose paths no longer
     // exist on disk OR no longer look like a git repo. This drops
@@ -193,7 +212,17 @@ void MainWindow::closeEvent(QCloseEvent* e)
 // QSettings, which dedupes by key.
 void MainWindow::persistLayout()
 {
-    if (!settingsService_ || !repoView_)
+    if (!settingsService_)
+        return;
+
+    // Save the main window geometry every time, regardless of the
+    // user's `restoreLastWindowSize` preference — a saved record is
+    // cheap and keeping it up-to-date means flipping the toggle
+    // back ON later picks up the right size instead of an ancient
+    // one.
+    settingsService_->saveWindowGeometry(saveGeometry());
+
+    if (!repoView_)
         return;
     settingsService_->saveSplitterState(
         QStringLiteral("repoSplitterH/v1"),
@@ -201,8 +230,11 @@ void MainWindow::persistLayout()
     settingsService_->saveSplitterState(
         QStringLiteral("repoSplitterV/v1"),
         repoView_->saveRepoSplitterV());
+    // Bumped to v2 in lockstep with kDiffSplitterKey in
+    // RepositoryView.cpp when the diff splitter's stretch ratio
+    // was retuned. Writing v2 here pairs with reading v2 there.
     settingsService_->saveSplitterState(
-        QStringLiteral("diffSplitter/v1"),
+        QStringLiteral("diffSplitter/v2"),
         repoView_->saveDiffSplitter());
 }
 
@@ -214,33 +246,16 @@ void MainWindow::persistLayout()
 //   Start | Repository | Navigate | View | Commands | GitHub |
 //   Plugins | Tools | Help
 //
-// Many entries are still placeholders — they're present so users
-// can see what's coming and so the menu chrome matches the
-// reference UI. Stub items are added with addPlaceholder() and
-// fire a "not yet implemented" status-bar message when clicked.
+// Every entry below is wired to a real handler. We used to ship a
+// few `addPlaceholder()` stubs (Show git notes, Show author avatar
+// column, Impact Graph) that just flashed "not yet implemented"
+// in the status bar — they were misleading and have been removed.
+// When those features are actually built, add them back inline as
+// real actions next to their siblings.
 // ---------------------------------------------------------------------------
-
-namespace {
-// Add a placeholder action that does nothing user-facing, but
-// emits a status-bar message so users know the slot exists.
-QAction* addPlaceholder(QMenu* menu, const QString& label,
-                        QStatusBar* status)
-{
-    auto* a = menu->addAction(label);
-    QObject::connect(a, &QAction::triggered, [label, status]() {
-        if (status)
-            status->showMessage(
-                QObject::tr("%1 — not yet implemented").arg(label),
-                3000);
-    });
-    return a;
-}
-} // namespace
 
 void MainWindow::createMenuBar()
 {
-    auto* status = statusBar();
-
     // Keep the menu bar INSIDE the window on every platform. By
     // default Qt on macOS moves QMainWindow::menuBar() into the
     // system-wide menu bar at the top of the screen, which would
@@ -1385,13 +1400,12 @@ void MainWindow::createMenuBar()
                          static_cast<int>(
                              models::BranchModel::RootCategory::Stashes),
                          QStringLiteral("view/showStashes"));
-    {
-        // Git notes — model doesn't expose a Notes category yet,
-        // so this remains a placeholder.
-        auto* a = addPlaceholder(viewMenu, tr("Show git &notes"), status);
-        a->setIcon(menuIcon(QStringLiteral("notes")));
-        a->setCheckable(true);
-    }
+    // Note: a "Show git notes" toggle used to live here as a
+    // placeholder. It was removed because the BranchModel doesn't
+    // expose a Notes category yet — clicking it just flashed a
+    // "not yet implemented" status message, which was misleading.
+    // When notes are wired into the model, re-add a real toggle
+    // here using wireBranchTreeToggle().
 
     viewMenu->addSeparator();
     // -- Grid labels section --
@@ -1526,12 +1540,11 @@ void MainWindow::createMenuBar()
                      QStringLiteral("submodule"),
                      static_cast<int>(models::CommitLogColumn::Graph),
                      QStringLiteral("view/showGraphColumn"));
-    // Avatar column isn't in the model yet — keep as placeholder.
-    auto* showAvatar = addPlaceholder(viewMenu,
-                       tr("Show author a&vatar column"), status);
-    showAvatar->setIcon(menuIcon(QStringLiteral("person")));
-    showAvatar->setCheckable(true);
-    showAvatar->setChecked(true);
+    // Note: a "Show author avatar column" toggle used to live here
+    // as a placeholder. Removed — the CommitLogModel doesn't have
+    // an avatar column and the toggle just flashed "not yet
+    // implemented". When/if an avatar column is added, re-add a
+    // wireColumnToggle() call here matching the other entries.
     wireColumnToggle(tr("Show author &name column"),
                      QStringLiteral("badge"),
                      static_cast<int>(models::CommitLogColumn::Author),
@@ -1709,6 +1722,7 @@ void MainWindow::createMenuBar()
                     tr("Pull complete."),
                     [this]() { gitService_->pull("origin", ""); });
     });
+    cmdMenu->addAction(pullAction_);
 
     pushAction_ = new QAction(tr("&Push..."), this);
     pushAction_->setIcon(menuIcon(QStringLiteral("push")));
@@ -2707,8 +2721,10 @@ void MainWindow::createMenuBar()
         });
         pluginsMenu->addAction(a);
     }
-    addPlaceholder(pluginsMenu, tr("&Impact Graph"), status)
-        ->setIcon(menuIcon(QStringLiteral("insights")));
+    // Note: an "Impact Graph" entry used to live here as a
+    // placeholder. Removed — clicking it only flashed
+    // "not yet implemented", which was misleading. Re-add when
+    // the impact-analysis plugin is actually built.
     {
         // Periodic background fetch — when toggled on, runs
         // `git fetch` every N minutes (default 5) on the open

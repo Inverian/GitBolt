@@ -35,11 +35,10 @@ namespace gitbolt::dialogs {
 
 namespace {
 
-// Visual tuning constants. Picked to match the GitExtensions
-// reference screenshot proportions at a 16pt body font.
-constexpr int kNavWidth        = 220;
-constexpr int kDialogWidth     = 860;
-constexpr int kDialogHeight    = 600;
+// Visual tuning constant. The dialog's actual width/height come
+// from SettingsService::defaultDialogSize() — this is just the
+// nav-tree column width inside the dialog.
+constexpr int kNavWidth = 220;
 
 // Indent the category header slightly so sub-section rows sit
 // clearly under it without looking flat.
@@ -70,7 +69,10 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     , theme_(theme)
 {
     setWindowTitle(tr("Settings"));
-    resize(kDialogWidth, kDialogHeight);
+    // Configured default + per-dialog persistence. Helper handles
+    // the toggle ("Restore previous dialog size") + saved-geometry
+    // restore + finished-signal hookup for save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "settings");
 
     // ---- Root layout: tree | pages on top, buttons on bottom ----
     auto* root = new QVBoxLayout(this);
@@ -194,18 +196,34 @@ QWidget* SettingsDialog::createGeneralPage()
 {
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
+    // Don't let inputs grow to fill the dialog horizontally — the
+    // dialog itself can be 1200+ px wide when the user has dragged
+    // it large, but a font picker + a size spinbox + a tab-size
+    // spinbox don't need anywhere near that. FieldsStayAtSizeHint
+    // pins each row's field column to its widget sizeHint, so the
+    // space to the right of the inputs stays empty (matching the
+    // GitExtensions reference).
+    form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
 
     auto* fontRow = new QHBoxLayout;
     fontCombo_ = new QFontComboBox(page);
     fontCombo_->setFontFilters(QFontComboBox::MonospacedFonts);
+    // Cap the font picker so long font names don't push the size
+    // spinbox off-screen on a narrow dialog. 260 px comfortably
+    // fits names up to ~25 chars at the system font size.
+    fontCombo_->setMinimumWidth(220);
+    fontCombo_->setMaximumWidth(260);
     fontSizeSpin_ = new QSpinBox(page);
     fontSizeSpin_->setRange(6, 72);
-    fontRow->addWidget(fontCombo_, 1);
+    fontSizeSpin_->setMaximumWidth(70);
+    fontRow->addWidget(fontCombo_);
     fontRow->addWidget(fontSizeSpin_);
+    fontRow->addStretch();
     form->addRow(tr("Code Font:"), fontRow);
 
     tabSizeSpin_ = new QSpinBox(page);
     tabSizeSpin_->setRange(1, 16);
+    tabSizeSpin_->setMaximumWidth(70);
     form->addRow(tr("Tab Size:"), tabSizeSpin_);
 
     showWhitespaceCheck_ = new QCheckBox(tr("Show whitespace characters"), page);
@@ -234,6 +252,9 @@ QWidget* SettingsDialog::createUiDesignPage()
 
     auto* layoutGroup = new QGroupBox(tr("Default Pane Sizes"), page);
     auto* form = new QFormLayout(layoutGroup);
+    // Pin every row's input column to its sizeHint so spinboxes
+    // and sliders don't sprawl across a wide dialog.
+    form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
 
     // --- Bottom inspector pane percent --------------------------
     auto* row = new QHBoxLayout;
@@ -241,14 +262,20 @@ QWidget* SettingsDialog::createUiDesignPage()
     bottomPaneSlider_->setRange(10, 90);
     bottomPaneSlider_->setTickInterval(10);
     bottomPaneSlider_->setTickPosition(QSlider::TicksBelow);
+    // 320–480 px keeps the slider usable (enough drag distance for
+    // ~5%-per-pixel resolution at the 80-step range) without
+    // letting it stretch the full width of a 1500-px dialog.
+    bottomPaneSlider_->setMinimumWidth(320);
+    bottomPaneSlider_->setMaximumWidth(480);
 
     bottomPaneSpin_ = new QSpinBox(layoutGroup);
     bottomPaneSpin_->setRange(10, 90);
     bottomPaneSpin_->setSuffix(QStringLiteral(" %"));
     bottomPaneSpin_->setFixedWidth(80);
 
-    row->addWidget(bottomPaneSlider_, 1);
+    row->addWidget(bottomPaneSlider_, 0);
     row->addWidget(bottomPaneSpin_, 0);
+    row->addStretch();
 
     form->addRow(tr("Bottom inspector pane:"), row);
 
@@ -269,7 +296,9 @@ QWidget* SettingsDialog::createUiDesignPage()
     form->addRow(QString(), note);
 
     root->addWidget(layoutGroup);
-    root->addStretch();
+    // Stretch is added at the very end of the page (after the
+    // Default Window Size group) so all the groups stack from the
+    // top instead of one floating to the bottom.
 
     // Two-way binding — avoid infinite ping-pong by checking that
     // the value actually changed before forwarding.
@@ -304,6 +333,188 @@ QWidget* SettingsDialog::createUiDesignPage()
     bottomPaneSpin_->setValue(initial);
     updatePreview(initial);
 
+    // --- Default Window Size --------------------------------------
+    // Two modes: remember the previous geometry across launches
+    // (the default), or always open at a configured fixed size.
+    // The spinboxes are greyed out when "remember previous" is on
+    // since the saved geometry takes priority over them anyway.
+    auto* sizeGroup = new QGroupBox(tr("Default Window Size"), page);
+    auto* sizeForm = new QFormLayout(sizeGroup);
+    sizeForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+
+    // Width spinboxes show 4-digit values + " px" suffix + the
+    // step arrows — 140 px fits all of that with a small margin.
+    constexpr int kPxSpinWidth = 140;
+
+    restoreLastSizeCheck_ = new QCheckBox(
+        tr("Restore previous window size on launch"), sizeGroup);
+    sizeForm->addRow(QString(), restoreLastSizeCheck_);
+
+    // Functional minimum is 1024 × 700 — below that the sidebar,
+    // repo view, and inspector tabs start crowding into uselessness.
+    // QSpinBox auto-clamps anything typed below the minimum to the
+    // minimum on focus-out, so a user typing "500" sees it snap to
+    // 1024. Keep these in lockstep with kStartupWidthMin/kStartupHeightMin
+    // in SettingsService.cpp.
+    constexpr int kMinStartupWidth  = 1024;
+    constexpr int kMinStartupHeight = 700;
+
+    // CorrectToNearestValue — when the user types a value out of
+    // range and tabs/Enters out, snap to the nearest valid value
+    // (which for a sub-min input means snap UP to the minimum).
+    // The default CorrectToPreviousValue silently reverts to the
+    // last good value, which is confusing — typing 500 then tabbing
+    // makes the field appear unchanged with no feedback.
+    startupWidthSpin_ = new QSpinBox(sizeGroup);
+    startupWidthSpin_->setRange(kMinStartupWidth, 8000);
+    startupWidthSpin_->setSuffix(QStringLiteral(" px"));
+    startupWidthSpin_->setSingleStep(50);
+    startupWidthSpin_->setFixedWidth(kPxSpinWidth);
+    startupWidthSpin_->setCorrectionMode(
+        QAbstractSpinBox::CorrectToNearestValue);
+    sizeForm->addRow(tr("Default width:"), startupWidthSpin_);
+
+    startupHeightSpin_ = new QSpinBox(sizeGroup);
+    startupHeightSpin_->setRange(kMinStartupHeight, 5000);
+    startupHeightSpin_->setSuffix(QStringLiteral(" px"));
+    startupHeightSpin_->setSingleStep(50);
+    startupHeightSpin_->setFixedWidth(kPxSpinWidth);
+    startupHeightSpin_->setCorrectionMode(
+        QAbstractSpinBox::CorrectToNearestValue);
+    sizeForm->addRow(tr("Default height:"), startupHeightSpin_);
+
+    auto syncStartupSizeEnabled = [this]() {
+        const bool restore = restoreLastSizeCheck_
+            && restoreLastSizeCheck_->isChecked();
+        if (startupWidthSpin_)  startupWidthSpin_->setEnabled(!restore);
+        if (startupHeightSpin_) startupHeightSpin_->setEnabled(!restore);
+    };
+    connect(restoreLastSizeCheck_, &QCheckBox::toggled,
+            this, syncStartupSizeEnabled);
+
+    // Live readout of the parent window's current size — handy for
+    // users who want to type their preferred size into the spinboxes
+    // and need a starting reference point. Refreshed by
+    // refreshCurrentMainWindowSize() in loadSettings() and after
+    // Apply runs (since Apply may have just resized the parent).
+    currentMainWindowSize_ = new QLabel(sizeGroup);
+    currentMainWindowSize_->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); }"));
+    sizeForm->addRow(QString(), currentMainWindowSize_);
+
+    auto* sizeNote = new QLabel(
+        tr("When “Restore previous” is on, the window remembers "
+           "wherever you last left it. Otherwise, it always opens at the "
+           "configured default size each launch, and Apply resizes the "
+           "current window immediately. Minimum size is %1 × %2 px — "
+           "values below that snap to the minimum.")
+            .arg(kMinStartupWidth).arg(kMinStartupHeight),
+        sizeGroup);
+    sizeNote->setWordWrap(true);
+    sizeNote->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); }"));
+    sizeForm->addRow(QString(), sizeNote);
+
+    root->addWidget(sizeGroup);
+
+    // Seed values right away so the dialog shows real numbers on
+    // open instead of a flash of (0, 0). loadSettings() will rerun
+    // these reads once the dialog is fully constructed.
+    if (settings_) {
+        restoreLastSizeCheck_->setChecked(settings_->restoreLastWindowSize());
+        startupWidthSpin_ ->setValue(settings_->startupWindowWidth());
+        startupHeightSpin_->setValue(settings_->startupWindowHeight());
+    }
+    syncStartupSizeEnabled();
+
+    // --- Default Dialog Size --------------------------------------
+    // One W × H pair applied to every popup dialog the user can
+    // resize (Settings, Commit, Clone, Tag, Stash, Rebase, Reflog,
+    // Cherry-Pick, Worktree, Remotes, Text Editor, Stash Manager).
+    // Changes apply the next time each dialog opens — we don't
+    // resize the running Settings dialog (would jump under the
+    // user) or any open Commit dialog. CorrectToNearestValue
+    // snaps any sub-min input up to the floor on focus-out.
+    //
+    // Layout deliberately mirrors the Default Window Size group
+    // above — two stacked rows with full-width spinboxes — so the
+    // two groups read as a matched pair.
+    constexpr int kMinDefaultDialogW = 400;
+    constexpr int kMinDefaultDialogH = 300;
+
+    auto* dlgGroup = new QGroupBox(tr("Default Dialog Size"), page);
+    auto* dlgForm  = new QFormLayout(dlgGroup);
+    dlgForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+
+    restoreLastDialogSizeCheck_ = new QCheckBox(
+        tr("Restore previous dialog size on open"), dlgGroup);
+    dlgForm->addRow(QString(), restoreLastDialogSizeCheck_);
+
+    defaultDialogWidthSpin_ = new QSpinBox(dlgGroup);
+    defaultDialogWidthSpin_->setRange(kMinDefaultDialogW, 8000);
+    defaultDialogWidthSpin_->setSuffix(QStringLiteral(" px"));
+    defaultDialogWidthSpin_->setSingleStep(50);
+    defaultDialogWidthSpin_->setFixedWidth(kPxSpinWidth);
+    defaultDialogWidthSpin_->setCorrectionMode(
+        QAbstractSpinBox::CorrectToNearestValue);
+    dlgForm->addRow(tr("Default width:"), defaultDialogWidthSpin_);
+
+    defaultDialogHeightSpin_ = new QSpinBox(dlgGroup);
+    defaultDialogHeightSpin_->setRange(kMinDefaultDialogH, 5000);
+    defaultDialogHeightSpin_->setSuffix(QStringLiteral(" px"));
+    defaultDialogHeightSpin_->setSingleStep(50);
+    defaultDialogHeightSpin_->setFixedWidth(kPxSpinWidth);
+    defaultDialogHeightSpin_->setCorrectionMode(
+        QAbstractSpinBox::CorrectToNearestValue);
+    dlgForm->addRow(tr("Default height:"), defaultDialogHeightSpin_);
+
+    // Live readout of THIS dialog's current size, mirroring the
+    // "Current window size" line in the Default Window Size group
+    // above. Refreshed in loadSettings() and apply() — useful for
+    // picking values empirically (drag the dialog, click Apply,
+    // read off the size).
+    currentDialogSizeLabel_ = new QLabel(dlgGroup);
+    currentDialogSizeLabel_->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); }"));
+    dlgForm->addRow(QString(), currentDialogSizeLabel_);
+
+    auto syncDlgSizeEnabled = [this]() {
+        const bool restore = restoreLastDialogSizeCheck_
+            && restoreLastDialogSizeCheck_->isChecked();
+        if (defaultDialogWidthSpin_)
+            defaultDialogWidthSpin_->setEnabled(!restore);
+        if (defaultDialogHeightSpin_)
+            defaultDialogHeightSpin_->setEnabled(!restore);
+    };
+    connect(restoreLastDialogSizeCheck_, &QCheckBox::toggled,
+            this, syncDlgSizeEnabled);
+
+    auto* dlgNote = new QLabel(
+        tr("This size is applied to every popup dialog (Commit, "
+           "Clone, Tag, Stash, Rebase, etc.) on next open. "
+           "Dialogs whose layout requires more space than this "
+           "will auto-grow to fit. Minimum %1 × %2 px — values "
+           "below that snap to the minimum.")
+            .arg(kMinDefaultDialogW).arg(kMinDefaultDialogH),
+        dlgGroup);
+    dlgNote->setWordWrap(true);
+    dlgNote->setStyleSheet(
+        QStringLiteral("QLabel { color: palette(mid); }"));
+    dlgForm->addRow(QString(), dlgNote);
+
+    root->addWidget(dlgGroup);
+
+    if (settings_) {
+        restoreLastDialogSizeCheck_->setChecked(
+            settings_->restoreLastDialogSize());
+        const QSize sz = settings_->defaultDialogSize();
+        defaultDialogWidthSpin_ ->setValue(sz.width());
+        defaultDialogHeightSpin_->setValue(sz.height());
+    }
+    syncDlgSizeEnabled();
+
+    root->addStretch();
+
     return page;
 }
 
@@ -316,28 +527,47 @@ QWidget* SettingsDialog::createGitConfigPage()
     auto* page = new QWidget(this);
     auto* form = new QFormLayout(page);
 
+    // [320, 360] px comfortably fits typical names, emails, and
+    // remote names without sprawling across the dialog when it's
+    // been dragged wide. The min keeps the box usable (a long
+    // GitHub no-reply address fits without scrolling); the max
+    // stops it from following the dialog out to 1000+ px.
+    constexpr int kEditMinWidth = 320;
+    constexpr int kEditMaxWidth = 360;
+    auto sizeEdit = [](QLineEdit* e) {
+        e->setMinimumWidth(kEditMinWidth);
+        e->setMaximumWidth(kEditMaxWidth);
+    };
+
     auto* identityGroup = new QGroupBox(tr("Identity"), page);
     auto* identityForm = new QFormLayout(identityGroup);
+    identityForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     userNameEdit_ = new QLineEdit(identityGroup);
     userNameEdit_->setPlaceholderText(tr("Your Name"));
+    sizeEdit(userNameEdit_);
     identityForm->addRow(tr("user.name:"), userNameEdit_);
     userEmailEdit_ = new QLineEdit(identityGroup);
     userEmailEdit_->setPlaceholderText(tr("you@example.com"));
+    sizeEdit(userEmailEdit_);
     identityForm->addRow(tr("user.email:"), userEmailEdit_);
     form->addRow(identityGroup);
 
     auto* remoteGroup = new QGroupBox(tr("Defaults"), page);
     auto* remoteForm = new QFormLayout(remoteGroup);
+    remoteForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     defaultRemoteEdit_ = new QLineEdit(remoteGroup);
     defaultRemoteEdit_->setPlaceholderText(QStringLiteral("origin"));
+    sizeEdit(defaultRemoteEdit_);
     remoteForm->addRow(tr("Default Remote:"), defaultRemoteEdit_);
     form->addRow(remoteGroup);
 
     auto* credGroup = new QGroupBox(tr("Credentials"), page);
     auto* credForm = new QFormLayout(credGroup);
+    credForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     credentialHelperEdit_ = new QLineEdit(credGroup);
     credentialHelperEdit_->setReadOnly(true);
     credentialHelperEdit_->setPlaceholderText(tr("(not configured)"));
+    sizeEdit(credentialHelperEdit_);
     credForm->addRow(tr("Credential Helper:"), credentialHelperEdit_);
     form->addRow(credGroup);
 
@@ -355,7 +585,10 @@ QWidget* SettingsDialog::createAppearancePage()
     auto* layout = new QVBoxLayout(page);
 
     auto* form = new QFormLayout;
+    form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     themeCombo_ = new QComboBox(page);
+    themeCombo_->setMinimumWidth(180);
+    themeCombo_->setMaximumWidth(260);
     if (theme_)
         themeCombo_->addItems(theme_->availableThemes());
     form->addRow(tr("Theme:"), themeCombo_);
@@ -673,6 +906,49 @@ void SettingsDialog::loadSettings()
     if (bottomPaneSlider_) bottomPaneSlider_->setValue(pct);
     if (bottomPaneSpin_)   bottomPaneSpin_->setValue(pct);
 
+    // UI Design — startup window size
+    if (restoreLastSizeCheck_)
+        restoreLastSizeCheck_->setChecked(settings_->restoreLastWindowSize());
+    if (startupWidthSpin_)
+        startupWidthSpin_->setValue(settings_->startupWindowWidth());
+    if (startupHeightSpin_)
+        startupHeightSpin_->setValue(settings_->startupWindowHeight());
+
+    // UI Design — single global default dialog size + toggle
+    if (restoreLastDialogSizeCheck_)
+        restoreLastDialogSizeCheck_->setChecked(
+            settings_->restoreLastDialogSize());
+    if (defaultDialogWidthSpin_ && defaultDialogHeightSpin_) {
+        const QSize sz = settings_->defaultDialogSize();
+        defaultDialogWidthSpin_ ->setValue(sz.width());
+        defaultDialogHeightSpin_->setValue(sz.height());
+    }
+    if (currentDialogSizeLabel_) {
+        const QSize sz = size();
+        currentDialogSizeLabel_->setText(
+            tr("Current dialog size: %1 × %2 px")
+                .arg(sz.width()).arg(sz.height()));
+    }
+
+    // Refresh the live "Current window size" readout. Done here
+    // (not just at construction) so reopening the Settings dialog
+    // after the user dragged the main window picks up the new size
+    // without a relaunch. The label format is intentionally simple
+    // text so screen-reader users can also read it cleanly.
+    if (currentMainWindowSize_) {
+        if (auto* p = parentWidget()) {
+            QWidget* top = p->window();
+            if (top) {
+                const QSize sz = top->size();
+                currentMainWindowSize_->setText(
+                    tr("Current window size: %1 × %2 px")
+                        .arg(sz.width()).arg(sz.height()));
+            }
+        } else {
+            currentMainWindowSize_->setText(QString{});
+        }
+    }
+
     if (theme_) {
         int idx = themeCombo_->findText(theme_->currentTheme());
         if (idx >= 0)
@@ -749,6 +1025,76 @@ void SettingsDialog::apply()
     // and snaps the splitter to the new ratio live.
     if (bottomPaneSpin_)
         settings_->setBottomPanePercent(bottomPaneSpin_->value());
+
+    // UI Design — startup window size. Persist the values, then
+    // optionally resize the running main window so the user gets
+    // immediate feedback. We only resize live when "Restore previous"
+    // is OFF — when it's ON the spinboxes are disabled (the saved
+    // geometry takes priority on next launch), so there's nothing
+    // meaningful to apply to the current session.
+    const bool restoreLast = restoreLastSizeCheck_
+        && restoreLastSizeCheck_->isChecked();
+    if (restoreLastSizeCheck_)
+        settings_->setRestoreLastWindowSize(restoreLast);
+    if (startupWidthSpin_)
+        settings_->setStartupWindowWidth(startupWidthSpin_->value());
+    if (startupHeightSpin_)
+        settings_->setStartupWindowHeight(startupHeightSpin_->value());
+
+    if (!restoreLast && startupWidthSpin_ && startupHeightSpin_) {
+        // parentWidget() is the MainWindow; ->window() walks up to
+        // the top-level widget if the dialog were ever reparented
+        // under a child. Defensive against a null parent (which
+        // shouldn't happen for a modal settings dialog, but the
+        // dialog should still be usable in unit tests where it's
+        // constructed standalone).
+        if (QWidget* p = parentWidget()) {
+            QWidget* top = p->window();
+            if (top)
+                top->resize(startupWidthSpin_->value(),
+                            startupHeightSpin_->value());
+        }
+    }
+
+    // Default dialog size — persist. Takes effect on the next
+    // open of each dialog; we deliberately don't resize the
+    // running Settings dialog (it would jump out from under the
+    // user) or any open Commit dialog. The "Restore previous
+    // dialog size" toggle controls whether dialogs prefer their
+    // saved drag-resized geometry over the configured default
+    // when opened.
+    if (restoreLastDialogSizeCheck_)
+        settings_->setRestoreLastDialogSize(
+            restoreLastDialogSizeCheck_->isChecked());
+    if (defaultDialogWidthSpin_ && defaultDialogHeightSpin_) {
+        settings_->setDefaultDialogSize(
+            QSize(defaultDialogWidthSpin_->value(),
+                  defaultDialogHeightSpin_->value()));
+    }
+    // Refresh the "Current dialog size" label — if the user has
+    // dragged the Settings dialog since opening it, the size is
+    // likely different from what loadSettings() captured.
+    if (currentDialogSizeLabel_) {
+        const QSize sz = size();
+        currentDialogSizeLabel_->setText(
+            tr("Current dialog size: %1 × %2 px")
+                .arg(sz.width()).arg(sz.height()));
+    }
+
+    // Refresh the "Current window size" label after Apply — if
+    // the live resize above ran, the size is now different from
+    // what the label showed at dialog open.
+    if (currentMainWindowSize_) {
+        if (QWidget* p = parentWidget()) {
+            QWidget* top = p->window();
+            if (top) {
+                const QSize sz = top->size();
+                currentMainWindowSize_->setText(
+                    tr("Current window size: %1 × %2 px")
+                        .arg(sz.width()).arg(sz.height()));
+            }
+        }
+    }
 
     // Git
     settings_->setDefaultRemote(defaultRemoteEdit_->text().trimmed());

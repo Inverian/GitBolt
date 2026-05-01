@@ -1,4 +1,5 @@
 #include "dialogs/CherryPickDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QDateTime>
 #include <QDialogButtonBox>
@@ -27,7 +28,10 @@ CherryPickDialog::CherryPickDialog(QWidget* parent)
 
 void CherryPickDialog::setupUi() {
     setWindowTitle(tr("Cherry-Pick Commit"));
-    resize(520, 260);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "cherryPick");
 
     auto* mainLayout = new QVBoxLayout(this);
 

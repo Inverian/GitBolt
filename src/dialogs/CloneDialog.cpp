@@ -1,4 +1,5 @@
 #include "dialogs/CloneDialog.h"
+#include "conf/SettingsService.h"
 #include "git/Repository.h"
 
 #include <QDialogButtonBox>
@@ -22,7 +23,10 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
 {
     setWindowTitle(tr("Clone Repository"));
     setModal(true);
-    resize(560, 260);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "clone");
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 16, 16, 12);

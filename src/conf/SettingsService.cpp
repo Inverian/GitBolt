@@ -1,8 +1,11 @@
 #include "conf/SettingsService.h"
 
 #include <QCoreApplication>
+#include <QDialog>
 #include <QDir>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QScreen>
 
 namespace gitbolt::conf {
 
@@ -300,6 +303,246 @@ void SettingsService::saveWindowState(const QByteArray& state)
 QByteArray SettingsService::restoreWindowState() const
 {
     return settings_.value(QStringLiteral("window/state")).toByteArray();
+}
+
+// ---------------------------------------------------------------------------
+// Startup window size
+// ---------------------------------------------------------------------------
+//
+// When the user hasn't configured a value yet, default to ~80% of
+// the primary screen's available geometry, clamped to a sane range
+// so we don't pick something tiny on a phone-sized display or
+// stretch silly-wide on a 5K ultrawide. The setter clamps to wider
+// bounds — a typoed value should still be writable but not break
+// the UI on the next launch.
+//
+// `availableGeometry()` excludes the macOS dock and menu bar, which
+// is what we want — opening at full screenGeometry() would put the
+// title bar under the menu bar.
+
+namespace {
+
+// Functional minimums — below these the sidebar, repo view, and
+// inspector tabs start crowding to the point where the app stops
+// being usable. Setters clamp to these via qBound, so a typoed
+// smaller value (or one written by an older build) snaps up to the
+// floor on read AND on write. The dialog's QSpinBox shares the same
+// floor and auto-corrects any user input below it on focus-out.
+constexpr int kStartupWidthMin  = 1024;
+constexpr int kStartupWidthMax  = 8000;
+constexpr int kStartupHeightMin = 700;
+constexpr int kStartupHeightMax = 5000;
+
+QSize defaultStartupSize()
+{
+    // Preferred new-install default. We still respect the available
+    // screen size on small displays — a 1366 × 768 laptop would
+    // overflow at 1400 × 900, so we cap to ~95% of the available
+    // geometry as a safety net. Min floor is the functional minimum
+    // (kStartupWidthMin / kStartupHeightMin) so we never propose
+    // below the usable threshold.
+    constexpr int kPreferredW = 1400;
+    constexpr int kPreferredH = 900;
+    QScreen* scr = QGuiApplication::primaryScreen();
+    const QSize avail = scr ? scr->availableGeometry().size()
+                            : QSize(1920, 1080);
+    const int w = qMax(kStartupWidthMin,
+                       qMin(kPreferredW, int(avail.width()  * 0.95)));
+    const int h = qMax(kStartupHeightMin,
+                       qMin(kPreferredH, int(avail.height() * 0.95)));
+    return QSize(w, h);
+}
+
+} // namespace
+
+int SettingsService::startupWindowWidth() const
+{
+    if (settings_.contains(QStringLiteral("window/startupWidth"))) {
+        const int raw = settings_.value(
+            QStringLiteral("window/startupWidth")).toInt();
+        return qBound(kStartupWidthMin, raw, kStartupWidthMax);
+    }
+    return defaultStartupSize().width();
+}
+
+void SettingsService::setStartupWindowWidth(int width)
+{
+    settings_.setValue(QStringLiteral("window/startupWidth"),
+                       qBound(kStartupWidthMin, width, kStartupWidthMax));
+    emit settingsChanged();
+}
+
+int SettingsService::startupWindowHeight() const
+{
+    if (settings_.contains(QStringLiteral("window/startupHeight"))) {
+        const int raw = settings_.value(
+            QStringLiteral("window/startupHeight")).toInt();
+        return qBound(kStartupHeightMin, raw, kStartupHeightMax);
+    }
+    return defaultStartupSize().height();
+}
+
+void SettingsService::setStartupWindowHeight(int height)
+{
+    settings_.setValue(QStringLiteral("window/startupHeight"),
+                       qBound(kStartupHeightMin, height, kStartupHeightMax));
+    emit settingsChanged();
+}
+
+bool SettingsService::restoreLastWindowSize() const
+{
+    return settings_.value(
+        QStringLiteral("window/restoreLastSize"), true).toBool();
+}
+
+void SettingsService::setRestoreLastWindowSize(bool restore)
+{
+    settings_.setValue(QStringLiteral("window/restoreLastSize"), restore);
+    emit settingsChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Dialog default size
+// ---------------------------------------------------------------------------
+//
+// One global W × H pair shared across every popup dialog the user
+// can resize. Storage: dialog/defaultWidth, dialog/defaultHeight.
+// Built-in default is 1000 × 800 — large enough that content-heavy
+// dialogs (Commit, Rebase, Reflog) don't feel cramped on first
+// open, while still leaving room on a typical 1400-wide window.
+//
+// Each dialog calls loadDefaultDialogSize() in its constructor
+// and passes the result to resize(). Dialogs whose layout needs
+// more vertical or horizontal space than this default auto-grow
+// via Qt's minimum-size-hint propagation, so the user picking a
+// small default doesn't break a content-heavy dialog like Commit
+// or Rebase.
+//
+// Hard floor / ceiling protect against a typoed huge value
+// breaking the UI; the settings dialog UI applies a tighter
+// functional floor (kDefaultDialogWidthMin / Height) on top.
+// The setter also drops the Commit dialog's persisted drag-
+// resized geometry so a freshly-configured default isn't
+// silently shadowed by a stale saved size.
+
+namespace {
+
+constexpr int kDefaultDialogWidthMin     = 400;
+constexpr int kDefaultDialogWidthMax     = 8000;
+constexpr int kDefaultDialogHeightMin    = 300;
+constexpr int kDefaultDialogHeightMax    = 5000;
+constexpr int kDefaultDialogWidthDefault  = 1000;
+constexpr int kDefaultDialogHeightDefault = 800;
+
+QSettings makeStandaloneSettings()
+{
+    return QSettings(QSettings::IniFormat, QSettings::UserScope,
+                     QCoreApplication::organizationName().isEmpty()
+                         ? QStringLiteral("GitBolt")
+                         : QCoreApplication::organizationName(),
+                     QCoreApplication::applicationName().isEmpty()
+                         ? QStringLiteral("GitBolt")
+                         : QCoreApplication::applicationName());
+}
+
+QSize readDefaultSize(QSettings& s)
+{
+    const int rawW = s.value(QStringLiteral("dialog/defaultWidth"),
+                             kDefaultDialogWidthDefault).toInt();
+    const int rawH = s.value(QStringLiteral("dialog/defaultHeight"),
+                             kDefaultDialogHeightDefault).toInt();
+    return QSize(qBound(kDefaultDialogWidthMin,  rawW, kDefaultDialogWidthMax),
+                 qBound(kDefaultDialogHeightMin, rawH, kDefaultDialogHeightMax));
+}
+
+} // namespace
+
+QSize SettingsService::defaultDialogSize() const
+{
+    return readDefaultSize(const_cast<QSettings&>(settings_));
+}
+
+void SettingsService::setDefaultDialogSize(QSize size)
+{
+    settings_.setValue(QStringLiteral("dialog/defaultWidth"),
+                       qBound(kDefaultDialogWidthMin,
+                              size.width(), kDefaultDialogWidthMax));
+    settings_.setValue(QStringLiteral("dialog/defaultHeight"),
+                       qBound(kDefaultDialogHeightMin,
+                              size.height(), kDefaultDialogHeightMax));
+    // We don't proactively clear saved per-dialog geometry here.
+    // The "Restore previous dialog size" toggle in the settings
+    // dialog gives the user direct control: if they want their
+    // configured default to take effect on next open, they
+    // uncheck the toggle. Clearing here would silently throw
+    // away their drag-resized sizes — surprising behavior.
+    emit settingsChanged();
+}
+
+QSize SettingsService::loadDefaultDialogSize()
+{
+    QSettings s = makeStandaloneSettings();
+    return readDefaultSize(s);
+}
+
+bool SettingsService::restoreLastDialogSize() const
+{
+    return settings_.value(
+        QStringLiteral("dialog/restoreLastSize"), true).toBool();
+}
+
+void SettingsService::setRestoreLastDialogSize(bool restore)
+{
+    settings_.setValue(QStringLiteral("dialog/restoreLastSize"), restore);
+    emit settingsChanged();
+}
+
+namespace {
+
+// Storage key for one dialog's last drag-resized geometry. Keep
+// this in lockstep with applyConfiguredSize() — both readers and
+// writers must agree on the path.
+QString dialogGeomKey(const char* key)
+{
+    return QStringLiteral("layout/dialog/%1/geom")
+        .arg(QLatin1StringView(key));
+}
+
+} // namespace
+
+void SettingsService::applyConfiguredSize(QDialog* dlg, const char* key)
+{
+    if (!dlg || !key)
+        return;
+
+    QSettings s = makeStandaloneSettings();
+    const bool restoreLast = s.value(
+        QStringLiteral("dialog/restoreLastSize"), true).toBool();
+
+    // Initial sizing: prefer the user's last drag-resized geometry
+    // when the toggle is on AND we have something saved; otherwise
+    // fall back to the configured default. restoreGeometry returns
+    // false when the saved blob is malformed (corrupted settings,
+    // schema-version mismatch) — we treat that the same as no save.
+    bool sized = false;
+    if (restoreLast) {
+        const QByteArray geom =
+            s.value(dialogGeomKey(key)).toByteArray();
+        if (!geom.isEmpty())
+            sized = dlg->restoreGeometry(geom);
+    }
+    if (!sized)
+        dlg->resize(readDefaultSize(s));
+
+    // Save geometry on close. We use QDialog::finished because it
+    // fires whether the dialog was closed via accept(), reject(),
+    // or the OS-level close button (closeEvent calls reject() by
+    // default). Lambda captures `key` as a raw const char* — safe
+    // since these come from string literals at every call site.
+    QObject::connect(dlg, &QDialog::finished, dlg, [dlg, key](int) {
+        QSettings ss = makeStandaloneSettings();
+        ss.setValue(dialogGeomKey(key), dlg->saveGeometry());
+    });
 }
 
 // ---------------------------------------------------------------------------

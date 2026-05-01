@@ -98,6 +98,35 @@ private:
     QSpinBox* bottomPaneSpin_   = nullptr;
     QLabel*   bottomPanePreview_ = nullptr;
 
+    // UI Design page — startup window size. The check controls
+    // whether geometry is remembered across launches; when off,
+    // the spin boxes' width × height are applied verbatim each
+    // launch. When on, the spin boxes are disabled (the saved
+    // geometry takes priority).
+    QCheckBox* restoreLastSizeCheck_ = nullptr;
+    QSpinBox*  startupWidthSpin_     = nullptr;
+    QSpinBox*  startupHeightSpin_    = nullptr;
+
+    // UI Design page — current size of the parent (main) window,
+    // shown in muted text under the startup-size group so users
+    // can read off the size they want before typing it into the
+    // spinboxes. Refreshed on dialog open and after Apply.
+    QLabel* currentMainWindowSize_ = nullptr;
+
+    // UI Design page — single global default size that every
+    // popup dialog (Settings, Commit, Clone, Tag, Stash, Rebase,
+    // Reflog, Cherry-Pick, Worktree, Remotes, Text Editor,
+    // Stash Manager) reads in its constructor. The toggle works
+    // exactly like the one in the Default Window Size group: ON
+    // restores each dialog's last drag-resized size on next open
+    // and disables the spinboxes; OFF always uses the configured
+    // default. The current-size label is a live readout of THIS
+    // dialog's size — useful for picking values empirically.
+    QCheckBox* restoreLastDialogSizeCheck_ = nullptr;
+    QSpinBox*  defaultDialogWidthSpin_     = nullptr;
+    QSpinBox*  defaultDialogHeightSpin_    = nullptr;
+    QLabel*    currentDialogSizeLabel_     = nullptr;
+
     // Git config page
     QLineEdit* userNameEdit_ = nullptr;
     QLineEdit* userEmailEdit_ = nullptr;

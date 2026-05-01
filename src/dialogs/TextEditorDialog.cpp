@@ -1,4 +1,5 @@
 #include "dialogs/TextEditorDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QDialogButtonBox>
 #include <QFontDatabase>
@@ -34,7 +35,10 @@ QString TextEditorDialog::contents() const {
 }
 
 void TextEditorDialog::setupUi() {
-    resize(720, 480);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "textEditor");
 
     auto* layout = new QVBoxLayout(this);
 

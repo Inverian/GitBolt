@@ -1,4 +1,5 @@
 #include "dialogs/WorktreeDialog.h"
+#include "conf/SettingsService.h"
 
 #include <QFileDialog>
 #include <QFormLayout>
@@ -77,7 +78,10 @@ void WorktreeDialog::validateInput() {
 
 void WorktreeDialog::setupUI() {
     setWindowTitle(tr("Add Worktree"));
-    resize(500, 220);
+    // Global dialog default + per-dialog restore — see
+    // Settings → UI Design → Default Dialog Size. Helper sets
+    // initial size and wires up save-on-close.
+    conf::SettingsService::applyConfiguredSize(this, "worktree");
 
     auto* mainLayout = new QVBoxLayout(this);
 
