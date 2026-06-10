@@ -13,11 +13,18 @@
 
 #include <QColor>
 #include <QDateTime>
+#include <QDesktopServices>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QFileIconProvider>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QRegularExpression>
 #include <QShowEvent>
 #include <QSortFilterProxyModel>
@@ -27,6 +34,8 @@
 #include <QTabWidget>
 #include <QTextBrowser>
 #include <QTreeView>
+#include <QTreeWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <memory>
 #include <set>
@@ -217,7 +226,122 @@ QWidget* RepositoryView::buildFileTreeTab()
     fileTreeWidget_ = new widgets::FileTreeWidget(page);
     l->addWidget(fileTreeWidget_);
 
+    // Context-menu actions. Both read gitService_ at click time
+    // (it's injected via setGitService after construction).
+    connect(fileTreeWidget_, &widgets::FileTreeWidget::openExternallyRequested,
+            this, &RepositoryView::openFileExternally);
+    connect(fileTreeWidget_, &widgets::FileTreeWidget::showHistoryRequested,
+            this, &RepositoryView::showFileHistory);
+
     return page;
+}
+
+// Open the working-tree copy of a repo-relative path with the OS
+// default application. The file tree shows blobs at a specific
+// commit, but for "open externally" the workdir version is what
+// users expect (it's editable, and it exists as a real file —
+// historical blobs would need a temp-file export).
+void RepositoryView::openFileExternally(const QString& path)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+    const QString workdir =
+        QString::fromStdString(gitService_->repository()->workdir());
+    const QString full = QDir(workdir).filePath(path);
+    if (!QFileInfo::exists(full)) {
+        QMessageBox::information(this, tr("Open Externally"),
+            tr("%1 does not exist in the working tree (it may only "
+               "exist at an older commit).").arg(path));
+        return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(full));
+}
+
+// Compact file-history popup: every commit that touched the path
+// (rename-tracking via --follow), newest first. Double-clicking a
+// row (or the Go to Commit button) jumps the revision graph to
+// that commit. Built as an ad-hoc dialog matching how MainWindow
+// does its one-off pickers; if file history grows features (diffs
+// per revision, checkout-file-at) it should graduate to its own
+// class in src/dialogs/.
+void RepositoryView::showFileHistory(const QString& path)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+
+    // %x09 = tab separator; fields: full sha, short sha, date,
+    // author, subject.
+    auto out = gitService_->process().run(
+        {"log", "--follow", "--date=short",
+         "--pretty=format:%H%x09%h%x09%ad%x09%an%x09%s", "--",
+         path.toStdString()});
+    if (!out.ok() || !out.value().success()) {
+        QMessageBox::warning(this, tr("File History"),
+            tr("Could not load history for %1").arg(path));
+        return;
+    }
+
+    auto* dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("History — %1").arg(path));
+    conf::SettingsService::applyConfiguredSize(dlg, "filehistory");
+
+    auto* layout = new QVBoxLayout(dlg);
+
+    auto* tree = new QTreeWidget(dlg);
+    tree->setHeaderLabels(
+        {tr("Commit"), tr("Date"), tr("Author"), tr("Message")});
+    tree->setRootIsDecorated(false);
+    tree->setAlternatingRowColors(true);
+    tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    const QString stdoutText =
+        QString::fromStdString(out.value().stdoutData);
+    const QStringList lines =
+        stdoutText.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& line : lines) {
+        const QStringList cols = line.split(QLatin1Char('\t'));
+        if (cols.size() < 5)
+            continue;
+        auto* item = new QTreeWidgetItem(
+            {cols[1], cols[2], cols[3], cols[4]});
+        item->setData(0, Qt::UserRole, cols[0]); // full sha
+        tree->addTopLevelItem(item);
+    }
+    tree->header()->resizeSection(0, 90);
+    tree->header()->resizeSection(1, 90);
+    tree->header()->resizeSection(2, 140);
+    layout->addWidget(new QLabel(
+        tr("%1 revision(s) touch this file:").arg(tree->topLevelItemCount()),
+        dlg));
+    layout->addWidget(tree, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dlg);
+    auto* gotoBtn = buttons->addButton(tr("Go to Commit"),
+                                       QDialogButtonBox::ActionRole);
+    layout->addWidget(buttons);
+
+    auto jumpToSelected = [this, tree, dlg]() {
+        auto* item = tree->currentItem();
+        if (!item)
+            return;
+        const QString sha = item->data(0, Qt::UserRole).toString();
+        if (graphWidget_ && graphWidget_->selectCommit(sha)) {
+            dlg->close();
+        } else {
+            // Paged log: the commit may simply not be loaded yet.
+            QMessageBox::information(dlg, tr("File History"),
+                tr("Commit %1 isn't in the loaded portion of the "
+                   "log — scroll the revision list further back "
+                   "and try again.").arg(sha.left(7)));
+        }
+    };
+    connect(gotoBtn, &QPushButton::clicked, dlg, jumpToSelected);
+    connect(tree, &QTreeWidget::itemDoubleClicked, dlg,
+            [jumpToSelected](QTreeWidgetItem*, int) { jumpToSelected(); });
+    connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::close);
+
+    dlg->show();
 }
 
 // GPG tab — placeholder. GitExtensions surfaces commit signature

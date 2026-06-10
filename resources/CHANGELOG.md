@@ -5,6 +5,44 @@ kept most-recent-first.
 
 ## Unreleased
 
+### Fixed
+- Branch sidebar actions actually work now. The "⊕ New Branch"
+  button and six of the eight context-menu items (New, Rename,
+  Merge into current, Push, Set Upstream, Delete) emitted signals
+  that nothing listened to — the prompt appeared, the click landed,
+  and the input went nowhere. All are wired: create/delete/push go
+  through GitService; rename / merge / set-upstream run through the
+  git CLI with the same error dialog the Commands-menu equivalents
+  use. Only Checkout (and double-click) was connected before.
+- Interactive rebase can now be continued, skipped, or aborted from
+  the UI. The rebase dialog's embedded Continue / Skip / Abort
+  buttons (enabled once a rebase starts) and the widget's own Start
+  Rebase button emitted unconnected signals; the dialog now forwards
+  all four to the host, which drives the existing
+  GitService::rebaseContinue / rebaseSkip / rebaseAbort. Previously
+  the post-rebase status message literally told users to "use
+  Continue/Abort" — buttons that did nothing.
+- File Tree tab context menu: "Open Externally" opens the
+  working-tree copy with the OS default app, and "Show History…"
+  opens a new file-history popup (every commit touching the path,
+  rename-tracking via `git log --follow`; double-click a row to
+  jump the revision graph to that commit). Both were dead clicks.
+- Manage Submodules: Sync and Deinit buttons now run
+  `git submodule sync` / `deinit -f` (Deinit asks for confirmation
+  first since it clears the submodule's working tree). Both were
+  visible but unwired; only Init and Update worked.
+- The sidebar's Tags category now actually lists tags. refreshTags
+  results were emitted to a signal nobody consumed and no UI path
+  ever requested a tag refresh — the category (and its View → Show
+  tags toggle) was permanently empty. Tags load on repo open, on
+  toolbar Refresh, and after create/delete tag.
+- Staging and branch operations no longer fail silently: stage /
+  unstage / stage-all / create-branch / delete-branch now emit
+  operationFailed on libgit2 errors, so the existing global error
+  toast actually fires (previously a failed click looked identical
+  to a successful one). Create-branch on an unborn-HEAD repo now
+  explains itself instead of swallowing the click.
+
 ### Added
 - Non-blocking repository open: File → Open / Recent / dashboard /
   clone / CLI all switch to the repository view immediately and

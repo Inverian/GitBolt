@@ -263,11 +263,20 @@ void GitService::refreshBranches() {
 // that's mid-libgit2-call and corrupt the heap. Same lock as the
 // worker lambdas, so a worker waits for the mutator to finish, and
 // vice versa.
+// Each mutator surfaces libgit2 failures via operationFailed —
+// MainWindow has a global handler (and CommitDialog its own), so a
+// failed click produces visible feedback instead of the button
+// silently doing nothing. The refresh that follows runs on both
+// paths: even after a failure the on-disk state may have shifted
+// and a resync is cheap.
 void GitService::stageFile(const QString& path) {
     if (!repo_) return;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        repo_->stageFile(path.toStdString());
+        auto result = repo_->stageFile(path.toStdString());
+        if (!result)
+            emit operationFailed(QStringLiteral("stage"),
+                QString::fromStdString(result.error().message()));
     }
     refreshStatus();
 }
@@ -276,7 +285,10 @@ void GitService::unstageFile(const QString& path) {
     if (!repo_) return;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        repo_->unstageFile(path.toStdString());
+        auto result = repo_->unstageFile(path.toStdString());
+        if (!result)
+            emit operationFailed(QStringLiteral("unstage"),
+                QString::fromStdString(result.error().message()));
     }
     refreshStatus();
 }
@@ -285,7 +297,10 @@ void GitService::stageAll() {
     if (!repo_) return;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        repo_->stageAll();
+        auto result = repo_->stageAll();
+        if (!result)
+            emit operationFailed(QStringLiteral("stage all"),
+                QString::fromStdString(result.error().message()));
     }
     refreshStatus();
 }
@@ -362,8 +377,19 @@ void GitService::createBranch(const QString& name) {
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
         auto headResult = repo_->head();
-        if (!headResult) return;
-        repo_->createBranch(name.toStdString(), *headResult);
+        if (!headResult) {
+            // Most common cause: unborn HEAD (fresh repo, no
+            // commits) — nothing for the branch to point at yet.
+            // Without this signal the New Branch button appeared
+            // to simply swallow the click.
+            emit operationFailed(QStringLiteral("create branch"),
+                QString::fromStdString(headResult.error().message()));
+            return;
+        }
+        auto result = repo_->createBranch(name.toStdString(), *headResult);
+        if (!result)
+            emit operationFailed(QStringLiteral("create branch"),
+                QString::fromStdString(result.error().message()));
     }
     refreshBranches();
 }
@@ -372,7 +398,10 @@ void GitService::deleteBranch(const QString& name) {
     if (!repo_) return;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        repo_->deleteBranch(name.toStdString());
+        auto result = repo_->deleteBranch(name.toStdString());
+        if (!result)
+            emit operationFailed(QStringLiteral("delete branch"),
+                QString::fromStdString(result.error().message()));
     }
     refreshBranches();
 }

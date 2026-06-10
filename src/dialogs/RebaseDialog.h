@@ -38,8 +38,19 @@ signals:
     /// can resolve commits that would be rebased.
     void targetRefChanged(const QString& ref);
 
-    /// Emitted when the user confirms the dialog (OK pressed).
+    /// Emitted when the user confirms the dialog (OK pressed) or
+    /// clicks the embedded widget's Start Rebase button — both
+    /// start paths funnel through this one signal.
     void rebaseRequested(const gitbolt::git::RebasePlan& plan);
+
+    /// Forwards of the embedded InteractiveRebaseWidget's control
+    /// buttons so the host can drive GitService::rebaseContinue /
+    /// rebaseSkip / rebaseAbort when a started rebase pauses on a
+    /// conflict. The widget enables these buttons after Start; the
+    /// dialog stays open (shown non-modally) for exactly this.
+    void rebaseContinueRequested();
+    void rebaseSkipRequested();
+    void rebaseAbortRequested();
 
 private slots:
     void onBranchSelected(int index);

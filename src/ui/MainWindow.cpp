@@ -386,6 +386,7 @@ void MainWindow::createMenuBar()
         gitService_->refreshBranches();
         gitService_->refreshStashes();
         gitService_->refreshSubmodules();
+        gitService_->refreshTags();
 
         if (!remoteOpClearTimer_) {
             remoteOpClearTimer_ = new QTimer(this);
@@ -535,9 +536,10 @@ void MainWindow::createMenuBar()
                         widget->setSubmodules(std::move(s));
                     });
 
-            // Row actions → GitService. deinit/sync aren't exposed
-            // as async ops on GitService yet, so we no-op here and
-            // pick them up in Phase 3 when the backend lands.
+            // Row actions → GitService where a wrapper exists;
+            // sync/deinit run through the git CLI (libgit2 has no
+            // first-class equivalent) with the same error dialog
+            // the bulk submodule menu items use.
             connect(widget, &widgets::SubmoduleWidget::initRequested,
                     this, [this](const QString& n) {
                         gitService_->submoduleInit(n);
@@ -545,6 +547,36 @@ void MainWindow::createMenuBar()
             connect(widget, &widgets::SubmoduleWidget::updateRequested,
                     this, [this](const QString& n) {
                         gitService_->submoduleUpdate(n);
+                    });
+            connect(widget, &widgets::SubmoduleWidget::syncRequested,
+                    this, [this](const QString& n) {
+                        auto out = gitService_->process().run(
+                            {"submodule", "sync", "--",
+                             n.toStdString()});
+                        handleProcessResult(
+                            this, tr("Submodule Sync Failed"), out);
+                        gitService_->refreshSubmodules();
+                    });
+            connect(widget, &widgets::SubmoduleWidget::deinitRequested,
+                    this, [this, dlg](const QString& n) {
+                        // Deinit empties the submodule's working
+                        // tree — confirm before running, and pass
+                        // -f so local modifications don't make git
+                        // refuse after the user already said yes.
+                        const auto answer = QMessageBox::question(
+                            dlg, tr("Deinit Submodule"),
+                            tr("Deinit '%1'?\n\nThis clears the "
+                               "submodule's working tree (its "
+                               "content can be restored later with "
+                               "Init + Update).").arg(n));
+                        if (answer != QMessageBox::Yes)
+                            return;
+                        auto out = gitService_->process().run(
+                            {"submodule", "deinit", "-f", "--",
+                             n.toStdString()});
+                        handleProcessResult(
+                            this, tr("Submodule Deinit Failed"), out);
+                        gitService_->refreshSubmodules();
                     });
             connect(widget, &widgets::SubmoduleWidget::openRequested,
                     this, [](const QString& p) {
@@ -2085,6 +2117,17 @@ void MainWindow::createMenuBar()
                 gitService_->interactiveRebase(plan);
             });
 
+            // Conflict-resolution controls: the embedded widget
+            // enables Continue / Skip / Abort once a rebase has
+            // started, and the dialog is shown non-modally so it
+            // stays available while the rebase is paused.
+            connect(dlg, &dialogs::RebaseDialog::rebaseContinueRequested,
+                    gitService_, &services::GitService::rebaseContinue);
+            connect(dlg, &dialogs::RebaseDialog::rebaseSkipRequested,
+                    gitService_, &services::GitService::rebaseSkip);
+            connect(dlg, &dialogs::RebaseDialog::rebaseAbortRequested,
+                    gitService_, &services::GitService::rebaseAbort);
+
             // rebaseComplete is async — surface to the status bar
             // so the user knows whether it ran cleanly. Connection
             // is owned by `this` so it persists across rebases;
@@ -3460,6 +3503,16 @@ void MainWindow::setupConnections()
     connect(gitService_, &services::GitService::branchesReady,
             this, &MainWindow::onBranchesReady);
 
+    // Tags feed the sidebar's Tags category. Without this connect
+    // (and the refreshTags() call in onRepositoryOpened) the
+    // category sat permanently empty — refreshTags results were
+    // emitted to nobody.
+    connect(gitService_, &services::GitService::tagsReady,
+            this, [this](std::vector<git::TagInfo> tags) {
+        if (repoView_)
+            repoView_->setTags(std::move(tags));
+    });
+
     // Live count for the toolbar's Commit button — shows how many
     // working-tree files have changes the user could commit. We
     // count any entry whose status isn't Current/Ignored, which
@@ -3562,10 +3615,51 @@ void MainWindow::setupConnections()
     connect(dashboardView_, &DashboardView::cloneRequested,
             this, &MainWindow::cloneRepository);
 
-    // --- Branch tree: checkout (BranchTreeWidget lives inside RepositoryView) ---
+    // --- Branch tree actions (BranchTreeWidget lives inside RepositoryView).
+    // Every context-menu entry and the sidebar's "New Branch" button
+    // routes through these. createBranch/deleteBranch go through
+    // GitService (which emits operationFailed on error); rename /
+    // merge / set-upstream have no libgit2 wrapper yet so they run
+    // through the git CLI with the same handleProcessResult feedback
+    // the Commands-menu equivalents use.
     if (auto* branchTree = repoView_->branchTree()) {
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRequested,
                 gitService_, &services::GitService::checkoutBranch);
+        connect(branchTree, &widgets::BranchTreeWidget::createBranchRequested,
+                gitService_, &services::GitService::createBranch);
+        connect(branchTree, &widgets::BranchTreeWidget::deleteBranchRequested,
+                gitService_, &services::GitService::deleteBranch);
+        connect(branchTree, &widgets::BranchTreeWidget::pushRequested,
+                gitService_, &services::GitService::push);
+        connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
+                this, [this](const QString& oldName, const QString& newName) {
+            if (!gitService_ || !gitService_->isOpen()) return;
+            auto out = gitService_->process().run(
+                {"branch", "-m", oldName.toStdString(),
+                 newName.toStdString()});
+            handleProcessResult(this, tr("Rename Branch Failed"), out);
+            gitService_->refreshBranches();
+        });
+        connect(branchTree, &widgets::BranchTreeWidget::mergeRequested,
+                this, [this](const QString& name) {
+            if (!gitService_ || !gitService_->isOpen()) return;
+            auto out = gitService_->process().run(
+                {"merge", name.toStdString()});
+            handleProcessResult(this, tr("Merge Failed"), out);
+            gitService_->refreshStatus();
+            gitService_->refreshLog();
+            gitService_->refreshBranches();
+        });
+        connect(branchTree, &widgets::BranchTreeWidget::setUpstreamRequested,
+                this, [this](const QString& branch, const QString& upstream) {
+            if (!gitService_ || !gitService_->isOpen()) return;
+            auto out = gitService_->process().run(
+                {"branch",
+                 "--set-upstream-to=" + upstream.toStdString(),
+                 branch.toStdString()});
+            handleProcessResult(this, tr("Set Upstream Failed"), out);
+            gitService_->refreshBranches();
+        });
     }
 }
 
@@ -3755,9 +3849,10 @@ void MainWindow::onRepositoryOpened(const QString& path)
         }
     }
 
-    // Refresh submodules and stashes for the sidebar.
+    // Refresh the remaining sidebar categories.
     gitService_->refreshStashes();
     gitService_->refreshSubmodules();
+    gitService_->refreshTags();
 
     statusBar()->showMessage(tr("Opened: %1").arg(path), 3000);
 }
@@ -3817,6 +3912,7 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         gitService_->refreshBranches();
         gitService_->refreshStashes();
         gitService_->refreshSubmodules();
+        gitService_->refreshTags();
     } else {
         // Nothing usable to fall back to — home screen.
         setWindowTitle(QStringLiteral("GitBolt"));

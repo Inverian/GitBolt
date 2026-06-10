@@ -101,6 +101,12 @@ public:
 public slots:
     void onCommitSelected(const QString& commitHash);
 
+private slots:
+    /// File Tree tab context-menu actions ("Open Externally" /
+    /// "Show History…"). Paths are repo-relative.
+    void openFileExternally(const QString& path);
+    void showFileHistory(const QString& path);
+
 protected:
     void showEvent(QShowEvent* e) override;
 
