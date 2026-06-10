@@ -50,6 +50,7 @@ private slots:
     void openRepository();
     void cloneRepository();
     void onRepositoryOpened(const QString& path);
+    void onRepositoryOpenFailed(const QString& path, const QString& error);
     void onLogReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches);
     void showAbout();
@@ -64,6 +65,12 @@ private:
     /// is open (home screen / after Close) and `true` after a
     /// repo is successfully opened.
     void setRepoOnlyMenusEnabled(bool on);
+    /// Enable or disable the repo-dependent toolbar/menu actions
+    /// (refresh, fetch, pull, push, commit, filter, branch combo).
+    /// Disabled on the home screen, after Close, and while an
+    /// async repository open is in flight (so Pull/Commit can't
+    /// fire against the previous repo mid-open).
+    void setRepoActionsEnabled(bool on);
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();
@@ -84,6 +91,21 @@ private:
     conf::SettingsService*  settingsService_ = nullptr;
     conf::ThemeService*     themeService_    = nullptr;  // owned by main()
     models::CommitLogModel* commitLogModel_  = nullptr;
+
+    // Async-open state. pendingOpenPath_ is non-empty while a
+    // GitService::openRepositoryAsync is in flight; the snapshot
+    // pair records where the user was before the optimistic switch
+    // to the repo view so a failed open can put them back (only the
+    // FIRST open of a burst snapshots — a second open while one is
+    // pending must not capture the loading screen itself).
+    // awaitingInitialLog_ latches the spinner: it's armed on open
+    // and cleared by the first logReady(offset==0), which is
+    // guaranteed to arrive (refreshLog emits an empty page even on
+    // walk errors).
+    QString  pendingOpenPath_;
+    QWidget* widgetBeforeOpen_ = nullptr;
+    QString  titleBeforeOpen_;
+    bool     awaitingInitialLog_ = false;
 
     QStackedWidget* centralStack_  = nullptr;
     DashboardView*  dashboardView_ = nullptr;

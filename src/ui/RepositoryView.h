@@ -27,6 +27,7 @@ namespace gitbolt::widgets {
 class BranchTreeWidget;
 class DiffViewerWidget;
 class FileTreeWidget;
+class LoadingOverlayWidget;
 class RevisionGraphWidget;
 class TerminalWidget;
 } // namespace gitbolt::widgets
@@ -75,6 +76,14 @@ public:
     /// Called by MainWindow when switching repositories so stale
     /// data from the previous repo isn't visible.
     void resetInspectorTabs();
+
+    /// Busy overlay covering the whole repo view, shown while an
+    /// asynchronous repository open is populating the models (the
+    /// overlay also blocks interaction with the still-empty panes).
+    /// MainWindow shows it when an open starts and hides it when
+    /// the first commit-log page arrives (or the open fails).
+    void showLoading(const QString& message);
+    void hideLoading();
 
     // Splitter persistence — called by MainWindow at shutdown.
     QByteArray saveRepoSplitterH() const;
@@ -145,6 +154,11 @@ private:
     // Splitters
     QSplitter* mainHSplitter_ = nullptr;
     QSplitter* rightVSplitter_ = nullptr;
+
+    // Busy overlay for async repository opens. Lazily created on
+    // first showLoading() so the common fast-open path never pays
+    // for it.
+    widgets::LoadingOverlayWidget* loadingOverlay_ = nullptr;
 
     // One-shot restore guard (see showEvent).
     bool restored_ = false;

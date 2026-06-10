@@ -49,6 +49,9 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - Multi-repository session support
 
 ### User Experience
+- Non-blocking repository open — the repo view appears instantly with
+  a loading spinner while commits, branches, and status stream in from
+  worker threads (no UI freeze even on huge working trees)
 - Light, Dark, and System theme modes
 - Customizable code font and tab size
 - Configurable keyboard shortcuts

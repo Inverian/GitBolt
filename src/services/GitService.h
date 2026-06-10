@@ -4,6 +4,7 @@
 #include "watcher/FileWatcher.h"
 #include <QObject>
 #include <QStringList>
+#include <atomic>
 #include <memory>
 #include <mutex>
 
@@ -13,8 +14,22 @@ class GitService : public QObject {
     Q_OBJECT
 public:
     explicit GitService(QObject* parent = nullptr);
+    ~GitService() override;
 
+    /// Synchronous open — blocks the calling thread on libgit2 open
+    /// AND the working-tree watch walk. Kept for RepoManager and
+    /// tests; interactive UI paths should use openRepositoryAsync()
+    /// so large repositories don't freeze the window.
     bool openRepository(const QString& path);
+
+    /// Non-blocking open: git_repository_open runs on a worker, the
+    /// working-tree watch enumeration runs on another worker, and
+    /// completion is reported via repositoryOpened (success) or
+    /// repositoryOpenFailed (failure). A newer openRepositoryAsync /
+    /// openRepository / closeRepository call supersedes an in-flight
+    /// one — the stale result is discarded without any signal.
+    void openRepositoryAsync(const QString& path);
+
     void closeRepository();
     bool isOpen() const;
     git::Repository* repository() const;
@@ -134,6 +149,7 @@ public:
 
 signals:
     void repositoryOpened(const QString& path);
+    void repositoryOpenFailed(const QString& path, const QString& error);
     void repositoryClosed();
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
@@ -157,11 +173,36 @@ signals:
     void maintenanceComplete(const QString& output);
 
 private:
-    std::unique_ptr<git::Repository> repo_;
+    /// Kicks the working-tree watch enumeration onto a worker and
+    /// applies the result on the main thread (QFileSystemWatcher is
+    /// not thread-safe). `gen` ties the apply to the open that
+    /// requested it.
+    void startWatchEnumeration(const QString& path, quint64 gen);
+
+    // shared_ptr (not unique_ptr) for two reasons: the async-open
+    // worker hands a freshly opened Repository back through a
+    // QFuture, which requires a copyable result type; and refresh
+    // workers capture a shared_ptr so a repo swap mid-refresh can't
+    // destroy the object under their feet (they finish against the
+    // old repo, then notice it's stale and drop their result).
+    std::shared_ptr<git::Repository> repo_;
     util::AsyncRunner runner_;
     watcher::FileWatcher watcher_;
     LogScope logScope_ = LogScope::Head;
     QStringList selectedBranches_;
+
+    // Monotonic token for open/close operations. Bumped on every
+    // openRepository / openRepositoryAsync / closeRepository call
+    // (main thread only); async completions capture the value at
+    // start and discard themselves if it moved on — so a rapid
+    // second open cleanly supersedes the first with no stale
+    // signals.
+    quint64 openGeneration_ = 0;
+
+    // Cancellation flag for the in-flight watch-directory walk.
+    // Replaced (not just toggled) per enumeration so each walk has
+    // its own flag; the old walk sees its flag flip and bails.
+    std::shared_ptr<std::atomic<bool>> watchEnumCancel_;
 
     // libgit2 is not safe for concurrent access on a single
     // git_repository*. AsyncRunner submits to the global QThreadPool,

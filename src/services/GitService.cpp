@@ -10,10 +10,28 @@ GitService::GitService(QObject* parent)
     });
 }
 
+GitService::~GitService() {
+    // Abort any in-flight watch-directory walk so app shutdown
+    // isn't held up by a worker stat()ing a huge tree for nothing.
+    if (watchEnumCancel_)
+        watchEnumCancel_->store(true);
+}
+
 bool GitService::openRepository(const QString& path) {
+    // A sync open supersedes any pending async open (and its
+    // enumeration) the same way a newer async open would.
+    ++openGeneration_;
+    if (watchEnumCancel_)
+        watchEnumCancel_->store(true);
+
     auto result = git::Repository::open(path.toStdString());
     if (!result) return false;
-    repo_ = std::make_unique<git::Repository>(std::move(*result));
+    {
+        // Swap under the libgit2 mutex so an in-flight refresh
+        // worker can't have the old repo destroyed mid-call.
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        repo_ = std::make_shared<git::Repository>(std::move(*result));
+    }
     watcher_.watchRepository(path);
     emit repositoryOpened(path);
     refreshStatus();
@@ -22,9 +40,97 @@ bool GitService::openRepository(const QString& path) {
     return true;
 }
 
+void GitService::openRepositoryAsync(const QString& path) {
+    const quint64 gen = ++openGeneration_;
+    if (watchEnumCancel_)
+        watchEnumCancel_->store(true);
+
+    // Worker outcome: exactly one of repo / error is set. Must be
+    // copyable + default-constructible for QFutureWatcher::result().
+    struct OpenOutcome {
+        std::shared_ptr<git::Repository> repo;
+        QString error;
+    };
+
+    runner_.runWithResult<OpenOutcome>(
+        [path]() -> OpenOutcome {
+            // Fresh git_repository* — no repoMutex_ needed; nothing
+            // else can touch this object until we publish it below.
+            // Same pattern CloneDialog uses for git_clone.
+            auto result = git::Repository::open(path.toStdString());
+            if (!result)
+                return { nullptr,
+                         QString::fromStdString(result.error().message()) };
+            return { std::make_shared<git::Repository>(std::move(*result)),
+                     QString() };
+        },
+        [this, path, gen](OpenOutcome outcome) {
+            // Main thread. A newer open/close superseded us — drop
+            // everything silently (the Repository, if any, is
+            // destroyed with the outcome).
+            if (gen != openGeneration_)
+                return;
+
+            if (!outcome.repo) {
+                emit repositoryOpenFailed(path, outcome.error);
+                return;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(repoMutex_);
+                repo_ = std::move(outcome.repo);
+            }
+
+            // Cheap, immediate watches (.git internals + repo root)
+            // now; the expensive working-tree walk goes to a worker.
+            watcher_.watchGitInternals(path);
+            startWatchEnumeration(path, gen);
+
+            // Emit BEFORE kicking refreshes: onRepositoryOpened
+            // handlers read repository() (headBranchName etc.) on
+            // the main thread, and direct-connection slots running
+            // synchronously inside this emit are guaranteed to
+            // finish before any refresh worker grabs repoMutex_.
+            emit repositoryOpened(path);
+            refreshStatus();
+            refreshLog();
+            refreshBranches();
+        });
+}
+
+void GitService::startWatchEnumeration(const QString& path, quint64 gen) {
+    auto cancel = std::make_shared<std::atomic<bool>>(false);
+    watchEnumCancel_ = cancel;
+
+    runner_.runWithResult<QStringList>(
+        [path, cancel]() {
+            // Pure filesystem walk — no libgit2, no QFileSystemWatcher,
+            // so no mutex. Captures only value copies; safe even if
+            // the service is torn down while we run.
+            return watcher::FileWatcher::enumerateWatchDirs(
+                path, 4096, [cancel]() { return cancel->load(); });
+        },
+        [this, path, gen](QStringList dirs) {
+            if (gen != openGeneration_)
+                return;
+            // Applied on the main thread (QFileSystemWatcher's
+            // thread); FileWatcher chunks the registrations across
+            // event-loop ticks internally.
+            watcher_.addWatchPaths(path, dirs);
+        });
+}
+
 void GitService::closeRepository() {
+    // Invalidate any in-flight async open + watch enumeration.
+    ++openGeneration_;
+    if (watchEnumCancel_)
+        watchEnumCancel_->store(true);
+
     watcher_.stop();
-    repo_.reset();
+    {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        repo_.reset();
+    }
     emit repositoryClosed();
 }
 
@@ -36,11 +142,20 @@ git::GitProcess GitService::process() const {
     return repo_->process();
 }
 
+// Refresh workers capture repo_ as a shared_ptr (pinning the object
+// alive across a concurrent repo swap) and re-check `r == repo_`
+// under repoMutex_ before doing any work: if the user opened a
+// different repository while this job sat in the thread-pool queue,
+// the job must neither touch the swapped-out repo nor emit results
+// the UI would misattribute to the new one. Reading repo_ from the
+// worker is safe because every mutation of repo_ happens under
+// repoMutex_ (openRepository / openRepositoryAsync / closeRepository).
 void GitService::refreshStatus() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->status();
         if (result) emit statusReady(std::move(*result));
     });
@@ -48,15 +163,24 @@ void GitService::refreshStatus() {
 
 void GitService::refreshLog(int offset, int count) {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     const LogScope scope = logScope_;
     // Snapshot so the worker lambda doesn't race with a UI-thread
     // setSelectedBranches() during the walk.
     const QStringList selected = selectedBranches_;
     runner_.run([this, r, offset, count, scope, selected]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto walk = r->createRevWalk();
-        if (!walk) return;
+        if (!walk) {
+            // Still emit for the initial page: the UI uses the first
+            // logReady(offset==0) as "loading finished" (it closes
+            // the open-repo spinner), so error paths must produce
+            // closure too — an empty log, same end state as today.
+            if (offset == 0)
+                emit logReady(std::vector<git::CommitData>{}, 0);
+            return;
+        }
         walk->setSorting(git::SortOrder::TopologicalTime);
         if (scope == LogScope::AllLocalBranches) {
             // Push every local branch tip so the walk includes
@@ -102,7 +226,10 @@ void GitService::refreshLog(int offset, int count) {
             walk->pushHead();
         }
         auto commits = walk->next(static_cast<size_t>(count));
-        if (commits) emit logReady(std::move(*commits), offset);
+        if (commits)
+            emit logReady(std::move(*commits), offset);
+        else if (offset == 0)
+            emit logReady(std::vector<git::CommitData>{}, 0);
     });
 }
 
@@ -120,9 +247,10 @@ void GitService::setSelectedBranches(const QStringList& branchNames) {
 
 void GitService::refreshBranches() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->allBranches();
         if (result) emit branchesReady(std::move(*result));
     });
@@ -556,9 +684,10 @@ void GitService::stashDrop(int index) {
 
 void GitService::refreshStashes() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->stashes();
         if (result) emit stashesReady(std::move(*result));
     });
@@ -570,9 +699,10 @@ void GitService::refreshStashes() {
 
 void GitService::refreshTags() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->tags();
         if (result) emit tagsReady(std::move(*result));
     });
@@ -617,9 +747,10 @@ void GitService::deleteTag(const QString& name) {
 
 void GitService::refreshSubmodules() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->submodules();
         if (result) emit submodulesReady(std::move(*result));
     });
@@ -657,9 +788,10 @@ void GitService::submoduleUpdate(const QString& name) {
 
 void GitService::refreshWorktrees() {
     if (!repo_) return;
-    auto* r = repo_.get();
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
         auto result = r->worktrees();
         if (result) emit worktreesReady(std::move(*result));
     });

@@ -3,8 +3,22 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
+#include <QMetaObject>
+
+#include <algorithm>
 
 namespace gitbolt::watcher {
+
+namespace {
+// How many directories to register with QFileSystemWatcher per
+// event-loop tick. Each addPaths() call restarts the underlying
+// FSEvents stream on macOS (and re-registers inotify watches on
+// Linux), so we want few, large batches — but a single 4096-path
+// batch can still take long enough to stutter the UI right when
+// the repo view is animating in. 512 per tick keeps each slice
+// well under a frame while finishing the whole cap in 8 ticks.
+constexpr int kAddPathsChunk = 512;
+} // namespace
 
 FileWatcher::FileWatcher(QObject* parent) : QObject(parent) {
     debounceTimer_.setSingleShot(true);
@@ -15,6 +29,11 @@ FileWatcher::FileWatcher(QObject* parent) : QObject(parent) {
 }
 
 void FileWatcher::watchRepository(const QString& repoPath) {
+    watchGitInternals(repoPath);
+    addWatchPaths(repoPath, enumerateWatchDirs(repoPath));
+}
+
+void FileWatcher::watchGitInternals(const QString& repoPath) {
     stop();
     repoPath_ = repoPath;
 
@@ -28,32 +47,42 @@ void FileWatcher::watchRepository(const QString& repoPath) {
         watcher_.addPath(gitDir + "/refs");
     }
 
-    // Also watch the working tree so editing a file in an external
-    // editor triggers a status refresh in GitBolt. QFileSystemWatcher
-    // on macOS uses FSEvents under the hood, which is efficient for
-    // directory-level monitoring even on large trees.
+    // Watch the repo root immediately too — root-level edits are
+    // noticed even while the full working-tree walk is still
+    // running on a worker thread.
+    watcher_.addPath(repoPath);
+}
+
+QStringList FileWatcher::enumerateWatchDirs(
+    const QString& repoPath,
+    int maxDirs,
+    const std::function<bool()>& cancelled)
+{
+    // Walk the working tree and collect every directory (skipping
+    // .git/ and a few noisy patterns like node_modules/, build/,
+    // and .venv/ that are almost always in .gitignore). The total
+    // is capped to keep kqueue/FSEvents happy on very large repos —
+    // if a repo exceeds the cap, the user won't get auto-refresh
+    // for the unwatched subtrees but everything else keeps working.
     //
-    // Implementation note: we walk the tree once at open time and
-    // add every directory (skipping .git/ and anything matching a
-    // few noisy patterns like node_modules/, build/, and .venv/ that
-    // are almost always in .gitignore). We cap the total number of
-    // watched paths at 4096 to keep kqueue/FSEvents happy on very
-    // large repos — if a repo exceeds that, the user won't get the
-    // auto-refresh for the unwatched subtrees but everything else
-    // keeps working.
+    // Pure filesystem work, no QFileSystemWatcher access: safe to
+    // run on a worker thread, which is exactly what GitService does
+    // for the async open path (this walk stats every directory and
+    // took ~a minute on large repos when it ran on the UI thread).
+    QStringList dirs;
     QDirIterator it(repoPath,
                     QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
                     QDirIterator::Subdirectories);
 
-    int watchedDirs = 0;
-    const int maxDirs = 4096;
+    while (it.hasNext() && dirs.size() < maxDirs) {
+        if (cancelled && cancelled())
+            return {};
 
-    while (it.hasNext() && watchedDirs < maxDirs) {
         const QString dir = it.next();
         const QFileInfo fi(dir);
         const QString name = fi.fileName();
 
-        // Skip .git (we already watch it selectively above) and
+        // Skip .git (watched selectively by watchGitInternals) and
         // common high-churn directories that are almost always
         // ignored by git anyway.
         if (name == QStringLiteral(".git")
@@ -74,14 +103,43 @@ void FileWatcher::watchRepository(const QString& repoPath) {
             continue;
         }
 
-        watcher_.addPath(dir);
-        ++watchedDirs;
+        dirs.append(dir);
     }
-    // Also watch the repo root itself.
-    watcher_.addPath(repoPath);
+    return dirs;
+}
+
+void FileWatcher::addWatchPaths(const QString& repoPath, const QStringList& dirs)
+{
+    // Stale async result — the user already switched to another
+    // repo (or closed this one) while the enumeration was running.
+    if (repoPath != repoPath_ || dirs.isEmpty())
+        return;
+
+    pendingDirs_ = dirs;
+    applyNextChunk();
+}
+
+void FileWatcher::applyNextChunk()
+{
+    // repoPath_ cleared (stop()/repo switch) invalidates the queue.
+    if (pendingDirs_.isEmpty())
+        return;
+
+    const int n = std::min<int>(kAddPathsChunk, pendingDirs_.size());
+    watcher_.addPaths(pendingDirs_.mid(0, n));
+    pendingDirs_ = pendingDirs_.mid(n);
+
+    if (!pendingDirs_.isEmpty()) {
+        // Yield back to the event loop between chunks so a long
+        // tail of registrations never blocks input or painting.
+        QMetaObject::invokeMethod(this, &FileWatcher::applyNextChunk,
+                                  Qt::QueuedConnection);
+    }
 }
 
 void FileWatcher::stop() {
+    pendingDirs_.clear();
+    repoPath_.clear();
     if (!watcher_.files().isEmpty()) watcher_.removePaths(watcher_.files());
     if (!watcher_.directories().isEmpty()) watcher_.removePaths(watcher_.directories());
 }

@@ -7,6 +7,7 @@
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
+#include "widgets/LoadingOverlayWidget.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
 
@@ -461,6 +462,22 @@ void RepositoryView::resetInspectorTabs()
     // Switch back to the Commit tab
     if (inspectorTabs_)
         inspectorTabs_->setCurrentIndex(0);
+}
+
+// ---------------------------------------------------------------------------
+// Loading overlay
+// ---------------------------------------------------------------------------
+void RepositoryView::showLoading(const QString& message)
+{
+    if (!loadingOverlay_)
+        loadingOverlay_ = new widgets::LoadingOverlayWidget(this);
+    loadingOverlay_->showOverlay(message);
+}
+
+void RepositoryView::hideLoading()
+{
+    if (loadingOverlay_)
+        loadingOverlay_->hideOverlay();
 }
 
 // ---------------------------------------------------------------------------

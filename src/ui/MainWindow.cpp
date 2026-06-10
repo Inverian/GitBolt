@@ -828,14 +828,8 @@ void MainWindow::createMenuBar()
         setRepoOnlyMenusEnabled(false);
         // Also disable the repo-dependent toolbar/menu actions
         // shared between the Repository menu and the toolbar.
-        if (refreshAction_) refreshAction_->setEnabled(false);
-        if (fetchAction_)   fetchAction_->setEnabled(false);
-        if (pullAction_)    pullAction_->setEnabled(false);
-        if (pushAction_)    pushAction_->setEnabled(false);
-        if (commitAction_)  commitAction_->setEnabled(false);
-        if (filterInput_)   filterInput_->setEnabled(false);
-        if (branchCombo_)   {
-            branchCombo_->setEnabled(false);
+        setRepoActionsEnabled(false);
+        if (branchCombo_) {
             branchCombo_->clear();
             branchCombo_->setProperty("currentBranch", QString());
         }
@@ -3163,6 +3157,22 @@ void MainWindow::setRepoOnlyMenusEnabled(bool on)
     toggleChildren(repoMenu_);
 }
 
+void MainWindow::setRepoActionsEnabled(bool on)
+{
+    // Each action is shared between the Repository menu and the
+    // toolbar, so one setEnabled() toggles both entry points (see
+    // MainWindow.h). Used by onRepositoryOpened (true), the Close
+    // action (false), the optimistic phase of an async open (false
+    // — ops would hit the previous repo), and the failure revert.
+    if (refreshAction_) refreshAction_->setEnabled(on);
+    if (fetchAction_)   fetchAction_->setEnabled(on);
+    if (pullAction_)    pullAction_->setEnabled(on);
+    if (pushAction_)    pushAction_->setEnabled(on);
+    if (commitAction_)  commitAction_->setEnabled(on);
+    if (filterInput_)   filterInput_->setEnabled(on);
+    if (branchCombo_)   branchCombo_->setEnabled(on);
+}
+
 // ---------------------------------------------------------------------------
 // Toolbar
 // ---------------------------------------------------------------------------
@@ -3441,6 +3451,9 @@ void MainWindow::setupConnections()
     connect(gitService_, &services::GitService::repositoryOpened,
             this, &MainWindow::onRepositoryOpened);
 
+    connect(gitService_, &services::GitService::repositoryOpenFailed,
+            this, &MainWindow::onRepositoryOpenFailed);
+
     connect(gitService_, &services::GitService::logReady,
             this, &MainWindow::onLogReady);
 
@@ -3581,10 +3594,58 @@ void MainWindow::openRepositoryAtPath(const QString& path)
 {
     if (path.isEmpty())
         return;
-    if (!gitService_->openRepository(path)) {
-        QMessageBox::warning(this, tr("Error"),
-            tr("Failed to open repository at %1").arg(path));
+
+    // Optimistic open: switch to the repository view immediately
+    // with a busy overlay and let the open + data loads stream in
+    // on worker threads. Previously this called the synchronous
+    // GitService::openRepository, which froze the app on whatever
+    // screen was active — up to ~a minute on large repos (libgit2
+    // open + a recursive working-tree walk for the file watcher).
+
+    // Snapshot where the user was so a failed open can revert.
+    // Only the first open of a burst snapshots; if another open is
+    // already pending, the current widget/title ARE the loading
+    // screen, which would be a useless revert target.
+    if (pendingOpenPath_.isEmpty()) {
+        widgetBeforeOpen_ = centralStack_->currentWidget();
+        titleBeforeOpen_  = windowTitle();
     }
+    pendingOpenPath_   = path;
+    awaitingInitialLog_ = true;
+
+    const QString repoName = QDir(path).dirName();
+    setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? path : repoName));
+    centralStack_->setCurrentWidget(repoView_);
+
+    // Clear every model/pane that still shows the previous repo —
+    // the user must never see repo A's data under repo B's title.
+    if (commitLogModel_)
+        commitLogModel_->clear();
+    if (repoView_) {
+        repoView_->setBranches({});
+        repoView_->setTags({});
+        repoView_->setStashes({});
+        repoView_->setSubmodules({});
+        repoView_->resetInspectorTabs();
+    }
+    if (filterInput_)
+        filterInput_->clear();
+    if (branchCombo_) {
+        branchCombo_->clear();
+        branchCombo_->setProperty("currentBranch", QString());
+    }
+    branchLabel_->setText(tr("Opening…"));
+    repoPathLabel_->setText(path);
+
+    // Block repo-dependent operations until the open lands — a
+    // Pull/Commit fired now would hit the previous repository.
+    setRepoActionsEnabled(false);
+
+    if (repoView_)
+        repoView_->showLoading(tr("Opening repository…"));
+    statusBar()->showMessage(tr("Opening %1…").arg(path));
+
+    gitService_->openRepositoryAsync(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -3607,6 +3668,11 @@ void MainWindow::cloneRepository()
 
 void MainWindow::onRepositoryOpened(const QString& path)
 {
+    // Async open landed (or a sync open from another path
+    // completed) — no longer pending. The loading overlay stays up
+    // until the first commit-log page arrives in onLogReady.
+    pendingOpenPath_.clear();
+
     // Lead with the repo name (the working-tree directory's
     // basename) instead of the app name. "GitBolt - /path" was
     // redundant: the app name lives in the macOS Apple menu and
@@ -3662,13 +3728,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // single QAction shared between the Repository menu and the
     // toolbar, so one setEnabled() call toggles BOTH entry points
     // in lockstep (see MainWindow.h for the rationale).
-    if (refreshAction_) refreshAction_->setEnabled(true);
-    if (fetchAction_)   fetchAction_->setEnabled(true);
-    if (pullAction_)    pullAction_->setEnabled(true);
-    if (pushAction_)    pushAction_->setEnabled(true);
-    if (commitAction_)  commitAction_->setEnabled(true);
-    if (filterInput_)   filterInput_->setEnabled(true);
-    if (branchCombo_)   branchCombo_->setEnabled(true);
+    setRepoActionsEnabled(true);
 
     // Reveal the filter pair now that there's actually a
     // revision grid for it to filter, and the branch quick-switch
@@ -3709,6 +3769,65 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
     } else {
         commitLogModel_->appendCommits(commits);
     }
+
+    // First page after an async open: the main area now has real
+    // content (or a guaranteed-empty page for unborn-HEAD repos —
+    // refreshLog always emits for offset 0), so drop the loading
+    // overlay. Stale logReady from a previous repo can't get here:
+    // GitService discards results whose repository was swapped out.
+    if (offset == 0 && awaitingInitialLog_) {
+        awaitingInitialLog_ = false;
+        if (repoView_)
+            repoView_->hideLoading();
+    }
+}
+
+void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& error)
+{
+    pendingOpenPath_.clear();
+    awaitingInitialLog_ = false;
+    if (repoView_)
+        repoView_->hideLoading();
+
+    if (gitService_->isOpen()) {
+        // The failed open never touched the previously loaded
+        // repository — put the user back where they were and
+        // repopulate the models we cleared optimistically. The
+        // refreshes are async and cheap for an already-open repo.
+        setWindowTitle(titleBeforeOpen_);
+        centralStack_->setCurrentWidget(
+            widgetBeforeOpen_ ? widgetBeforeOpen_
+                              : static_cast<QWidget*>(dashboardView_));
+        setRepoActionsEnabled(true);
+
+        auto* repo = gitService_->repository();
+        if (repo) {
+            repoPathLabel_->setText(
+                QString::fromStdString(repo->workdir()));
+            auto branchResult = repo->headBranchName();
+            if (branchResult) {
+                branchLabel_->setText(tr("Branch: %1")
+                    .arg(QString::fromStdString(*branchResult)));
+            } else {
+                branchLabel_->setText(tr("HEAD (detached)"));
+            }
+        }
+        gitService_->refreshStatus();
+        gitService_->refreshLog();
+        gitService_->refreshBranches();
+        gitService_->refreshStashes();
+        gitService_->refreshSubmodules();
+    } else {
+        // Nothing usable to fall back to — home screen.
+        setWindowTitle(QStringLiteral("GitBolt"));
+        centralStack_->setCurrentWidget(dashboardView_);
+        branchLabel_->setText(tr("No repository"));
+        repoPathLabel_->setText(QString());
+    }
+
+    statusBar()->showMessage(tr("Failed to open %1").arg(path), 4000);
+    QMessageBox::warning(this, tr("Error"),
+        tr("Failed to open repository at %1\n\n%2").arg(path, error));
 }
 
 void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
@@ -3805,9 +3924,10 @@ void MainWindow::updateRecentMenu()
 
     for (const QString& path : recent) {
         recentMenu_->addAction(path, this, [this, path]() {
-            if (!gitService_->openRepository(path))
-                QMessageBox::warning(this, tr("Error"),
-                    tr("Failed to open repository at %1").arg(path));
+            // Same async path as File → Open: immediate repo view
+            // with loading overlay; failure handling lives in
+            // onRepositoryOpenFailed.
+            openRepositoryAtPath(path);
         });
     }
 }

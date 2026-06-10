@@ -6,6 +6,32 @@ kept most-recent-first.
 ## Unreleased
 
 ### Added
+- Non-blocking repository open: File → Open / Recent / dashboard /
+  clone / CLI all switch to the repository view immediately and
+  stream data in from worker threads. A new animated loading
+  overlay (`LoadingOverlayWidget`: translucent veil + rotating arc
+  + message) covers the repo view until the first commit-log page
+  arrives. Previously `GitService::openRepository` ran libgit2 open
+  AND a recursive working-tree walk (for the file watcher) on the
+  UI thread, freezing the app on whatever screen was active — up
+  to ~a minute on large repositories. The walk now runs on a
+  worker (`FileWatcher::enumerateWatchDirs`, cancellable), watch
+  registrations apply in 512-path chunks across event-loop ticks,
+  and `.git` internals + the repo root are watched immediately so
+  external commits are noticed even while the walk is running.
+  A generation counter discards superseded opens (rapid double-
+  open is safe), and a failed open reverts to the previous view
+  with the old repository's data repopulated and the libgit2
+  error message shown in the warning dialog.
+- Refresh workers (status / log / branches / stashes / submodules /
+  tags / worktrees) now pin the repository via `shared_ptr` and
+  re-check it under the repo mutex before emitting, so results
+  from a superseded repository are dropped instead of briefly
+  flashing the wrong repo's data after a switch (also closes a
+  use-after-free window when a swap landed mid-refresh).
+- `refreshLog` always emits the initial page even when the rev-walk
+  fails or the repository has an unborn HEAD, so "loading" states
+  driven by the first `logReady` can never get stuck.
 - Settings → UI Design page: new "Default Pane Sizes" group with a
   bottom-inspector-pane percent slider (10–90%) that drives the
   default split between the revision graph and the inspector tabs;
@@ -204,18 +230,29 @@ kept most-recent-first.
   combo at 260 px, and the bottom-pane slider at 480 px. The empty
   space to the right of inputs stays empty, matching the
   GitExtensions reference.
-- Diff viewer (used by both the Commit dialog's diff pane and the
-  RepositoryView Diff inspector tab) now uses single line-height
-  for every block via `QTextBlockFormat::ProportionalHeight = 100`.
-  Previously the default `QPlainTextEdit` leading left visible white
-  slivers between consecutively colored hunk lines, reading as
-  "double-spaced". Consecutive `+` (or `-`) lines now form a
-  contiguous green (or red) block, matching the GitHub /
-  GitExtensions diff look.
-- File Tree inspector preview applies the same single line-height
-  via a `contentsChange` connection so every `setPlainText` (file
-  body, directory listing, error placeholder) picks it up. The two
-  inspector tabs now render text at identical density.
+- Diff viewer line backgrounds rebuilt on a new `DiffTextEdit`
+  subclass (`QPlainTextEdit` with a custom `paintEvent`) that
+  pre-paints full-line-height colored stripes for `+` / `-` / `@@`
+  lines from each block's top to the next block's top, so
+  consecutive added (or deleted) lines form one contiguous green
+  (or red) band with zero white gap — the GitHub / GitExtensions
+  look. Root cause of the stubborn gaps turned out to be data, not
+  paint: libgit2 returns `line.content` with the source newline
+  still attached, and joining those with `'\n'` created an *empty
+  block* between every real diff line. Both unified and
+  side-by-side renderers now strip trailing newlines at ingest.
+  Earlier attempts via `QTextCharFormat` backgrounds,
+  `QTextBlockFormat::setBackground`, and `ExtraSelection` +
+  `FullWidthSelection` are documented in the widget for posterity.
+- DiffSyntaxHighlighter is now foreground-only (green/red/blue
+  text, bold file headers); all background fill moved to
+  DiffTextEdit's painter.
+- File Tree inspector preview uses the same explicit Menlo 11 pt
+  font as the diff viewer so the two inspector tabs render text at
+  identical density, and the file tree lists directories before
+  files at every level, alphabetical within each group (GitHub
+  style) — the previous comparator mixed two orderings and was
+  non-transitive (undefined behavior under `std::sort`).
 - Bolt logo's digit ink and body fill sampled from
   `resources/icons/gitbolt-256.png` so colors stay in lock-step with
   the artwork (bright amber outline, transparent interior, bright
