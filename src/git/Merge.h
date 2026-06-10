@@ -20,6 +20,18 @@ enum class MergeAnalysis {
     Unborn,
 };
 
+/// Repository-wide in-progress operation state (git_repository_state).
+/// Determines which abort command applies when the user bails out of
+/// a conflicted operation: merge --abort, cherry-pick --abort, etc.
+enum class RepoState {
+    None,
+    Merge,
+    Revert,
+    CherryPick,
+    Rebase,
+    Other,
+};
+
 struct MergeConflictEntry {
     std::string path;
     std::string ancestorContent;

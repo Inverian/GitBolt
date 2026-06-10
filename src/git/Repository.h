@@ -157,6 +157,17 @@ public:
     Result<MergeResult> analyzeMerge(const ObjectId& theirHead) const;
     Result<MergeResult> merge(const ObjectId& theirHead, MergePreference pref = MergePreference::Normal);
 
+    /// In-progress operation state (merging, rebasing, …) — wraps
+    /// git_repository_state. Drives which abort command applies
+    /// and whether the conflict resolver has anything to do.
+    RepoState state() const;
+
+    /// Three-way payloads for every conflicted index entry:
+    /// ancestor / ours / theirs content (empty for sides that
+    /// don't exist, e.g. add/add has no ancestor). Works for any
+    /// conflict source — merge, cherry-pick, rebase, revert.
+    Result<std::vector<MergeConflictEntry>> conflictEntries() const;
+
     // Remotes
     Result<std::vector<RemoteInfo>> remotes() const;
     Result<void> addRemote(const std::string& name, const std::string& url);

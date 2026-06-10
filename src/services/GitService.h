@@ -64,6 +64,28 @@ public:
     void blameFile(const QString& path,
                    const QString& newestCommitSpec = QString());
 
+    /// Async read of the index's conflicted entries (three-way
+    /// payloads). Result lands via conflictsReady — empty when the
+    /// repository has no conflicts. Works for conflicts from any
+    /// source: merge, cherry-pick, rebase, revert.
+    void refreshConflicts();
+
+    /// Write each (repo-relative path, resolved content) pair to
+    /// the working tree and stage it, collapsing the conflict
+    /// entries. Synchronous (file writes + index adds are fast);
+    /// failures surface per-file via operationFailed. Ends with a
+    /// status refresh. The caller then concludes the merge with a
+    /// normal commit — Repository::commit picks up MERGE_HEAD as a
+    /// second parent automatically.
+    void resolveConflicts(
+        const std::vector<std::pair<QString, QString>>& resolutions);
+
+    /// Abort whatever conflicted operation is in progress, using
+    /// the command that matches the repository state: merge /
+    /// cherry-pick / rebase / revert --abort. No-op when the
+    /// repository is in a normal state.
+    void abortConflictState();
+
     /// Choose which refs the log walk starts from. Default is
     /// `Head` (just the current branch and its ancestors).
     /// `AllLocalBranches` pushes every local branch tip onto the
@@ -165,6 +187,7 @@ signals:
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void branchesReady(std::vector<gitbolt::git::BranchInfo> branches);
     void blameReady(gitbolt::git::BlameResult result);
+    void conflictsReady(std::vector<gitbolt::git::MergeConflictEntry> conflicts);
     void commitComplete(bool success, const QString& message);
     void operationFailed(const QString& operation, const QString& error);
     void repositoryChanged();

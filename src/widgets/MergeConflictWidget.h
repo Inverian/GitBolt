@@ -21,6 +21,19 @@ public:
     int conflictCount() const { return static_cast<int>(conflicts_.size()); }
     QString resolvedContent() const;
 
+    /// Resolved text for every conflict, index-aligned with the
+    /// vector passed to setConflicts(). Valid once
+    /// allConflictsResolved fires (onMarkAllResolved saves the
+    /// current editor and fills unvisited conflicts with "ours"
+    /// before emitting); the host zips these with the conflict
+    /// paths to write files and stage them.
+    std::vector<QString> allResolvedContents() const { return resolvedContents_; }
+
+    /// The conflicts currently loaded, as passed to setConflicts().
+    const std::vector<gitbolt::git::MergeConflictEntry>& conflicts() const {
+        return conflicts_;
+    }
+
 signals:
     void conflictResolved();
     void mergeAborted();

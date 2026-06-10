@@ -87,6 +87,18 @@ private:
     /// browsers use: a fresh navigation invalidates the redo path.
     void pushHistory(const QString& commitHash);
 
+    /// Open the three-way conflict resolver dialog (hosting
+    /// MergeConflictWidget). Reads the index's conflicted entries
+    /// via GitService::refreshConflicts; resolving writes + stages
+    /// each file, aborting runs the state-appropriate --abort.
+    /// Reached from Commands → Resolve conflicts and from the
+    /// offer shown after a merge / cherry-pick hits conflicts.
+    void showConflictResolver();
+
+    /// If the repository is mid-merge/cherry-pick/rebase after a
+    /// failed operation, offer to open the conflict resolver.
+    void offerConflictResolution(const QString& operation);
+
     services::GitService*   gitService_   = nullptr;
     conf::SettingsService*  settingsService_ = nullptr;
     conf::ThemeService*     themeService_    = nullptr;  // owned by main()

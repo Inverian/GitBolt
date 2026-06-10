@@ -1,5 +1,8 @@
 #include "services/GitService.h"
 
+#include <QDir>
+#include <QFile>
+
 namespace gitbolt::services {
 
 GitService::GitService(QObject* parent)
@@ -254,6 +257,98 @@ void GitService::refreshBranches() {
         auto result = r->allBranches();
         if (result) emit branchesReady(std::move(*result));
     });
+}
+
+void GitService::refreshConflicts() {
+    if (!repo_) return;
+    std::shared_ptr<git::Repository> r = repo_;
+    runner_.run([this, r]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
+        auto result = r->conflictEntries();
+        if (result)
+            emit conflictsReady(std::move(*result));
+        else
+            emit operationFailed(QStringLiteral("conflicts"),
+                QString::fromStdString(result.error().message()));
+    });
+}
+
+void GitService::resolveConflicts(
+        const std::vector<std::pair<QString, QString>>& resolutions) {
+    if (!repo_) return;
+    {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        const QString workdir =
+            QString::fromStdString(repo_->workdir());
+        for (const auto& [path, content] : resolutions) {
+            QFile f(QDir(workdir).filePath(path));
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                emit operationFailed(
+                    QStringLiteral("resolve conflicts"),
+                    tr("Could not write %1: %2")
+                        .arg(path, f.errorString()));
+                continue;
+            }
+            f.write(content.toUtf8());
+            f.close();
+
+            // Staging a conflicted path collapses its conflict
+            // entries to a normal stage-0 entry — same as
+            // `git add` during manual resolution.
+            auto res = repo_->stageFile(path.toStdString());
+            if (!res)
+                emit operationFailed(
+                    QStringLiteral("resolve conflicts"),
+                    QString::fromStdString(res.error().message()));
+        }
+    }
+    refreshStatus();
+}
+
+void GitService::abortConflictState() {
+    if (!repo_) return;
+
+    git::RepoState state = git::RepoState::None;
+    git::GitProcess proc{[&]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        state = repo_->state();
+        return repo_->process();
+    }()};
+
+    std::vector<std::string> args;
+    switch (state) {
+    case git::RepoState::Merge:
+        args = {"merge", "--abort"};
+        break;
+    case git::RepoState::CherryPick:
+        args = {"cherry-pick", "--abort"};
+        break;
+    case git::RepoState::Rebase:
+        args = {"rebase", "--abort"};
+        break;
+    case git::RepoState::Revert:
+        args = {"revert", "--abort"};
+        break;
+    case git::RepoState::None:
+    case git::RepoState::Other:
+        return;   // nothing in progress to abort
+    }
+
+    auto result = proc.run(args);
+    if (!result) {
+        emit operationFailed(QStringLiteral("abort"),
+            QString::fromStdString(result.error().message()));
+    } else if (!result->success()) {
+        QString detail =
+            QString::fromStdString(result->stderrData).trimmed();
+        if (detail.isEmpty())
+            detail = QString::fromStdString(result->stdoutData).trimmed();
+        emit operationFailed(QStringLiteral("abort"), detail);
+    }
+    refreshStatus();
+    refreshLog();
+    refreshBranches();
 }
 
 void GitService::blameFile(const QString& path,

@@ -25,6 +25,7 @@
 #include "conf/ThemeService.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
+#include "widgets/MergeConflictWidget.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
@@ -2137,11 +2138,25 @@ void MainWindow::createMenuBar()
             if (!ok || picked.isEmpty()) return;
             auto out = gitService_->process().run(
                 {"merge", picked.toStdString()});
-            handleProcessResult(this, tr("Merge Failed"), out);
+            const bool merged =
+                handleProcessResult(this, tr("Merge Failed"), out);
             gitService_->refreshStatus();
             gitService_->refreshLog();
             gitService_->refreshBranches();
+            if (!merged)
+                offerConflictResolution(tr("merge"));
         });
+        cmdMenu->addAction(a);
+    }
+    {
+        // Resolve conflicts — opens the three-way resolver for
+        // whatever conflicted operation is in progress (merge,
+        // cherry-pick, rebase, revert). Also offered automatically
+        // when a merge / cherry-pick stops on conflicts.
+        auto* a = new QAction(menuIcon(QStringLiteral("merge")),
+                              tr("Resolve co&nflicts..."), this);
+        connect(a, &QAction::triggered,
+                this, &MainWindow::showConflictResolver);
         cmdMenu->addAction(a);
     }
     {
@@ -3591,6 +3606,17 @@ void MainWindow::setupConnections()
     connect(gitService_, &services::GitService::repositoryOpenFailed,
             this, &MainWindow::onRepositoryOpenFailed);
 
+    // Cherry-pick outcome: success gets a status-bar note; a
+    // conflict stop offers the three-way resolver (libgit2 leaves
+    // the repository in CHERRYPICK state with conflicted index
+    // entries, which is exactly what the resolver reads).
+    connect(gitService_, &services::GitService::cherryPickComplete,
+            this, [this](bool success, const QString& message) {
+        statusBar()->showMessage(message, 4000);
+        if (!success)
+            offerConflictResolution(tr("cherry-pick"));
+    });
+
     connect(gitService_, &services::GitService::logReady,
             this, &MainWindow::onLogReady);
 
@@ -3739,10 +3765,13 @@ void MainWindow::setupConnections()
             if (!gitService_ || !gitService_->isOpen()) return;
             auto out = gitService_->process().run(
                 {"merge", name.toStdString()});
-            handleProcessResult(this, tr("Merge Failed"), out);
+            const bool merged =
+                handleProcessResult(this, tr("Merge Failed"), out);
             gitService_->refreshStatus();
             gitService_->refreshLog();
             gitService_->refreshBranches();
+            if (!merged)
+                offerConflictResolution(tr("merge"));
         });
         connect(branchTree, &widgets::BranchTreeWidget::setUpstreamRequested,
                 this, [this](const QString& branch, const QString& upstream) {
@@ -4136,6 +4165,99 @@ void MainWindow::pushHistory(const QString& commitHash)
         forwardHistory_.clear();
     }
     currentNavCommit_ = commitHash;
+}
+
+// ---------------------------------------------------------------------------
+// Conflict resolution
+// ---------------------------------------------------------------------------
+void MainWindow::showConflictResolver()
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+
+    auto* dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("Resolve Conflicts"));
+    conf::SettingsService::applyConfiguredSize(dlg, "conflicts");
+
+    auto* layout = new QVBoxLayout(dlg);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* widget = new widgets::MergeConflictWidget(dlg);
+    layout->addWidget(widget);
+
+    // One-shot population on the first conflictsReady. A standing
+    // connection would re-populate on every later conflict-list
+    // change and stomp the user's in-progress resolutions.
+    auto conn = std::make_shared<QMetaObject::Connection>();
+    *conn = connect(
+        gitService_, &services::GitService::conflictsReady,
+        dlg, [this, dlg, widget, conn](
+                 std::vector<git::MergeConflictEntry> conflicts) {
+            QObject::disconnect(*conn);
+            if (conflicts.empty()) {
+                QMessageBox::information(
+                    this, tr("Resolve Conflicts"),
+                    tr("No conflicted files — nothing to resolve."));
+                dlg->close();
+                return;
+            }
+            widget->setConflicts(conflicts);
+        });
+    gitService_->refreshConflicts();
+
+    connect(widget,
+            &widgets::MergeConflictWidget::allConflictsResolved,
+            dlg, [this, dlg, widget]() {
+        const auto& conflicts = widget->conflicts();
+        const auto contents = widget->allResolvedContents();
+        std::vector<std::pair<QString, QString>> resolutions;
+        resolutions.reserve(conflicts.size());
+        for (size_t i = 0;
+             i < conflicts.size() && i < contents.size(); ++i) {
+            resolutions.emplace_back(
+                QString::fromStdString(conflicts[i].path),
+                contents[i]);
+        }
+        gitService_->resolveConflicts(resolutions);
+        statusBar()->showMessage(
+            tr("Conflicts resolved and staged — commit to conclude "
+               "the operation."), 6000);
+        dlg->close();
+    });
+
+    connect(widget, &widgets::MergeConflictWidget::mergeAborted,
+            dlg, [this, dlg]() {
+        // The widget has already confirmed with the user.
+        gitService_->abortConflictState();
+        dlg->close();
+    });
+
+    dlg->show();
+}
+
+void MainWindow::offerConflictResolution(const QString& operation)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+
+    // Only offer when the repo is actually mid-operation — a merge
+    // can fail for plenty of non-conflict reasons (dirty tree,
+    // unknown ref) where the resolver would have nothing to show.
+    bool inProgress = false;
+    {
+        std::lock_guard<std::mutex> lock(gitService_->repoMutex());
+        inProgress = gitService_->repository()->state()
+                     != git::RepoState::None;
+    }
+    if (!inProgress)
+        return;
+
+    const auto answer = QMessageBox::question(
+        this, tr("Conflicts"),
+        tr("The %1 stopped on conflicts.\n\nOpen the conflict "
+           "resolver now?").arg(operation));
+    if (answer == QMessageBox::Yes)
+        showConflictResolver();
 }
 
 } // namespace gitbolt::ui

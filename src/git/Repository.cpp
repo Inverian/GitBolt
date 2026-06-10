@@ -597,19 +597,51 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
         err = git_commit_amend(&commitOid, headCommit, "HEAD", sig, sig, nullptr, message.c_str(), tree);
         git_commit_free(headCommit);
     } else {
-        git_commit* parent = nullptr;
-        const git_commit* parents[1] = {nullptr};
-        int parentCount = 0;
+        std::vector<git_commit*> parents;
         git_reference* headRef = nullptr;
         if (git_repository_head(&headRef, repo_) == 0) {
+            git_commit* parent = nullptr;
             git_reference_peel(reinterpret_cast<git_object**>(&parent), headRef, GIT_OBJECT_COMMIT);
             git_reference_free(headRef);
-            parents[0] = parent;
-            parentCount = 1;
+            if (parent) parents.push_back(parent);
         }
-        err = git_commit_create(&commitOid, repo_, "HEAD", sig, sig, nullptr,
-                                message.c_str(), tree, parentCount, parents);
-        if (parent) git_commit_free(parent);
+
+        // Concluding an in-progress merge: MERGE_HEAD's commits are
+        // additional parents, exactly like `git commit` after a
+        // conflicted merge. Without this the resulting commit had a
+        // single parent — the merge silently flattened into a
+        // normal commit and the merged-from branch appeared
+        // unmerged forever.
+        std::vector<git_oid> mergeHeads;
+        git_repository_mergehead_foreach(
+            repo_,
+            [](const git_oid* oid, void* payload) -> int {
+                static_cast<std::vector<git_oid>*>(payload)
+                    ->push_back(*oid);
+                return 0;
+            },
+            &mergeHeads);
+        for (const auto& oid : mergeHeads) {
+            git_commit* mergeParent = nullptr;
+            if (git_commit_lookup(&mergeParent, repo_, &oid) == 0)
+                parents.push_back(mergeParent);
+        }
+
+        std::vector<const git_commit*> parentPtrs(parents.begin(),
+                                                  parents.end());
+        err = git_commit_create(&commitOid, repo_, "HEAD", sig, sig,
+                                nullptr, message.c_str(), tree,
+                                parentPtrs.size(),
+                                parentPtrs.empty() ? nullptr
+                                                   : parentPtrs.data());
+        for (auto* p : parents)
+            git_commit_free(p);
+
+        // Clear MERGE_HEAD / MERGE_MSG (or cherry-pick state) so
+        // the repository leaves the "merging" state once the
+        // concluding commit lands.
+        if (err == 0)
+            git_repository_state_cleanup(repo_);
     }
 
     git_signature_free(sig);
@@ -754,6 +786,76 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
     MergeResult result;
     result.analysis = MergeAnalysis::Normal;
     result.hasConflicts = git_index_has_conflicts(index) != 0;
+    git_index_free(index);
+    return result;
+}
+
+RepoState Repository::state() const {
+    switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_NONE:
+        return RepoState::None;
+    case GIT_REPOSITORY_STATE_MERGE:
+        return RepoState::Merge;
+    case GIT_REPOSITORY_STATE_REVERT:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+        return RepoState::Revert;
+    case GIT_REPOSITORY_STATE_CHERRYPICK:
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+        return RepoState::CherryPick;
+    case GIT_REPOSITORY_STATE_REBASE:
+    case GIT_REPOSITORY_STATE_REBASE_INTERACTIVE:
+    case GIT_REPOSITORY_STATE_REBASE_MERGE:
+        return RepoState::Rebase;
+    default:
+        return RepoState::Other;
+    }
+}
+
+Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
+    git_index* index = nullptr;
+    int err = git_repository_index(&index, repo_);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    // Reads a conflict side's blob into a string. A null entry is
+    // normal (add/add conflicts have no ancestor; delete/modify
+    // has only one side) and yields empty content so the three-way
+    // panes can render "nothing on this side".
+    auto readSide = [this](const git_index_entry* e,
+                           std::string& content, ObjectId& id) {
+        if (!e) return;
+        id = ObjectId(&e->id);
+        git_blob* blob = nullptr;
+        if (git_blob_lookup(&blob, repo_, &e->id) == 0) {
+            const auto* data =
+                static_cast<const char*>(git_blob_rawcontent(blob));
+            content.assign(data, git_blob_rawsize(blob));
+            git_blob_free(blob);
+        }
+    };
+
+    git_index_conflict_iterator* it = nullptr;
+    err = git_index_conflict_iterator_new(&it, index);
+    if (err < 0) {
+        git_index_free(index);
+        return GitError::fromLibgit2(err);
+    }
+
+    std::vector<MergeConflictEntry> result;
+    const git_index_entry* ancestor = nullptr;
+    const git_index_entry* ours = nullptr;
+    const git_index_entry* theirs = nullptr;
+    while (git_index_conflict_next(&ancestor, &ours, &theirs, it)
+           == 0) {
+        MergeConflictEntry entry;
+        if (ours && ours->path)            entry.path = ours->path;
+        else if (theirs && theirs->path)   entry.path = theirs->path;
+        else if (ancestor && ancestor->path) entry.path = ancestor->path;
+        readSide(ancestor, entry.ancestorContent, entry.ancestorId);
+        readSide(ours, entry.oursContent, entry.oursId);
+        readSide(theirs, entry.theirsContent, entry.theirsId);
+        result.push_back(std::move(entry));
+    }
+    git_index_conflict_iterator_free(it);
     git_index_free(index);
     return result;
 }
