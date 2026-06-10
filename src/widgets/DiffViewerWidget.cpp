@@ -1,10 +1,10 @@
 #include "widgets/DiffViewerWidget.h"
+#include "widgets/DiffTextEdit.h"
 #include "editor/DiffSyntaxHighlighter.h"
 
 #include <QAction>
 #include <QActionGroup>
 #include <QLabel>
-#include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QTextBlock>
@@ -14,38 +14,18 @@
 namespace gitbolt::widgets {
 
 // ---------------------------------------------------------------------------
-// Color constants
+// Background painting note
 // ---------------------------------------------------------------------------
-
-namespace {
-const QColor kAddBg(200, 255, 200);
-const QColor kDelBg(255, 220, 220);
-const QColor kHunkBg(220, 230, 255);
-
-// Force every block in the document to single line-height. Without
-// this, QPlainTextEdit's default leaves visible ascender/descender
-// gaps between lines that read as "double-spaced" once the hunk
-// background colors are applied — consecutive `+` lines look like
-// stacked green strips with white slivers between them. Setting
-// LineHeight=100 with ProportionalHeight collapses each line to
-// exactly the font's natural height with no extra leading, so
-// colored backgrounds run together cleanly (matches the GitHub /
-// GitExtensions diff look).
 //
-// Called after every setPlainText() in both unified and side-by-
-// side renderers so freshly inserted text picks up the spacing.
-// Uses mergeBlockFormat (not setBlockFormat) so any block-level
-// background applied later by the side-by-side renderer is
-// preserved — the merge only overrides the line-height property.
-void applySingleLineHeight(QPlainTextEdit* editor)
-{
-    QTextCursor c(editor->document());
-    c.select(QTextCursor::Document);
-    QTextBlockFormat fmt;
-    fmt.setLineHeight(100, QTextBlockFormat::ProportionalHeight);
-    c.mergeBlockFormat(fmt);
-}
-} // anonymous namespace
+// Full-line-height background fills for `+` / `-` / `@@` lines are
+// handled inside the DiffTextEdit subclass via paintEvent — see
+// widgets/DiffTextEdit.cpp. That avoids the inter-block "white
+// stripe" you get from QTextCharFormat::setBackground (paints under
+// the chars only), QTextBlockFormat::setBackground (ignored across
+// the inter-block leading by QPlainTextDocumentLayout), and
+// QTextEdit::ExtraSelection + FullWidthSelection (only fills the
+// text-line rect, not the leading). The colour swatches live there;
+// this file no longer needs its own copies.
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -174,7 +154,7 @@ void DiffViewerWidget::setupUi()
     });
 
     // ---- Unified editor ---------------------------------------------------
-    unifiedEditor_ = new QPlainTextEdit(this);
+    unifiedEditor_ = new DiffTextEdit(this);
     unifiedEditor_->setReadOnly(true);
     unifiedEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     QFont monoFont(QStringLiteral("Menlo, Consolas, monospace"));
@@ -190,12 +170,12 @@ void DiffViewerWidget::setupUi()
     // ---- Side-by-side editors ---------------------------------------------
     sideSplitter_ = new QSplitter(Qt::Horizontal, this);
 
-    leftEditor_ = new QPlainTextEdit(this);
+    leftEditor_ = new DiffTextEdit(this);
     leftEditor_->setReadOnly(true);
     leftEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     leftEditor_->setFont(monoFont);
 
-    rightEditor_ = new QPlainTextEdit(this);
+    rightEditor_ = new DiffTextEdit(this);
     rightEditor_->setReadOnly(true);
     rightEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     rightEditor_->setFont(monoFont);
@@ -236,6 +216,21 @@ void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
         return;
     }
 
+    // libgit2 returns line.content with the source file's trailing
+    // newline still attached. If we leave it in and then join with
+    // '\n' before setPlainText, every diff line becomes "+text\n\n"
+    // and Qt creates an *empty* block between every real one — so
+    // every other row in the editor is uncoloured, producing the
+    // visible white "gap" between consecutive `+` / `-` lines that
+    // the painter then can't fill (those gap blocks don't carry a
+    // diff prefix). Strip the embedded newline once at ingest.
+    auto stripNewline = [](const std::string& s) {
+        QString q = QString::fromStdString(s);
+        while (q.endsWith(QLatin1Char('\n')) || q.endsWith(QLatin1Char('\r')))
+            q.chop(1);
+        return q;
+    };
+
     QStringList lines;
     // File header
     lines << QStringLiteral("diff --git a/%1 b/%2")
@@ -243,31 +238,36 @@ void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
                       QString::fromStdString(file.newPath));
 
     for (const auto& hunk : file.hunks) {
-        lines << QString::fromStdString(hunk.header);
+        lines << stripNewline(hunk.header);
         for (const auto& line : hunk.lines) {
             using LT = gitbolt::git::DiffLineType;
+            const QString content = stripNewline(line.content);
             switch (line.type) {
             case LT::Addition:
-                lines << QStringLiteral("+") + QString::fromStdString(line.content);
+                lines << QStringLiteral("+") + content;
                 break;
             case LT::Deletion:
-                lines << QStringLiteral("-") + QString::fromStdString(line.content);
+                lines << QStringLiteral("-") + content;
                 break;
             case LT::HunkHeader:
-                lines << QString::fromStdString(line.content);
+                lines << content;
                 break;
             case LT::FileHeader:
-                lines << QString::fromStdString(line.content);
+                lines << content;
                 break;
             default:
-                lines << QStringLiteral(" ") + QString::fromStdString(line.content);
+                lines << QStringLiteral(" ") + content;
                 break;
             }
         }
     }
 
     unifiedEditor_->setPlainText(lines.join(QLatin1Char('\n')));
-    applySingleLineHeight(unifiedEditor_);
+    // Background colours are painted edge-to-edge (no inter-block
+    // white slivers) by DiffTextEdit::paintEvent based on each
+    // block's leading character — see widgets/DiffTextEdit.cpp.
+    // The DiffSyntaxHighlighter still runs over the document to set
+    // foreground colours, font weights, etc.
 }
 
 // ---------------------------------------------------------------------------
@@ -285,55 +285,55 @@ void DiffViewerWidget::renderSideBySide(const gitbolt::git::DiffFileEntry& file)
         return;
     }
 
+    // Same trailing-newline-strip as renderUnified — line.content
+    // carries the source's '\n' which would create empty blocks
+    // between every visible row when we setPlainText.
+    auto stripNewline = [](const std::string& s) {
+        QString q = QString::fromStdString(s);
+        while (q.endsWith(QLatin1Char('\n')) || q.endsWith(QLatin1Char('\r')))
+            q.chop(1);
+        return q;
+    };
+
     QStringList leftLines;
     QStringList rightLines;
 
-    // We also need to colour the backgrounds ourselves since the side panels
-    // do not use the DiffSyntaxHighlighter.
-    struct LineStyle {
-        QColor bg;
-    };
-    std::vector<LineStyle> leftStyles;
-    std::vector<LineStyle> rightStyles;
-
+    // Colours are painted by DiffTextEdit::paintEvent based on each
+    // block's leading character. We just need to make sure the
+    // prefix character matches what the painter looks for: `+` for
+    // additions on the right pane, `-` for deletions on the left
+    // pane, `@@` for hunk headers on both, and a leading space (or
+    // empty placeholder line) for everything else.
     for (const auto& hunk : file.hunks) {
-        // Hunk header on both sides
-        leftLines  << QString::fromStdString(hunk.header);
-        rightLines << QString::fromStdString(hunk.header);
-        leftStyles.push_back({kHunkBg});
-        rightStyles.push_back({kHunkBg});
+        // Hunk header on both sides — `@@`-prefixed text triggers
+        // the blue stripe in DiffTextEdit on each pane.
+        const QString hdr = stripNewline(hunk.header);
+        leftLines  << hdr;
+        rightLines << hdr;
 
         for (const auto& line : hunk.lines) {
             using LT = gitbolt::git::DiffLineType;
-            const QString content = QString::fromStdString(line.content);
+            const QString content = stripNewline(line.content);
 
             switch (line.type) {
             case LT::Context:
             case LT::ContextEOFNL:
                 leftLines  << QStringLiteral(" ") + content;
                 rightLines << QStringLiteral(" ") + content;
-                leftStyles.push_back({QColor()});
-                rightStyles.push_back({QColor()});
                 break;
             case LT::Deletion:
             case LT::DelEOFNL:
                 leftLines  << QStringLiteral("-") + content;
                 rightLines << QString();
-                leftStyles.push_back({kDelBg});
-                rightStyles.push_back({QColor()});
                 break;
             case LT::Addition:
             case LT::AddEOFNL:
                 leftLines  << QString();
                 rightLines << QStringLiteral("+") + content;
-                leftStyles.push_back({QColor()});
-                rightStyles.push_back({kAddBg});
                 break;
             default:
                 leftLines  << content;
                 rightLines << content;
-                leftStyles.push_back({QColor()});
-                rightStyles.push_back({QColor()});
                 break;
             }
         }
@@ -341,27 +341,6 @@ void DiffViewerWidget::renderSideBySide(const gitbolt::git::DiffFileEntry& file)
 
     leftEditor_->setPlainText(leftLines.join(QLatin1Char('\n')));
     rightEditor_->setPlainText(rightLines.join(QLatin1Char('\n')));
-    applySingleLineHeight(leftEditor_);
-    applySingleLineHeight(rightEditor_);
-
-    // Apply background colours block-by-block
-    auto applyBg = [](QPlainTextEdit* editor, const std::vector<LineStyle>& styles) {
-        QTextBlock block = editor->document()->begin();
-        size_t idx = 0;
-        while (block.isValid() && idx < styles.size()) {
-            if (styles[idx].bg.isValid()) {
-                QTextCursor cursor(block);
-                QTextBlockFormat fmt = block.blockFormat();
-                fmt.setBackground(styles[idx].bg);
-                cursor.setBlockFormat(fmt);
-            }
-            block = block.next();
-            ++idx;
-        }
-    };
-
-    applyBg(leftEditor_, leftStyles);
-    applyBg(rightEditor_, rightStyles);
 }
 
 // ---------------------------------------------------------------------------

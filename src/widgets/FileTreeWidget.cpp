@@ -116,7 +116,20 @@ void FileTreeWidget::setupUi()
 
     preview_ = new QPlainTextEdit(rightPane);
     preview_->setReadOnly(true);
-    preview_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    // Match DiffViewerWidget's font exactly so the two inspector
+    // tabs render at identical line height. Previously this used
+    // QFontDatabase::systemFont(FixedFont), which on macOS picks
+    // a fixed font at the system's default editor point size —
+    // typically larger than the diff viewer's explicit 11 pt
+    // Menlo, producing visibly taller rows in the file preview
+    // than in the diff. Fixing the font + size in both places is
+    // the only reliable way to keep the spacing identical, since
+    // line height is driven by the font's own ascent/descent
+    // metrics, not by Qt-level layout.
+    QFont monoFont(QStringLiteral("Menlo, Consolas, monospace"));
+    monoFont.setStyleHint(QFont::Monospace);
+    monoFont.setPointSize(11);
+    preview_->setFont(monoFont);
     preview_->setLineWrapMode(QPlainTextEdit::NoWrap);
     preview_->setPlaceholderText(tr("(no file selected)"));
     // Reapply single-line-height after every text replacement so
@@ -202,28 +215,48 @@ void FileTreeWidget::rebuildTree()
 
     const auto& entries = *walk;
 
-    // Sort entries: directories before files at each level, then
-    // alphabetical (case-insensitive). git_tree_walk doesn't make
-    // any sort guarantees, and we want a stable, predictable order
-    // before we feed it into the model.
+    // Sort entries: directories before files at every level, then
+    // alphabetical within each group (GitHub / Finder style). We
+    // build a component-wise sort key so ordering is consistent
+    // both within a single parent and across the whole flat walk:
+    //
+    //   src/conf/SettingsService.cpp →
+    //     [ (DIR, "src"), (DIR, "conf"), (FILE, "SettingsService.cpp") ]
+    //
+    // Lexicographic comparison of these keys gives the GitHub
+    // ordering: at each level a (DIR, name) tuple sorts before any
+    // (FILE, name) tuple regardless of name. The previous comparator
+    // mixed two different orderings (path-based for cross-parent
+    // entries, dir-first for same-parent) and produced a non-
+    // transitive comparator — std::sort is undefined under that.
+    constexpr int DIR_KEY  = 0;
+    constexpr int FILE_KEY = 1;
+    using SortKey = std::vector<std::pair<int, std::string>>;
+    auto buildSortKey = [&](const git::TreeEntry& e) -> SortKey {
+        SortKey key;
+        const std::string& p = e.path;
+        size_t pos = 0;
+        while (true) {
+            const size_t slash = p.find('/', pos);
+            if (slash == std::string::npos) {
+                // Last (own) component — flag matches the entry's
+                // own kind: tree → DIR_KEY, blob → FILE_KEY.
+                key.emplace_back(e.isTree ? DIR_KEY : FILE_KEY,
+                                 p.substr(pos));
+                return key;
+            }
+            // Intermediate component is by definition a parent
+            // directory along the path, so always DIR_KEY.
+            key.emplace_back(DIR_KEY, p.substr(pos, slash - pos));
+            pos = slash + 1;
+        }
+    };
+
     auto sorted = entries;
     std::sort(sorted.begin(), sorted.end(),
-              [](const git::TreeEntry& a, const git::TreeEntry& b) {
-                  // Compare path component-wise so directory order
-                  // is preserved relative to its parent.
-                  if (a.path == b.path) return false;
-                  // Same parent? dirs first.
-                  const auto aSlash = a.path.rfind('/');
-                  const auto bSlash = b.path.rfind('/');
-                  const auto aParent = (aSlash == std::string::npos)
-                                            ? std::string{} : a.path.substr(0, aSlash);
-                  const auto bParent = (bSlash == std::string::npos)
-                                            ? std::string{} : b.path.substr(0, bSlash);
-                  if (aParent != bParent)
-                      return a.path < b.path;
-                  if (a.isTree != b.isTree)
-                      return a.isTree;  // dirs first
-                  return a.name < b.name;
+              [&buildSortKey](const git::TreeEntry& a,
+                              const git::TreeEntry& b) {
+                  return buildSortKey(a) < buildSortKey(b);
               });
 
     QFileIconProvider iconProvider;

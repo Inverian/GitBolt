@@ -7,13 +7,21 @@ namespace gitbolt::editor {
 DiffSyntaxHighlighter::DiffSyntaxHighlighter(QTextDocument* parent)
     : QSyntaxHighlighter(parent)
 {
-    // Addition lines: green foreground, light-green background
-    additionFmt_.setForeground(QColor(0, 140, 0));
-    additionFmt_.setBackground(QColor(200, 255, 200));
+    // Foreground-only styling — backgrounds are NOT set here.
+    // QTextCharFormat::setBackground only paints under the actual
+    // characters, leaving visible white slivers in the line gap
+    // between consecutive colored lines (the "double-spaced" look).
+    // The unified-mode renderer applies per-block backgrounds via
+    // QTextBlockFormat::setBackground in a separate pass after
+    // setPlainText, which paints the entire line height edge-to-
+    // edge — matching how the side-by-side renderer already
+    // colors its panels and how GitHub's diff renders.
 
-    // Deletion lines: red foreground, light-red background
+    // Addition lines: green foreground
+    additionFmt_.setForeground(QColor(0, 140, 0));
+
+    // Deletion lines: red foreground
     deletionFmt_.setForeground(QColor(180, 0, 0));
-    deletionFmt_.setBackground(QColor(255, 220, 220));
 
     // Hunk headers (@@ ... @@): blue foreground
     hunkHeaderFmt_.setForeground(QColor(0, 102, 204));
