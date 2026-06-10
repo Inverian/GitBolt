@@ -8,6 +8,7 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
+#include <QMenu>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QToolButton>
@@ -49,6 +50,10 @@ void ReflogDialog::setEntries(
         auto* newItem = new QTableWidgetItem(
             newHex.left(8));
         newItem->setToolTip(newHex);
+        // Full SHA for the context-menu actions (checkout / reset
+        // target). Stored on the row's first cell so the handler
+        // doesn't have to parse it back out of a tooltip.
+        newItem->setData(Qt::UserRole, newHex);
 
         const auto t = std::chrono::system_clock::to_time_t(
             e.committer.when);
@@ -215,6 +220,9 @@ void ReflogDialog::setupUi() {
     table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table_->setAlternatingRowColors(true);
     table_->verticalHeader()->setVisible(false);
+    table_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(table_, &QTableWidget::customContextMenuRequested,
+            this, &ReflogDialog::onTableContextMenu);
     layout->addWidget(table_, /*stretch=*/1);
 
     auto* buttons = new QDialogButtonBox(
@@ -232,6 +240,52 @@ void ReflogDialog::setupUi() {
         if (idx < 0) return;
         emit refSelected(refCombo_->itemText(idx));
     });
+}
+
+void ReflogDialog::refreshCurrentRef()
+{
+    if (refCombo_->currentIndex() >= 0)
+        emit refSelected(refCombo_->currentText());
+}
+
+void ReflogDialog::onTableContextMenu(const QPoint& pos)
+{
+    auto* item = table_->itemAt(pos);
+    if (!item)
+        return;
+    // The full "new" SHA is stored as UserRole data on the row's
+    // "New" cell (column 1) — see setEntries. Actions act on that
+    // SHA: the state the ref moved to, i.e. what you'd recover.
+    auto* anchor = table_->item(item->row(), 1);
+    if (!anchor)
+        return;
+    const QString sha = anchor->data(Qt::UserRole).toString();
+    if (sha.isEmpty())
+        return;
+    const QString shortSha = sha.left(8);
+
+    QMenu menu(this);
+    menu.addAction(tr("Checkout %1 (detached HEAD)").arg(shortSha),
+                   this, [this, sha]() {
+        emit checkoutRequested(sha);
+    });
+    menu.addSeparator();
+    auto* resetMenu = menu.addMenu(
+        tr("Reset current branch to %1").arg(shortSha));
+    resetMenu->addAction(tr("Soft — keep index and working tree"),
+                         this, [this, sha]() {
+        emit resetRequested(sha, QStringLiteral("soft"));
+    });
+    resetMenu->addAction(tr("Mixed — keep working tree"),
+                         this, [this, sha]() {
+        emit resetRequested(sha, QStringLiteral("mixed"));
+    });
+    resetMenu->addAction(tr("Hard — discard all local changes"),
+                         this, [this, sha]() {
+        emit resetRequested(sha, QStringLiteral("hard"));
+    });
+
+    menu.exec(table_->viewport()->mapToGlobal(pos));
 }
 
 } // namespace gitbolt::dialogs

@@ -25,25 +25,27 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 ### Core Git Operations
 - Visual revision graph with lane-based topology rendering
 - Side-by-side and unified diff viewer with syntax highlighting
-- Chunk-level and line-level staging
-- Three-way merge conflict resolution
-- Interactive rebase with drag-and-drop reordering
+- File-level staging with per-file and stage-all/unstage-all flows
+- Interactive rebase with drag-and-drop reordering and
+  continue / skip / abort controls for conflicted rebases
 - Cherry-pick with multi-commit selection
 - Stash save/apply/pop/drop with diff preview
-- Branch management (create, delete, rename, checkout, merge)
+- Branch management (create, delete, rename, checkout, merge,
+  push, set-upstream — from the sidebar context menu or Commands)
 - Push, pull, fetch with credential helper integration
 
 ### Repository Inspection
 - Commit log with paged loading (handles 100K+ commits smoothly)
-- Blame view with drill-down to commits
-- File history with rename tracking
-- Reflog viewer with checkout and reset actions
+- File history with rename tracking (File Tree → Show History,
+  jump the revision graph to any revision that touched the file)
+- Reflog viewer with checkout and reset (soft / mixed / hard)
+  recovery actions on any entry
 - Search by message, author, date range, file content (pickaxe), or file path
 
 ### Repository Management
 - Tag management (annotated and lightweight)
 - Submodule operations (init, update, sync, deinit)
-- Worktree management (add, remove, lock)
+- Worktree creation (new working trees on any branch)
 - Git Flow workflow integration
 - Repository maintenance (gc, prune, fsck, repack) with disk stats
 - Multi-repository session support
@@ -172,7 +174,7 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 2 — Commit History + Revision Graph | Complete |
 | Phase 3 — Staging, Diffing, Committing | Complete |
 | Phase 4 — Branch Management, Merge, Push/Pull | Complete |
-| Phase 5 — Blame, File History, Search | Complete |
+| Phase 5 — Blame, File History, Search | Core complete (blame UI pending) |
 | Phase 6 — Interactive Rebase, Cherry-Pick, Stash | Complete |
 | Phase 7 — Tags, Submodules, Worktrees, Reflog | Complete |
 | Phase 8 — Settings, Themes, Dashboard | Complete |
@@ -182,6 +184,24 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 12 — Performance & Hardening | Complete |
 
 **~28,900 lines of C++ across 185 source files.**
+
+### Roadmap
+
+Features whose backend exists (or is scaffolded) but which don't have
+a UI entry point yet:
+
+- **Blame view** — `git/Blame` and a blame widget exist; not yet
+  reachable from the UI
+- **Three-way merge conflict resolution** — conflicted merges
+  currently report through git's own error output; the dedicated
+  resolution widget isn't wired in yet
+- **Hunk / line-level staging** — staging is per-file today
+- **Worktree remove / lock** — worktrees can be created but not yet
+  managed afterwards from the UI
+- **GPG signature verification** — the inspector tab is a placeholder
+  by design
+- **Clone cancellation** — a running clone must finish or fail; there
+  is no abort yet
 
 ---
 

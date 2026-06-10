@@ -5,6 +5,23 @@ kept most-recent-first.
 
 ## Unreleased
 
+### Added
+- Reflog recovery actions: right-click any reflog entry to checkout
+  its "new" SHA (detached HEAD, with explanation) or reset the
+  current branch to it (soft / mixed / hard submenu; hard reset
+  warns that uncommitted changes are discarded). The table reloads
+  after each action so the operation you just performed appears as
+  the newest entry. Previously the dialog was view-only despite the
+  README advertising checkout/reset.
+
+### Changed
+- README feature list now matches reality: staging is described as
+  file-level (hunk/line staging moved to a new Roadmap section along
+  with blame view, merge-conflict resolution UI, worktree
+  remove/lock, GPG verification, and clone cancellation), worktrees
+  are listed as create-only, and the file-history + reflog-actions
+  bullets describe the newly wired implementations.
+
 ### Fixed
 - Branch sidebar actions actually work now. The "⊕ New Branch"
   button and six of the eight context-menu items (New, Rename,

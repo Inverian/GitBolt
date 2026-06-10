@@ -1349,6 +1349,53 @@ void MainWindow::createMenuBar()
                     dlg->setEntries({});
                 }
             });
+
+            // Row context-menu recovery actions. Confirmations
+            // live here (not in the dialog) so the wording can
+            // reference the actual git consequences.
+            connect(dlg, &dialogs::ReflogDialog::checkoutRequested,
+                    this, [this, dlg](const QString& sha) {
+                const auto answer = QMessageBox::question(
+                    dlg, tr("Checkout Commit"),
+                    tr("Checkout %1?\n\nHEAD will be detached — "
+                       "create a branch afterwards if you want to "
+                       "keep work based on this state.")
+                        .arg(sha.left(8)));
+                if (answer != QMessageBox::Yes)
+                    return;
+                auto out = gitService_->process().run(
+                    {"checkout", sha.toStdString()});
+                handleProcessResult(dlg, tr("Checkout Failed"), out);
+                gitService_->refreshStatus();
+                gitService_->refreshLog();
+                gitService_->refreshBranches();
+                dlg->refreshCurrentRef();
+            });
+            connect(dlg, &dialogs::ReflogDialog::resetRequested,
+                    this, [this, dlg](const QString& sha,
+                                      const QString& mode) {
+                const QString warning =
+                    mode == QLatin1String("hard")
+                        ? tr("Reset --hard to %1?\n\nAll uncommitted "
+                             "changes in the working tree and index "
+                             "will be PERMANENTLY discarded.")
+                              .arg(sha.left(8))
+                        : tr("Reset --%1 the current branch to %2?")
+                              .arg(mode, sha.left(8));
+                const auto answer = QMessageBox::question(
+                    dlg, tr("Reset Branch"), warning);
+                if (answer != QMessageBox::Yes)
+                    return;
+                auto out = gitService_->process().run(
+                    {"reset", "--" + mode.toStdString(),
+                     sha.toStdString()});
+                handleProcessResult(dlg, tr("Reset Failed"), out);
+                gitService_->refreshStatus();
+                gitService_->refreshLog();
+                gitService_->refreshBranches();
+                dlg->refreshCurrentRef();
+            });
+
             dlg->setRefs(refs);
             dlg->show();
         });

@@ -17,10 +17,12 @@ namespace gitbolt::dialogs {
 /// new SHA, committer, when, message — in chronological order
 /// (oldest at the top).
 ///
-/// The dialog is intentionally read-only. A future improvement is
-/// "checkout this entry's newId" via a row context menu, but for
-/// now the dialog is purely informational, matching what
-/// `git reflog show <ref>` produces in a terminal.
+/// Right-clicking a row offers recovery actions on that entry's
+/// "new" SHA (the state the ref moved to): checkout (detached
+/// HEAD) and reset of the current branch (soft / mixed / hard).
+/// The dialog only EMITS for these — the host owns the git calls
+/// and the confirmation prompts, mirroring the refSelected /
+/// setEntries split used for data loading.
 class ReflogDialog : public QDialog {
     Q_OBJECT
 public:
@@ -37,13 +39,25 @@ public:
     /// `Repository::reflog(ref)` call there).
     void setEntries(const std::vector<gitbolt::git::ReflogEntry>& entries);
 
+    /// Re-emit refSelected for the current combo entry so the
+    /// host reloads the table — called by the host after a
+    /// checkout/reset so the reflog shows the operation it just
+    /// performed.
+    void refreshCurrentRef();
+
 signals:
     /// Emitted when the user picks a different ref. Host should
     /// resolve the reflog and call setEntries() with the result.
     void refSelected(const QString& ref);
 
+    /// Context-menu actions on a reflog row. `sha` is the row's
+    /// full "new" SHA; `mode` is "soft", "mixed", or "hard".
+    void checkoutRequested(const QString& sha);
+    void resetRequested(const QString& sha, const QString& mode);
+
 private:
     void setupUi();
+    void onTableContextMenu(const QPoint& pos);
 
     QComboBox*   refCombo_ = nullptr;
     QTableWidget* table_   = nullptr;
