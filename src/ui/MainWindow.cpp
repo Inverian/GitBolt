@@ -28,6 +28,7 @@
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
+#include "widgets/WorktreeWidget.h"
 #include "models/CommitLogModel.h"
 
 #include <QAction>
@@ -621,29 +622,75 @@ void MainWindow::createMenuBar()
 
     repoMenu->addSeparator();
     {
+        // Manage worktrees — modeless manager dialog hosting
+        // WorktreeWidget (list + Add / Remove / Lock / Unlock /
+        // Open), same hosting pattern as Manage Submodules. The
+        // Add button opens the existing WorktreeDialog form.
+        // Previously this menu item went STRAIGHT to the add form:
+        // worktrees could be created but never listed, removed, or
+        // locked from the UI.
         auto* a = new QAction(menuIcon(QStringLiteral("worktrees")),
                               tr("Manage &worktrees..."), this);
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_W));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
-            dialogs::WorktreeDialog dlg(this);
-            // Populate the branch picker from the currently-open
-            // repo. Done synchronously via the Repository handle
-            // because libgit2 branch enumeration is fast and the
-            // dialog is modal anyway.
-            QStringList branchNames;
-            if (auto res = gitService_->repository()->branches(
-                    git::BranchType::Local); res.ok()) {
-                for (const auto& b : res.value())
-                    branchNames << QString::fromStdString(b.name);
-            }
-            dlg.setBranches(branchNames);
-            if (dlg.exec() == QDialog::Accepted) {
-                gitService_->addWorktree(dlg.worktreeName(),
-                                         dlg.worktreePath(),
-                                         dlg.branch());
-            }
+
+            auto* dlg = new QDialog(this);
+            dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->setWindowTitle(tr("Worktrees"));
+            conf::SettingsService::applyConfiguredSize(dlg, "worktrees");
+
+            auto* layout = new QVBoxLayout(dlg);
+            layout->setContentsMargins(0, 0, 0, 0);
+            auto* widget = new widgets::WorktreeWidget(dlg);
+            layout->addWidget(widget);
+
+            connect(gitService_,
+                    &services::GitService::worktreesReady,
+                    widget,
+                    [widget](std::vector<git::WorktreeInfo> w) {
+                        widget->setWorktrees(std::move(w));
+                    });
+            gitService_->refreshWorktrees();
+
+            connect(widget, &widgets::WorktreeWidget::addRequested,
+                    this, [this]() {
+                dialogs::WorktreeDialog addDlg(this);
+                QStringList branchNames;
+                if (auto res = gitService_->repository()->branches(
+                        git::BranchType::Local); res.ok()) {
+                    for (const auto& b : res.value())
+                        branchNames << QString::fromStdString(b.name);
+                }
+                addDlg.setBranches(branchNames);
+                if (addDlg.exec() == QDialog::Accepted) {
+                    gitService_->addWorktree(addDlg.worktreeName(),
+                                             addDlg.worktreePath(),
+                                             addDlg.branch());
+                }
+            });
+            connect(widget, &widgets::WorktreeWidget::removeRequested,
+                    this, [this, dlg](const QString& name) {
+                const auto answer = QMessageBox::question(
+                    dlg, tr("Remove Worktree"),
+                    tr("Remove worktree '%1'?\n\nIts working "
+                       "directory is deleted from disk. Commits "
+                       "made there stay in the repository, but "
+                       "uncommitted changes are lost.").arg(name));
+                if (answer == QMessageBox::Yes)
+                    gitService_->removeWorktree(name);
+            });
+            connect(widget, &widgets::WorktreeWidget::lockRequested,
+                    gitService_, &services::GitService::lockWorktree);
+            connect(widget, &widgets::WorktreeWidget::unlockRequested,
+                    gitService_, &services::GitService::unlockWorktree);
+            connect(widget, &widgets::WorktreeWidget::openRequested,
+                    this, [](const QString& p) {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+            });
+
+            dlg->show();
         });
         repoMenu->addAction(a);
     }

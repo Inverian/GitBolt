@@ -206,7 +206,13 @@ public:
     // Worktrees
     Result<std::vector<WorktreeInfo>> worktrees() const;
     Result<void> addWorktree(const std::string& name, const std::string& path, const std::string& branch);
+    /// Prunes the worktree's administrative files AND deletes its
+    /// working directory from disk. Refuses locked worktrees —
+    /// unlock first. Caller is expected to confirm with the user.
     Result<void> removeWorktree(const std::string& name);
+    Result<void> lockWorktree(const std::string& name,
+                              const std::string& reason = "");
+    Result<void> unlockWorktree(const std::string& name);
 
     // Revwalk
     Result<RevWalk> createRevWalk() const;

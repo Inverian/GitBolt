@@ -134,6 +134,8 @@ public:
     void refreshWorktrees();
     void addWorktree(const QString& name, const QString& path, const QString& branch);
     void removeWorktree(const QString& name);
+    void lockWorktree(const QString& name);
+    void unlockWorktree(const QString& name);
 
     // Git Flow
     bool isGitFlowInitialized();

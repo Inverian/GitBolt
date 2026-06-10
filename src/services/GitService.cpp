@@ -888,6 +888,34 @@ void GitService::removeWorktree(const QString& name) {
     else     refreshWorktrees();
 }
 
+void GitService::lockWorktree(const QString& name) {
+    if (!repo_) return;
+    bool ok = false;
+    QString err;
+    {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        auto result = repo_->lockWorktree(name.toStdString());
+        ok = result.ok();
+        if (!ok) err = QString::fromStdString(result.error().message());
+    }
+    if (!ok) emit operationFailed("lockWorktree", err);
+    else     refreshWorktrees();
+}
+
+void GitService::unlockWorktree(const QString& name) {
+    if (!repo_) return;
+    bool ok = false;
+    QString err;
+    {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        auto result = repo_->unlockWorktree(name.toStdString());
+        ok = result.ok();
+        if (!ok) err = QString::fromStdString(result.error().message());
+    }
+    if (!ok) emit operationFailed("unlockWorktree", err);
+    else     refreshWorktrees();
+}
+
 // ---------------------------------------------------------------------------
 // Git Flow
 // ---------------------------------------------------------------------------

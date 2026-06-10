@@ -1048,6 +1048,26 @@ Result<std::vector<WorktreeInfo>> Repository::worktrees() const {
             info.path = git_worktree_path(wt) ? git_worktree_path(wt) : "";
             info.isLocked = git_worktree_is_locked(nullptr, wt) != 0;
             info.isPrunable = git_worktree_is_prunable(wt, nullptr) != 0;
+
+            // Checked-out branch of the worktree. The table's
+            // Branch column was previously always empty because
+            // this was never resolved. Detached HEAD shows the
+            // short SHA instead of a ref name.
+            git_reference* head = nullptr;
+            if (git_repository_head_for_worktree(
+                    &head, repo_, names.strings[i]) == 0) {
+                if (git_reference_is_branch(head)) {
+                    const char* shorthand =
+                        git_reference_shorthand(head);
+                    info.branch = shorthand ? shorthand : "";
+                } else if (const git_oid* oid =
+                               git_reference_target(head)) {
+                    info.branch =
+                        ObjectId(oid).toShortHex() + " (detached)";
+                }
+                git_reference_free(head);
+            }
+
             git_worktree_free(wt);
             result.push_back(std::move(info));
         }
@@ -1075,7 +1095,40 @@ Result<void> Repository::removeWorktree(const std::string& name) {
     git_worktree* wt = nullptr;
     int err = git_worktree_lookup(&wt, repo_, name.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
-    err = git_worktree_prune(wt, nullptr);
+
+    // Default prune options refuse to touch a valid (i.e. normal,
+    // still-on-disk) worktree — they only clean up already-broken
+    // ones, so "Remove" from the UI would always fail. VALID lets
+    // a healthy worktree be pruned; WORKING_TREE also deletes its
+    // directory from disk (the UI confirms with the user first).
+    // A LOCKED worktree is still refused — unlock first, which is
+    // the same protection `git worktree remove` gives.
+    git_worktree_prune_options opts = GIT_WORKTREE_PRUNE_OPTIONS_INIT;
+    opts.flags = GIT_WORKTREE_PRUNE_VALID
+               | GIT_WORKTREE_PRUNE_WORKING_TREE;
+    err = git_worktree_prune(wt, &opts);
+    git_worktree_free(wt);
+    if (err < 0) return GitError::fromLibgit2(err);
+    return Result<void>::success();
+}
+
+Result<void> Repository::lockWorktree(const std::string& name,
+                                      const std::string& reason) {
+    git_worktree* wt = nullptr;
+    int err = git_worktree_lookup(&wt, repo_, name.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    err = git_worktree_lock(wt, reason.empty() ? nullptr
+                                               : reason.c_str());
+    git_worktree_free(wt);
+    if (err < 0) return GitError::fromLibgit2(err);
+    return Result<void>::success();
+}
+
+Result<void> Repository::unlockWorktree(const std::string& name) {
+    git_worktree* wt = nullptr;
+    int err = git_worktree_lookup(&wt, repo_, name.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    err = git_worktree_unlock(wt);
     git_worktree_free(wt);
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
