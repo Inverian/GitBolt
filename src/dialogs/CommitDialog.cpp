@@ -7,7 +7,7 @@
 #include "git/Repository.h"
 #include "models/FileStatusModel.h"
 #include "services/GitService.h"
-#include "widgets/CommitEditorWidget.h" // for CommitMessageEdit
+#include "widgets/CommitMessageEdit.h"
 #include "widgets/DiffViewerWidget.h"
 
 #include <QAction>

@@ -53,8 +53,9 @@ QVariant FileStatusModel::data(const QModelIndex& index, int role) const
         }
         case Path: {
             // Prefix the path with the single-letter status so that
-            // single-column list views (StagingWidget) show both the
-            // status and the file without needing a delegate.
+            // single-column list views (CommitDialog's staged /
+            // unstaged panes) show both the status and the file
+            // without needing a delegate.
             const QChar letter = statusLetter(entry, stagedFilter_);
             const QString path = QString::fromStdString(entry.path);
             return QStringLiteral("%1  %2").arg(letter).arg(path);
@@ -66,7 +67,7 @@ QVariant FileStatusModel::data(const QModelIndex& index, int role) const
     }
     case Qt::ForegroundRole: {
         // Foreground tint on the status letter column AND on the path
-        // column, so a single-column QListView (like StagingWidget uses)
+        // column, so a single-column QListView (CommitDialog's panes)
         // still shows status colour without needing a custom delegate.
         if (col == StatusIcon || col == Path)
             return statusColor(entry, stagedFilter_);

@@ -65,10 +65,6 @@ Result<void> Index::removeAll() {
     return Result<void>::success();
 }
 
-Result<void> Index::addByHunk(const std::string& /*path*/, const std::vector<int>& /*hunkIndices*/) {
-    return GitError(GitErrorCode::GenericError, "Hunk-level staging not yet implemented");
-}
-
 Result<void> Index::write() {
     git_index* idx = nullptr;
     int err = git_repository_index(&idx, repo_);
