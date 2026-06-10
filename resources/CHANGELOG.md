@@ -6,6 +6,13 @@ kept most-recent-first.
 ## Unreleased
 
 ### Added
+- Every popup dialog now closes with the standard close-window
+  shortcut (Cmd+W on macOS, Ctrl+W elsewhere), not just Escape.
+  Wired once in the shared `applyConfiguredSize` helper so every
+  dialog that adopts it (Commit, Clone, Settings, Reflog, Rebase,
+  Tag, Stash, Worktree, file-history, …) gets it for free. Scoped
+  to the active dialog via WindowShortcut context, so it never
+  shadows the main window's Cmd+W (Repository → Close).
 - Reflog recovery actions: right-click any reflog entry to checkout
   its "new" SHA (detached HEAD, with explanation) or reset the
   current branch to it (soft / mixed / hard submenu; hard reset

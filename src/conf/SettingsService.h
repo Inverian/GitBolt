@@ -146,11 +146,14 @@ public:
     // its constructor. Handles: (1) the initial resize — restoring
     // a previously-saved geometry if `restoreLastDialogSize()` is
     // on and a saved size exists for `key`, otherwise applying
-    // the configured default; and (2) wiring up the dialog's
-    // `finished` signal so the geometry is saved on close.
-    // The save happens regardless of the toggle's current state,
-    // so toggling the setting back on later still picks up the
-    // most recent drag-resized size.
+    // the configured default; (2) wiring up the dialog's
+    // `finished` signal so the geometry is saved on close; and
+    // (3) a standard close-window shortcut (Cmd+W on macOS,
+    // Ctrl+W elsewhere) so every popup closes the way macOS users
+    // expect — and the way UI automation can rely on.
+    // The geometry save happens regardless of the toggle's current
+    // state, so toggling the setting back on later still picks up
+    // the most recent drag-resized size.
     static void applyConfiguredSize(class QDialog* dlg, const char* key);
 
     // Layout persistence — generic splitter + dialog geometry helpers

@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QScreen>
+#include <QShortcut>
 
 namespace gitbolt::conf {
 
@@ -543,6 +544,21 @@ void SettingsService::applyConfiguredSize(QDialog* dlg, const char* key)
         QSettings ss = makeStandaloneSettings();
         ss.setValue(dialogGeomKey(key), dlg->saveGeometry());
     });
+
+    // Standard close-window shortcut (Cmd+W on macOS, Ctrl+W
+    // elsewhere) for every popup that adopts this helper. QDialog
+    // only handles Escape out of the box; macOS users expect Cmd+W
+    // to close the focused window, and it also gives UI automation
+    // a deterministic one-keystroke close — the Close button
+    // usually sits nested inside a QDialogButtonBox, where
+    // accessibility tooling can't address it as a direct child of
+    // the window. The default WindowShortcut context scopes the
+    // shortcut to this dialog while it is the active window, so it
+    // never collides with the main window's Cmd+W (Repository →
+    // Close).
+    auto* closeShortcut = new QShortcut(QKeySequence::Close, dlg);
+    QObject::connect(closeShortcut, &QShortcut::activated,
+                     dlg, &QDialog::close);
 }
 
 // ---------------------------------------------------------------------------
