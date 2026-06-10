@@ -6,6 +6,7 @@ cmake-build-*/
 # IDE files
 .vscode/
 .idea/
+.claude/
 *.user
 *.suo
 *.sln.docstates
