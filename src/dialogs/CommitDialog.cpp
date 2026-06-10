@@ -3,6 +3,7 @@
 #include "conf/SettingsService.h"
 #include "git/Config.h"
 #include "git/Diff.h"
+#include "git/PatchBuilder.h"
 #include "git/Repository.h"
 #include "models/FileStatusModel.h"
 #include "services/GitService.h"
@@ -380,6 +381,57 @@ void CommitDialog::wireConnections()
     connect(stageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::stageAll);
     connect(unstageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::unstageAll);
 
+    // ---- Hunk / line staging from the diff pane ----------------------------
+    // The diff viewer's context menu emits these; the verb (stage
+    // vs unstage) is whatever mode showDiffForUnstaged/Staged armed.
+    // Patches are built from the exact DiffFileEntry on display, so
+    // a stale diff (file changed since render) fails cleanly in
+    // `git apply --cached` and surfaces via operationFailed.
+    connect(diffView_, &widgets::DiffViewerWidget::hunkActionRequested,
+            this, [this](int hunkIdx) {
+        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        const bool reverse =
+            diffView_->hunkActionMode()
+            == widgets::DiffViewerWidget::HunkAction::Unstage;
+        const QString path =
+            QString::fromStdString(diffView_->currentFile().path());
+        const std::string patch = git::buildHunkPatch(
+            diffView_->currentFile(), static_cast<size_t>(hunkIdx));
+        if (patch.empty()) return;
+        svc_->applyPatchToIndex(QString::fromStdString(patch), reverse);
+        // Re-render the same file/side so the user can keep
+        // picking hunks; if nothing of it remains on this side the
+        // lookup misses and the pane clears.
+        if (reverse) showDiffForStaged(path);
+        else         showDiffForUnstaged(path);
+    });
+    connect(diffView_, &widgets::DiffViewerWidget::linesActionRequested,
+            this, [this](int hunkIdx, QList<int> lineIdxs) {
+        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        const bool reverse =
+            diffView_->hunkActionMode()
+            == widgets::DiffViewerWidget::HunkAction::Unstage;
+        const QString path =
+            QString::fromStdString(diffView_->currentFile().path());
+        std::set<size_t> lines;
+        for (int l : lineIdxs)
+            if (l >= 0) lines.insert(static_cast<size_t>(l));
+        const std::string patch = git::buildLinesPatch(
+            diffView_->currentFile(), static_cast<size_t>(hunkIdx),
+            lines);
+        if (patch.empty()) {
+            QMessageBox::information(this, tr("Stage Lines"),
+                tr("The selection doesn't produce a stageable "
+                   "change — select at least one added or removed "
+                   "line (hunks that end without a newline only "
+                   "support whole-hunk staging)."));
+            return;
+        }
+        svc_->applyPatchToIndex(QString::fromStdString(patch), reverse);
+        if (reverse) showDiffForStaged(path);
+        else         showDiffForUnstaged(path);
+    });
+
     // ---- Commit buttons --------------------------------------------------
     connect(commitBtn_,     &QPushButton::clicked, this, &CommitDialog::onCommitClicked);
     connect(commitPushBtn_, &QPushButton::clicked, this, &CommitDialog::onCommitAndPushClicked);
@@ -619,6 +671,10 @@ void CommitDialog::showDiffForUnstaged(const QString& path)
     for (size_t i = 0; i < diff.files.size(); ++i) {
         if (diff.files[i].path() == needle) {
             diffView_->setDiff(diff, static_cast<int>(i));
+            // Workdir→index diff: context menu offers Stage Hunk /
+            // Stage Selected Lines (Modified files only).
+            diffView_->setHunkActionMode(
+                widgets::DiffViewerWidget::HunkAction::Stage);
             return;
         }
     }
@@ -639,6 +695,10 @@ void CommitDialog::showDiffForStaged(const QString& path)
     for (size_t i = 0; i < diff.files.size(); ++i) {
         if (diff.files[i].path() == needle) {
             diffView_->setDiff(diff, static_cast<int>(i));
+            // Index→HEAD diff: context menu offers Unstage Hunk /
+            // Unstage Selected Lines.
+            diffView_->setHunkActionMode(
+                widgets::DiffViewerWidget::HunkAction::Unstage);
             return;
         }
     }

@@ -432,6 +432,37 @@ void GitService::stageAll() {
     refreshStatus();
 }
 
+void GitService::applyPatchToIndex(const QString& patchText,
+                                   bool reverse) {
+    if (!repo_ || patchText.isEmpty()) return;
+
+    // Only the repo_->process() call needs the mutex (it reads the
+    // workdir via libgit2); `git apply` itself is a subprocess and
+    // independent of libgit2 state — same pattern as unstageAll.
+    git::GitProcess proc{[&]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        return repo_->process();
+    }()};
+
+    std::vector<std::string> args{"apply", "--cached"};
+    if (reverse)
+        args.push_back("--reverse");
+    args.push_back("-");   // read the patch from stdin
+
+    auto result = proc.runWithInput(args, patchText.toStdString());
+    if (!result) {
+        emit operationFailed(QStringLiteral("stage hunk"),
+            QString::fromStdString(result.error().message()));
+    } else if (!result->success()) {
+        QString detail =
+            QString::fromStdString(result->stderrData).trimmed();
+        if (detail.isEmpty())
+            detail = QString::fromStdString(result->stdoutData).trimmed();
+        emit operationFailed(QStringLiteral("stage hunk"), detail);
+    }
+    refreshStatus();
+}
+
 void GitService::unstageAll() {
     if (!repo_) return;
     // `git reset` with no paths unstages everything: it rewrites the

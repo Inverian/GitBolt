@@ -114,6 +114,15 @@ public:
     void unstageFile(const QString& path);
     void stageAll();
     void unstageAll();
+
+    /// Apply a unified patch to the INDEX only (`git apply --cached`),
+    /// reversed when `reverse` is true. This is how hunk- and
+    /// line-level staging work: the diff pane builds a minimal patch
+    /// for the chosen hunk/lines (git::buildHunkPatch /
+    /// buildLinesPatch) and stages it without touching the working
+    /// tree. Failures (e.g. the diff went stale because the file
+    /// changed since it was rendered) surface via operationFailed.
+    void applyPatchToIndex(const QString& patchText, bool reverse);
     void discardFile(const QString& path);
     void commitChanges(const QString& message, bool amend = false);
 

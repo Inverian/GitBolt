@@ -57,6 +57,57 @@ Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int 
     return output;
 }
 
+Result<ProcessOutput> GitProcess::runWithInput(
+    const std::vector<std::string>& args,
+    const std::string& stdinData,
+    int timeoutMs) const
+{
+    QProcess process;
+    process.setWorkingDirectory(QString::fromStdString(workDir_));
+
+    QStringList qargs;
+    for (const auto& arg : args)
+        qargs.append(QString::fromStdString(arg));
+
+    QElapsedTimer timer;
+    timer.start();
+
+    process.start(QString::fromStdString(gitPath_), qargs);
+    if (!process.waitForStarted(5000)) {
+        GitProcessLog::instance().emitCommand(
+            QString::fromStdString(workDir_), qargs, -1,
+            timer.elapsed());
+        return GitError(GitErrorCode::ProcessFailed,
+                        "Failed to start git process");
+    }
+
+    // Feed the payload and close stdin so git sees EOF — commands
+    // like `git apply -` block until the write channel closes.
+    process.write(stdinData.data(),
+                  static_cast<qint64>(stdinData.size()));
+    process.closeWriteChannel();
+
+    if (!process.waitForFinished(timeoutMs)) {
+        process.kill();
+        GitProcessLog::instance().emitCommand(
+            QString::fromStdString(workDir_), qargs, -1,
+            timer.elapsed());
+        return GitError(GitErrorCode::ProcessFailed,
+                        "Git process timed out");
+    }
+
+    ProcessOutput output;
+    output.exitCode = process.exitCode();
+    output.stdoutData = process.readAllStandardOutput().toStdString();
+    output.stderrData = process.readAllStandardError().toStdString();
+
+    GitProcessLog::instance().emitCommand(
+        QString::fromStdString(workDir_), qargs, output.exitCode,
+        timer.elapsed());
+
+    return output;
+}
+
 Result<std::vector<std::string>> GitProcess::logOneline(const std::string& range, int maxCount) const {
     std::vector<std::string> args = {"log", "--oneline", "--format=%H %s"};
     if (maxCount > 0) { args.emplace_back("-n"); args.push_back(std::to_string(maxCount)); }

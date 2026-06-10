@@ -21,6 +21,15 @@ public:
 
     Result<ProcessOutput> run(const std::vector<std::string>& args, int timeoutMs = 30000) const;
 
+    /// Like run(), but feeds `stdinData` to the child's stdin and
+    /// closes the write channel. Needed for commands that read a
+    /// payload from stdin, e.g. `git apply --cached -` with a patch
+    /// (hunk-level staging builds patches in memory; writing temp
+    /// files just to hand git a few hundred bytes would be noise).
+    Result<ProcessOutput> runWithInput(const std::vector<std::string>& args,
+                                       const std::string& stdinData,
+                                       int timeoutMs = 30000) const;
+
     Result<std::vector<std::string>> logOneline(const std::string& range = "", int maxCount = -1) const;
     Result<std::string> diffRaw(const std::string& from, const std::string& to) const;
     Result<std::string> showFile(const std::string& revision, const std::string& path) const;

@@ -5,6 +5,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QLabel>
+#include <QMenu>
 #include <QScrollBar>
 #include <QSplitter>
 #include <QTextBlock>
@@ -72,6 +73,8 @@ void DiffViewerWidget::clear()
     unifiedEditor_->clear();
     leftEditor_->clear();
     rightEditor_->clear();
+    blockHunkLine_.clear();
+    hunkAction_ = HunkAction::None;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +168,13 @@ void DiffViewerWidget::setupUi()
     unifiedHighlighter_ = new editor::DiffSyntaxHighlighter(
         unifiedEditor_->document());
 
+    // Custom context menu so hosts can offer "Stage/Unstage Hunk"
+    // (and selected lines) on top of the standard copy/select-all
+    // items — see onUnifiedContextMenu.
+    unifiedEditor_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(unifiedEditor_, &QPlainTextEdit::customContextMenuRequested,
+            this, &DiffViewerWidget::onUnifiedContextMenu);
+
     layout->addWidget(unifiedEditor_);
 
     // ---- Side-by-side editors ---------------------------------------------
@@ -210,6 +220,7 @@ void DiffViewerWidget::setupUi()
 void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
 {
     unifiedEditor_->clear();
+    blockHunkLine_.clear();
 
     if (file.isBinary) {
         unifiedEditor_->setPlainText(tr("Binary file differs"));
@@ -232,14 +243,22 @@ void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
     };
 
     QStringList lines;
+    // Parallel map: block number → (hunk index, line index within
+    // that hunk). Drives the context menu's hunk/line staging.
+    blockHunkLine_.clear();
+
     // File header
     lines << QStringLiteral("diff --git a/%1 b/%2")
                  .arg(QString::fromStdString(file.oldPath),
                       QString::fromStdString(file.newPath));
+    blockHunkLine_.emplace_back(-1, -1);
 
-    for (const auto& hunk : file.hunks) {
+    for (size_t h = 0; h < file.hunks.size(); ++h) {
+        const auto& hunk = file.hunks[h];
         lines << stripNewline(hunk.header);
-        for (const auto& line : hunk.lines) {
+        blockHunkLine_.emplace_back(static_cast<int>(h), -1);
+        for (size_t l = 0; l < hunk.lines.size(); ++l) {
+            const auto& line = hunk.lines[l];
             using LT = gitbolt::git::DiffLineType;
             const QString content = stripNewline(line.content);
             switch (line.type) {
@@ -259,6 +278,8 @@ void DiffViewerWidget::renderUnified(const gitbolt::git::DiffFileEntry& file)
                 lines << QStringLiteral(" ") + content;
                 break;
             }
+            blockHunkLine_.emplace_back(static_cast<int>(h),
+                                        static_cast<int>(l));
         }
     }
 
@@ -341,6 +362,82 @@ void DiffViewerWidget::renderSideBySide(const gitbolt::git::DiffFileEntry& file)
 
     leftEditor_->setPlainText(leftLines.join(QLatin1Char('\n')));
     rightEditor_->setPlainText(rightLines.join(QLatin1Char('\n')));
+}
+
+// ---------------------------------------------------------------------------
+// Context menu — hunk / line staging
+// ---------------------------------------------------------------------------
+//
+// Adds "Stage Hunk" (or "Unstage Hunk", per the host-configured
+// HunkAction mode) and, when the selection stays within a single
+// hunk, "Stage Selected Lines" on top of the standard context menu.
+// Restricted to Modified files: Added/Deleted files are one
+// all-or-nothing hunk where file-level staging is equivalent, and
+// their patches would need new-file/deleted-file headers.
+void DiffViewerWidget::onUnifiedContextMenu(const QPoint& pos)
+{
+    QMenu* menu = unifiedEditor_->createStandardContextMenu();
+
+    const bool stagingEligible =
+        hunkAction_ != HunkAction::None && hasFile_
+        && currentFile_.status == git::DiffStatus::Modified;
+
+    if (stagingEligible) {
+        // cursorForPosition wants viewport coordinates; the
+        // customContextMenuRequested pos is in editor coordinates.
+        const QPoint vpPos =
+            unifiedEditor_->viewport()->mapFrom(unifiedEditor_, pos);
+        const int block =
+            unifiedEditor_->cursorForPosition(vpPos).blockNumber();
+        const int hunkIdx =
+            (block >= 0
+             && block < static_cast<int>(blockHunkLine_.size()))
+                ? blockHunkLine_[static_cast<size_t>(block)].first
+                : -1;
+
+        if (hunkIdx >= 0) {
+            const QString verb = hunkAction_ == HunkAction::Stage
+                                     ? tr("Stage")
+                                     : tr("Unstage");
+            menu->addSeparator();
+            menu->addAction(tr("%1 Hunk").arg(verb), this,
+                            [this, hunkIdx]() {
+                emit hunkActionRequested(hunkIdx);
+            });
+
+            // Line-level entry only when a selection exists and
+            // every selected block belongs to this same hunk.
+            const QTextCursor sel = unifiedEditor_->textCursor();
+            if (sel.hasSelection()) {
+                const auto* doc = unifiedEditor_->document();
+                const int startBlock =
+                    doc->findBlock(sel.selectionStart()).blockNumber();
+                const int endBlock =
+                    doc->findBlock(sel.selectionEnd()).blockNumber();
+                QList<int> lineIdxs;
+                bool sameHunk = startBlock >= 0
+                    && endBlock < static_cast<int>(blockHunkLine_.size());
+                for (int b = startBlock; sameHunk && b <= endBlock; ++b) {
+                    const auto& [h, l] =
+                        blockHunkLine_[static_cast<size_t>(b)];
+                    if (h != hunkIdx)
+                        sameHunk = false;
+                    else if (l >= 0)
+                        lineIdxs.append(l);
+                }
+                if (sameHunk && !lineIdxs.isEmpty()) {
+                    menu->addAction(
+                        tr("%1 Selected Lines").arg(verb), this,
+                        [this, hunkIdx, lineIdxs]() {
+                        emit linesActionRequested(hunkIdx, lineIdxs);
+                    });
+                }
+            }
+        }
+    }
+
+    menu->exec(unifiedEditor_->mapToGlobal(pos));
+    delete menu;
 }
 
 // ---------------------------------------------------------------------------
