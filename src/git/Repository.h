@@ -22,6 +22,7 @@
 #include "git/Tree.h"
 #include "git/Worktree.h"
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -95,9 +96,17 @@ public:
     /// `onProgress`. The callback is invoked on the libgit2 worker
     /// thread (typically a background thread); it must not touch UI
     /// state directly — marshal across threads first.
-    static Result<Repository> clone(const std::string& url,
-                                    const std::string& path,
-                                    CloneProgressCallback onProgress);
+    ///
+    /// `cancelFlag`, when non-null, is polled from the progress
+    /// callbacks: set it to true (from any thread) and the fetch —
+    /// or checkout — aborts at the next callback with a GIT_EUSER
+    /// error. The caller is responsible for cleaning up the
+    /// partially-cloned destination directory afterwards.
+    static Result<Repository> clone(
+        const std::string& url,
+        const std::string& path,
+        CloneProgressCallback onProgress,
+        std::shared_ptr<std::atomic<bool>> cancelFlag = nullptr);
 
     std::string path() const;
     std::string workdir() const;

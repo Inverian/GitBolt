@@ -114,18 +114,22 @@ Result<Repository> Repository::clone(const std::string& url, const std::string& 
 // (typically a QtConcurrent pool thread), so if the lambda touches UI
 // state it must marshal back to the GUI thread itself.
 //
-// Return values: libgit2 treats a nonzero return from transfer_progress
-// as "please cancel". We always return 0 — cancellation UX isn't wired
-// up yet and the caller can still Cancel from the dialog.
+// Cancellation: a nonzero return from transfer_progress (fetch) or
+// notify_cb (checkout) makes libgit2 abort with GIT_EUSER. When the
+// caller supplies `cancelFlag`, both callbacks poll it — flipping the
+// flag from any thread stops the clone at the next callback tick.
 // ---------------------------------------------------------------------------
-Result<Repository> Repository::clone(const std::string& url,
-                                     const std::string& path,
-                                     CloneProgressCallback onProgress)
+Result<Repository> Repository::clone(
+    const std::string& url,
+    const std::string& path,
+    CloneProgressCallback onProgress,
+    std::shared_ptr<std::atomic<bool>> cancelFlag)
 {
     struct CallbackState {
         CloneProgressCallback cb;
+        std::shared_ptr<std::atomic<bool>> cancel;
     };
-    CallbackState state{std::move(onProgress)};
+    CallbackState state{std::move(onProgress), std::move(cancelFlag)};
 
     git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
 
@@ -133,7 +137,10 @@ Result<Repository> Repository::clone(const std::string& url,
     opts.fetch_opts.callbacks.transfer_progress =
         [](const git_indexer_progress* stats, void* payload) -> int {
             auto* s = static_cast<CallbackState*>(payload);
-            if (!s || !s->cb) return 0;
+            if (!s) return 0;
+            if (s->cancel && s->cancel->load())
+                return GIT_EUSER;   // abort the fetch
+            if (!s->cb) return 0;
             CloneProgress p;
             p.receivedObjects = stats->received_objects;
             p.indexedObjects  = stats->indexed_objects;
@@ -164,6 +171,22 @@ Result<Repository> Repository::clone(const std::string& url,
             s->cb(p);
         };
     opts.checkout_opts.progress_payload = &state;
+
+    // Checkout-phase cancellation: progress_cb can't abort (void
+    // return), but notify_cb can — any nonzero return stops the
+    // checkout. Big repos spend real time here (tens of seconds
+    // for ~100k files), so Cancel should work in this phase too.
+    opts.checkout_opts.notify_flags = GIT_CHECKOUT_NOTIFY_UPDATED;
+    opts.checkout_opts.notify_cb =
+        [](git_checkout_notify_t, const char*, const git_diff_file*,
+           const git_diff_file*, const git_diff_file*,
+           void* payload) -> int {
+            auto* s = static_cast<CallbackState*>(payload);
+            if (s && s->cancel && s->cancel->load())
+                return GIT_EUSER;   // abort the checkout
+            return 0;
+        };
+    opts.checkout_opts.notify_payload = &state;
 
     git_repository* repo = nullptr;
     int err = git_clone(&repo, url.c_str(), path.c_str(), &opts);

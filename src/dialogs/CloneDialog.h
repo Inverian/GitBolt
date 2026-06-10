@@ -3,6 +3,8 @@
 #include <QDialog>
 #include <QElapsedTimer>
 #include <QString>
+#include <atomic>
+#include <memory>
 
 class QLineEdit;
 class QProgressBar;
@@ -28,6 +30,15 @@ public:
     /// dialog returns QDialog::Accepted).
     QString clonedPath() const { return clonedPath_; }
 
+protected:
+    /// While a clone is running, Cancel / Esc / the window close
+    /// button all become "cancel the clone" (flip the atomic flag
+    /// libgit2 polls) instead of closing the dialog — the worker
+    /// holds a pointer to this dialog, so it must stay alive until
+    /// the clone loop actually stops.
+    void reject() override;
+    void closeEvent(QCloseEvent* event) override;
+
 private slots:
     /// Triggered by the URL field — auto-fills the destination path
     /// with `<defaultParent>/<repo-name>` derived from the URL, but
@@ -42,6 +53,7 @@ private slots:
 
 private:
     void setBusy(bool busy, const QString& message = QString());
+    void requestCancel();
     static QString defaultParentDir();
     static QString repoNameFromUrl(const QString& url);
     static QString humanBytes(quint64 n);
@@ -65,6 +77,15 @@ private:
     /// dropping updates that matter.
     QElapsedTimer progressThrottle_;
     int           lastPhase_ = -1;
+
+    /// Clone-cancellation state. cancelFlag_ is shared with the
+    /// worker (libgit2 polls it from its progress callbacks);
+    /// cloning_ gates reject()/closeEvent(); cancelRequested_
+    /// distinguishes "user cancelled" from a genuine clone error
+    /// when the worker finishes.
+    std::shared_ptr<std::atomic<bool>> cancelFlag_;
+    bool cloning_         = false;
+    bool cancelRequested_ = false;
 };
 
 } // namespace gitbolt::dialogs

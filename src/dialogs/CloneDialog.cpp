@@ -2,6 +2,7 @@
 #include "conf/SettingsService.h"
 #include "git/Repository.h"
 
+#include <QCloseEvent>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
@@ -159,6 +160,16 @@ void CloneDialog::onCloneClicked()
     progressThrottle_.restart();
     lastPhase_ = -1;
 
+    cloning_ = true;
+    cancelRequested_ = false;
+    cancelFlag_ = std::make_shared<std::atomic<bool>>(false);
+
+    // Whether the destination existed (as an empty dir) before we
+    // started — decides how aggressively to clean up after a
+    // cancelled/failed clone. Without cleanup, a retry to the same
+    // path would always trip the "exists and is not empty" check.
+    const bool targetExistedBefore = QFileInfo::exists(path);
+
     // ---- Progress callback (runs on the libgit2 worker thread) ----
     //
     // libgit2 fires transfer_progress MANY times per second. We
@@ -166,10 +177,10 @@ void CloneDialog::onCloneClicked()
     // QMetaObject::invokeMethod, which queues a lambda to run in
     // `this` object's event loop — safe to call from any thread.
     //
-    // Safety: the Cancel and Clone buttons are both disabled while
-    // the clone is in flight (see setBusy), so the dialog stays
-    // alive for the entire clone. That means the raw `this` pointer
-    // captured below is guaranteed valid for every callback.
+    // Safety: while a clone is in flight reject()/closeEvent() turn
+    // into "request cancel" instead of closing, so the dialog stays
+    // alive until the worker actually finishes. That keeps the raw
+    // `this` pointer captured below valid for every callback.
     auto progressCb = [this](const git::CloneProgress& p) {
         // Worker thread — do NOT touch widgets here directly.
         QMetaObject::invokeMethod(this, [this, p]() {
@@ -187,12 +198,30 @@ void CloneDialog::onCloneClicked()
     // path. Empty optional = success; set optional = error message.
     auto* watcher = new QFutureWatcher<std::optional<QString>>(this);
     connect(watcher, &QFutureWatcher<std::optional<QString>>::finished,
-            this, [this, watcher, path]() {
+            this, [this, watcher, path, targetExistedBefore]() {
         const auto err = watcher->result();
         watcher->deleteLater();
         progressBar_->hide();
+        cloning_ = false;
+
         if (err.has_value()) {
-            setBusy(false, tr("Clone failed: %1").arg(*err));
+            // Failed or cancelled clones leave a partial destination
+            // behind (libgit2 does not clean up). Remove it so a
+            // retry — same path, fixed URL — passes the up-front
+            // empty-directory check. If the directory pre-existed
+            // (empty), restore it to empty rather than deleting it.
+            QDir target(path);
+            if (target.exists()) {
+                target.removeRecursively();
+                if (targetExistedBefore)
+                    QDir().mkpath(path);
+            }
+            if (cancelRequested_) {
+                setBusy(false, tr("Clone cancelled."));
+            } else {
+                setBusy(false, tr("Clone failed: %1").arg(*err));
+            }
+            cancelRequested_ = false;
             return;
         }
         clonedPath_ = path;
@@ -200,14 +229,56 @@ void CloneDialog::onCloneClicked()
     });
 
     watcher->setFuture(QtConcurrent::run(
-        [url, path, progressCb = std::move(progressCb)]() -> std::optional<QString> {
+        [url, path, progressCb = std::move(progressCb),
+         flag = cancelFlag_]() -> std::optional<QString> {
             auto result = git::Repository::clone(url.toStdString(),
                                                  path.toStdString(),
-                                                 progressCb);
+                                                 progressCb,
+                                                 flag);
             if (!result.ok())
                 return QString::fromStdString(result.error().message());
             return std::nullopt;
         }));
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation. The Cancel button stays ENABLED during a clone (see
+// setBusy) and routes here via reject(): first activation flips the
+// shared atomic flag, which libgit2 polls from its fetch/checkout
+// callbacks — the worker then aborts with GIT_EUSER and the finished
+// handler above reports "Clone cancelled." and cleans up the partial
+// directory. The dialog itself only closes once the worker is done.
+// ---------------------------------------------------------------------------
+void CloneDialog::requestCancel()
+{
+    if (!cloning_ || cancelRequested_)
+        return;
+    cancelRequested_ = true;
+    if (cancelFlag_)
+        cancelFlag_->store(true);
+    statusLabel_->setText(tr("Cancelling…"));
+    // One shot — further Cancel clicks while the abort drains do
+    // nothing (the button also visually disables).
+    buttons_->button(QDialogButtonBox::Cancel)->setEnabled(false);
+}
+
+void CloneDialog::reject()
+{
+    if (cloning_) {
+        requestCancel();
+        return;     // stay open until the worker finishes
+    }
+    QDialog::reject();
+}
+
+void CloneDialog::closeEvent(QCloseEvent* event)
+{
+    if (cloning_) {
+        requestCancel();
+        event->ignore();
+        return;
+    }
+    QDialog::closeEvent(event);
 }
 
 // ---------------------------------------------------------------------------
@@ -300,13 +371,12 @@ void CloneDialog::onProgressUpdate(gitbolt::git::CloneProgress p)
 // Toggle the inputs and the buttons between idle and "in flight",
 // and show a status line. Empty `message` hides the status row.
 //
-// Note: BOTH Ok (Clone) and Cancel get disabled while a clone is
-// running. Cancel being disabled keeps the dialog alive for the
-// entire clone — the worker thread holds a raw `this` pointer in
-// its progress callback, and a mid-clone reject()/destroy would
-// dangle that pointer. TODO: wire up a cancellation path that
-// tells libgit2 to abort the fetch so users can bail out of a
-// wrong-URL clone without waiting it out.
+// Cancel stays ENABLED during a clone — it's the cancellation
+// trigger (see requestCancel). reject()/closeEvent() are overridden
+// so Cancel / Esc / the window close button all request a cancel
+// instead of closing; the dialog itself only closes once the worker
+// has actually stopped, keeping the raw `this` pointer in the
+// progress callback valid for the clone's whole lifetime.
 // ---------------------------------------------------------------------------
 void CloneDialog::setBusy(bool busy, const QString& message)
 {
@@ -314,7 +384,7 @@ void CloneDialog::setBusy(bool busy, const QString& message)
     pathEdit_->setEnabled(!busy);
     browseBtn_->setEnabled(!busy);
     buttons_->button(QDialogButtonBox::Ok)->setEnabled(!busy);
-    buttons_->button(QDialogButtonBox::Cancel)->setEnabled(!busy);
+    buttons_->button(QDialogButtonBox::Cancel)->setEnabled(true);
 
     if (message.isEmpty()) {
         statusLabel_->hide();
