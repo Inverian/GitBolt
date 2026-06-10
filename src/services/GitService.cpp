@@ -256,6 +256,38 @@ void GitService::refreshBranches() {
     });
 }
 
+void GitService::blameFile(const QString& path,
+                           const QString& newestCommitSpec) {
+    if (!repo_) return;
+    std::shared_ptr<git::Repository> r = repo_;
+    const std::string p = path.toStdString();
+    const std::string spec = newestCommitSpec.toStdString();
+    runner_.run([this, r, p, spec]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_) return;   // superseded by a repo switch
+
+        git::ObjectId newest;     // zero = blame at HEAD
+        if (!spec.empty()) {
+            auto resolved = r->resolveRef(spec);
+            if (!resolved) {
+                // Typical case: "<root-commit>^" from Blame Before
+                // on the initial commit — there is no parent.
+                emit operationFailed(QStringLiteral("blame"),
+                    QString::fromStdString(resolved.error().message()));
+                return;
+            }
+            newest = *resolved;
+        }
+
+        auto result = r->blame(p, newest);
+        if (result)
+            emit blameReady(std::move(*result));
+        else
+            emit operationFailed(QStringLiteral("blame"),
+                QString::fromStdString(result.error().message()));
+    });
+}
+
 // Synchronous mutators below: they all run on the main thread but
 // schedule async refreshes that touch repo_ on a worker. Locking here
 // serializes them against any in-flight worker — without this, a

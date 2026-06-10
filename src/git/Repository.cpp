@@ -846,8 +846,17 @@ Result<void> Repository::deleteTag(const std::string& name) {
     return Result<void>::success();
 }
 
-Result<BlameResult> Repository::blame(const std::string& path) const {
+Result<BlameResult> Repository::blame(const std::string& path,
+                                      const ObjectId& newestCommit) const {
     git_blame_options opts = GIT_BLAME_OPTIONS_INIT;
+    // Blame "as of" a specific commit when one is given (used by
+    // the blame view's "Blame Before" action to re-blame at the
+    // parent of a selected commit). Zero/default = HEAD, which is
+    // libgit2's default behavior.
+    if (!newestCommit.isZero())
+        std::memcpy(opts.newest_commit.id, newestCommit.raw().data(),
+                    ObjectId::RAW_SIZE);
+
     git_blame* bl = nullptr;
     int err = git_blame_file(&bl, repo_, path.c_str(), &opts);
     if (err < 0) return GitError::fromLibgit2(err);
@@ -870,6 +879,46 @@ Result<BlameResult> Repository::blame(const std::string& path) const {
         result.hunks.push_back(std::move(bh));
     }
     git_blame_free(bl);
+
+    // File content at the blamed revision. The hunks only carry
+    // line RANGES; BlameModel zips them with these lines to render
+    // the table, so without this the blame view shows zero rows.
+    // (Workdir content would be wrong here: blame attributes lines
+    // as of <rev>, so the text must come from <rev>:<path> too.)
+    const std::string spec =
+        (newestCommit.isZero() ? std::string("HEAD")
+                               : newestCommit.toHex())
+        + ":" + path;
+    git_object* obj = nullptr;
+    err = git_revparse_single(&obj, repo_, spec.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    if (git_object_type(obj) != GIT_OBJECT_BLOB) {
+        git_object_free(obj);
+        return GitError(GitErrorCode::GenericError,
+                        path + " is not a file at " + spec);
+    }
+    auto* blob = reinterpret_cast<git_blob*>(obj);
+    if (git_blob_is_binary(blob)) {
+        git_object_free(obj);
+        return GitError(GitErrorCode::GenericError,
+                        path + " is a binary file");
+    }
+    const auto* data =
+        static_cast<const char*>(git_blob_rawcontent(blob));
+    const size_t size = git_blob_rawsize(blob);
+    std::string current;
+    for (size_t i = 0; i < size; ++i) {
+        if (data[i] == '\n') {
+            result.lines.push_back(std::move(current));
+            current.clear();
+        } else if (data[i] != '\r') {
+            current.push_back(data[i]);
+        }
+    }
+    if (!current.empty())
+        result.lines.push_back(std::move(current));
+    git_object_free(obj);
+
     return result;
 }
 

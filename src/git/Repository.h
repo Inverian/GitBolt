@@ -169,7 +169,15 @@ public:
     Result<void> deleteTag(const std::string& name);
 
     // Blame
-    Result<BlameResult> blame(const std::string& path) const;
+    /// Per-line commit attribution for `path`, plus the file's
+    /// content at the blamed revision (BlameResult::lines — the
+    /// blame table zips hunk ranges with these lines). Blames at
+    /// HEAD by default; pass `newestCommit` to blame as of that
+    /// commit instead (the blame view's "Blame Before" re-blames
+    /// at the parent of a selected commit this way — no checkout
+    /// involved).
+    Result<BlameResult> blame(const std::string& path,
+                              const ObjectId& newestCommit = ObjectId()) const;
 
     // Reflog
     /// Read the reflog for `refName` (e.g. "HEAD",

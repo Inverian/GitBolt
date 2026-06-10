@@ -56,6 +56,14 @@ public:
     void refreshLog(int offset = 0, int count = 256);
     void refreshBranches();
 
+    /// Async per-line blame for a repo-relative path. Result lands
+    /// via blameReady; failures via operationFailed("blame", …).
+    /// `newestCommitSpec` is any revspec ("", "HEAD", "<sha>^", …);
+    /// empty blames at HEAD. "<sha>^" is how the blame view's
+    /// "Blame Before" re-blames at the parent of a commit.
+    void blameFile(const QString& path,
+                   const QString& newestCommitSpec = QString());
+
     /// Choose which refs the log walk starts from. Default is
     /// `Head` (just the current branch and its ancestors).
     /// `AllLocalBranches` pushes every local branch tip onto the
@@ -154,6 +162,7 @@ signals:
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void branchesReady(std::vector<gitbolt::git::BranchInfo> branches);
+    void blameReady(gitbolt::git::BlameResult result);
     void commitComplete(bool success, const QString& message);
     void operationFailed(const QString& operation, const QString& error);
     void repositoryChanged();

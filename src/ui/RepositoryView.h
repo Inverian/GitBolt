@@ -103,9 +103,10 @@ public slots:
 
 private slots:
     /// File Tree tab context-menu actions ("Open Externally" /
-    /// "Show History…"). Paths are repo-relative.
+    /// "Show History…" / "Blame"). Paths are repo-relative.
     void openFileExternally(const QString& path);
     void showFileHistory(const QString& path);
+    void showBlameForFile(const QString& path);
 
 protected:
     void showEvent(QShowEvent* e) override;

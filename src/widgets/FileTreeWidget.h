@@ -54,16 +54,19 @@ public:
     void clear();
 
 signals:
-    /// Emitted when the user double-clicks a file or chooses
-    /// "Show History" in the context menu. Currently routed to
-    /// nothing — the slot is here for the eventual file-history
-    /// view. Path is repo-relative.
+    /// Emitted when the user chooses "Show History…" in the
+    /// context menu. RepositoryView opens the file-history popup.
+    /// Path is repo-relative.
     void showHistoryRequested(const QString& path);
 
     /// Emitted when the user picks "Open Externally" — the host
-    /// can resolve the repo workdir + path and shell out to the
+    /// resolves the repo workdir + path and shells out to the
     /// platform's default opener.
     void openExternallyRequested(const QString& path);
+
+    /// Emitted when the user picks "Blame" — the host opens the
+    /// blame view for this repo-relative path.
+    void blameRequested(const QString& path);
 
 private slots:
     void onTreeClicked(const QModelIndex& index);

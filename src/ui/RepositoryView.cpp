@@ -4,6 +4,7 @@
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
+#include "widgets/BlameWidget.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
@@ -226,12 +227,14 @@ QWidget* RepositoryView::buildFileTreeTab()
     fileTreeWidget_ = new widgets::FileTreeWidget(page);
     l->addWidget(fileTreeWidget_);
 
-    // Context-menu actions. Both read gitService_ at click time
+    // Context-menu actions. All read gitService_ at click time
     // (it's injected via setGitService after construction).
     connect(fileTreeWidget_, &widgets::FileTreeWidget::openExternallyRequested,
             this, &RepositoryView::openFileExternally);
     connect(fileTreeWidget_, &widgets::FileTreeWidget::showHistoryRequested,
             this, &RepositoryView::showFileHistory);
+    connect(fileTreeWidget_, &widgets::FileTreeWidget::blameRequested,
+            this, &RepositoryView::showBlameForFile);
 
     return page;
 }
@@ -341,6 +344,59 @@ void RepositoryView::showFileHistory(const QString& path)
             [jumpToSelected](QTreeWidgetItem*, int) { jumpToSelected(); });
     connect(buttons, &QDialogButtonBox::rejected, dlg, &QDialog::close);
 
+    dlg->show();
+}
+
+// Per-line blame in a modeless dialog hosting the (previously
+// dormant) BlameWidget. The data flow mirrors the service's other
+// async results: blameFile() computes on a worker under the repo
+// mutex and emits blameReady; the dialog consumes only results for
+// ITS path, so "Blame Before" re-blames (same path, earlier
+// revision) update this dialog while any blame dialog on a
+// different file is unaffected.
+void RepositoryView::showBlameForFile(const QString& path)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+
+    auto* dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(tr("Blame — %1").arg(path));
+    conf::SettingsService::applyConfiguredSize(dlg, "blame");
+
+    auto* layout = new QVBoxLayout(dlg);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* blame = new widgets::BlameWidget(dlg);
+    layout->addWidget(blame);
+
+    connect(gitService_, &services::GitService::blameReady,
+            blame, [blame, path](git::BlameResult result) {
+        if (QString::fromStdString(result.path) == path)
+            blame->setBlameResult(std::move(result));
+    });
+
+    // Row click → jump the revision graph. Silently ignore commits
+    // outside the loaded log window (clicking around an old file
+    // would otherwise nag once per click).
+    connect(blame, &widgets::BlameWidget::commitSelected,
+            this, [this](const git::ObjectId& id) {
+        if (graphWidget_)
+            graphWidget_->selectCommit(
+                QString::fromStdString(id.toHex()));
+    });
+
+    // "Blame Before" → re-blame at the selected commit's parent.
+    // resolveRef handles the "<sha>^" revspec; the root commit has
+    // no parent and surfaces as an operationFailed toast.
+    connect(blame, &widgets::BlameWidget::blameBeforeRequested,
+            this, [this](const git::ObjectId& commitId,
+                         const QString& filePath) {
+        gitService_->blameFile(filePath,
+            QString::fromStdString(commitId.toHex())
+                + QStringLiteral("^"));
+    });
+
+    gitService_->blameFile(path);
     dlg->show();
 }
 

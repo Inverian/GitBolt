@@ -469,13 +469,14 @@ void FileTreeWidget::onContextMenu(const QPoint& pos)
     menu.addSeparator();
 
     if (!isDir) {
-        // The history slot is wired but no consumer is hooked up
-        // yet — keeping the entry visible so the menu mirrors
-        // GitExtensions and so the wiring is one connect away
-        // from working when the file-history view lands.
         QAction* histAction = menu.addAction(tr("Show History…"));
         connect(histAction, &QAction::triggered, this, [this, path]() {
             emit showHistoryRequested(path);
+        });
+
+        QAction* blameAction = menu.addAction(tr("Blame"));
+        connect(blameAction, &QAction::triggered, this, [this, path]() {
+            emit blameRequested(path);
         });
 
         QAction* openAction = menu.addAction(tr("Open Externally"));

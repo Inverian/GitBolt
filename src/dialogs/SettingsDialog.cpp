@@ -699,7 +699,12 @@ QWidget* SettingsDialog::createShortcutsPage()
 }
 
 // ---------------------------------------------------------------------------
-// Plugins page — placeholder until we have a real plugin host
+// Plugins page — describes the built-in extensions and where their
+// settings live. The dynamic plugin HOST (PluginManager + shared-
+// library loading in src/plugins/) is scaffolded but not active;
+// every extension currently ships built into the Plugins menu, so
+// this page documents that honestly instead of pretending there is
+// a loadable-plugin list to manage.
 // ---------------------------------------------------------------------------
 
 QWidget* SettingsDialog::createPluginsPage()
@@ -715,12 +720,39 @@ QWidget* SettingsDialog::createPluginsPage()
     layout->addWidget(title);
 
     auto* body = new QLabel(
-        tr("GitBolt's plugin system is on the roadmap but isn't wired "
-           "up yet. This page is a placeholder — no action is needed."),
+        tr("GitBolt ships its extensions built in — find them under "
+           "the <b>Plugins</b> menu:"),
         page);
+    body->setTextFormat(Qt::RichText);
     body->setWordWrap(true);
-    body->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
     layout->addWidget(body);
+
+    auto* list = new QLabel(
+        tr("<ul>"
+           "<li><b>Periodic background fetch</b> — toggleable, with an "
+           "editable interval; persists across launches</li>"
+           "<li><b>Repository statistics</b> — commit counts, top "
+           "contributors, branch / tag / remote totals</li>"
+           "<li><b>Git Flow</b> — init plus feature / release / hotfix "
+           "start &amp; finish</li>"
+           "<li><b>Delete obsolete branches</b> — multi-select picker "
+           "over merged branches</li>"
+           "<li><b>Find large files</b> — top blobs by size across "
+           "all history</li>"
+           "</ul>"),
+        page);
+    list->setTextFormat(Qt::RichText);
+    list->setWordWrap(true);
+    layout->addWidget(list);
+
+    auto* footer = new QLabel(
+        tr("Loading third-party plugins from shared libraries is on "
+           "the roadmap; when it lands, installed plugins and their "
+           "settings will be managed from this page."),
+        page);
+    footer->setWordWrap(true);
+    footer->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    layout->addWidget(footer);
 
     layout->addStretch();
     return page;
