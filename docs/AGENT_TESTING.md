@@ -97,9 +97,10 @@ tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay is
 ```
 
 Addressing:
-- **Actions** by menu-path slug (`commands/merge-branches`) or trailing
-  suffix (`merge-branches`); `trigger`/`click` are queued so an action
-  that opens a modal returns immediately — assert with `dump-state`.
+- **Actions** by `objectName` (every action has one — see below), by
+  menu-path slug (`commands/merge-branches`), or trailing suffix
+  (`merge-branches`); `trigger`/`click` are queued so an action that
+  opens a modal returns immediately — assert with `dump-state`.
 - **Buttons** by visible text (case-insensitive, mnemonics/`...` stripped)
   with a prefix fallback so `Commit` matches the live-count `Commit (1)`.
 - **Views / editors** by `objectName` or `ClassName[:index]`, matched
@@ -113,6 +114,17 @@ cached libgit2 index (CLI-side merges were invisible — fixed with
 (fixed with the prefix fallback). Worktree lock/remove — which no
 synthetic input could ever reach because they need a selected table
 row — were verified end to end via `select-row`.
+
+## Every action is named
+
+`MainWindow::assignActionObjectNames()` runs after the menu and toolbar
+are built and assigns a stable `objectName` (derived from the menu
+path, e.g. `commands.resolve-conflicts`) to any action that doesn't
+already have an explicit one, so `list-actions` reports a name for
+100% of menu / toolbar / widget-toolbar actions. New features should
+still set an explicit `setObjectName()` — see the Testability section
+in [CONTRIBUTING.md](../CONTRIBUTING.md) — because an explicit name
+survives a display-text change, whereas the derived fallback does not.
 
 ## Fallback when the bridge isn't available
 

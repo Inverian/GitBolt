@@ -86,7 +86,10 @@ void forEachAction(
     const auto toolbars = window->findChildren<QToolBar*>();
     for (QToolBar* tb : toolbars) {
         for (QAction* a : tb->actions()) {
-            if (a->isSeparator() || a->menu())
+            // Skip separators, submenu openers, and widget-holder
+            // actions (addWidget wraps a QLabel/combo in an action
+            // with empty text — not something to "trigger").
+            if (a->isSeparator() || a->menu() || a->text().isEmpty())
                 continue;
             fn(QStringLiteral("toolbar/") + TestBridge::slugify(a->text()),
                a);

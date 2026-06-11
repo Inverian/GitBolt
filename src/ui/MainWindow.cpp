@@ -55,6 +55,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QRegularExpression>
 #include <QProcess>
 #include <QTableWidget>
 #include <QMenuBar>
@@ -363,6 +364,10 @@ void MainWindow::createMenuBar()
 
     refreshAction_ = new QAction(menuIcon(QStringLiteral("refresh")),
                                  tr("&Refresh"), this);
+    // Explicit objectName (convention for shared / member actions —
+    // stable across display-text changes, unlike the menu-path
+    // fallback assignActionObjectNames() applies). See CONTRIBUTING.
+    refreshAction_->setObjectName(QStringLiteral("act.refresh"));
     refreshAction_->setShortcut(QKeySequence::Refresh);
     refreshAction_->setEnabled(false);
     connect(refreshAction_, &QAction::triggered, this, [this]() {
@@ -1688,6 +1693,7 @@ void MainWindow::createMenuBar()
     auto* cmdMenu = cmdMenu_;
 
     commitAction_ = new QAction(tr("Co&mmit..."), this);
+    commitAction_->setObjectName(QStringLiteral("act.commit"));
     commitAction_->setIcon(menuIcon(QStringLiteral("commit")));
     commitAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Space));
     commitAction_->setEnabled(false);
@@ -1817,6 +1823,7 @@ void MainWindow::createMenuBar()
     };
 
     fetchAction_ = new QAction(tr("&Fetch"), this);
+    fetchAction_->setObjectName(QStringLiteral("act.fetch"));
     fetchAction_->setIcon(menuIcon(QStringLiteral("fetch")));
     fetchAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Down));
     fetchAction_->setToolTip(tr("Fetch from origin (no merge)"));
@@ -1832,6 +1839,7 @@ void MainWindow::createMenuBar()
     cmdMenu->addAction(fetchAction_);
 
     pullAction_ = new QAction(tr("Pu&ll"), this);
+    pullAction_->setObjectName(QStringLiteral("act.pull"));
     pullAction_->setIcon(menuIcon(QStringLiteral("pull")));
     pullAction_->setToolTip(tr("Pull from origin (fetch + merge)"));
     pullAction_->setStatusTip(tr("Fetch and merge from the tracking branch on origin."));
@@ -1846,6 +1854,7 @@ void MainWindow::createMenuBar()
     cmdMenu->addAction(pullAction_);
 
     pushAction_ = new QAction(tr("&Push..."), this);
+    pushAction_->setObjectName(QStringLiteral("act.push"));
     pushAction_->setIcon(menuIcon(QStringLiteral("push")));
     pushAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Up));
     pushAction_->setToolTip(tr("Push current branch to origin"));
@@ -1882,6 +1891,7 @@ void MainWindow::createMenuBar()
         // GitExtensions toolbar layout) instead of the full menu name.
         stashAction_ = new QAction(menuIcon(QStringLiteral("stashes")),
                                    tr("&Stash..."), this);
+        stashAction_->setObjectName(QStringLiteral("act.stash"));
         stashAction_->setToolTip(tr("Manage stashes (apply / pop / drop / new)"));
         connect(stashAction_, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
@@ -3277,6 +3287,16 @@ void MainWindow::createMenuBar()
     };
     enableIcons(menuBar());
 
+    // Guarantee every menu action is addressable by the test bridge
+    // (docs/AGENT_TESTING.md): assign a stable objectName derived
+    // from the menu path to any action that doesn't already have an
+    // explicit one. New features SHOULD still call setObjectName()
+    // themselves — an explicit name survives a display-text change,
+    // whereas this fallback is derived from the text — but this
+    // ensures nothing is ever untestable, including actions added
+    // later by someone who forgets. See assignActionObjectNames().
+    assignActionObjectNames(menuBar(), QString());
+
     // Navigate, View, and Commands only make sense with a repository
     // open. Gray out every child action on the dashboard/home screen
     // so the menus still open but every item is disabled — matching
@@ -3323,6 +3343,52 @@ void MainWindow::setRepoActionsEnabled(bool on)
     if (commitAction_)  commitAction_->setEnabled(on);
     if (filterInput_)   filterInput_->setEnabled(on);
     if (branchCombo_)   branchCombo_->setEnabled(on);
+}
+
+void MainWindow::assignActionObjectNames(QWidget* widget,
+                                         const QString& pathPrefix)
+{
+    // Display-text → slug, mirroring TestBridge::slugify so the
+    // auto-assigned objectName lines up with the menu-path the
+    // bridge derives ("commands.resolve-conflicts"). Strips
+    // mnemonics and ellipses, lowercases, collapses runs of
+    // non-alphanumerics to single hyphens.
+    auto slug = [](QString text) {
+        text.remove(QLatin1Char('&'));
+        text.remove(QStringLiteral("..."));
+        text.remove(QStringLiteral("…"));
+        text = text.toLower();
+        text.replace(QRegularExpression(QStringLiteral("[^a-z0-9]+")),
+                     QStringLiteral("-"));
+        while (text.startsWith(QLatin1Char('-'))) text.remove(0, 1);
+        while (text.endsWith(QLatin1Char('-')))   text.chop(1);
+        return text;
+    };
+
+    for (QAction* a : widget->actions()) {
+        if (a->isSeparator())
+            continue;
+        if (QMenu* sub = a->menu()) {
+            // Recurse into the submenu, extending the path with this
+            // menu's title. The top-level menu titles ("File",
+            // "Commands", …) form the first path segment.
+            const QString seg = slug(sub->title());
+            assignActionObjectNames(
+                sub, pathPrefix.isEmpty() ? seg
+                                          : pathPrefix + QLatin1Char('.') + seg);
+            continue;
+        }
+        // Leaf action. Respect an explicit objectName if the call
+        // site already set one (preferred — stable across text
+        // changes); only fill in the gaps.
+        if (a->objectName().isEmpty()) {
+            const QString name = slug(a->text());
+            if (!name.isEmpty())
+                a->setObjectName(pathPrefix.isEmpty()
+                                     ? name
+                                     : pathPrefix + QLatin1Char('.') + name);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3557,6 +3623,12 @@ void MainWindow::createToolBar()
     if (filterInputAction_) filterInputAction_->setVisible(false);
     if (branchLabelAction_) branchLabelAction_->setVisible(false);
     if (branchComboAction_) branchComboAction_->setVisible(false);
+
+    // Name any toolbar-only actions (most are shared QAction
+    // instances already named via the menu walk; this covers the
+    // rest under a "toolbar." path). Runs after createMenuBar so
+    // shared actions keep their menu-derived names.
+    assignActionObjectNames(toolbar, QStringLiteral("toolbar"));
 }
 
 // ---------------------------------------------------------------------------
@@ -4141,13 +4213,20 @@ void MainWindow::updateRecentMenu()
         return;
     }
 
+    int idx = 0;
     for (const QString& path : recent) {
-        recentMenu_->addAction(path, this, [this, path]() {
+        QAction* a = recentMenu_->addAction(path, this, [this, path]() {
             // Same async path as File → Open: immediate repo view
             // with loading overlay; failure handling lives in
             // onRepositoryOpenFailed.
             openRepositoryAtPath(path);
         });
+        // This submenu is rebuilt on every change, AFTER the
+        // createMenuBar auto-namer ran, so name the entries here.
+        // By index, not path, so the names are stable as the list
+        // reorders; the bridge can read each entry's path from its
+        // list-actions "text" field.
+        a->setObjectName(QStringLiteral("file.recent.%1").arg(idx++));
     }
 }
 

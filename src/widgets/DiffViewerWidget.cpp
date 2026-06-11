@@ -133,11 +133,13 @@ void DiffViewerWidget::setupUi()
     modeGroup->setExclusive(true);
 
     unifiedAct_ = toolbar_->addAction(tr("Unified"));
+    unifiedAct_->setObjectName(QStringLiteral("diff.viewUnified"));
     unifiedAct_->setCheckable(true);
     unifiedAct_->setChecked(true);
     modeGroup->addAction(unifiedAct_);
 
     sideBySideAct_ = toolbar_->addAction(tr("Side-by-Side"));
+    sideBySideAct_->setObjectName(QStringLiteral("diff.viewSideBySide"));
     sideBySideAct_->setCheckable(true);
     modeGroup->addAction(sideBySideAct_);
 

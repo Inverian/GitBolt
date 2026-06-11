@@ -284,24 +284,28 @@ void SubmoduleWidget::setupUI() {
     initAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("document-new")),
         tr("Init"));
+    initAction_->setObjectName(QStringLiteral("submodule.init"));
     connect(initAction_, &QAction::triggered,
             this, &SubmoduleWidget::onInitClicked);
 
     updateAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("view-refresh")),
         tr("Update"));
+    updateAction_->setObjectName(QStringLiteral("submodule.update"));
     connect(updateAction_, &QAction::triggered,
             this, &SubmoduleWidget::onUpdateClicked);
 
     syncAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("sync")),
         tr("Sync"));
+    syncAction_->setObjectName(QStringLiteral("submodule.sync"));
     connect(syncAction_, &QAction::triggered,
             this, &SubmoduleWidget::onSyncClicked);
 
     deinitAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("process-stop")),
         tr("Deinit"));
+    deinitAction_->setObjectName(QStringLiteral("submodule.deinit"));
     connect(deinitAction_, &QAction::triggered,
             this, &SubmoduleWidget::onDeinitClicked);
 

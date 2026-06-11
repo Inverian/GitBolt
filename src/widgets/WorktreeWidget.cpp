@@ -267,18 +267,21 @@ void WorktreeWidget::setupUI() {
     addAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("list-add")),
         tr("Add Worktree"));
+    addAction_->setObjectName(QStringLiteral("worktree.add"));
     connect(addAction_, &QAction::triggered,
             this, &WorktreeWidget::addRequested);
 
     removeAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("list-remove")),
         tr("Remove"));
+    removeAction_->setObjectName(QStringLiteral("worktree.remove"));
     connect(removeAction_, &QAction::triggered,
             this, &WorktreeWidget::onRemoveClicked);
 
     lockUnlockAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("object-locked")),
         tr("Lock/Unlock"));
+    lockUnlockAction_->setObjectName(QStringLiteral("worktree.lockUnlock"));
     connect(lockUnlockAction_, &QAction::triggered,
             this, &WorktreeWidget::onLockUnlockClicked);
 

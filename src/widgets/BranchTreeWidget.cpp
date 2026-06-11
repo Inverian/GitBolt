@@ -101,6 +101,7 @@ void BranchTreeWidget::setupToolbar() {
     auto* newBranchAction = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("list-add")),
         tr("New Branch"));
+    newBranchAction->setObjectName(QStringLiteral("branchTree.newBranch"));
     connect(newBranchAction, &QAction::triggered,
             this, &BranchTreeWidget::onNewBranchClicked);
 

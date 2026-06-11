@@ -71,6 +71,14 @@ private:
     /// async repository open is in flight (so Pull/Commit can't
     /// fire against the previous repo mid-open).
     void setRepoActionsEnabled(bool on);
+
+    /// Recursively assign a stable objectName to every leaf action
+    /// under `widget` (a menu bar, menu, or toolbar) that doesn't
+    /// already have one, derived from `pathPrefix` + the action's
+    /// text (e.g. "commands.resolve-conflicts"). Guarantees the
+    /// test bridge can address every action — see the convention
+    /// note in CONTRIBUTING.md and docs/AGENT_TESTING.md.
+    void assignActionObjectNames(QWidget* widget, const QString& pathPrefix);
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();
