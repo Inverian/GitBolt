@@ -1,0 +1,86 @@
+# Driving GitBolt from an AI agent — friction log & proposed test bridge
+
+This document records where UI automation (AppleScript / accessibility
+tree / synthetic clicks) breaks down when an AI agent tries to
+exercise GitBolt end-to-end, and proposes a built-in test interface so
+agents can verify features without fighting the GUI layer.
+
+## Observed friction points
+
+Logged while QA-testing the June 2026 feature batch (blame, worktrees,
+merge-conflict resolver, clone cancel, hunk staging). Each is a place
+an agent reliably gets stuck:
+
+1. **Qt in-window menu bar is invisible to the standard AX path.**
+   `menu bar 1 of window 1` throws -1728. The menu bar is reachable
+   only as a generic `AXMenuBar` child found by iterating
+   `UI elements of window 1`. `whose name is "X"` specifiers on those
+   children also throw intermittently; only manual `repeat` iteration
+   works.
+
+2. **An open menu becomes "window 1".** While a menu is dropped down,
+   it is the frontmost AX window, so any code that reads
+   `position of window 1` (e.g. a coordinate helper) targets the menu,
+   not the main window — coordinates silently land in the wrong place.
+   `AXMenuBar` also vanishes from the (real) window's children until
+   the menu closes.
+
+3. **Menu coordinates must be read, not estimated.** Hard-coding
+   `winX + 152` for a menu lands one item off (opened Navigate instead
+   of Commands). Item centers have to be read from each menubar item's
+   `position`/`size` — which only works when no menu is open (see #2),
+   a chicken-and-egg.
+
+4. **Qt table / list row selection ignores synthetic input.**
+   `select row N`, `perform action "AXPress"` on a cell, `cliclick`
+   on the row's real screen center, and "focus table + arrow key" all
+   leave `selectedRows()` empty. Anything gated on a selected row
+   (worktree Lock/Remove, file-list staging) can't be driven. Real
+   mouse input works fine — this is purely an automation gap.
+
+5. **Dialog Cmd+W needs the dialog explicitly raised.** A modeless
+   dialog isn't automatically key, so `keystroke "w" using command down`
+   goes to the main window. `perform action "AXRaise"` on the dialog
+   first fixes it.
+
+6. **BetterDisplay overlay blocks computer-use coordinate clicks.**
+   The MCP computer-use guard refuses clicks that land on an invisible
+   BetterDisplay window over parts of the screen. `cliclick` bypasses
+   that guard but then hits #4 for table rows anyway.
+
+Net effect: menu-driven actions are *barely* drivable (read coords with
+no menu open, then click), and anything needing a table-row selection
+is **not** drivable from automation at all.
+
+## Proposed built-in: an environment-gated test bridge
+
+Add a control channel, active only when `GITBOLT_TEST_BRIDGE=1` (or a
+`--test-bridge` flag), so it never ships in normal use. A `QLocalServer`
+on a fixed socket name (or a line-reader on stdin) accepting newline
+commands:
+
+| Command | Effect |
+|---|---|
+| `list-actions` | Dump every `QAction` objectName + text + enabled state |
+| `trigger <objectName>` | Invoke a QAction (covers all menu/toolbar items) |
+| `list-widgets` | Dump objectNames of live top-level widgets / dialogs |
+| `select-row <widgetObjectName> <n>` | Drive a model-view selection directly |
+| `click <objectName>` | `click()` a named QPushButton / QToolButton |
+| `dump-state` | JSON: open repo path, repo state (merging/rebasing), current dialog, conflict count |
+| `screenshot <path>` | `grab()` the focused window to a PNG (no screencapture race) |
+
+Implementation notes:
+- Requires giving the relevant `QAction`s, dialogs, and views stable
+  `setObjectName()` values (most don't have them yet — that work is the
+  bulk of it and is independently good for QSS/styling and crash logs).
+- The bridge lives in `app/` behind the env gate; it resolves objects
+  via `qApp->findChildren<QAction*>()` / `QApplication::topLevelWidgets()`.
+- `dump-state` is the highest-value single command: it lets an agent
+  assert outcomes (e.g. "repo is MERGING", "3 conflicts", "commit has 2
+  parents") without screenshots or AX traversal.
+
+Until the bridge exists, the reliable agent workflow is: drive what the
+GUI strictly requires through coordinate clicks (menus, buttons by AX
+name), and verify *outcomes* by inspecting the on-disk git repository
+with shell `git` — the GUI is just the trigger; correctness lives in
+the repository state.
