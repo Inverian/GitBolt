@@ -287,6 +287,7 @@ void RepositoryView::showFileHistory(const QString& path)
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(tr("History — %1").arg(path));
+    dlg->setObjectName(QStringLiteral("dlg.fileHistory"));
     conf::SettingsService::applyConfiguredSize(dlg, "filehistory");
 
     auto* layout = new QVBoxLayout(dlg);
@@ -362,6 +363,7 @@ void RepositoryView::showBlameForFile(const QString& path)
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(tr("Blame — %1").arg(path));
+    dlg->setObjectName(QStringLiteral("dlg.blame"));
     conf::SettingsService::applyConfiguredSize(dlg, "blame");
 
     auto* layout = new QVBoxLayout(dlg);

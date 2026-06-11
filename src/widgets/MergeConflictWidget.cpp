@@ -87,6 +87,7 @@ void MergeConflictWidget::setupUI() {
     resultLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #8B4513;"));
     resultLayout->addWidget(resultLabel);
     resultEditor_ = new QPlainTextEdit(this);
+    resultEditor_->setObjectName(QStringLiteral("conflict.result"));
     resultEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     resultLayout->addWidget(resultEditor_);
     mainSplitter->addWidget(resultContainer);

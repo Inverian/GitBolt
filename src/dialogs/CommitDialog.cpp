@@ -179,11 +179,13 @@ void CommitDialog::setupUi()
     unstagedLayout->addLayout(makeSectionHeader(unstagedLabel_));
 
     unstagedFilter_ = new QLineEdit(unstagedPanel);
+    unstagedFilter_->setObjectName(QStringLiteral("commit.unstagedFilter"));
     unstagedFilter_->setPlaceholderText(tr("Filter unstaged files…"));
     unstagedFilter_->setClearButtonEnabled(true);
     unstagedLayout->addWidget(unstagedFilter_);
 
     unstagedView_ = new QListView(unstagedPanel);
+    unstagedView_->setObjectName(QStringLiteral("commit.unstagedList"));
     unstagedView_->setModel(unstagedProxy_);
     unstagedView_->setModelColumn(models::FileStatusModel::Path);
     unstagedView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -214,11 +216,13 @@ void CommitDialog::setupUi()
     stagedLayout->addLayout(makeSectionHeader(stagedLabel_));
 
     stagedFilter_ = new QLineEdit(stagedPanel);
+    stagedFilter_->setObjectName(QStringLiteral("commit.stagedFilter"));
     stagedFilter_->setPlaceholderText(tr("Filter staged files…"));
     stagedFilter_->setClearButtonEnabled(true);
     stagedLayout->addWidget(stagedFilter_);
 
     stagedView_ = new QListView(stagedPanel);
+    stagedView_->setObjectName(QStringLiteral("commit.stagedList"));
     stagedView_->setModel(stagedProxy_);
     stagedView_->setModelColumn(models::FileStatusModel::Path);
     stagedView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
@@ -281,6 +285,7 @@ void CommitDialog::setupUi()
     commitOuter->addLayout(buttonCol);
 
     messageEdit_ = new widgets::CommitMessageEdit(commitPanel);
+    messageEdit_->setObjectName(QStringLiteral("commit.message"));
     messageEdit_->setMinimumHeight(80);
     commitOuter->addWidget(messageEdit_, 1);
 

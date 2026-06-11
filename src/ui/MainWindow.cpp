@@ -284,6 +284,7 @@ void MainWindow::createMenuBar()
         auto* globalBar  = new QMenuBar(nullptr);
         auto* appMenu    = globalBar->addMenu(QStringLiteral("App"));  // label unused
         auto* aboutAct   = appMenu->addAction(tr("About GitBolt"));
+        aboutAct->setObjectName(QStringLiteral("app.about"));
         aboutAct->setMenuRole(QAction::AboutRole);
         connect(aboutAct, &QAction::triggered, this, &MainWindow::showAbout);
     }
@@ -294,12 +295,14 @@ void MainWindow::createMenuBar()
 
     auto* openAction = new QAction(menuIcon(QStringLiteral("open_repo")),
                                    tr("&Open Repository..."), this);
+    openAction->setObjectName(QStringLiteral("file.open-repository"));
     openAction->setShortcut(QKeySequence::Open);
     connect(openAction, &QAction::triggered, this, &MainWindow::openRepository);
     fileMenu->addAction(openAction);
 
     auto* cloneAction = new QAction(menuIcon(QStringLiteral("clone_repo")),
                                     tr("&Clone Repository..."), this);
+    cloneAction->setObjectName(QStringLiteral("file.clone-repository"));
     connect(cloneAction, &QAction::triggered, this, &MainWindow::cloneRepository);
     fileMenu->addAction(cloneAction);
 
@@ -310,6 +313,7 @@ void MainWindow::createMenuBar()
         // view as if they'd cloned it.
         auto* a = new QAction(menuIcon(QStringLiteral("new_repo")),
                               tr("Create &New Repository..."), this);
+        a->setObjectName(QStringLiteral("file.create-new-repository"));
         connect(a, &QAction::triggered, this, [this]() {
             const QString dir = QFileDialog::getExistingDirectory(
                 this, tr("Choose a folder for the new repository"),
@@ -340,6 +344,7 @@ void MainWindow::createMenuBar()
     // same entry in Recent Repositories brings the repo view back.
     auto* homeAction = new QAction(menuIcon(QStringLiteral("recent")),
                                    tr("&Home"), this);
+    homeAction->setObjectName(QStringLiteral("file.home"));
     connect(homeAction, &QAction::triggered, this, [this]() {
         if (centralStack_ && dashboardView_)
             centralStack_->setCurrentWidget(dashboardView_);
@@ -349,6 +354,7 @@ void MainWindow::createMenuBar()
     fileMenu->addSeparator();
     auto* quitAction = new QAction(menuIcon(QStringLiteral("quit")),
                                    tr("&Quit"), this);
+    quitAction->setObjectName(QStringLiteral("file.quit"));
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
     fileMenu->addAction(quitAction);
@@ -415,6 +421,7 @@ void MainWindow::createMenuBar()
         // Linux). Matches GitExtensions' "File Explorer" entry.
         auto* a = new QAction(menuIcon(QStringLiteral("file_explorer")),
                               tr("File E&xplorer"), this);
+        a->setObjectName(QStringLiteral("repository.file-explorer"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_O));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
@@ -434,6 +441,7 @@ void MainWindow::createMenuBar()
         // round-trip since Repository doesn't expose a setUrl verb.
         auto* a = new QAction(menuIcon(QStringLiteral("remote")),
                               tr("Remote &repositories..."), this);
+        a->setObjectName(QStringLiteral("repository.remote-repositories"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             auto* dlg = new dialogs::RemotesDialog(this);
@@ -516,6 +524,7 @@ void MainWindow::createMenuBar()
         // with the main window while browsing submodules.
         auto* a = new QAction(menuIcon(QStringLiteral("submodule")),
                               tr("Manage &submodules..."), this);
+        a->setObjectName(QStringLiteral("repository.manage-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
@@ -601,6 +610,7 @@ void MainWindow::createMenuBar()
         // operation (fetches + checkouts) but not destructive.
         auto* a = new QAction(menuIcon(QStringLiteral("submodule_update")),
                               tr("&Update all submodules"), this);
+        a->setObjectName(QStringLiteral("repository.update-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             auto out = gitService_->process().run(
@@ -616,6 +626,7 @@ void MainWindow::createMenuBar()
         // from `.gitmodules` into each submodule's local `.git/config`.
         auto* a = new QAction(menuIcon(QStringLiteral("submodule_sync")),
                               tr("S&ynchronize all submodules"), this);
+        a->setObjectName(QStringLiteral("repository.synchronize-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             auto out = gitService_->process().run(
@@ -637,6 +648,7 @@ void MainWindow::createMenuBar()
         // locked from the UI.
         auto* a = new QAction(menuIcon(QStringLiteral("worktrees")),
                               tr("Manage &worktrees..."), this);
+        a->setObjectName(QStringLiteral("repository.manage-worktrees"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_W));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
@@ -645,6 +657,7 @@ void MainWindow::createMenuBar()
             auto* dlg = new QDialog(this);
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Worktrees"));
+            dlg->setObjectName(QStringLiteral("dlg.worktrees"));
             conf::SettingsService::applyConfiguredSize(dlg, "worktrees");
 
             auto* layout = new QVBoxLayout(dlg);
@@ -761,6 +774,7 @@ void MainWindow::createMenuBar()
 
         auto* aGI = new QAction(menuIcon(QStringLiteral("edit")),
                                 tr("Edit .&gitignore"), this);
+        aGI->setObjectName(QStringLiteral("repository.edit-gitignore"));
         connect(aGI, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".gitignore"),
                            tr("Edit .gitignore"));
@@ -769,6 +783,7 @@ void MainWindow::createMenuBar()
 
         auto* aEx = new QAction(menuIcon(QStringLiteral("edit")),
                                 tr("Edit .git/&info/exclude"), this);
+        aEx->setObjectName(QStringLiteral("repository.edit-git-info-exclude"));
         connect(aEx, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".git/info/exclude"),
                            tr("Edit .git/info/exclude"));
@@ -777,6 +792,7 @@ void MainWindow::createMenuBar()
 
         auto* aAttr = new QAction(menuIcon(QStringLiteral("edit")),
                                   tr("Edit .git&attributes"), this);
+        aAttr->setObjectName(QStringLiteral("repository.edit-gitattributes"));
         connect(aAttr, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".gitattributes"),
                            tr("Edit .gitattributes"));
@@ -785,6 +801,7 @@ void MainWindow::createMenuBar()
 
         auto* aMM = new QAction(menuIcon(QStringLiteral("edit")),
                                 tr("Edit .&mailmap"), this);
+        aMM->setObjectName(QStringLiteral("repository.edit-mailmap"));
         connect(aMM, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".mailmap"),
                            tr("Edit .mailmap"));
@@ -802,6 +819,7 @@ void MainWindow::createMenuBar()
                                       tr("Sparse &Working Copy"));
 
         auto* initA = new QAction(tr("&Initialize (cone mode)"), this);
+        initA->setObjectName(QStringLiteral("repository.sparse-working-copy.initialize-cone-mode"));
         connect(initA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const auto out = gitService_->process().run(
@@ -812,6 +830,7 @@ void MainWindow::createMenuBar()
         sub->addAction(initA);
 
         auto* setA = new QAction(tr("&Edit patterns..."), this);
+        setA->setObjectName(QStringLiteral("repository.sparse-working-copy.edit-patterns"));
         connect(setA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             // The sparse-checkout file lives at
@@ -863,6 +882,7 @@ void MainWindow::createMenuBar()
         sub->addAction(setA);
 
         auto* disableA = new QAction(tr("&Disable"), this);
+        disableA->setObjectName(QStringLiteral("repository.sparse-working-copy.disable"));
         connect(disableA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const auto confirm = QMessageBox::question(this,
@@ -884,6 +904,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("maintenance")),
                               tr("Git mai&ntenance"), this);
+        a->setObjectName(QStringLiteral("repository.git-maintenance"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
@@ -903,6 +924,7 @@ void MainWindow::createMenuBar()
     repoMenu->addSeparator();
     auto* closeAction = new QAction(menuIcon(QStringLiteral("close")),
                                     tr("&Close"), this);
+    closeAction->setObjectName(QStringLiteral("repository.close"));
     closeAction->setShortcut(QKeySequence::Close);
     connect(closeAction, &QAction::triggered, this, [this]() {
         centralStack_->setCurrentWidget(dashboardView_);
@@ -944,6 +966,7 @@ void MainWindow::createMenuBar()
         // isn't in the loaded commit window).
         auto* a = new QAction(menuIcon(QStringLiteral("current_rev")),
                               tr("Go to &current revision"), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-current-revision"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_C));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen() || !repoView_)
@@ -975,6 +998,7 @@ void MainWindow::createMenuBar()
         // full SHA to find the row, so we resolve to ObjectId first.
         auto* a = new QAction(menuIcon(QStringLiteral("go_to_commit")),
                               tr("Go to c&ommit..."), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-commit"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen() || !repoView_)
@@ -1017,6 +1041,7 @@ void MainWindow::createMenuBar()
         // no child is in the loaded commit window.
         auto* a = new QAction(menuIcon(QStringLiteral("child_commit")),
                               tr("Go to &child commit"), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-child-commit"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_N));
         connect(a, &QAction::triggered, this, [this]() {
             if (!repoView_) return;
@@ -1035,6 +1060,7 @@ void MainWindow::createMenuBar()
         // before merging) which matches `git log --first-parent`.
         auto* a = new QAction(menuIcon(QStringLiteral("parent_commit")),
                               tr("Go to &parent commit"), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-parent-commit"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_P));
         connect(a, &QAction::triggered, this, [this]() {
             if (!repoView_) return;
@@ -1055,6 +1081,7 @@ void MainWindow::createMenuBar()
         // commits this matches the regular parent navigation.
         auto* a = new QAction(menuIcon(QStringLiteral("first_parent")),
                               tr("Go to &first parent commit"), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-first-parent-commit"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!repoView_) return;
             if (auto* g = repoView_->revisionGraph()) {
@@ -1073,6 +1100,7 @@ void MainWindow::createMenuBar()
         // branch. Same as first parent for non-merge commits.
         auto* a = new QAction(menuIcon(QStringLiteral("last_parent")),
                               tr("Go to &last parent commit"), this);
+        a->setObjectName(QStringLiteral("navigate.go-to-last-parent-commit"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!repoView_) return;
             if (auto* g = repoView_->revisionGraph()) {
@@ -1096,6 +1124,7 @@ void MainWindow::createMenuBar()
         // collides with text-cursor navigation.
         auto* a = new QAction(menuIcon(QStringLiteral("back")),
                               tr("Navigate &backward"), this);
+        a->setObjectName(QStringLiteral("navigate.navigate-backward"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_BracketLeft));
         connect(a, &QAction::triggered, this, [this]() {
             if (backHistory_.isEmpty() || !repoView_) {
@@ -1127,6 +1156,7 @@ void MainWindow::createMenuBar()
         // word" on macOS, so we use the browser convention.
         auto* a = new QAction(menuIcon(QStringLiteral("forward")),
                               tr("Navigate f&orward"), this);
+        a->setObjectName(QStringLiteral("navigate.navigate-forward"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_BracketRight));
         connect(a, &QAction::triggered, this, [this]() {
             if (forwardHistory_.isEmpty() || !repoView_) {
@@ -1159,6 +1189,7 @@ void MainWindow::createMenuBar()
         // RepositoryView.
         auto* a = new QAction(menuIcon(QStringLiteral("go_to_commit")),
                               tr("Quick &search"), this);
+        a->setObjectName(QStringLiteral("navigate.quick-search"));
         a->setShortcut(QKeySequence::Find);
         connect(a, &QAction::triggered, this, [this]() {
             if (filterInput_ && filterInput_->isEnabled()) {
@@ -1176,6 +1207,7 @@ void MainWindow::createMenuBar()
         // original mapping.
         auto* a = new QAction(menuIcon(QStringLiteral("parent_commit")),
                               tr("Quick search pre&vious"), this);
+        a->setObjectName(QStringLiteral("navigate.quick-search-previous"));
         a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Up));
         connect(a, &QAction::triggered, this, [this]() {
             if (repoView_ && repoView_->revisionGraph()) {
@@ -1189,6 +1221,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("child_commit")),
                               tr("Quick search ne&xt"), this);
+        a->setObjectName(QStringLiteral("navigate.quick-search-next"));
         a->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Down));
         connect(a, &QAction::triggered, this, [this]() {
             if (repoView_ && repoView_->revisionGraph()) {
@@ -1221,6 +1254,7 @@ void MainWindow::createMenuBar()
 
         auto* showAll = new QAction(menuIcon(QStringLiteral("visibility")),
                                     tr("Show &all branches"), this);
+        showAll->setObjectName(QStringLiteral("view.show-all-branches"));
         showAll->setCheckable(true);
         showAll->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_A));
         group->addAction(showAll);
@@ -1228,6 +1262,7 @@ void MainWindow::createMenuBar()
 
         auto* showFiltered = new QAction(menuIcon(QStringLiteral("filter")),
                                          tr("Show &filtered branches..."), this);
+        showFiltered->setObjectName(QStringLiteral("view.show-filtered-branches"));
         showFiltered->setCheckable(true);
         showFiltered->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_T));
         group->addAction(showFiltered);
@@ -1235,6 +1270,7 @@ void MainWindow::createMenuBar()
 
         auto* showHead = new QAction(menuIcon(QStringLiteral("visibility")),
                                      tr("Show c&urrent branch only"), this);
+        showHead->setObjectName(QStringLiteral("view.show-current-branch-only"));
         showHead->setCheckable(true);
         showHead->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_U));
         group->addAction(showHead);
@@ -1368,6 +1404,7 @@ void MainWindow::createMenuBar()
         // matches the original placeholder shortcut.
         auto* a = new QAction(menuIcon(QStringLiteral("reflog")),
                               tr("&Reflog..."), this);
+        a->setObjectName(QStringLiteral("view.reflog"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
@@ -1466,6 +1503,7 @@ void MainWindow::createMenuBar()
         // without losing date/author/SHA filters set here.
         auto* a = new QAction(menuIcon(QStringLiteral("filter")),
                               tr("Ad&vanced filter..."), this);
+        a->setObjectName(QStringLiteral("view.advanced-filter"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
         connect(a, &QAction::triggered, this, [this]() {
             if (!repoView_ || !repoView_->revisionGraph()) return;
@@ -1495,12 +1533,14 @@ void MainWindow::createMenuBar()
     //
     // The category index matches BranchModel::RootCategory.
     auto wireBranchTreeToggle = [this, viewMenu](
+            const QString& objectName,
             const QString& label,
             const QString& iconKey,
             int categoryIndex,
             const QString& settingsKey,
             const QKeySequence& shortcut = {}) {
         auto* a = new QAction(menuIcon(iconKey), label, this);
+        a->setObjectName(objectName);
         a->setCheckable(true);
         if (!shortcut.isEmpty()) a->setShortcut(shortcut);
         const bool saved = settingsService_
@@ -1521,7 +1561,8 @@ void MainWindow::createMenuBar()
     };
 
     // -- Commits section --
-    wireBranchTreeToggle(tr("Show s&tashes"),
+    wireBranchTreeToggle(QStringLiteral("view.show-stashes"),
+                         tr("Show s&tashes"),
                          QStringLiteral("stashes"),
                          static_cast<int>(
                              models::BranchModel::RootCategory::Stashes),
@@ -1535,13 +1576,15 @@ void MainWindow::createMenuBar()
 
     viewMenu->addSeparator();
     // -- Grid labels section --
-    wireBranchTreeToggle(tr("Show &remote branches"),
+    wireBranchTreeToggle(QStringLiteral("view.show-remote-branches"),
+                         tr("Show &remote branches"),
                          QStringLiteral("remote"),
                          static_cast<int>(
                              models::BranchModel::RootCategory::RemoteBranches),
                          QStringLiteral("view/showRemoteBranches"),
                          QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
-    wireBranchTreeToggle(tr("Show ta&gs"),
+    wireBranchTreeToggle(QStringLiteral("view.show-tags"),
+                         tr("Show ta&gs"),
                          QStringLiteral("tag_create"),
                          static_cast<int>(
                              models::BranchModel::RootCategory::Tags),
@@ -1558,6 +1601,7 @@ void MainWindow::createMenuBar()
         // clicking through each one. Persists to settings.
         auto* a = new QAction(menuIcon(QStringLiteral("description")),
                               tr("Show commit &message body"), this);
+        a->setObjectName(QStringLiteral("view.show-commit-message-body"));
         a->setCheckable(true);
         const bool saved = settingsService_
             ? settingsService_->value(
@@ -1582,6 +1626,7 @@ void MainWindow::createMenuBar()
         // relative-date toggle below.
         auto* a = new QAction(menuIcon(QStringLiteral("schedule")),
                               tr("Show a&uthor date"), this);
+        a->setObjectName(QStringLiteral("view.show-author-date"));
         a->setCheckable(true);
         const bool saved = settingsService_
             ? settingsService_->value(
@@ -1604,6 +1649,7 @@ void MainWindow::createMenuBar()
         // setRelativeDate which emits dataChanged for repaint.
         auto* a = new QAction(menuIcon(QStringLiteral("schedule")),
                               tr("Show relati&ve date"), this);
+        a->setObjectName(QStringLiteral("view.show-relative-date"));
         a->setCheckable(true);
         const bool saved = settingsService_
             ? settingsService_->value(
@@ -1633,11 +1679,13 @@ void MainWindow::createMenuBar()
     // column in CommitLogModel today (we only show author NAME),
     // so it's marked as a placeholder still.
     auto wireColumnToggle = [this, viewMenu](
+            const QString& objectName,
             const QString& label,
             const QString& iconKey,
             int columnIndex,
             const QString& settingsKey) {
         auto* a = new QAction(menuIcon(iconKey), label, this);
+        a->setObjectName(objectName);
         a->setCheckable(true);
         // Restore from settings; default visible. The check state
         // is restored here; the graph itself gets the visibility
@@ -1662,7 +1710,8 @@ void MainWindow::createMenuBar()
         return a;
     };
 
-    wireColumnToggle(tr("Show revision &graph column"),
+    wireColumnToggle(QStringLiteral("view.show-revision-graph-column"),
+                     tr("Show revision &graph column"),
                      QStringLiteral("submodule"),
                      static_cast<int>(models::CommitLogColumn::Graph),
                      QStringLiteral("view/showGraphColumn"));
@@ -1671,15 +1720,18 @@ void MainWindow::createMenuBar()
     // an avatar column and the toggle just flashed "not yet
     // implemented". When/if an avatar column is added, re-add a
     // wireColumnToggle() call here matching the other entries.
-    wireColumnToggle(tr("Show author &name column"),
+    wireColumnToggle(QStringLiteral("view.show-author-name-column"),
+                     tr("Show author &name column"),
                      QStringLiteral("badge"),
                      static_cast<int>(models::CommitLogColumn::Author),
                      QStringLiteral("view/showAuthorColumn"));
-    wireColumnToggle(tr("Show &date column"),
+    wireColumnToggle(QStringLiteral("view.show-date-column"),
+                     tr("Show &date column"),
                      QStringLiteral("date"),
                      static_cast<int>(models::CommitLogColumn::Date),
                      QStringLiteral("view/showDateColumn"));
-    wireColumnToggle(tr("Show SHA-&1 column"),
+    wireColumnToggle(QStringLiteral("view.show-sha-1-column"),
+                     tr("Show SHA-&1 column"),
                      QStringLiteral("hash"),
                      static_cast<int>(models::CommitLogColumn::Hash),
                      QStringLiteral("view/showHashColumn"));
@@ -1708,6 +1760,7 @@ void MainWindow::createMenuBar()
         // history on the current branch.
         auto* a = new QAction(menuIcon(QStringLiteral("undo")),
                               tr("&Undo last commit..."), this);
+        a->setObjectName(QStringLiteral("commands.undo-last-commit"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const auto ret = QMessageBox::question(
@@ -1971,6 +2024,7 @@ void MainWindow::createMenuBar()
         // is destructive so we gate it behind an extra confirm.
         auto* a = new QAction(menuIcon(QStringLiteral("reset")),
                               tr("&Reset changes..."), this);
+        a->setObjectName(QStringLiteral("commands.reset-changes"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QStringList modes = {
@@ -2009,6 +2063,7 @@ void MainWindow::createMenuBar()
         // so show a confirm with an explanation first.
         auto* a = new QAction(menuIcon(QStringLiteral("clean")),
                               tr("Clea&n working directory..."), this);
+        a->setObjectName(QStringLiteral("commands.clean-working-directory"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const auto ret = QMessageBox::warning(
@@ -2047,6 +2102,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("branch_create")),
                               tr("Create &branch..."), this);
+        a->setObjectName(QStringLiteral("commands.create-branch"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_B));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
@@ -2063,6 +2119,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("branch_delete")),
                               tr("&Delete branch..."), this);
+        a->setObjectName(QStringLiteral("commands.delete-branch"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             // Filter out the currently-checked-out branch — git
@@ -2103,6 +2160,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("branch_checkout")),
                               tr("Check&out branch..."), this);
+        a->setObjectName(QStringLiteral("commands.checkout-branch"));
         connect(a, &QAction::triggered, this, [this, localBranchNames]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QStringList names = localBranchNames();
@@ -2128,6 +2186,7 @@ void MainWindow::createMenuBar()
         // the user.
         auto* a = new QAction(menuIcon(QStringLiteral("merge")),
                               tr("Mer&ge branches..."), this);
+        a->setObjectName(QStringLiteral("commands.merge-branches"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
@@ -2165,6 +2224,7 @@ void MainWindow::createMenuBar()
         // when a merge / cherry-pick stops on conflicts.
         auto* a = new QAction(menuIcon(QStringLiteral("merge")),
                               tr("Resolve co&nflicts..."), this);
+        a->setObjectName(QStringLiteral("commands.resolve-conflicts"));
         connect(a, &QAction::triggered,
                 this, &MainWindow::showConflictResolver);
         cmdMenu->addAction(a);
@@ -2187,6 +2247,7 @@ void MainWindow::createMenuBar()
         //            bar surfaces the result.
         auto* a = new QAction(menuIcon(QStringLiteral("rebase")),
                               tr("R&ebase..."), this);
+        a->setObjectName(QStringLiteral("commands.rebase"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
@@ -2274,6 +2335,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("tag_create")),
                               tr("Create &tag..."), this);
+        a->setObjectName(QStringLiteral("commands.create-tag"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_T));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
@@ -2306,6 +2368,7 @@ void MainWindow::createMenuBar()
         // hiccup.
         auto* a = new QAction(menuIcon(QStringLiteral("tag_delete")),
                               tr("De&lete tag..."), this);
+        a->setObjectName(QStringLiteral("commands.delete-tag"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
@@ -2351,6 +2414,7 @@ void MainWindow::createMenuBar()
         // enabled and GitService will surface the failure.
         auto* a = new QAction(menuIcon(QStringLiteral("cherry_pick")),
                               tr("C&herry pick..."), this);
+        a->setObjectName(QStringLiteral("commands.cherry-pick"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
@@ -2404,6 +2468,7 @@ void MainWindow::createMenuBar()
         // format is picked from the output extension (.zip or .tar).
         auto* a = new QAction(menuIcon(QStringLiteral("archive")),
                               tr("&Archive revision..."), this);
+        a->setObjectName(QStringLiteral("commands.archive-revision"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             bool ok = false;
@@ -2435,6 +2500,7 @@ void MainWindow::createMenuBar()
         // a local branch.
         auto* a = new QAction(menuIcon(QStringLiteral("checkout")),
                               tr("Checko&ut revision..."), this);
+        a->setObjectName(QStringLiteral("commands.checkout-revision"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             bool ok = false;
@@ -2493,6 +2559,7 @@ void MainWindow::createMenuBar()
         };
 
         auto* startA = new QAction(tr("&Start..."), this);
+        startA->setObjectName(QStringLiteral("commands.bisect.start"));
         connect(startA, &QAction::triggered, this, [this, runBisect]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             bool ok = false;
@@ -2515,18 +2582,21 @@ void MainWindow::createMenuBar()
         sub->addAction(startA);
 
         auto* goodA = new QAction(tr("Mark current as &good"), this);
+        goodA->setObjectName(QStringLiteral("commands.bisect.mark-current-as-good"));
         connect(goodA, &QAction::triggered, this,
                 [runBisect]() { runBisect({"good"},
                                           QObject::tr("Bisect Good Failed")); });
         sub->addAction(goodA);
 
         auto* badA = new QAction(tr("Mark current as &bad"), this);
+        badA->setObjectName(QStringLiteral("commands.bisect.mark-current-as-bad"));
         connect(badA, &QAction::triggered, this,
                 [runBisect]() { runBisect({"bad"},
                                           QObject::tr("Bisect Bad Failed")); });
         sub->addAction(badA);
 
         auto* skipA = new QAction(tr("S&kip current"), this);
+        skipA->setObjectName(QStringLiteral("commands.bisect.skip-current"));
         connect(skipA, &QAction::triggered, this,
                 [runBisect]() { runBisect({"skip"},
                                           QObject::tr("Bisect Skip Failed")); });
@@ -2534,6 +2604,7 @@ void MainWindow::createMenuBar()
 
         sub->addSeparator();
         auto* resetA = new QAction(tr("&Reset"), this);
+        resetA->setObjectName(QStringLiteral("commands.bisect.reset"));
         connect(resetA, &QAction::triggered, this,
                 [runBisect]() { runBisect({"reset"},
                                           QObject::tr("Bisect Reset Failed")); });
@@ -2549,6 +2620,7 @@ void MainWindow::createMenuBar()
         // up named 0001-foo.patch, 0002-bar.patch, etc.
         auto* a = new QAction(menuIcon(QStringLiteral("format_patch")),
                               tr("&Format patch..."), this);
+        a->setObjectName(QStringLiteral("commands.format-patch"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             bool ok = false;
@@ -2583,6 +2655,7 @@ void MainWindow::createMenuBar()
         // accepted in one go and applied in order.
         auto* a = new QAction(menuIcon(QStringLiteral("apply_patch")),
                               tr("A&pply patch..."), this);
+        a->setObjectName(QStringLiteral("commands.apply-patch"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QStringList files = QFileDialog::getOpenFileNames(
@@ -2637,6 +2710,7 @@ void MainWindow::createMenuBar()
         // QListWidget dialog.
         auto* a = new QAction(menuIcon(QStringLiteral("auto_delete")),
                               tr("&Delete obsolete branches..."), this);
+        a->setObjectName(QStringLiteral("plugins.delete-obsolete-branches"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             auto out = gitService_->process().run(
@@ -2716,6 +2790,7 @@ void MainWindow::createMenuBar()
         // skip noise.
         auto* a = new QAction(menuIcon(QStringLiteral("find_files")),
                               tr("&Find large files..."), this);
+        a->setObjectName(QStringLiteral("plugins.find-large-files"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
 
@@ -2868,6 +2943,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("submodule")),
                               tr("&GitFlow"), this);
+        a->setObjectName(QStringLiteral("plugins.gitflow"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
@@ -2889,6 +2965,7 @@ void MainWindow::createMenuBar()
         // whose state persists across sessions.
         auto* a = new QAction(menuIcon(QStringLiteral("submodule_update")),
                               tr("&Periodic background fetch"), this);
+        a->setObjectName(QStringLiteral("plugins.periodic-background-fetch"));
         a->setCheckable(true);
         const bool savedOn = settingsService_
             ? settingsService_->value(
@@ -2962,6 +3039,7 @@ void MainWindow::createMenuBar()
         // via Repository::createRevWalk so we don't shell out.
         auto* a = new QAction(menuIcon(QStringLiteral("stats")),
                               tr("&Statistics..."), this);
+        a->setObjectName(QStringLiteral("plugins.statistics"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             auto* repo = gitService_->repository();
@@ -3063,6 +3141,7 @@ void MainWindow::createMenuBar()
         // open the right one; today there's just the parent page.
         auto* a = new QAction(menuIcon(QStringLiteral("extension")),
                               tr("Plugin &Manager"), this);
+        a->setObjectName(QStringLiteral("plugins.plugin-manager"));
         connect(a, &QAction::triggered,
                 this, &MainWindow::showSettingsDialog);
         pluginsMenu->addAction(a);
@@ -3080,6 +3159,7 @@ void MainWindow::createMenuBar()
         // from the previous stub (Ctrl+G).
         auto* a = new QAction(menuIcon(QStringLiteral("terminal")),
                               tr("Git &bash"), this);
+        a->setObjectName(QStringLiteral("tools.git-bash"));
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
@@ -3105,6 +3185,7 @@ void MainWindow::createMenuBar()
         // the call returns false and we surface a friendly message.
         auto* a = new QAction(menuIcon(QStringLiteral("visibility")),
                               tr("Git&K"), this);
+        a->setObjectName(QStringLiteral("tools.gitk"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QString workdir = QString::fromStdString(
@@ -3130,6 +3211,7 @@ void MainWindow::createMenuBar()
         // ring buffer of the last 200 lines).
         auto* a = new QAction(menuIcon(QStringLiteral("command_log")),
                               tr("Git &command log"), this);
+        a->setObjectName(QStringLiteral("tools.git-command-log"));
         a->setShortcut(QKeySequence(Qt::Key_F12));
         connect(a, &QAction::triggered, this, [this]() {
             auto* dlg = new QDialog(this);
@@ -3197,6 +3279,7 @@ void MainWindow::createMenuBar()
     toolsMenu->addSeparator();
     auto* settingsAct = new QAction(menuIcon(QStringLiteral("settings")),
                                     tr("&Settings..."), this);
+    settingsAct->setObjectName(QStringLiteral("tools.settings"));
     settingsAct->setShortcut(QKeySequence::Preferences);
     connect(settingsAct, &QAction::triggered,
             this, &MainWindow::showSettingsDialog);
@@ -3209,6 +3292,7 @@ void MainWindow::createMenuBar()
         // online docs (Read the Docs or similar), switch this URL.
         auto* a = new QAction(menuIcon(QStringLiteral("manual")),
                               tr("&User manual"), this);
+        a->setObjectName(QStringLiteral("help.user-manual"));
         a->setShortcut(QKeySequence::HelpContents);
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
@@ -3222,6 +3306,7 @@ void MainWindow::createMenuBar()
         // a dialog with QTextBrowser's markdown support).
         auto* a = new QAction(menuIcon(QStringLiteral("changelog")),
                               tr("&Changelog"), this);
+        a->setObjectName(QStringLiteral("help.changelog"));
         connect(a, &QAction::triggered, this, [this]() {
             QFile f(QStringLiteral(":/content/CHANGELOG.md"));
             QString text;
@@ -3248,6 +3333,7 @@ void MainWindow::createMenuBar()
     {
         auto* a = new QAction(menuIcon(QStringLiteral("bug")),
                               tr("&Report an issue"), this);
+        a->setObjectName(QStringLiteral("help.report-an-issue"));
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
                 "https://github.com/ThePieMonster/GitBolt/issues/new")));
@@ -3264,6 +3350,7 @@ void MainWindow::createMenuBar()
         // latest?") with zero maintenance burden today.
         auto* a = new QAction(menuIcon(QStringLiteral("update")),
                               tr("&Check for updates"), this);
+        a->setObjectName(QStringLiteral("help.check-for-updates"));
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
                 "https://github.com/ThePieMonster/GitBolt/releases")));
@@ -3273,6 +3360,7 @@ void MainWindow::createMenuBar()
     helpMenu->addSeparator();
     auto* aboutMenuAct = new QAction(menuIcon(QStringLiteral("about")),
                                      tr("&About GitBolt"), this);
+    aboutMenuAct->setObjectName(QStringLiteral("help.about-gitbolt"));
     connect(aboutMenuAct, &QAction::triggered, this, &MainWindow::showAbout);
     helpMenu->addAction(aboutMenuAct);
 
@@ -4257,6 +4345,7 @@ void MainWindow::showConflictResolver()
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(tr("Resolve Conflicts"));
+    dlg->setObjectName(QStringLiteral("dlg.conflicts"));
     conf::SettingsService::applyConfiguredSize(dlg, "conflicts");
 
     auto* layout = new QVBoxLayout(dlg);

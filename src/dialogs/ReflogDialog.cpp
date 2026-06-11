@@ -210,6 +210,7 @@ void ReflogDialog::setupUi() {
     layout->addLayout(refRow);
 
     table_ = new QTableWidget(this);
+    table_->setObjectName(QStringLiteral("reflog.table"));
     table_->setColumnCount(5);
     table_->setHorizontalHeaderLabels({
         tr("Old"), tr("New"), tr("Committer"),

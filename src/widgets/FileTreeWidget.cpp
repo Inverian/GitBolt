@@ -79,11 +79,13 @@ void FileTreeWidget::setupUi()
     leftLayout->setSpacing(4);
 
     filterInput_ = new QLineEdit(leftPane);
+    filterInput_->setObjectName(QStringLiteral("fileTree.filter"));
     filterInput_->setPlaceholderText(tr("Filter files…"));
     filterInput_->setClearButtonEnabled(true);
     leftLayout->addWidget(filterInput_);
 
     treeView_ = new QTreeView(leftPane);
+    treeView_->setObjectName(QStringLiteral("fileTree.view"));
     treeView_->setHeaderHidden(true);
     treeView_->setUniformRowHeights(true);
     treeView_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -115,6 +117,7 @@ void FileTreeWidget::setupUi()
     rightLayout->addWidget(previewHeader_);
 
     preview_ = new QPlainTextEdit(rightPane);
+    preview_->setObjectName(QStringLiteral("fileTree.preview"));
     preview_->setReadOnly(true);
     // Match DiffViewerWidget's font exactly so the two inspector
     // tabs render at identical line height. Previously this used

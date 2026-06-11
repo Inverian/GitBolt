@@ -160,6 +160,7 @@ void DiffViewerWidget::setupUi()
 
     // ---- Unified editor ---------------------------------------------------
     unifiedEditor_ = new DiffTextEdit(this);
+    unifiedEditor_->setObjectName(QStringLiteral("diff.unifiedEditor"));
     unifiedEditor_->setReadOnly(true);
     unifiedEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
     QFont monoFont(QStringLiteral("Menlo, Consolas, monospace"));

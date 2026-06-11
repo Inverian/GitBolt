@@ -29,6 +29,7 @@ BranchTreeWidget::BranchTreeWidget(QWidget* parent)
     filterProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
     treeView_->setModel(filterProxy_);
+    treeView_->setObjectName(QStringLiteral("branchTree.view"));
     treeView_->setHeaderHidden(true);
     treeView_->setExpandsOnDoubleClick(false);
     treeView_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -107,6 +108,7 @@ void BranchTreeWidget::setupToolbar() {
 
     toolbar_->addSeparator();
 
+    filterInput_->setObjectName(QStringLiteral("branchTree.filter"));
     filterInput_->setPlaceholderText(tr("Filter branches..."));
     filterInput_->setClearButtonEnabled(true);
     toolbar_->addWidget(filterInput_);
