@@ -174,7 +174,7 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 2 — Commit History + Revision Graph | Complete |
 | Phase 3 — Staging, Diffing, Committing | Complete |
 | Phase 4 — Branch Management, Merge, Push/Pull | Complete |
-| Phase 5 — Blame, File History, Search | Core complete (blame UI pending) |
+| Phase 5 — Blame, File History, Search | Complete |
 | Phase 6 — Interactive Rebase, Cherry-Pick, Stash | Complete |
 | Phase 7 — Tags, Submodules, Worktrees, Reflog | Complete |
 | Phase 8 — Settings, Themes, Dashboard | Complete |
@@ -187,21 +187,16 @@ GitBolt is currently in **early development**. The core architecture and all maj
 
 ### Roadmap
 
-Features whose backend exists (or is scaffolded) but which don't have
-a UI entry point yet:
+The scaffolded-but-unwired backlog has been cleared — **blame view**,
+**three-way merge conflict resolution**, **hunk / line-level staging**,
+**worktree remove / lock**, and **clone cancellation** are all wired in
+and reachable from the UI.
 
-- **Blame view** — `git/Blame` and a blame widget exist; not yet
-  reachable from the UI
-- **Three-way merge conflict resolution** — conflicted merges
-  currently report through git's own error output; the dedicated
-  resolution widget isn't wired in yet
-- **Hunk / line-level staging** — staging is per-file today
-- **Worktree remove / lock** — worktrees can be created but not yet
-  managed afterwards from the UI
-- **GPG signature verification** — the inspector tab is a placeholder
-  by design
-- **Clone cancellation** — a running clone must finish or fail; there
-  is no abort yet
+Remaining deferred work:
+
+- **GPG signature verification** — the commit inspector's signature tab
+  is an intentional placeholder; signature checking is not implemented
+  yet.
 
 ---
 
