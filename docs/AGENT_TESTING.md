@@ -79,8 +79,44 @@ Implementation notes:
   assert outcomes (e.g. "repo is MERGING", "3 conflicts", "commit has 2
   parents") without screenshots or AX traversal.
 
-Until the bridge exists, the reliable agent workflow is: drive what the
-GUI strictly requires through coordinate clicks (menus, buttons by AX
-name), and verify *outcomes* by inspecting the on-disk git repository
-with shell `git` — the GUI is just the trigger; correctness lives in
-the repository state.
+## The bridge (implemented)
+
+`src/app/TestBridge.{h,cpp}` implements the design above; `tools/bridge.py`
+is the client. Enable it by setting the env var at launch:
+
+```bash
+GITBOLT_TEST_BRIDGE=1 ./build/src/app/GitBolt.app/Contents/MacOS/GitBolt /path/to/repo &
+tools/bridge.py dump-state
+tools/bridge.py list-actions          # every menu/toolbar action + slug
+tools/bridge.py trigger commands/resolve-conflicts
+tools/bridge.py list-widgets          # windows, buttons, views, editors (with classes)
+tools/bridge.py select-row QTableView:0 0     # the AX-impossible operation
+tools/bridge.py click "Lock/Unlock"
+tools/bridge.py type CommitMessageEdit:0 "message text"
+tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay issues
+```
+
+Addressing:
+- **Actions** by menu-path slug (`commands/merge-branches`) or trailing
+  suffix (`merge-branches`); `trigger`/`click` are queued so an action
+  that opens a modal returns immediately — assert with `dump-state`.
+- **Buttons** by visible text (case-insensitive, mnemonics/`...` stripped)
+  with a prefix fallback so `Commit` matches the live-count `Commit (1)`.
+- **Views / editors** by `objectName` or `ClassName[:index]`, matched
+  against the whole superclass chain — `QPlainTextEdit:0` resolves a
+  `CommitMessageEdit`. Active window's widgets are ordered first.
+
+Two real bugs were caught the first time the bridge drove a full
+merge→resolve→commit cycle: `Repository::conflictEntries()` read a stale
+cached libgit2 index (CLI-side merges were invisible — fixed with
+`git_index_read(force)`), and the brittle exact-text button match
+(fixed with the prefix fallback). Worktree lock/remove — which no
+synthetic input could ever reach because they need a selected table
+row — were verified end to end via `select-row`.
+
+## Fallback when the bridge isn't available
+
+Drive what the GUI strictly requires through coordinate clicks (menus,
+buttons by AX name), and verify *outcomes* by inspecting the on-disk git
+repository with shell `git` — the GUI is just the trigger; correctness
+lives in the repository state.

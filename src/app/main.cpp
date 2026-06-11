@@ -1,7 +1,10 @@
+#include "TestBridge.h"
 #include "ui/MainWindow.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "util/CrashHandler.h"
+
+#include <memory>
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -132,6 +135,13 @@ int main(int argc, char* argv[]) {
         window.restoreGeometry(geometry);
 
     window.show();
+
+    // Test bridge — agent/test control channel, never active unless
+    // explicitly requested via the environment. Declared after
+    // `window` so it is destroyed first. See docs/AGENT_TESTING.md.
+    std::unique_ptr<gitbolt::app::TestBridge> testBridge;
+    if (qEnvironmentVariableIsSet("GITBOLT_TEST_BRIDGE"))
+        testBridge = std::make_unique<gitbolt::app::TestBridge>(&window);
 
     // Open repository from command line if provided. We queue the call so
     // it runs after the event loop starts and the window is fully shown.

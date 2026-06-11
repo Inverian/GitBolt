@@ -1,5 +1,7 @@
 set(GITBOLT_APP_SOURCES
     main.cpp
+    TestBridge.cpp
+    TestBridge.h
     resources/gitbolt.qrc
 )
 
@@ -57,6 +59,7 @@ target_link_libraries(gitbolt PRIVATE
     gitbolt_plugins
     Qt6::Widgets
     Qt6::Concurrent
+    Qt6::Network
 )
 
 # libgit2 for git_libgit2_init / git_libgit2_shutdown in main

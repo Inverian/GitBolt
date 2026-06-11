@@ -19,8 +19,9 @@ if(GITBOLT_SANITIZERS)
     include(Sanitizers)
 endif()
 
-# Find Qt 6
-find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg)
+# Find Qt 6 (Network is for the env-gated agent/test bridge's
+# QLocalServer — see docs/AGENT_TESTING.md)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg Network)
 qt_standard_project_setup()
 
 # Find libgit2

@@ -839,6 +839,14 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
     int err = git_repository_index(&index, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
+    // Reload from disk: libgit2 caches the git_index object, so a
+    // merge/cherry-pick/rebase performed by an external process —
+    // or by GitBolt's own CLI-backed merge — leaves this handle's
+    // in-memory copy stale, and the conflict entries written to
+    // .git/index would be invisible. git_index_read(force=1)
+    // re-reads unconditionally.
+    git_index_read(index, /*force=*/1);
+
     // Reads a conflict side's blob into a string. A null entry is
     // normal (add/add conflicts have no ancestor; delete/modify
     // has only one side) and yields empty content so the three-way
