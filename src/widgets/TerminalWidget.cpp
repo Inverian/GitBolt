@@ -24,9 +24,25 @@
 #include <unistd.h>
 #include <util.h>   // forkpty (BSD/macOS)
 
+#include <vector>
+
+#ifdef Q_OS_MACOS
+#include <crt_externs.h>   // _NSGetEnviron
+#endif
+
 namespace gitbolt::widgets {
 
 namespace {
+
+// The host process environment, portably. On macOS `environ` is not
+// directly visible to shared code — Apple provides _NSGetEnviron().
+#ifdef Q_OS_MACOS
+char** hostEnviron() { return *_NSGetEnviron(); }
+#else
+extern "C" char** environ;
+char** hostEnviron() { return environ; }
+#endif
+
 constexpr int kMaxScrollback = 5000;
 } // namespace
 
@@ -83,6 +99,53 @@ void TerminalWidget::start(const QString& workingDirectory)
     if (!workingDirectory.isEmpty())
         pendingCwd_ = workingDirectory;
 
+    // -----------------------------------------------------------------
+    // Snapshot EVERYTHING the child needs into plain byte buffers
+    // BEFORE forking. GitBolt always has QtConcurrent git workers
+    // alive, and a child of a multithreaded process may only call
+    // async-signal-safe functions between fork and exec: Qt string
+    // conversion, setenv and getpwuid all allocate or take locks, so
+    // any of them can deadlock the child on a lock some other thread
+    // held at fork time — the terminal then silently never starts.
+    // chdir / execve / _exit are safe.
+    // -----------------------------------------------------------------
+    const QByteArray cwdBytes = pendingCwd_.toLocal8Bit();
+
+    // Pick the user's login shell (parent side — getpwuid may lock).
+    QByteArray shellBytes;
+    if (const char* shellEnv = getenv("SHELL"); shellEnv && *shellEnv) {
+        shellBytes = shellEnv;
+    } else {
+        struct passwd* pw = getpwuid(getuid());
+        shellBytes = (pw && pw->pw_shell && *pw->pw_shell)
+                         ? QByteArray(pw->pw_shell)
+                         : QByteArrayLiteral("/bin/sh");
+    }
+
+    // Child environment = current env + TERM + GITBOLT_TERM.
+    // TERM=xterm-256color so colorful programs (git, ls --color)
+    // emit SGR sequences — we strip non-SGR CSI for now, so
+    // fullscreen TUIs won't render properly (known follow-up).
+    // GITBOLT_TERM lets dotfiles detect us.
+    QList<QByteArray> envBytes;
+    for (char** e = hostEnviron(); e && *e; ++e) {
+        if (strncmp(*e, "TERM=", 5) == 0 ||
+            strncmp(*e, "GITBOLT_TERM=", 13) == 0)
+            continue;
+        envBytes.append(QByteArray(*e));
+    }
+    envBytes.append(QByteArrayLiteral("TERM=xterm-256color"));
+    envBytes.append(QByteArrayLiteral("GITBOLT_TERM=1"));
+
+    std::vector<char*> envp;
+    envp.reserve(static_cast<size_t>(envBytes.size()) + 1);
+    for (auto& e : envBytes)
+        envp.push_back(e.data());
+    envp.push_back(nullptr);
+
+    QByteArray arg1 = QByteArrayLiteral("-i");
+    std::vector<char*> argv{shellBytes.data(), arg1.data(), nullptr};
+
     // forkpty does the openpty + fork + dup2-of-slave-to-stdio in
     // one call. The child gets a fresh controlling terminal.
     int fd = -1;
@@ -94,33 +157,12 @@ void TerminalWidget::start(const QString& workingDirectory)
     }
 
     if (pid == 0) {
-        // ----- child -----
-        // Switch to the requested cwd before exec, if any.
-        if (!pendingCwd_.isEmpty()) {
-            const QByteArray cwd = pendingCwd_.toLocal8Bit();
-            if (chdir(cwd.constData()) != 0) {
-                // Non-fatal — fall through with whatever cwd we have.
-            }
+        // ----- child: async-signal-safe calls ONLY -----
+        if (!cwdBytes.isEmpty()) {
+            // Non-fatal — fall through with whatever cwd we have.
+            (void)chdir(cwdBytes.constData());
         }
-
-        // TERM=xterm-256color so colorful programs (git, ls --color)
-        // emit SGR sequences. We strip non-SGR CSI for now, so
-        // fullscreen TUIs (vim, htop, less) won't render properly
-        // — that's a known follow-up.
-        setenv("TERM", "xterm-256color", 1);
-        // Tell the shell who's hosting it so users can detect us
-        // from their dotfiles if they want to.
-        setenv("GITBOLT_TERM", "1", 1);
-
-        // Pick the user's login shell.
-        const char* shell = getenv("SHELL");
-        if (!shell || !*shell) {
-            struct passwd* pw = getpwuid(getuid());
-            shell = (pw && pw->pw_shell && *pw->pw_shell)
-                        ? pw->pw_shell : "/bin/sh";
-        }
-
-        execl(shell, shell, "-i", nullptr);
+        execve(shellBytes.constData(), argv.data(), envp.data());
         // exec failed — terminate the child.
         _exit(127);
     }

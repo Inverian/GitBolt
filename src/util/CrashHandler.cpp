@@ -1,19 +1,20 @@
 #include "util/CrashHandler.h"
 
 #include <QCoreApplication>
-#include <QDateTime>
 #include <QDir>
 #include <QFile>
-#include <QStandardPaths>
 #include <QSysInfo>
-#include <QTextStream>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 
 #if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
 #include <execinfo.h>
+#include <fcntl.h>
 #include <unistd.h>
 #elif defined(Q_OS_WIN)
 #include <windows.h>
@@ -23,13 +24,128 @@
 
 namespace gitbolt::util {
 
+// ---------------------------------------------------------------------------
+// Signal-handler contract: SIGSEGV/SIGABRT usually fire from inside a
+// corrupted heap or mid-malloc, so the handler may only use async-
+// signal-safe calls — open/write/close, backtrace, backtrace_symbols_fd,
+// time, raise. Anything that allocates (QString, fopen/fprintf,
+// backtrace_symbols, mkpath) or takes a lock (localtime) can convert a
+// crash into a silent deadlock with no report AND no core dump.
+//
+// Everything the handler needs is therefore pre-rendered at install()
+// time, in a normal context, into the static buffers below.
+// ---------------------------------------------------------------------------
+namespace {
+
+char   g_crashPath[1024] = {};
+char   g_header[2048]    = {};
+size_t g_headerLen       = 0;
+
+#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
+
+void writeRaw(int fd, const char* data, size_t len) {
+    while (len > 0) {
+        const ssize_t n = ::write(fd, data, len);
+        if (n <= 0)
+            return;  // EINTR/disk-full — nothing safe left to do
+        data += n;
+        len -= static_cast<size_t>(n);
+    }
+}
+
+void writeStr(int fd, const char* s) {
+    writeRaw(fd, s, std::strlen(s));
+}
+
+// Minimal decimal printer — printf is not async-signal-safe.
+void writeDec(int fd, long long value) {
+    char buf[24];
+    char* p = buf + sizeof(buf);
+    const bool neg = value < 0;
+    unsigned long long v = neg
+        ? ~static_cast<unsigned long long>(value) + 1ULL
+        : static_cast<unsigned long long>(value);
+    do {
+        *--p = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    } while (v != 0);
+    if (neg)
+        *--p = '-';
+    writeRaw(fd, p, static_cast<size_t>(buf + sizeof(buf) - p));
+}
+
+// Dedicated stack for the handler so a stack-overflow SIGSEGV can
+// still run it (without SA_ONSTACK the faulting thread has no stack
+// left to handle anything on).
+char g_altStack[64 * 1024];
+
+#endif // unix
+
+const char* signalName(int sig) {
+    switch (sig) {
+    case SIGSEGV: return "SIGSEGV";
+    case SIGABRT: return "SIGABRT";
+    case SIGFPE:  return "SIGFPE";
+#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
+    case SIGBUS:  return "SIGBUS";
+#endif
+    default:      return "UNKNOWN";
+    }
+}
+
+} // namespace
+
 void CrashHandler::install() {
+    // Pre-render the path (this also creates ~/.gitbolt — mkpath is
+    // NOT signal-safe, so it must happen here) and the static system
+    // header the handler will write verbatim.
+    const QByteArray pathBytes = QFile::encodeName(crashLogPath());
+    std::snprintf(g_crashPath, sizeof(g_crashPath), "%s",
+                  pathBytes.constData());
+
+    const QByteArray header =
+        (QStringLiteral("=== GitBolt Crash Report ===\n")
+         + QStringLiteral("App version: %1\n")
+               .arg(qApp ? qApp->applicationVersion()
+                         : QStringLiteral("unknown"))
+         + QStringLiteral("Qt version: %1 (runtime), %2 (compile)\n")
+               .arg(QString::fromLatin1(qVersion()),
+                    QStringLiteral(QT_VERSION_STR))
+         + QStringLiteral("OS: %1 %2\n")
+               .arg(QSysInfo::productType(), QSysInfo::productVersion())
+         + QStringLiteral("Kernel: %1 %2\n")
+               .arg(QSysInfo::kernelType(), QSysInfo::kernelVersion())
+         + QStringLiteral("CPU Arch: %1\n")
+               .arg(QSysInfo::currentCpuArchitecture()))
+            .toUtf8();
+    g_headerLen = std::min<size_t>(static_cast<size_t>(header.size()),
+                                   sizeof(g_header));
+    std::memcpy(g_header, header.constData(), g_headerLen);
+
+#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
+    stack_t ss{};
+    ss.ss_sp = g_altStack;
+    ss.ss_size = sizeof(g_altStack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, nullptr);
+
+    struct sigaction sa{};
+    sa.sa_handler = signalHandler;
+    // SA_ONSTACK: run on the alternate stack (stack overflows).
+    // SA_RESETHAND: default disposition restored on entry, so the
+    // re-raise at the end of the handler dumps core normally and a
+    // crash INSIDE the handler can't recurse.
+    sa.sa_flags = SA_ONSTACK | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGFPE,  &sa, nullptr);
+#else
     std::signal(SIGSEGV, signalHandler);
     std::signal(SIGABRT, signalHandler);
-#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
-    std::signal(SIGBUS, signalHandler);
+    std::signal(SIGFPE,  signalHandler);
 #endif
-    std::signal(SIGFPE, signalHandler);
 }
 
 bool CrashHandler::hasPendingCrashReport() {
@@ -54,80 +170,55 @@ QString CrashHandler::crashLogPath() {
 }
 
 void CrashHandler::signalHandler(int signal) {
-    // Re-install default handler so that if writeStackTrace itself crashes,
-    // the OS produces a core dump as usual.
+#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
+    // Async-signal-safe path: open/write/close + backtrace_symbols_fd
+    // only. No allocation, no locks, no stdio.
+    const int fd = ::open(g_crashPath,
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        writeRaw(fd, g_header, g_headerLen);
+        writeStr(fd, "Signal: ");
+        writeStr(fd, signalName(signal));
+        writeStr(fd, " (");
+        writeDec(fd, signal);
+        writeStr(fd, ")\n");
+        // Raw epoch — localtime/strftime take locks. The reader can
+        // format it; the crash dialog shows the report verbatim and
+        // an epoch is still unambiguous.
+        writeStr(fd, "Epoch: ");
+        writeDec(fd, static_cast<long long>(::time(nullptr)));
+        writeStr(fd, "\n\n--- Stack Trace ---\n");
+
+        void* frames[64];
+        const int frameCount = ::backtrace(frames, 64);
+        ::backtrace_symbols_fd(frames, frameCount, fd);
+
+        writeStr(fd, "\n=== End of Report ===\n");
+        ::close(fd);
+    }
+    // SA_RESETHAND already restored the default disposition.
+    ::raise(signal);
+#else
     std::signal(signal, SIG_DFL);
-
     writeStackTrace(signal);
-
-    // Re-raise to get the default behavior (core dump / termination)
     std::raise(signal);
+#endif
 }
 
+// Windows-only since the POSIX path moved into the handler itself
+// (the constraints differ: no fork-style signal-safety list, and the
+// dbghelp calls below have no fd-based equivalents).
 void CrashHandler::writeStackTrace(int signal) {
-    const char* signalName = "UNKNOWN";
-    switch (signal) {
-    case SIGSEGV: signalName = "SIGSEGV"; break;
-    case SIGABRT: signalName = "SIGABRT"; break;
-    case SIGFPE:  signalName = "SIGFPE";  break;
-#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
-    case SIGBUS:  signalName = "SIGBUS";  break;
-#endif
-    }
-
-    // Open crash log using low-level I/O (signal-safe on most platforms)
-    QString path = crashLogPath();
-    QByteArray pathBytes = path.toUtf8();
-    FILE* fp = std::fopen(pathBytes.constData(), "w");
+#if defined(Q_OS_WIN)
+    FILE* fp = std::fopen(g_crashPath, "w");
     if (!fp) return;
 
-    // Header
-    std::fprintf(fp, "=== GitBolt Crash Report ===\n");
-    std::fprintf(fp, "Signal: %s (%d)\n", signalName, signal);
-
-    // Timestamp — use a simple approach (time_t is async-signal-safe on most systems)
-    std::time_t now = std::time(nullptr);
-    char timeBuf[64] = {};
-    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-    std::fprintf(fp, "Time: %s\n", timeBuf);
-
-    // Application info
-    std::fprintf(fp, "App version: %s\n",
-                 qApp ? qPrintable(qApp->applicationVersion()) : "unknown");
-    std::fprintf(fp, "Qt version: %s (runtime), %s (compile)\n",
-                 qVersion(), QT_VERSION_STR);
-    std::fprintf(fp, "OS: %s %s\n",
-                 qPrintable(QSysInfo::productType()),
-                 qPrintable(QSysInfo::productVersion()));
-    std::fprintf(fp, "Kernel: %s %s\n",
-                 qPrintable(QSysInfo::kernelType()),
-                 qPrintable(QSysInfo::kernelVersion()));
-    std::fprintf(fp, "CPU Arch: %s\n",
-                 qPrintable(QSysInfo::currentCpuArchitecture()));
-
-    // Stack trace
+    std::fwrite(g_header, 1, g_headerLen, fp);
+    std::fprintf(fp, "Signal: %s (%d)\n", signalName(signal), signal);
+    std::fprintf(fp, "Epoch: %lld\n",
+                 static_cast<long long>(std::time(nullptr)));
     std::fprintf(fp, "\n--- Stack Trace ---\n");
 
-#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
-    static constexpr int MAX_FRAMES = 64;
-    void* frames[MAX_FRAMES];
-    int frameCount = backtrace(frames, MAX_FRAMES);
-
-    // backtrace_symbols_fd writes directly to a file descriptor (signal-safe)
-    char** symbols = backtrace_symbols(frames, frameCount);
-    if (symbols) {
-        for (int i = 0; i < frameCount; ++i) {
-            std::fprintf(fp, "  [%d] %s\n", i, symbols[i]);
-        }
-        std::free(symbols);
-    } else {
-        std::fprintf(fp, "  (unable to resolve symbols)\n");
-        // Fall back to fd-based output
-        std::fflush(fp);
-        backtrace_symbols_fd(frames, frameCount, fileno(fp));
-    }
-
-#elif defined(Q_OS_WIN)
     static constexpr int MAX_FRAMES = 64;
     void* frames[MAX_FRAMES];
     USHORT frameCount = CaptureStackBackTrace(0, MAX_FRAMES, frames, nullptr);
@@ -151,12 +242,11 @@ void CrashHandler::writeStackTrace(int signal) {
     }
 
     SymCleanup(process);
-#else
-    std::fprintf(fp, "  (stack trace not available on this platform)\n");
-#endif
-
     std::fprintf(fp, "\n=== End of Report ===\n");
     std::fclose(fp);
+#else
+    Q_UNUSED(signal);
+#endif
 }
 
 } // namespace gitbolt::util

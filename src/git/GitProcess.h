@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+class QProcess;
+
 namespace gitbolt::git {
 
 struct ProcessOutput {
@@ -58,6 +60,11 @@ public:
     static std::string findGitExecutable();
 
 private:
+    /// Shared child-process environment: inherits the session env
+    /// and sets GIT_TERMINAL_PROMPT=0 so a promptless child fails
+    /// fast instead of hanging until the timeout kills it.
+    static void applyEnvironment(QProcess& process);
+
     std::string workDir_;
     std::string gitPath_;
 };

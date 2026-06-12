@@ -4128,8 +4128,12 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     repoPathLabel_->setText(path);
 
     // Block repo-dependent operations until the open lands — a
-    // Pull/Commit fired now would hit the previous repository.
+    // Pull/Commit fired now would hit the previous repository. That
+    // includes the Navigate/View/Commands menus: gitService_ still
+    // reports the OLD repo as open for the whole pending window, so
+    // every menu guard would happily pass and operate on it.
     setRepoActionsEnabled(false);
+    setRepoOnlyMenusEnabled(false);
 
     if (repoView_)
         repoView_->showLoading(tr("Opening repository…"));
@@ -4290,6 +4294,7 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
             widgetBeforeOpen_ ? widgetBeforeOpen_
                               : static_cast<QWidget*>(dashboardView_));
         setRepoActionsEnabled(true);
+        setRepoOnlyMenusEnabled(true);  // re-arm for the still-open repo
 
         struct HeadInfo {
             bool open = false;

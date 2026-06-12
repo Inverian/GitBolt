@@ -612,11 +612,25 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
 
     git_oid commitOid;
     if (amend) {
+        // An unborn HEAD (fresh repo, no commits) has nothing to
+        // amend. The old code ignored this error and handed a null
+        // reference straight to git_reference_peel — a guaranteed
+        // crash on the very first commit with "Amend" ticked.
         git_reference* headRef = nullptr;
+        err = git_repository_head(&headRef, repo_);
+        if (err < 0) {
+            git_signature_free(sig);
+            git_tree_free(tree);
+            return GitError::fromLibgit2(err);
+        }
         git_commit* headCommit = nullptr;
-        git_repository_head(&headRef, repo_);
-        git_reference_peel(reinterpret_cast<git_object**>(&headCommit), headRef, GIT_OBJECT_COMMIT);
+        err = git_reference_peel(reinterpret_cast<git_object**>(&headCommit), headRef, GIT_OBJECT_COMMIT);
         git_reference_free(headRef);
+        if (err < 0) {
+            git_signature_free(sig);
+            git_tree_free(tree);
+            return GitError::fromLibgit2(err);
+        }
         err = git_commit_amend(&commitOid, headCommit, "HEAD", sig, sig, nullptr, message.c_str(), tree);
         git_commit_free(headCommit);
     } else {
@@ -755,13 +769,38 @@ Result<void> Repository::checkout(const std::string& branchOrRef) {
     git_object* target = nullptr;
     int err = git_revparse_single(&target, repo_, branchOrRef.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
-    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
-    opts.checkout_strategy = GIT_CHECKOUT_SAFE;
-    err = git_checkout_tree(repo_, target, &opts);
+
+    // Annotated tags peel to their commit; commits peel to
+    // themselves. Checking out a non-committish fails right here.
+    git_object* peeled = nullptr;
+    err = git_object_peel(&peeled, target, GIT_OBJECT_COMMIT);
     git_object_free(target);
     if (err < 0) return GitError::fromLibgit2(err);
-    std::string refName = "refs/heads/" + branchOrRef;
-    err = git_repository_set_head(repo_, refName.c_str());
+
+    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    opts.checkout_strategy = GIT_CHECKOUT_SAFE;
+    err = git_checkout_tree(repo_, peeled, &opts);
+    if (err < 0) {
+        git_object_free(peeled);
+        return GitError::fromLibgit2(err);
+    }
+
+    // HEAD update: only an actual LOCAL BRANCH name gets a symbolic
+    // HEAD; tags, remote-tracking refs, raw SHAs and relative specs
+    // detach. The old code wrote "refs/heads/<input>" for all of
+    // them, leaving HEAD as a broken symbolic ref to a branch that
+    // doesn't exist while the working tree showed the checkout.
+    git_reference* branchRef = nullptr;
+    if (git_branch_lookup(&branchRef, repo_, branchOrRef.c_str(),
+                          GIT_BRANCH_LOCAL) == 0) {
+        git_reference_free(branchRef);
+        const std::string refName = "refs/heads/" + branchOrRef;
+        err = git_repository_set_head(repo_, refName.c_str());
+    } else {
+        err = git_repository_set_head_detached(repo_,
+                                               git_object_id(peeled));
+    }
+    git_object_free(peeled);
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
 }

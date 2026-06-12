@@ -11,9 +11,24 @@ namespace gitbolt::git {
 GitProcess::GitProcess(const std::string& workingDirectory)
     : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
 
+void GitProcess::applyEnvironment(QProcess& process) {
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // The child has no tty, so a git that decides to prompt (HTTPS
+    // remote with no cached credential, ssh host-key confirmation)
+    // used to block until waitForFinished's timeout killed it —
+    // 120 s of frozen "Pushing…" ending in a meaningless timeout.
+    // Forbidding prompts makes those cases fail immediately with
+    // git's own stderr explanation. Credential HELPERS (osxkeychain,
+    // libsecret, manager-core) are unaffected — only terminal
+    // prompting is disabled.
+    env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+    process.setProcessEnvironment(env);
+}
+
 Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int timeoutMs) const {
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
+    applyEnvironment(process);
 
     QStringList qargs;
     for (const auto& arg : args)
@@ -64,6 +79,7 @@ Result<ProcessOutput> GitProcess::runWithInput(
 {
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
+    applyEnvironment(process);
 
     QStringList qargs;
     for (const auto& arg : args)
@@ -171,6 +187,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(const std::string& onto, con
     process.setWorkingDirectory(QString::fromStdString(workDir_));
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     env.insert("GIT_SEQUENCE_EDITOR", QString::fromStdString(editorScript));
+    env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
     process.setProcessEnvironment(env);
     process.start(QString::fromStdString(gitPath_), {"rebase", "-i", QString::fromStdString(onto)});
 
