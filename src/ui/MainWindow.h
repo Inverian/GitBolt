@@ -59,6 +59,12 @@ private slots:
     void createNewRepository();
 
 private:
+    /// Paints the inline toolbar label / status bar / clear-timer
+    /// after a fetch-pull-push worker finishes.
+    void finishRemoteOpFeedback(const QString& successMsg);
+
+
+private:
     void createMenuBar();
     void createToolBar();
     /// Enable or disable every child action under the Navigate,
@@ -226,6 +232,7 @@ private:
     // confirmation message; if true, the failed-message that the
     // operationFailed handler put on the status bar stays.
     bool lastRemoteOpFailed_ = false;
+    bool remoteOpRunning_ = false;
 
     // Inline activity indicator that lives on the toolbar between the
     // push button and the Commit button. Shown in italic-color text

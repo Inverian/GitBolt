@@ -260,11 +260,17 @@ void FileTreeWidget::rebuildTree()
         }
     };
 
-    auto sorted = entries;
-    std::sort(sorted.begin(), sorted.end(),
-              [&buildSortKey](const git::TreeEntry& a,
-                              const git::TreeEntry& b) {
-                  return buildSortKey(a) < buildSortKey(b);
+    // Decorate–sort–undecorate: the comparator used to rebuild BOTH
+    // keys on every comparison — millions of transient vectors and
+    // substrings on the GUI thread for a big tree. Build each key
+    // once, sort pointers by precomputed key.
+    std::vector<std::pair<SortKey, const git::TreeEntry*>> keyed;
+    keyed.reserve(entries.size());
+    for (const auto& e : entries)
+        keyed.emplace_back(buildSortKey(e), &e);
+    std::sort(keyed.begin(), keyed.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first < b.first;
               });
 
     QFileIconProvider iconProvider;
@@ -275,14 +281,15 @@ void FileTreeWidget::rebuildTree()
     // during the second pass. The empty key represents the model
     // root (invisibleRootItem()).
     std::unordered_map<std::string, QStandardItem*> itemByPath;
-    itemByPath.reserve(sorted.size() + 1);
+    itemByPath.reserve(keyed.size() + 1);
     itemByPath[std::string{}] = model_->invisibleRootItem();
 
     int dirCount  = 0;
     int fileCount = 0;
     quint64 totalBytes = 0;
 
-    for (const auto& entry : sorted) {
+    for (const auto& [sortKey, entryPtr] : keyed) {
+        const auto& entry = *entryPtr;
         QString name = QString::fromStdString(entry.name);
         QString display = name;
         if (!entry.isTree && entry.size > 0)

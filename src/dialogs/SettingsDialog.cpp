@@ -1,4 +1,7 @@
 #include "dialogs/SettingsDialog.h"
+
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 
@@ -1011,17 +1014,48 @@ void SettingsDialog::loadSettings()
 
 void SettingsDialog::loadGitConfig()
 {
-    // Read global git config via the git CLI for portability
-    auto readConfig = [](const QString& key) -> QString {
-        QProcess proc;
-        proc.start(QStringLiteral("git"), {QStringLiteral("config"), QStringLiteral("--global"), key});
-        proc.waitForFinished(3000);
-        return QString::fromUtf8(proc.readAllStandardOutput()).trimmed();
-    };
+    // Read global git config via the git CLI for portability — on a
+    // worker. The three sequential reads each carried a 3 s timeout
+    // and ran in the constructor, so a slow git stalled the dialog
+    // up to ~9 s before it could paint.
+    userNameEdit_->setPlaceholderText(tr("loading…"));
+    userEmailEdit_->setPlaceholderText(tr("loading…"));
+    credentialHelperEdit_->setPlaceholderText(tr("loading…"));
 
-    userNameEdit_->setText(readConfig(QStringLiteral("user.name")));
-    userEmailEdit_->setText(readConfig(QStringLiteral("user.email")));
-    credentialHelperEdit_->setText(readConfig(QStringLiteral("credential.helper")));
+    struct GitIdentity {
+        QString name;
+        QString email;
+        QString credentialHelper;
+    };
+    auto* watcher = new QFutureWatcher<GitIdentity>(this);
+    connect(watcher, &QFutureWatcher<GitIdentity>::finished, this,
+            [this, watcher]() {
+        const GitIdentity id = watcher->result();
+        userNameEdit_->setText(id.name);
+        userEmailEdit_->setText(id.email);
+        credentialHelperEdit_->setText(id.credentialHelper);
+        userNameEdit_->setPlaceholderText(QString());
+        userEmailEdit_->setPlaceholderText(QString());
+        credentialHelperEdit_->setPlaceholderText(QString());
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([]() {
+        auto readConfig = [](const QString& key) -> QString {
+            QProcess proc;
+            proc.start(QStringLiteral("git"),
+                       {QStringLiteral("config"),
+                        QStringLiteral("--global"), key});
+            proc.waitForFinished(3000);
+            return QString::fromUtf8(
+                proc.readAllStandardOutput()).trimmed();
+        };
+        GitIdentity id;
+        id.name  = readConfig(QStringLiteral("user.name"));
+        id.email = readConfig(QStringLiteral("user.email"));
+        id.credentialHelper =
+            readConfig(QStringLiteral("credential.helper"));
+        return id;
+    }));
 }
 
 void SettingsDialog::saveGitConfig()

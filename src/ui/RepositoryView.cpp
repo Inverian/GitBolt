@@ -1,5 +1,8 @@
 #include "ui/RepositoryView.h"
 
+#include <QFutureWatcher>
+#include <QtConcurrent>
+
 #include "conf/SettingsService.h"
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
@@ -1004,54 +1007,15 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // We cap output at 10 names because commits early in history
     // can be reachable from hundreds of branches in active repos,
     // which would blow out the inspector's vertical space.
-    QString containsBranchesText;
-    if (gitService_ && gitService_->isOpen()) {
-        const std::string sha = commit.id.toHex();
-        // GitService::process() locks internally and returns the
-        // GitProcess by value — no repository access needed here.
-        auto out = gitService_->process().run(
-            {"branch", "--all", "--contains", sha,
-             "--format=%(refname:short)"},
-            /*timeoutMs=*/5000);
-        if (out && out->success()) {
-            QStringList branches;
-            const QString stdoutText =
-                QString::fromStdString(out->stdoutData);
-            const auto lines = stdoutText.split(QChar('\n'),
-                                                Qt::SkipEmptyParts);
-            for (const auto& line : lines) {
-                const QString trimmed = line.trimmed();
-                if (trimmed.isEmpty())
-                    continue;
-                // Skip "<remote>/HEAD" symbolic refs — they're
-                // aliases for whatever branch HEAD points at on the
-                // remote (typically already in our list as
-                // "<remote>/main"), so listing them is just noise.
-                if (trimmed.endsWith(QLatin1String("/HEAD")))
-                    continue;
-                branches << trimmed.toHtmlEscaped();
-            }
-            if (branches.isEmpty()) {
-                containsBranchesText = QStringLiteral(
-                    "<span class='muted'>(none)</span>");
-            } else {
-                constexpr int kMaxShown = 10;
-                QStringList shown = branches.mid(0, kMaxShown);
-                containsBranchesText = shown.join(QStringLiteral(", "));
-                if (branches.size() > kMaxShown) {
-                    containsBranchesText += QStringLiteral(
-                        " <span class='muted'>+%1 more</span>")
-                        .arg(branches.size() - kMaxShown);
-                }
-            }
-        } else {
-            containsBranchesText = QStringLiteral(
-                "<span class='muted'>(unable to query)</span>");
-        }
-    } else {
-        containsBranchesText = QStringLiteral(
-            "<span class='muted'>(no repo open)</span>");
-    }
+    // The query itself now runs on a pool thread (see below, after
+    // the HTML is assembled) — it shells out to git and can take
+    // seconds on big repos, and running it synchronously here made
+    // every arrow-key scrub through the log stall per row. The
+    // browser shows a placeholder until the worker reports back; a
+    // token drops stale replies once the selection has moved on.
+    QString containsBranchesText = (gitService_ && gitService_->isOpen())
+        ? QStringLiteral("<span class='muted'>(querying…)</span>")
+        : QStringLiteral("<span class='muted'>(no repo open)</span>");
 
     // ----- Top browser: 2-column metadata grid ------------------
     // No summary/body/footer here — those live in messageBrowser_
@@ -1154,6 +1118,70 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         .arg(summary, bodyHtml, containsBranchesText);
 
     messageBrowser_->setHtml(messageHtml);
+
+    // Kick the contained-in query on a worker and patch the browser
+    // when it lands. The GitProcess is snapshotted HERE (on the GUI
+    // thread, under the service's lock) and used freely on the pool
+    // thread — QProcess execution is independent of libgit2 state.
+    if (gitService_ && gitService_->isOpen()) {
+        const quint64 token = ++containsQueryToken_;
+        const std::string sha = commit.id.toHex();
+        git::GitProcess proc = gitService_->process();
+        // Rebuild the surrounding HTML on completion: everything but
+        // the contains row is captured by value.
+        const QString htmlTemplate = messageHtml;
+        const QString placeholder = containsBranchesText;
+
+        auto* watcher = new QFutureWatcher<QString>(this);
+        connect(watcher, &QFutureWatcher<QString>::finished, this,
+                [this, watcher, token, htmlTemplate, placeholder]() {
+            watcher->deleteLater();
+            if (token != containsQueryToken_ || !messageBrowser_)
+                return;  // selection moved on — stale reply
+            QString patched = htmlTemplate;
+            patched.replace(placeholder, watcher->result());
+            messageBrowser_->setHtml(patched);
+        });
+        watcher->setFuture(QtConcurrent::run([proc, sha]() -> QString {
+            auto out = proc.run(
+                {"branch", "--all", "--contains", sha,
+                 "--format=%(refname:short)"},
+                /*timeoutMs=*/5000);
+            if (!out || !out->success())
+                return QStringLiteral(
+                    "<span class='muted'>(unable to query)</span>");
+
+            QStringList branches;
+            const QString stdoutText =
+                QString::fromStdString(out->stdoutData);
+            const auto lines = stdoutText.split(QChar('\n'),
+                                                Qt::SkipEmptyParts);
+            for (const auto& line : lines) {
+                const QString trimmed = line.trimmed();
+                if (trimmed.isEmpty())
+                    continue;
+                // Skip "<remote>/HEAD" symbolic refs — they're
+                // aliases for whatever branch HEAD points at on
+                // the remote (typically already in our list as
+                // "<remote>/main"), so listing them is noise.
+                if (trimmed.endsWith(QLatin1String("/HEAD")))
+                    continue;
+                branches << trimmed.toHtmlEscaped();
+            }
+            if (branches.isEmpty())
+                return QStringLiteral(
+                    "<span class='muted'>(none)</span>");
+            constexpr int kMaxShown = 10;
+            QString text =
+                branches.mid(0, kMaxShown).join(QStringLiteral(", "));
+            if (branches.size() > kMaxShown) {
+                text += QStringLiteral(
+                    " <span class='muted'>+%1 more</span>")
+                    .arg(branches.size() - kMaxShown);
+            }
+            return text;
+        }));
+    }
 
     // ----- Dynamic resize: top row + avatar fit content exactly -
     // Sizing matches the GitExtensions Commit tab. Each row at

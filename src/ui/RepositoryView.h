@@ -112,6 +112,11 @@ protected:
     void showEvent(QShowEvent* e) override;
 
 private:
+    // Monotonic token for the async "contained in branches" query —
+    // a reply older than the latest request is dropped instead of
+    // overwriting the newer commit's details.
+    quint64 containsQueryToken_ = 0;
+
     void setupUi();
     QWidget* buildCommitInfoTab();
     QWidget* buildDiffTab();

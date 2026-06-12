@@ -1,4 +1,7 @@
 #include "ui/MainWindow.h"
+
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include "ui/RepositoryView.h"
 #include "ui/DashboardView.h"
 #include "dialogs/AboutDialog.h"
@@ -1829,6 +1832,14 @@ void MainWindow::createMenuBar()
                               const QString& startMsg,
                               const QString& successMsg,
                               std::function<void()> op) {
+        // One remote op at a time: the ops mutate the same repo,
+        // and the inline label can only narrate one of them.
+        if (remoteOpRunning_) {
+            statusBar()->showMessage(
+                tr("Another remote operation is still running…"), 3000);
+            return;
+        }
+        remoteOpRunning_ = true;
         lastRemoteOpFailed_ = false;
 
         // Cancel any pending "clear the label" timer from a previous
@@ -1845,56 +1856,26 @@ void MainWindow::createMenuBar()
         statusBar()->showMessage(startMsg);
         if (sourceAction) sourceAction->setEnabled(false);
 
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        QApplication::processEvents();  // paint the disabled state, the
-                                        // label, and the cursor before
-                                        // the blocking op runs
-        op();
-        QApplication::restoreOverrideCursor();
-
-        if (sourceAction) sourceAction->setEnabled(true);
-
-        if (remoteOpLabel_) {
-            if (lastRemoteOpFailed_) {
-                // The operationFailed handler already set the status-bar
-                // text to "fetch failed: <err>" and persists it long
-                // enough; mirror it inline in red. Collapse any newlines
-                // (git stderr is multi-line: "remote: …\nfatal: …\n") to
-                // " | " so the toolbar label stays one row tall, and
-                // park the full text in a tooltip in case it elides.
-                QString status = statusBar()->currentMessage();
-                QString oneLine = status;
-                oneLine.replace(QChar('\n'), QStringLiteral(" | "));
-                oneLine.replace(QChar('\r'), QString());
-                remoteOpLabel_->setStyleSheet(QStringLiteral(
-                    "QLabel { color: #c43c3c; font-weight: bold; }"));
-                remoteOpLabel_->setText(tr("✗ %1").arg(oneLine));
-                remoteOpLabel_->setToolTip(status);
-            } else {
-                remoteOpLabel_->setStyleSheet(QStringLiteral(
-                    "QLabel { color: #2e9c36; font-weight: bold; }"));
-                remoteOpLabel_->setText(tr("✓ %1").arg(successMsg));
-                remoteOpLabel_->setToolTip(QString());
-            }
-        }
-
-        if (!lastRemoteOpFailed_)
-            statusBar()->showMessage(successMsg, 4000);
-
-        // Clear the inline label after a delay. Lazily construct the
-        // timer on first use so the constructor doesn't pay for it.
-        if (!remoteOpClearTimer_) {
-            remoteOpClearTimer_ = new QTimer(this);
-            remoteOpClearTimer_->setSingleShot(true);
-            connect(remoteOpClearTimer_, &QTimer::timeout, this, [this]() {
-                if (remoteOpLabel_) {
-                    remoteOpLabel_->clear();
-                    remoteOpLabel_->setStyleSheet(QString());
-                }
-            });
-        }
-        remoteOpClearTimer_->start(lastRemoteOpFailed_ ? 8000 : 4000);
+        // The op runs on a pool thread, so the window stays live —
+        // no wait cursor, and no QApplication::processEvents()
+        // reentrancy hole (the old synchronous version pumped events
+        // right before blocking, so a queued second click ran NESTED
+        // inside the first op). GitService::{fetch,pull,push} are
+        // safe off the GUI thread: they snapshot a GitProcess under
+        // the repo lock and shell out; their failure signals arrive
+        // queued, and are delivered before the finished handler
+        // below because they're posted first.
+        auto* opWatcher = new QFutureWatcher<void>(this);
+        connect(opWatcher, &QFutureWatcher<void>::finished, this,
+                [this, opWatcher, sourceAction, successMsg]() {
+            opWatcher->deleteLater();
+            remoteOpRunning_ = false;
+            if (sourceAction) sourceAction->setEnabled(true);
+            finishRemoteOpFeedback(successMsg);
+        });
+        opWatcher->setFuture(QtConcurrent::run(std::move(op)));
     };
+
 
     fetchAction_ = new QAction(tr("&Fetch"), this);
     fetchAction_->setObjectName(QStringLiteral("act.fetch"));
@@ -4583,6 +4564,54 @@ void MainWindow::offerConflictResolution(const QString& operation)
            "resolver now?").arg(operation));
     if (answer == QMessageBox::Yes)
         showConflictResolver();
+}
+
+// Completion half of the toolbar fetch/pull/push wrapper: reads
+// lastRemoteOpFailed_ (set by the operationFailed handler, which is
+// always delivered before the worker's finished signal) and paints
+// the inline label + status bar + clear timer accordingly.
+void MainWindow::finishRemoteOpFeedback(const QString& successMsg)
+{
+    if (remoteOpLabel_) {
+        if (lastRemoteOpFailed_) {
+            // The operationFailed handler already set the status-bar
+            // text to "fetch failed: <err>" and persists it long
+            // enough; mirror it inline in red. Collapse any newlines
+            // (git stderr is multi-line: "remote: …\nfatal: …\n") to
+            // " | " so the toolbar label stays one row tall, and
+            // park the full text in a tooltip in case it elides.
+            QString status = statusBar()->currentMessage();
+            QString oneLine = status;
+            oneLine.replace(QChar('\n'), QStringLiteral(" | "));
+            oneLine.replace(QChar('\r'), QString());
+            remoteOpLabel_->setStyleSheet(QStringLiteral(
+                "QLabel { color: #c43c3c; font-weight: bold; }"));
+            remoteOpLabel_->setText(tr("✗ %1").arg(oneLine));
+            remoteOpLabel_->setToolTip(status);
+        } else {
+            remoteOpLabel_->setStyleSheet(QStringLiteral(
+                "QLabel { color: #2e9c36; font-weight: bold; }"));
+            remoteOpLabel_->setText(tr("✓ %1").arg(successMsg));
+            remoteOpLabel_->setToolTip(QString());
+        }
+    }
+
+    if (!lastRemoteOpFailed_)
+        statusBar()->showMessage(successMsg, 4000);
+
+    // Clear the inline label after a delay. Lazily construct the
+    // timer on first use so the constructor doesn't pay for it.
+    if (!remoteOpClearTimer_) {
+        remoteOpClearTimer_ = new QTimer(this);
+        remoteOpClearTimer_->setSingleShot(true);
+        connect(remoteOpClearTimer_, &QTimer::timeout, this, [this]() {
+            if (remoteOpLabel_) {
+                remoteOpLabel_->clear();
+                remoteOpLabel_->setStyleSheet(QString());
+            }
+        });
+    }
+    remoteOpClearTimer_->start(lastRemoteOpFailed_ ? 8000 : 4000);
 }
 
 } // namespace gitbolt::ui

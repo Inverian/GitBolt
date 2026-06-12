@@ -5,6 +5,7 @@
 
 #include <QAbstractTableModel>
 #include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace gitbolt::models {
@@ -91,12 +92,24 @@ signals:
 
 private:
     void computeGraphData();
+    /// Continue the lane fold from the last computed row (used by
+    /// appendCommits — O(new rows), not O(all rows)).
+    void appendGraphRows();
     void evictDistantPages();
     int pageForRow(int row) const;
 
     std::vector<git::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
     bool hasMore_ = true;
+
+    // ---- Lane-assignment checkpoint ----
+    // Working state of the graph fold, carried across appendGraphRows
+    // calls so appended pages continue from the last computed row.
+    // Reset by setCommits/clear (via computeGraphData).
+    std::vector<git::ObjectId> activeLanes_;
+    std::vector<int> laneColors_;   // parallel to activeLanes_
+    std::unordered_map<git::ObjectId, int, git::ObjectId::Hash> oidToLane_;
+    int nextColorCounter_ = 0;
     // True while a requestMoreCommits round-trip is in flight. Qt
     // re-invokes fetchMore every time the view hits the bottom —
     // without this guard the same offset gets requested repeatedly
