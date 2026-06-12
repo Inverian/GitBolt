@@ -95,9 +95,27 @@ int main(int argc, char* argv[]) {
         initialRepoPath = fi.absoluteFilePath();
     }
 
-    // Initialize theme service and apply before showing any window
+    // Settings service — constructed before the theme so the saved
+    // theme choice is restored before any window paints. Also used
+    // further down for window-geometry persistence.
+    gitbolt::conf::SettingsService settings;
+
+    // Initialize theme service and apply before showing any window.
+    // setTheme() no-ops when the saved name equals the default, so
+    // the explicit applyTheme covers the fresh-install/System case.
     auto* themeService = new gitbolt::conf::ThemeService(&app);
+    themeService->setTheme(settings.theme());
     themeService->applyTheme(&app);
+
+    // Persist every later change (the Settings dialog calls
+    // ThemeService::setTheme; nothing used to write the choice
+    // anywhere, so it reset to System on each launch).
+    QObject::connect(themeService,
+                     &gitbolt::conf::ThemeService::themeChanged,
+                     &settings,
+                     [&settings](const QString& name) {
+                         settings.setTheme(name);
+                     });
 
     // Respect system dark mode as fallback
     app.styleHints()->setColorScheme(Qt::ColorScheme::Unknown);
@@ -115,9 +133,6 @@ int main(int argc, char* argv[]) {
         crashBox.exec();
         gitbolt::util::CrashHandler::clearCrashReport();
     }
-
-    // Settings service for window geometry persistence
-    gitbolt::conf::SettingsService settings;
 
     // Create and show the main window. Inject the app-wide theme
     // service so the Settings dialog can list and switch themes

@@ -90,11 +90,12 @@ QVariant CommitLogModel::headerData(int section, Qt::Orientation orientation, in
 }
 
 bool CommitLogModel::canFetchMore(const QModelIndex& parent) const {
-    return !parent.isValid() && hasMore_;
+    return !parent.isValid() && hasMore_ && !fetchPending_;
 }
 
 void CommitLogModel::fetchMore(const QModelIndex& parent) {
-    if (parent.isValid()) return;
+    if (parent.isValid() || fetchPending_) return;
+    fetchPending_ = true;
     emit requestMoreCommits(static_cast<int>(commits_.size()), PAGE_SIZE);
 }
 
@@ -103,6 +104,7 @@ void CommitLogModel::setCommits(std::vector<git::CommitData> commits) {
     beginResetModel();
     commits_ = std::move(commits);
     hasMore_ = commits_.size() >= PAGE_SIZE;
+    fetchPending_ = false;
     residentPages_.clear();
     for (size_t i = 0; i < commits_.size(); i += PAGE_SIZE)
         residentPages_.insert(static_cast<int>(i / PAGE_SIZE));
@@ -110,8 +112,16 @@ void CommitLogModel::setCommits(std::vector<git::CommitData> commits) {
     endResetModel();
 }
 
-void CommitLogModel::appendCommits(const std::vector<git::CommitData>& commits) {
+void CommitLogModel::appendCommits(const std::vector<git::CommitData>& commits,
+                                   int offset) {
     util::PerformanceTimer timer("CommitLogModel::appendCommits");
+    fetchPending_ = false;
+    // Stale or duplicate page: the walk for this offset was already
+    // appended (or the model was reset/cleared since the request).
+    // Appending anyway would duplicate rows and feed the same OIDs
+    // back into the lane assignment.
+    if (offset >= 0 && offset != static_cast<int>(commits_.size()))
+        return;
     if (commits.empty()) { hasMore_ = false; return; }
     int first = static_cast<int>(commits_.size());
     int last = first + static_cast<int>(commits.size()) - 1;
@@ -132,6 +142,7 @@ void CommitLogModel::clear() {
     graphData_.clear();
     residentPages_.clear();
     hasMore_ = true;
+    fetchPending_ = false;
     endResetModel();
 }
 

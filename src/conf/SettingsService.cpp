@@ -229,6 +229,20 @@ void SettingsService::setDefaultRemote(const QString& remote)
     emit settingsChanged();
 }
 
+QString SettingsService::theme() const
+{
+    return settings_.value(QStringLiteral("appearance/theme"),
+                           QStringLiteral("System")).toString();
+}
+
+void SettingsService::setTheme(const QString& name)
+{
+    if (theme() == name)
+        return;
+    settings_.setValue(QStringLiteral("appearance/theme"), name);
+    emit settingsChanged();
+}
+
 // ---------------------------------------------------------------------------
 // Behaviour
 // ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QMetaObject>
 
@@ -40,17 +41,58 @@ void FileWatcher::watchGitInternals(const QString& repoPath) {
     // Watch .git/ internals so we notice commits, checkouts, and index
     // updates made by external tools (or by our own GitService after
     // a stage/commit cycle).
-    QString gitDir = repoPath + "/.git";
+    const QString gitDir = repoPath + "/.git";
     if (QDir(gitDir).exists()) {
-        watcher_.addPath(gitDir + "/index");
-        watcher_.addPath(gitDir + "/HEAD");
-        watcher_.addPath(gitDir + "/refs");
+        gitDir_ = gitDir;
+
+        // Files git rewrites atomically (lockfile + rename-over).
+        // On inotify backends the rename DELETES the watch — see
+        // onFileChanged, which re-adds each path after it fires.
+        addFileIfExists(gitDir + "/index");
+        addFileIfExists(gitDir + "/HEAD");
+        addFileIfExists(gitDir + "/packed-refs");
+        addFileIfExists(gitDir + "/FETCH_HEAD");
+
+        // The .git directory itself: catches creation of files that
+        // may not exist yet (FETCH_HEAD before the first fetch,
+        // packed-refs before the first pack) — onDirectoryChanged
+        // re-arms their file watches when they appear.
+        watcher_.addPath(gitDir);
+
+        // Every directory under refs/. directoryChanged only fires
+        // for a watched directory's OWN listing: a watch on refs/
+        // alone never reports `git fetch` writing
+        // refs/remotes/origin/main two levels down.
+        watchRefsSubtree();
     }
 
     // Watch the repo root immediately too — root-level edits are
     // noticed even while the full working-tree walk is still
     // running on a worker thread.
     watcher_.addPath(repoPath);
+}
+
+void FileWatcher::watchRefsSubtree() {
+    if (gitDir_.isEmpty())
+        return;
+    const QString refsRoot = gitDir_ + "/refs";
+    if (!QDir(refsRoot).exists())
+        return;
+    QStringList dirs{refsRoot};
+    QDirIterator it(refsRoot, QDir::Dirs | QDir::NoDotAndDotDot,
+                    QDirIterator::Subdirectories);
+    while (it.hasNext())
+        dirs.append(it.next());
+    // Already-watched paths come back in addPaths' failure list,
+    // which is exactly what we want — re-running after every refs/
+    // change is cheap (the refs tree is tiny; most refs live in
+    // packed-refs anyway) and keeps new namespaces covered.
+    watcher_.addPaths(dirs);
+}
+
+void FileWatcher::addFileIfExists(const QString& path) {
+    if (QFile::exists(path))
+        watcher_.addPath(path);
 }
 
 QStringList FileWatcher::enumerateWatchDirs(
@@ -140,6 +182,7 @@ void FileWatcher::applyNextChunk()
 void FileWatcher::stop() {
     pendingDirs_.clear();
     repoPath_.clear();
+    gitDir_.clear();
     if (!watcher_.files().isEmpty()) watcher_.removePaths(watcher_.files());
     if (!watcher_.directories().isEmpty()) watcher_.removePaths(watcher_.directories());
 }
@@ -147,10 +190,33 @@ void FileWatcher::stop() {
 void FileWatcher::onFileChanged(const QString& path) {
     if (path.endsWith("/index")) emit indexChanged();
     else if (path.endsWith("/HEAD")) emit headChanged();
+
+    // git replaces these files atomically (write lockfile, rename
+    // over). Qt documents that a watched file which is removed or
+    // replaced stops being watched — true on inotify; FSEvents
+    // happens to survive. Re-add so the SECOND external commit or
+    // fetch still fires, on every platform.
+    if (QFile::exists(path) && !watcher_.files().contains(path))
+        watcher_.addPath(path);
+
     debounceTimer_.start();
 }
 
-void FileWatcher::onDirectoryChanged(const QString& /*path*/) {
+void FileWatcher::onDirectoryChanged(const QString& path) {
+    if (!gitDir_.isEmpty()) {
+        if (path == gitDir_) {
+            // FETCH_HEAD / packed-refs may have just been created
+            // (first fetch, first ref pack) — arm their watches.
+            addFileIfExists(gitDir_ + "/packed-refs");
+            addFileIfExists(gitDir_ + "/FETCH_HEAD");
+        } else if (path.startsWith(gitDir_ + QStringLiteral("/refs"))) {
+            // A refs/ directory changed its listing — possibly a
+            // brand-new subdirectory (first feature/* branch, a
+            // remote's first fetch). Re-scan so the new dir gets
+            // its own watch before refs land inside it.
+            watchRefsSubtree();
+        }
+    }
     debounceTimer_.start();
 }
 

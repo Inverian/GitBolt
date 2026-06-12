@@ -4258,7 +4258,7 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
     if (offset == 0) {
         commitLogModel_->setCommits(std::move(commits));
     } else {
-        commitLogModel_->appendCommits(commits);
+        commitLogModel_->appendCommits(commits, offset);
     }
 
     // First page after an async open: the main area now has real

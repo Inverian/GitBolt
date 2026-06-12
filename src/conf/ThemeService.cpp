@@ -11,6 +11,21 @@ namespace gitbolt::conf {
 ThemeService::ThemeService(QObject* parent)
     : QObject(parent)
 {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    // Follow live OS appearance flips while in System mode. The
+    // effective scheme is sampled inside applyTheme, so re-applying
+    // is all it takes.
+    if (auto* hints = QGuiApplication::styleHints()) {
+        connect(hints, &QStyleHints::colorSchemeChanged, this,
+                [this](Qt::ColorScheme) {
+            if (currentTheme_ != QStringLiteral("System"))
+                return;
+            if (auto* app = qobject_cast<QApplication*>(
+                    QCoreApplication::instance()))
+                applyTheme(app);
+        });
+    }
+#endif
 }
 
 QStringList ThemeService::availableThemes() const

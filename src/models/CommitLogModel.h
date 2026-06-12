@@ -45,7 +45,13 @@ public:
     void fetchMore(const QModelIndex& parent) override;
 
     void setCommits(std::vector<git::CommitData> commits);
-    void appendCommits(const std::vector<git::CommitData>& commits);
+    /// Append a page of commits. `offset` is the row the page was
+    /// requested for; pass it through from logReady so a duplicate
+    /// or out-of-order page (the same offset requested twice while
+    /// the first request was still walking) is dropped instead of
+    /// appended twice. -1 skips the check (tests / non-paged use).
+    void appendCommits(const std::vector<git::CommitData>& commits,
+                       int offset = -1);
     void clear();
 
     const git::CommitData* commitAt(int row) const;
@@ -91,6 +97,11 @@ private:
     std::vector<git::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
     bool hasMore_ = true;
+    // True while a requestMoreCommits round-trip is in flight. Qt
+    // re-invokes fetchMore every time the view hits the bottom —
+    // without this guard the same offset gets requested repeatedly
+    // and the same 256 commits land more than once.
+    bool fetchPending_ = false;
 
     // When true, the Date column renders "X ago" instead of an
     // absolute timestamp. Persisted by MainWindow via QSettings.

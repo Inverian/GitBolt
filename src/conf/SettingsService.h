@@ -68,6 +68,12 @@ public:
     QString defaultRemote() const;
     void setDefaultRemote(const QString& remote);
 
+    /// UI theme persisted across launches: "Light", "Dark", or
+    /// "System" (default). main.cpp restores it before the window
+    /// shows and persists every ThemeService::themeChanged.
+    QString theme() const;
+    void setTheme(const QString& name);
+
     // Behaviour
     int tabSize() const;
     void setTabSize(int size);
