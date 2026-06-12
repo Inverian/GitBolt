@@ -17,6 +17,7 @@ function(gitbolt_add_test test_name source_file)
         Qt6::Test
         Qt6::Widgets  # models/ link Qt6::Widgets via Qt::Gui for QFont/QIcon
     )
+    gitbolt_set_warnings(${test_name})
     add_test(NAME ${test_name} COMMAND ${test_name})
 endfunction()
 

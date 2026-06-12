@@ -1,15 +1,29 @@
 cmake_minimum_required(VERSION 3.21)
 project(GitBolt VERSION 0.1.0 LANGUAGES CXX)
 
+# An empty build type builds with NO optimization and no debug info —
+# the worst of both worlds, and exactly what `cmake -B build` with no
+# -DCMAKE_BUILD_TYPE gave you. Default to Debug for hacking; release
+# builds say -DCMAKE_BUILD_TYPE=Release explicitly (CI and the docs
+# both do).
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY
+                 STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# compile_commands.json for clangd / clang-tidy (the checked-in
+# .clang-tidy is useless without it).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Options
 option(GITBOLT_BUILD_TESTS "Build tests" ON)
-option(GITBOLT_BUILD_PLUGINS "Build plugin system" ON)
 option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")

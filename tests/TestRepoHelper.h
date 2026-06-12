@@ -44,6 +44,7 @@ namespace gitbolt::test {
 class TestRepo {
 public:
     TestRepo() {
+        isolateGitConfig();
         Q_ASSERT(tmpDir_.isValid());
         auto result = gitbolt::git::Repository::init(tmpDir_.path().toStdString());
         Q_ASSERT(result.ok());
@@ -108,6 +109,29 @@ public:
     }
 
 private:
+    /// Point libgit2's global/system/xdg config search paths at an
+    /// empty directory ONCE per test process, so the developer's
+    /// ~/.gitconfig (core.autocrlf, init.defaultBranch,
+    /// commit.gpgsign, …) can't bleed into fixture behavior and
+    /// flake tests across machines. Repo-local config written by
+    /// the fixture (user.name/email) is unaffected.
+    static void isolateGitConfig() {
+        static const bool done = [] {
+            static QTemporaryDir empty;  // lives for the process
+            const QByteArray p = empty.path().toUtf8();
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH,
+                             GIT_CONFIG_LEVEL_GLOBAL, p.constData());
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH,
+                             GIT_CONFIG_LEVEL_SYSTEM, p.constData());
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH,
+                             GIT_CONFIG_LEVEL_XDG, p.constData());
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH,
+                             GIT_CONFIG_LEVEL_PROGRAMDATA, p.constData());
+            return true;
+        }();
+        Q_UNUSED(done);
+    }
+
     QTemporaryDir tmpDir_;
     std::unique_ptr<gitbolt::git::Repository> repo_;
 };

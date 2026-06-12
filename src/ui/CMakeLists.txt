@@ -1,4 +1,19 @@
-file(GLOB SOURCES "*.cpp" "*.h")
+# Explicit source list — file(GLOB) hid new/deleted files from
+# ninja until someone manually re-ran CMake, which is exactly
+# how stale-binary "my change does nothing" sessions happen.
+# Add new files HERE.
+set(SOURCES
+    DashboardView.cpp
+    InlineOpIndicator.cpp
+    MainWindow.cpp
+    RepoCommandController.cpp
+    RepositoryView.cpp
+    DashboardView.h
+    InlineOpIndicator.h
+    MainWindow.h
+    RepoCommandController.h
+    RepositoryView.h
+)
 add_library(gitbolt_ui STATIC ${SOURCES})
 
 target_include_directories(gitbolt_ui PUBLIC ${CMAKE_SOURCE_DIR}/src)

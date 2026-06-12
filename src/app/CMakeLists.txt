@@ -44,6 +44,7 @@ if(WIN32)
 endif()
 
 qt_add_executable(gitbolt ${GITBOLT_APP_SOURCES})
+gitbolt_set_warnings(gitbolt)
 
 target_link_libraries(gitbolt PRIVATE
     gitbolt_ui
