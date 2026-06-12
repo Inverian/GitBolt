@@ -34,3 +34,6 @@ gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
 # Needs the services lib on top of the defaults the helper links.
 gitbolt_add_test(test_git_service services/TestGitService.cpp)
 target_link_libraries(test_git_service PRIVATE gitbolt_services)
+
+# e2e/ tests — the real app binary driven through the test bridge.
+add_subdirectory(e2e)

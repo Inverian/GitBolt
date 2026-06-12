@@ -197,6 +197,9 @@ void CommitDialog::setupUi()
     stageBtn_     = new QPushButton(tr("Stage"),    unstagedPanel);
     stageAllBtn_  = new QPushButton(tr("Stage All"), unstagedPanel);
     discardBtn_   = new QPushButton(tr("Discard"),   unstagedPanel);
+    stageBtn_->setObjectName(QStringLiteral("commit.stageBtn"));
+    stageAllBtn_->setObjectName(QStringLiteral("commit.stageAllBtn"));
+    discardBtn_->setObjectName(QStringLiteral("commit.discardBtn"));
     stageBtn_->setEnabled(false);
     discardBtn_->setEnabled(false);
     unstagedBtnRow->addWidget(stageBtn_);
@@ -233,6 +236,8 @@ void CommitDialog::setupUi()
     stagedBtnRow->setContentsMargins(0, 0, 0, 0);
     unstageBtn_    = new QPushButton(tr("Unstage"),    stagedPanel);
     unstageAllBtn_ = new QPushButton(tr("Unstage All"), stagedPanel);
+    unstageBtn_->setObjectName(QStringLiteral("commit.unstageBtn"));
+    unstageAllBtn_->setObjectName(QStringLiteral("commit.unstageAllBtn"));
     unstageBtn_->setEnabled(false);
     stagedBtnRow->addWidget(unstageBtn_);
     stagedBtnRow->addWidget(unstageAllBtn_);
@@ -271,6 +276,9 @@ void CommitDialog::setupUi()
     commitBtn_     = new QPushButton(tr("Commit"),        commitPanel);
     commitPushBtn_ = new QPushButton(tr("Commit && Push"), commitPanel);
     amendCheck_    = new QCheckBox(tr("Amend last commit"), commitPanel);
+    commitBtn_->setObjectName(QStringLiteral("commit.commitBtn"));
+    commitPushBtn_->setObjectName(QStringLiteral("commit.commitPushBtn"));
+    amendCheck_->setObjectName(QStringLiteral("commit.amendCheck"));
     commitBtn_->setDefault(true);
     // Equal-width buttons stacked vertically — set a min width so the
     // amend checkbox doesn't squeeze the column narrower than the buttons.

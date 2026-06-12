@@ -577,6 +577,11 @@ QByteArray TestBridge::cmdDumpState()
 
     if (auto* settings = window_->findChild<conf::SettingsService*>())
         state[QStringLiteral("theme")] = settings->theme();
+    // The *effective* palette, not the stored preference: a startup-
+    // ordering bug once left the INI saying Dark while the window
+    // rendered light, and only this distinction can catch that.
+    state[QStringLiteral("paletteWindow")] =
+        QApplication::palette().color(QPalette::Window).name();
     if (auto* logModel = window_->findChild<models::CommitLogModel*>())
         state[QStringLiteral("logRows")] = logModel->rowCount();
 

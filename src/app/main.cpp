@@ -59,7 +59,16 @@ int main(int argc, char* argv[]) {
     // This still races against a *real* second instance starting at the
     // same time, but for a desktop app that's acceptable. The behavior
     // matches what most QSharedMemory tutorials recommend.
-    QSharedMemory singleInstanceGuard(QStringLiteral("GitBolt-SingleInstance"));
+    // GITBOLT_INSTANCE_NAME keys both the guard segment and the
+    // forwarding socket into a private namespace. Without it, an e2e
+    // harness launching GitBolt while the user has a real session
+    // open would forward its test repo into the user's window.
+    const QString instanceOverride =
+        qEnvironmentVariable("GITBOLT_INSTANCE_NAME");
+    QSharedMemory singleInstanceGuard(
+        instanceOverride.isEmpty()
+            ? QStringLiteral("GitBolt-SingleInstance")
+            : instanceOverride + QStringLiteral("-guard"));
     if (singleInstanceGuard.attach()) {
         // Either there's a real running instance, or we attached to an
         // orphaned segment from a previous crashed run. Either way,
@@ -67,7 +76,8 @@ int main(int argc, char* argv[]) {
         singleInstanceGuard.detach();
     }
     const QString instanceServerName =
-        QStringLiteral("gitbolt-instance");
+        instanceOverride.isEmpty() ? QStringLiteral("gitbolt-instance")
+                                   : instanceOverride;
     if (!singleInstanceGuard.create(1)) {
         // A real instance is running (or a foreign-user orphan holds
         // the segment). Forward our repo argument to it — this is
