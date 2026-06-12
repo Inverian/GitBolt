@@ -56,7 +56,6 @@ target_link_libraries(gitbolt PRIVATE
     gitbolt_conf
     gitbolt_watcher
     gitbolt_util
-    gitbolt_plugins
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::Network

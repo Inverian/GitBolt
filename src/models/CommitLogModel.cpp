@@ -105,9 +105,6 @@ void CommitLogModel::setCommits(std::vector<git::CommitData> commits) {
     commits_ = std::move(commits);
     hasMore_ = commits_.size() >= PAGE_SIZE;
     fetchPending_ = false;
-    residentPages_.clear();
-    for (size_t i = 0; i < commits_.size(); i += PAGE_SIZE)
-        residentPages_.insert(static_cast<int>(i / PAGE_SIZE));
     computeGraphData();
     endResetModel();
 }
@@ -128,19 +125,14 @@ void CommitLogModel::appendCommits(const std::vector<git::CommitData>& commits,
     beginInsertRows(QModelIndex(), first, last);
     commits_.insert(commits_.end(), commits.begin(), commits.end());
     hasMore_ = commits.size() >= PAGE_SIZE;
-    // Register newly added pages
-    for (int r = first; r <= last; r += PAGE_SIZE)
-        residentPages_.insert(pageForRow(r));
     appendGraphRows();
     endInsertRows();
-    evictDistantPages();
 }
 
 void CommitLogModel::clear() {
     beginResetModel();
     commits_.clear();
     graphData_.clear();
-    residentPages_.clear();
     hasMore_ = true;
     fetchPending_ = false;
     endResetModel();
@@ -157,13 +149,8 @@ const GraphRowData* CommitLogModel::graphAt(int row) const {
 }
 
 // ---------------------------------------------------------------------------
-// Sliding-window page cache
+// Display-mode toggles
 // ---------------------------------------------------------------------------
-
-void CommitLogModel::setMaxCachedPages(int pages) {
-    maxCachedPages_ = std::max(1, pages);
-    evictDistantPages();
-}
 
 void CommitLogModel::setRelativeDate(bool relative) {
     if (relativeDate_ == relative) return;
@@ -199,40 +186,6 @@ void CommitLogModel::setShowMessageBody(bool showBody) {
         static_cast<int>(commits_.size()) - 1,
         static_cast<int>(CommitLogColumn::Message));
     emit dataChanged(top, bot, {Qt::DisplayRole});
-}
-
-void CommitLogModel::setVisibleRange(int first, int last) {
-    visibleFirst_ = first;
-    visibleLast_ = last;
-    evictDistantPages();
-}
-
-int CommitLogModel::pageForRow(int row) const {
-    return row / PAGE_SIZE;
-}
-
-void CommitLogModel::evictDistantPages() {
-    if (static_cast<int>(residentPages_.size()) <= maxCachedPages_) return;
-
-    int centerPage = pageForRow((visibleFirst_ + visibleLast_) / 2);
-
-    // Collect pages sorted by distance from center
-    struct PageDist { int page; int dist; };
-    std::vector<PageDist> pages;
-    pages.reserve(residentPages_.size());
-    for (int p : residentPages_)
-        pages.push_back({p, std::abs(p - centerPage)});
-
-    std::sort(pages.begin(), pages.end(),
-              [](const PageDist& a, const PageDist& b) { return a.dist > b.dist; });
-
-    // Evict farthest pages until within budget
-    while (static_cast<int>(residentPages_.size()) > maxCachedPages_ && !pages.empty()) {
-        int evictPage = pages.front().page;
-        pages.erase(pages.begin());
-        residentPages_.erase(evictPage);
-        emit pageEvicted(evictPage * PAGE_SIZE);
-    }
 }
 
 // ---------------------------------------------------------------------------

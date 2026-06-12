@@ -3474,6 +3474,10 @@ void MainWindow::createMenuBar()
     // later by someone who forgets. See assignActionObjectNames().
     assignActionObjectNames(menuBar(), QString());
 
+    // Now that every action is named, build the shortcut registry
+    // and apply any persisted user overrides.
+    collectAndApplyShortcuts();
+
     // Navigate, View, and Commands only make sense with a repository
     // open. Gray out every child action on the dashboard/home screen
     // so the menus still open but every item is disabled — matching
@@ -3520,6 +3524,40 @@ void MainWindow::setRepoActionsEnabled(bool on)
     if (commitAction_)  commitAction_->setEnabled(on);
     if (filterInput_)   filterInput_->setEnabled(on);
     if (branchCombo_)   branchCombo_->setEnabled(on);
+}
+
+void MainWindow::collectAndApplyShortcuts()
+{
+    shortcutActions_.clear();
+    defaultShortcuts_.clear();
+
+    QSet<QAction*> seen;
+    std::function<void(const QList<QAction*>&)> walk =
+        [&](const QList<QAction*>& actions) {
+            for (QAction* a : actions) {
+                if (!a || a->isSeparator())
+                    continue;
+                if (QMenu* sub = a->menu()) {
+                    walk(sub->actions());
+                    continue;
+                }
+                const QString name = a->objectName();
+                if (name.isEmpty() || seen.contains(a))
+                    continue;
+                seen.insert(a);
+                shortcutActions_.append(a);
+                defaultShortcuts_.insert(name, a->shortcut());
+                if (settingsService_) {
+                    const QString saved = settingsService_->value(
+                        QStringLiteral("shortcuts/%1").arg(name))
+                        .toString();
+                    if (!saved.isEmpty())
+                        a->setShortcut(QKeySequence::fromString(
+                            saved, QKeySequence::PortableText));
+                }
+            }
+        };
+    walk(menuBar()->actions());
 }
 
 void MainWindow::assignActionObjectNames(QWidget* widget,
@@ -4374,6 +4412,7 @@ void MainWindow::showAbout()
 void MainWindow::showSettingsDialog()
 {
     dialogs::SettingsDialog dlg(settingsService_, themeService_, this);
+    dlg.setShortcutActions(shortcutActions_, defaultShortcuts_);
     dlg.exec();
 }
 

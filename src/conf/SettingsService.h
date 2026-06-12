@@ -180,6 +180,16 @@ public:
     // Raw access for ad-hoc keys
     QVariant value(const QString& key, const QVariant& defaultValue = {}) const;
     void setValue(const QString& key, const QVariant& value);
+    void remove(const QString& key);
+
+    /// Coalesce a burst of setter calls into ONE settingsChanged
+    /// emission. The Settings dialog's Apply flips a dozen keys in a
+    /// row; without batching, every consumer re-read and re-applied
+    /// its state once per key (O(settings × consumers) churn).
+    /// Nestable; the signal fires when the outermost endUpdate()
+    /// closes, and only if something actually changed inside.
+    void beginUpdate();
+    void endUpdate();
 
 signals:
     void settingsChanged();
@@ -190,6 +200,12 @@ private:
     // for any new add-to-recents operation.
     static constexpr int kDefaultMaxRecentRepositories = 10;
     QSettings settings_;
+    /// emit settingsChanged immediately, or defer it to the
+    /// outermost endUpdate() while a batch is open.
+    void notifyChanged();
+
+    int updateDepth_ = 0;
+    bool pendingChange_ = false;
 };
 
 } // namespace gitbolt::conf

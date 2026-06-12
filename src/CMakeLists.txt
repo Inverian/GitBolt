@@ -30,7 +30,6 @@ add_subdirectory(dialogs)   # must come before ui
 add_subdirectory(ui)
 
 if(GITBOLT_BUILD_PLUGINS)
-    add_subdirectory(plugins)
-endif()
+    endif()
 
 add_subdirectory(app)

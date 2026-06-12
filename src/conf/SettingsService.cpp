@@ -85,7 +85,7 @@ void SettingsService::addRecentRepository(const QString& path)
     }
     settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
 
-    emit settingsChanged();
+    notifyChanged();
 }
 
 void SettingsService::removeRecentRepository(const QString& path)
@@ -100,7 +100,7 @@ void SettingsService::removeRecentRepository(const QString& path)
             .value(QStringLiteral("recent/accessedAt")).toMap();
         if (accessMap.remove(canonical) > 0)
             settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
-        emit settingsChanged();
+        notifyChanged();
     }
 }
 
@@ -108,7 +108,7 @@ void SettingsService::clearRecentRepositories()
 {
     settings_.remove(QStringLiteral("recent/repositories"));
     settings_.remove(QStringLiteral("recent/accessedAt"));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 QHash<QString, QDateTime> SettingsService::recentAccessTimes() const
@@ -149,7 +149,7 @@ int SettingsService::maxRecentRepositories() const
 void SettingsService::setMaxRecentRepositories(int count)
 {
     settings_.setValue(QStringLiteral("recent/maxCount"), qBound(1, count, 200));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 bool SettingsService::sortRecentAlphabetically() const
@@ -160,7 +160,7 @@ bool SettingsService::sortRecentAlphabetically() const
 void SettingsService::setSortRecentAlphabetically(bool sort)
 {
     settings_.setValue(QStringLiteral("recent/sortAlphabetically"), sort);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 SettingsService::RecentShortening SettingsService::recentShorteningStrategy() const
@@ -181,7 +181,7 @@ void SettingsService::setRecentShorteningStrategy(RecentShortening strategy)
 {
     settings_.setValue(QStringLiteral("recent/shortening"),
                        static_cast<int>(strategy));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +200,7 @@ QFont SettingsService::codeFont() const
 void SettingsService::setCodeFont(const QFont& font)
 {
     settings_.setValue(QStringLiteral("editor/font"), font.toString());
-    emit settingsChanged();
+    notifyChanged();
 }
 
 int SettingsService::codeFontSize() const
@@ -211,7 +211,7 @@ int SettingsService::codeFontSize() const
 void SettingsService::setCodeFontSize(int size)
 {
     settings_.setValue(QStringLiteral("editor/fontSize"), qBound(6, size, 72));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +226,7 @@ QString SettingsService::defaultRemote() const
 void SettingsService::setDefaultRemote(const QString& remote)
 {
     settings_.setValue(QStringLiteral("git/defaultRemote"), remote);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 QString SettingsService::theme() const
@@ -240,7 +240,7 @@ void SettingsService::setTheme(const QString& name)
     if (theme() == name)
         return;
     settings_.setValue(QStringLiteral("appearance/theme"), name);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ int SettingsService::tabSize() const
 void SettingsService::setTabSize(int size)
 {
     settings_.setValue(QStringLiteral("editor/tabSize"), qBound(1, size, 16));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 bool SettingsService::showWhitespace() const
@@ -266,7 +266,7 @@ bool SettingsService::showWhitespace() const
 void SettingsService::setShowWhitespace(bool show)
 {
     settings_.setValue(QStringLiteral("editor/showWhitespace"), show);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ void SettingsService::setBottomPanePercent(int percent)
 {
     settings_.setValue(QStringLiteral("ui/bottomPanePercent"),
                        qBound(10, percent, 90));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +384,7 @@ void SettingsService::setStartupWindowWidth(int width)
 {
     settings_.setValue(QStringLiteral("window/startupWidth"),
                        qBound(kStartupWidthMin, width, kStartupWidthMax));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 int SettingsService::startupWindowHeight() const
@@ -401,7 +401,7 @@ void SettingsService::setStartupWindowHeight(int height)
 {
     settings_.setValue(QStringLiteral("window/startupHeight"),
                        qBound(kStartupHeightMin, height, kStartupHeightMax));
-    emit settingsChanged();
+    notifyChanged();
 }
 
 bool SettingsService::restoreLastWindowSize() const
@@ -413,7 +413,7 @@ bool SettingsService::restoreLastWindowSize() const
 void SettingsService::setRestoreLastWindowSize(bool restore)
 {
     settings_.setValue(QStringLiteral("window/restoreLastSize"), restore);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +491,7 @@ void SettingsService::setDefaultDialogSize(QSize size)
     // configured default to take effect on next open, they
     // uncheck the toggle. Clearing here would silently throw
     // away their drag-resized sizes — surprising behavior.
-    emit settingsChanged();
+    notifyChanged();
 }
 
 QSize SettingsService::loadDefaultDialogSize()
@@ -509,7 +509,7 @@ bool SettingsService::restoreLastDialogSize() const
 void SettingsService::setRestoreLastDialogSize(bool restore)
 {
     settings_.setValue(QStringLiteral("dialog/restoreLastSize"), restore);
-    emit settingsChanged();
+    notifyChanged();
 }
 
 namespace {
@@ -628,7 +628,42 @@ QVariant SettingsService::value(const QString& key, const QVariant& defaultValue
 void SettingsService::setValue(const QString& key, const QVariant& val)
 {
     settings_.setValue(key, val);
+    notifyChanged();
+}
+
+
+// ---------------------------------------------------------------------------
+// Change batching
+// ---------------------------------------------------------------------------
+
+void SettingsService::beginUpdate()
+{
+    ++updateDepth_;
+}
+
+void SettingsService::endUpdate()
+{
+    if (updateDepth_ > 0)
+        --updateDepth_;
+    if (updateDepth_ == 0 && pendingChange_) {
+        pendingChange_ = false;
+        emit settingsChanged();
+    }
+}
+
+void SettingsService::notifyChanged()
+{
+    if (updateDepth_ > 0) {
+        pendingChange_ = true;
+        return;
+    }
     emit settingsChanged();
+}
+
+void SettingsService::remove(const QString& key)
+{
+    settings_.remove(key);
+    notifyChanged();
 }
 
 } // namespace gitbolt::conf

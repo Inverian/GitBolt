@@ -4,6 +4,9 @@
 #include "git/Commit.h"
 #include "git/Status.h"
 
+#include <QHash>
+#include <QKeySequence>
+#include <QList>
 #include <QMainWindow>
 #include <vector>
 
@@ -78,6 +81,14 @@ private:
     /// async repository open is in flight (so Pull/Commit can't
     /// fire against the previous repo mid-open).
     void setRepoActionsEnabled(bool on);
+
+    /// Walk every named leaf action under the menu bar, record its
+    /// factory-default shortcut, and apply any user override saved
+    /// under "shortcuts/<objectName>". Runs once at the end of
+    /// createMenuBar(); the same list feeds the Settings dialog's
+    /// Shortcuts page, which is how the page edits REAL bindings
+    /// instead of a hand-typed placebo list.
+    void collectAndApplyShortcuts();
 
     /// Recursively assign a stable objectName to every leaf action
     /// under `widget` (a menu bar, menu, or toolbar) that doesn't
@@ -233,6 +244,12 @@ private:
     // operationFailed handler put on the status bar stays.
     bool lastRemoteOpFailed_ = false;
     bool remoteOpRunning_ = false;
+
+    // Real shortcut registry: every named leaf menu action, with the
+    // shortcut it was constructed with. Built by
+    // collectAndApplyShortcuts(); consumed by the Settings dialog.
+    QList<QAction*> shortcutActions_;
+    QHash<QString, QKeySequence> defaultShortcuts_;
 
     // Inline activity indicator that lives on the toolbar between the
     // push button and the Commit button. Shown in italic-color text

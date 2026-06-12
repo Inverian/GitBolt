@@ -1,6 +1,7 @@
 #include "dialogs/SettingsDialog.h"
 
 #include <QFutureWatcher>
+#include <QScopeGuard>
 #include <QtConcurrent>
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
@@ -703,8 +704,9 @@ QWidget* SettingsDialog::createShortcutsPage()
 
 // ---------------------------------------------------------------------------
 // Plugins page — describes the built-in extensions and where their
-// settings live. The dynamic plugin HOST (PluginManager + shared-
-// library loading in src/plugins/) is scaffolded but not active;
+// settings live. There is no dynamic plugin host — the previously
+// scaffolded one (src/plugins/) was never instantiated and has been
+// removed; the built-in features below are wired directly:
 // every extension currently ships built into the Plugins menu, so
 // this page documents that honestly instead of pretending there is
 // a loadable-plugin list to manage.
@@ -787,47 +789,70 @@ void SettingsDialog::onShortcutCellDoubleClicked(int row, int column)
 
 void SettingsDialog::resetShortcutsToDefault()
 {
+    // Put the FACTORY defaults into the table — the old version
+    // re-ran populate, which read back the *saved* values: a no-op
+    // precisely when there was something to reset. Takes effect on
+    // Apply like any other pending edit.
+    for (int i = 0; i < shortcutsTable_->rowCount(); ++i) {
+        auto* nameItem = shortcutsTable_->item(i, 0);
+        auto* keyItem  = shortcutsTable_->item(i, 1);
+        if (!nameItem || !keyItem)
+            continue;
+        const QString name = nameItem->data(Qt::UserRole).toString();
+        keyItem->setText(shortcutDefaults_.value(name)
+                             .toString(QKeySequence::NativeText));
+    }
+}
+
+void SettingsDialog::setShortcutActions(
+    const QList<QAction*>& actions,
+    const QHash<QString, QKeySequence>& defaults)
+{
+    shortcutActions_.clear();
+    for (QAction* a : actions)
+        shortcutActions_.append(QPointer<QAction>(a));
+    shortcutDefaults_ = defaults;
     populateShortcutsTable();
 }
 
 void SettingsDialog::populateShortcutsTable()
 {
-    // Populate with common application shortcuts.
-    // In a full implementation these would come from a ShortcutManager; for now
-    // we list representative defaults.
-    struct ShortcutEntry {
-        const char* name;
-        const char* shortcut;
-    };
-    static const ShortcutEntry defaults[] = {
-        {"Open Repository",     "Ctrl+O"},
-        {"Close Repository",    "Ctrl+W"},
-        {"Refresh",             "F5"},
-        {"Commit",              "Ctrl+Return"},
-        {"Stage File",          "Ctrl+Shift+S"},
-        {"Unstage File",        "Ctrl+Shift+U"},
-        {"Push",                "Ctrl+Shift+P"},
-        {"Pull",                "Ctrl+Shift+L"},
-        {"Fetch",               "Ctrl+Shift+F"},
-        {"Find / Search",       "Ctrl+F"},
-        {"Settings",            "Ctrl+,"},
-        {"Toggle Console",      "Ctrl+`"},
-    };
+    // Rows mirror the REAL QActions handed over by MainWindow. The
+    // page used to list hand-typed "representative defaults" that
+    // matched neither the actual bindings nor anything any code read
+    // back — write-only settings under names no action carried.
+    rowActions_.clear();
+    shortcutsTable_->setRowCount(0);
+    if (shortcutActions_.isEmpty())
+        return;
 
-    shortcutsTable_->setRowCount(static_cast<int>(std::size(defaults)));
-    for (int i = 0; i < static_cast<int>(std::size(defaults)); ++i) {
-        auto* nameItem = new QTableWidgetItem(tr(defaults[i].name));
+    shortcutsTable_->setRowCount(shortcutActions_.size());
+    int row = 0;
+    for (const auto& ap : shortcutActions_) {
+        QAction* a = ap.data();
+        if (!a)
+            continue;
+        QString label = a->text();
+        label.remove(QLatin1Char('&'));
+        while (label.endsWith(QLatin1Char('.')) ||
+               label.endsWith(QChar(0x2026)))  // trailing "..." / "…"
+            label.chop(1);
+
+        auto* nameItem = new QTableWidgetItem(label.trimmed());
         nameItem->setFlags(nameItem->flags() & ~Qt::ItemIsEditable);
-        shortcutsTable_->setItem(i, 0, nameItem);
+        nameItem->setData(Qt::UserRole, a->objectName());
+        nameItem->setToolTip(a->objectName());
+        shortcutsTable_->setItem(row, 0, nameItem);
 
-        QString saved = settings_
-            ? settings_->value(QStringLiteral("shortcuts/%1").arg(QLatin1StringView(defaults[i].name)),
-                               QLatin1StringView(defaults[i].shortcut)).toString()
-            : QLatin1StringView(defaults[i].shortcut);
-        auto* keyItem = new QTableWidgetItem(saved);
+        auto* keyItem = new QTableWidgetItem(
+            a->shortcut().toString(QKeySequence::NativeText));
         keyItem->setFlags(keyItem->flags() & ~Qt::ItemIsEditable);
-        shortcutsTable_->setItem(i, 1, keyItem);
+        shortcutsTable_->setItem(row, 1, keyItem);
+
+        rowActions_.append(ap);
+        ++row;
     }
+    shortcutsTable_->setRowCount(row);
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1103,12 @@ void SettingsDialog::apply()
     if (!settings_)
         return;
 
+    // One settingsChanged for the whole Apply instead of one per
+    // setter — consumers (RepositoryView, DashboardView, MainWindow)
+    // re-read everything on each emission.
+    settings_->beginUpdate();
+    const auto endBatch = qScopeGuard([this] { settings_->endUpdate(); });
+
     // General
     QFont font = fontCombo_->currentFont();
     font.setPointSize(fontSizeSpin_->value());
@@ -1185,13 +1216,29 @@ void SettingsDialog::apply()
         settings_->setRecentShorteningStrategy(strategy);
     }
 
-    // Shortcuts
-    for (int i = 0; i < shortcutsTable_->rowCount(); ++i) {
+    // Shortcuts — apply edits to the live QActions and persist only
+    // real overrides; a binding put back to its factory default
+    // clears the override key instead of pinning it forever.
+    for (int i = 0; i < shortcutsTable_->rowCount()
+                    && i < rowActions_.size(); ++i) {
         auto* nameItem = shortcutsTable_->item(i, 0);
-        auto* keyItem = shortcutsTable_->item(i, 1);
-        if (nameItem && keyItem)
-            settings_->setValue(QStringLiteral("shortcuts/%1").arg(nameItem->text()),
-                                keyItem->text());
+        auto* keyItem  = shortcutsTable_->item(i, 1);
+        QAction* action = rowActions_.at(i).data();
+        if (!nameItem || !keyItem || !action)
+            continue;
+        const QString name = nameItem->data(Qt::UserRole).toString();
+        if (name.isEmpty())
+            continue;
+        const QKeySequence seq = QKeySequence::fromString(
+            keyItem->text(), QKeySequence::NativeText);
+        if (action->shortcut() != seq)
+            action->setShortcut(seq);
+        const QString key = QStringLiteral("shortcuts/%1").arg(name);
+        if (seq == shortcutDefaults_.value(name))
+            settings_->remove(key);
+        else
+            settings_->setValue(
+                key, seq.toString(QKeySequence::PortableText));
     }
 }
 

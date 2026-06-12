@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QDialog>
+#include <QHash>
+#include <QKeySequence>
+#include <QPointer>
 
 class QCheckBox;
 class QComboBox;
@@ -11,6 +14,7 @@ class QLineEdit;
 class QSpinBox;
 class QSlider;
 class QStackedWidget;
+class QAction;
 class QTableWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
@@ -40,6 +44,12 @@ namespace gitbolt::dialogs {
 class SettingsDialog : public QDialog {
     Q_OBJECT
 public:
+    /// Feed the Shortcuts page the application's REAL actions and
+    /// their factory-default bindings. Called by MainWindow before
+    /// exec(); without it the page is empty.
+    void setShortcutActions(const QList<QAction*>& actions,
+                            const QHash<QString, QKeySequence>& defaults);
+
     explicit SettingsDialog(conf::SettingsService* settings,
                             conf::ThemeService* theme,
                             QWidget* parent = nullptr);
@@ -140,6 +150,15 @@ private:
     // Shortcuts page
     QTableWidget* shortcutsTable_ = nullptr;
     QKeySequenceEdit* keySeqEdit_ = nullptr;
+
+    // Real actions behind the Shortcuts page (handed over by
+    // MainWindow::showSettingsDialog). rowActions_ maps table rows
+    // back to actions across repopulations; defaults back the
+    // "Reset to Default" button and let Apply drop overrides that
+    // match the factory binding.
+    QList<QPointer<QAction>> shortcutActions_;
+    QList<QPointer<QAction>> rowActions_;
+    QHash<QString, QKeySequence> shortcutDefaults_;
 
     // Recent Repositories page — mirrors GitExtensions' dialog:
     // a max-count spinbox, an alphabetical-sort toggle, three
