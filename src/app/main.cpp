@@ -74,7 +74,10 @@ int main(int argc, char* argv[]) {
     app.setStyle(QStringLiteral("fusion"));
 
     app.setApplicationName(QStringLiteral("GitBolt"));
-    app.setApplicationVersion(QStringLiteral("0.1.0"));
+    // GITBOLT_VERSION comes from the project() version in the
+    // top-level CMakeLists — the single source of truth that CPack
+    // also stamps into package names. A literal here once drifted.
+    app.setApplicationVersion(QStringLiteral(GITBOLT_VERSION));
     app.setOrganizationName(QStringLiteral("GitBolt"));
     app.setOrganizationDomain(QStringLiteral("gitbolt.dev"));
 

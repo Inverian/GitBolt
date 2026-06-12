@@ -88,6 +88,12 @@ if(APPLE)
     )
 endif()
 
+# Single source of truth for the user-visible version string
+# (About dialog, --version): the project() version above CPack's
+# package stamping. main.cpp once hardcoded its own copy.
+target_compile_definitions(gitbolt PRIVATE
+    GITBOLT_VERSION="${PROJECT_VERSION}")
+
 install(TARGETS gitbolt
     BUNDLE DESTINATION .
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

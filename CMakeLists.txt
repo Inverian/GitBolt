@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GitBolt VERSION 0.1.0 LANGUAGES CXX)
+project(GitBolt VERSION 0.9.0 LANGUAGES CXX)
 
 # An empty build type builds with NO optimization and no debug info —
 # the worst of both worlds, and exactly what `cmake -B build` with no

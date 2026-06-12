@@ -20,6 +20,13 @@ if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "GitBolt")
     set(CPACK_DMG_FORMAT "UDBZ")  # bzip2 compressed
+    # Do NOT bake the LICENSE in as a DMG click-through SLA: Apple
+    # deprecated DMG SLAs, every scripted `hdiutil attach` (CI, this
+    # repo's own smoke test) hangs on the agreement prompt, and users
+    # get a wall of license text before they can drag the app. The
+    # license still ships inside the bundle and for generators where
+    # an agreement step is normal (NSIS).
+    set(CPACK_DMG_SLA_USE_RESOURCE_FILE_LICENSE OFF)
     # The DragNDrop generator adds the /Applications symlink itself, so
     # the bundle sits at the DMG root with no install-prefix override.
     # Qt is deployed into the bundle during CPack's staging install via
