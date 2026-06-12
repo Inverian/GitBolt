@@ -28,13 +28,21 @@ namespace gitbolt::app {
 ///   list-widgets                     top-level windows + the active
 ///                                    window's buttons/views/fields
 ///   click <objectName-or-text>       queue a QAbstractButton::click
-///   select-row <viewSpec> <row>      drive a view's selection model
+///   select-row <viewSpec> <rows>     drive a view's selection model;
+///                                    rows = "3" or comma list "0,2,5"
 ///                                    (viewSpec = objectName or
 ///                                    ClassName[:index] among visible)
-///   type <widgetSpec> <text…>        focus + set a line/text edit
-///   dump-state                       repo path/state/branch,
-///                                    conflict count, windows
+///   type <widgetSpec> <text…>        focus + set a line/text edit;
+///                                    \n \t \\ escapes are decoded so
+///                                    one protocol line can carry a
+///                                    multi-line commit message
+///   dump-state                       repo path/state/branch/headOid,
+///                                    conflict count, theme, log row
+///                                    count, windows
 ///   screenshot <path>                grab() active window to PNG
+///   quit                             queue MainWindow::close() (runs
+///                                    closeEvent, persists geometry —
+///                                    clean exit for relaunch tests)
 ///
 /// trigger/click respond {"ok":true,"dispatched":true} BEFORE the
 /// action runs (queued invocation): a triggered action may open a
@@ -59,10 +67,12 @@ private:
     QByteArray cmdTrigger(const QString& spec);
     QByteArray cmdListWidgets();
     QByteArray cmdClick(const QString& spec);
-    QByteArray cmdSelectRow(const QString& viewSpec, int row);
+    QByteArray cmdSelectRow(const QString& viewSpec,
+                            const QList<int>& rows);
     QByteArray cmdType(const QString& widgetSpec, const QString& text);
     QByteArray cmdDumpState();
     QByteArray cmdScreenshot(const QString& path);
+    QByteArray cmdQuit();
 
     ui::MainWindow* window_ = nullptr;
     QLocalServer* server_ = nullptr;

@@ -1,5 +1,7 @@
 #include "TestBridge.h"
 
+#include "conf/SettingsService.h"
+#include "models/CommitLogModel.h"
 #include "services/GitService.h"
 #include "ui/MainWindow.h"
 
@@ -40,6 +42,38 @@ QByteArray errLine(const QString& message)
 {
     return jsonLine({{QStringLiteral("ok"), false},
                      {QStringLiteral("error"), message}});
+}
+
+// The protocol is one command per line, so a `type` argument can never
+// contain a raw newline. Decoding \n \t \\ here is the only way a
+// multi-line commit message fits through the channel.
+QString unescapeTypeText(const QString& in)
+{
+    QString out;
+    out.reserve(in.size());
+    for (qsizetype i = 0; i < in.size(); ++i) {
+        const QChar c = in.at(i);
+        if (c == QLatin1Char('\\') && i + 1 < in.size()) {
+            const QChar next = in.at(i + 1);
+            if (next == QLatin1Char('n')) {
+                out += QLatin1Char('\n');
+                ++i;
+                continue;
+            }
+            if (next == QLatin1Char('t')) {
+                out += QLatin1Char('\t');
+                ++i;
+                continue;
+            }
+            if (next == QLatin1Char('\\')) {
+                out += QLatin1Char('\\');
+                ++i;
+                continue;
+            }
+        }
+        out += c;
+    }
+    return out;
 }
 
 // Strip mnemonic ampersands and trailing ellipses from user-visible
@@ -249,17 +283,28 @@ QByteArray TestBridge::handleLine(const QString& line)
         // toInt() without the ok-flag yields 0 on garbage — which
         // silently selected row 0 instead of erroring. An agent-
         // facing surface must fail loudly.
-        bool okRow = false;
-        const int row = parts.at(2).toInt(&okRow);
-        if (!okRow)
-            return errLine(QStringLiteral("select-row: not an integer: ")
-                           + parts.at(2));
-        return cmdSelectRow(parts.at(1), row);
+        QList<int> rows;
+        const QStringList rowParts =
+            parts.at(2).split(QLatin1Char(','), Qt::SkipEmptyParts);
+        for (const QString& p : rowParts) {
+            bool okRow = false;
+            const int row = p.toInt(&okRow);
+            if (!okRow)
+                return errLine(
+                    QStringLiteral("select-row: not an integer: ") + p);
+            rows.append(row);
+        }
+        if (rows.isEmpty())
+            return errLine(QStringLiteral("select-row: no rows given"));
+        return cmdSelectRow(parts.at(1), rows);
     }
     if (verb == QStringLiteral("type") && parts.size() >= 3)
-        return cmdType(parts.at(1), line.section(QLatin1Char(' '), 2));
+        return cmdType(parts.at(1),
+                       unescapeTypeText(line.section(QLatin1Char(' '), 2)));
     if (verb == QStringLiteral("dump-state"))
         return cmdDumpState();
+    if (verb == QStringLiteral("quit"))
+        return cmdQuit();
     if (verb == QStringLiteral("screenshot") && parts.size() >= 2)
         // section() keeps the remainder intact so paths containing
         // spaces aren't silently truncated at the first one.
@@ -430,7 +475,8 @@ QByteArray TestBridge::cmdClick(const QString& spec)
                      {QStringLiteral("dispatched"), true}});
 }
 
-QByteArray TestBridge::cmdSelectRow(const QString& viewSpec, int row)
+QByteArray TestBridge::cmdSelectRow(const QString& viewSpec,
+                                    const QList<int>& rows)
 {
     auto* view = resolveWidget<QAbstractItemView>(viewSpec);
     if (!view)
@@ -439,17 +485,27 @@ QByteArray TestBridge::cmdSelectRow(const QString& viewSpec, int row)
     auto* model = view->model();
     if (!model)
         return errLine(QStringLiteral("view has no model"));
-    if (row < 0 || row >= model->rowCount(view->rootIndex()))
-        return errLine(QStringLiteral("row out of range (%1 rows)")
-                           .arg(model->rowCount(view->rootIndex())));
+    const int rowCount = model->rowCount(view->rootIndex());
+    for (int row : rows) {
+        if (row < 0 || row >= rowCount)
+            return errLine(QStringLiteral("row %1 out of range (%2 rows)")
+                               .arg(row)
+                               .arg(rowCount));
+    }
 
     // In-process selection — this is the operation that no amount
     // of synthetic mouse/AX input could reach (friction log #4).
-    const QModelIndex idx = model->index(row, 0, view->rootIndex());
-    view->setCurrentIndex(idx);
+    // Multiple rows ("0,2,5") cover the ExtendedSelection staging
+    // lists, where Stage/Unstage act on everything selected.
+    QItemSelection selection;
+    for (int row : rows) {
+        const QModelIndex idx = model->index(row, 0, view->rootIndex());
+        selection.select(idx, idx);
+    }
+    view->setCurrentIndex(model->index(rows.first(), 0, view->rootIndex()));
     view->selectionModel()->select(
-        idx, QItemSelectionModel::ClearAndSelect
-                 | QItemSelectionModel::Rows);
+        selection, QItemSelectionModel::ClearAndSelect
+                       | QItemSelectionModel::Rows);
 
     return jsonLine(
         {{QStringLiteral("ok"), true},
@@ -512,7 +568,17 @@ QByteArray TestBridge::cmdDumpState()
         if (auto conflicts = repo->conflictEntries())
             state[QStringLiteral("conflictCount")] =
                 static_cast<int>(conflicts->size());
+        // headOid lets a harness assert "a commit happened" / "HEAD
+        // moved" without shelling out to git.
+        if (auto head = repo->head())
+            state[QStringLiteral("headOid")] =
+                QString::fromStdString(head.value().toHex());
     }
+
+    if (auto* settings = window_->findChild<conf::SettingsService*>())
+        state[QStringLiteral("theme")] = settings->theme();
+    if (auto* logModel = window_->findChild<models::CommitLogModel*>())
+        state[QStringLiteral("logRows")] = logModel->rowCount();
 
     QJsonArray windows;
     const QWidgetList tops = QApplication::topLevelWidgets();
@@ -534,6 +600,17 @@ QByteArray TestBridge::cmdScreenshot(const QString& path)
         return errLine(QStringLiteral("could not save to ") + path);
     return jsonLine({{QStringLiteral("ok"), true},
                      {QStringLiteral("path"), path}});
+}
+
+QByteArray TestBridge::cmdQuit()
+{
+    // close(), not qApp->quit(): closeEvent must run so geometry and
+    // session state persist — relaunch-and-verify tests depend on the
+    // exit being indistinguishable from a user closing the window.
+    QMetaObject::invokeMethod(
+        window_, [w = window_]() { w->close(); }, Qt::QueuedConnection);
+    return jsonLine({{QStringLiteral("ok"), true},
+                     {QStringLiteral("dispatched"), true}});
 }
 
 } // namespace gitbolt::app

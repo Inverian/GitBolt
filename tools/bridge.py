@@ -8,7 +8,10 @@ Launch the app with the bridge enabled, then send commands:
     tools/bridge.py list-actions | python3 -m json.tool
     tools/bridge.py trigger commands/resolve-conflicts
     tools/bridge.py select-row QTableView:0 0
+    tools/bridge.py select-row commit.unstagedList 0,2,5
     tools/bridge.py click "Lock/Unlock"
+    tools/bridge.py type CommitMessageEdit:0 'subject\\n\\nbody'
+    tools/bridge.py quit
 
 The socket lives at $TMPDIR/<name> (QLocalServer's default placement
 on macOS); <name> defaults to "gitbolt-test-bridge" or the value of
