@@ -20,20 +20,16 @@ if(APPLE)
     set(CPACK_GENERATOR "DragNDrop")
     set(CPACK_DMG_VOLUME_NAME "GitBolt")
     set(CPACK_DMG_FORMAT "UDBZ")  # bzip2 compressed
-    set(CPACK_DMG_DS_STORE_SETUP_SCRIPT "${CMAKE_SOURCE_DIR}/cmake/macOS/DMGSetup.scpt" CACHE STRING "" FORCE)
-
-    # App bundle settings
-    set(CPACK_BUNDLE_NAME "GitBolt")
-    set(CPACK_BUNDLE_PLIST "${CMAKE_SOURCE_DIR}/src/app/platform/macos/Info.plist.in")
-    set(CPACK_BUNDLE_ICON "${CMAKE_SOURCE_DIR}/resources/icons/gitbolt.icns")
-
-    # macOS-specific install destinations
-    set(CPACK_PACKAGING_INSTALL_PREFIX "/Applications")
-
-    # Code signing (set GITBOLT_CODESIGN_IDENTITY in CI environment)
-    if(DEFINED ENV{GITBOLT_CODESIGN_IDENTITY})
-        set(CPACK_BUNDLE_APPLE_CERT_APP "$ENV{GITBOLT_CODESIGN_IDENTITY}")
-    endif()
+    # The DragNDrop generator adds the /Applications symlink itself, so
+    # the bundle sits at the DMG root with no install-prefix override.
+    # Qt is deployed into the bundle during CPack's staging install via
+    # the qt_generate_deploy_app_script hook in src/app/CMakeLists.txt.
+    #
+    # Code signing & notarization are intentionally NOT wired here:
+    # the CPACK_BUNDLE_* variables (including APPLE_CERT_APP) apply
+    # only to the Bundle generator, not DragNDrop. When signing lands
+    # it belongs in CI: codesign the .app before cpack, then
+    # `notarytool submit` + `stapler staple` on the finished DMG.
 
 # ============================================================================
 # Windows — NSIS installer
@@ -78,7 +74,12 @@ else()
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "GitBolt Team <team@gitbolt.dev>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libqt6widgets6 (>= 6.5), libgit2-1.7 (>= 1.7.0)")
+    # Let dpkg-shlibdeps compute the real shared-library dependencies
+    # (libqt6svg6, the actual libgit2 soname of the build host, etc.)
+    # instead of hand-pinning a list that drifts — the old hardcoded
+    # "libgit2-1.7" pin was already wrong on newer Ubuntu, and it
+    # omitted Qt SVG entirely.
+    set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/ThePieMonster/GitBolt")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 

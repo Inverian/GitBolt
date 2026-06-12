@@ -87,13 +87,22 @@ private slots:
     }
 
     // -----------------------------------------------------------------
-    // Linear 3-commit history: every commit on lane 0, with a single
-    // start-segment connecting each to its parent.
+    // Linear 3-commit history: every commit on lane 0.
     //
     //      C ← B ← A   (newest first)
     //      0   0   0
+    //
+    // Segment semantics (see RevisionGraphDelegate::paint): a row's
+    // segments are ALL of its line primitives, not just outgoing
+    // parent edges. `Start` is the bottom half (dot → first parent),
+    // `End` is the top half (incoming line from the child above →
+    // dot). A root commit therefore still carries exactly one End
+    // segment when a child sits above it — without it the root's dot
+    // would render disconnected from the line coming down.
     // -----------------------------------------------------------------
     void linearHistoryAllOnLaneZero() {
+        using SegType = gitbolt::models::LaneSegmentType;
+
         gitbolt::models::CommitLogModel model;
         // Newest first, as revwalk would return.
         std::vector<gitbolt::git::CommitData> commits = {
@@ -113,11 +122,27 @@ private slots:
             QCOMPARE(g->maxLane, 0);
         }
 
-        // First two rows should have a start segment pointing at their parent.
-        // Last row is a root commit, no parents, no segments.
-        QVERIFY(!model.graphAt(0)->segments.empty());
-        QVERIFY(!model.graphAt(1)->segments.empty());
-        QVERIFY(model.graphAt(2)->segments.empty());
+        auto countType = [&](int row, SegType t) {
+            int n = 0;
+            for (const auto& s : model.graphAt(row)->segments)
+                if (s.type == t) ++n;
+            return n;
+        };
+
+        // Tip (C): no child above, one outgoing line to its parent.
+        QCOMPARE(model.graphAt(0)->segments.size(), size_t(1));
+        QCOMPARE(countType(0, SegType::Start), 1);
+
+        // Middle (B): incoming from C plus outgoing to A.
+        QCOMPARE(model.graphAt(1)->segments.size(), size_t(2));
+        QCOMPARE(countType(1, SegType::End), 1);
+        QCOMPARE(countType(1, SegType::Start), 1);
+
+        // Root (A): incoming from B only — and crucially NO outgoing
+        // Start, because there is no parent below.
+        QCOMPARE(model.graphAt(2)->segments.size(), size_t(1));
+        QCOMPARE(countType(2, SegType::End), 1);
+        QCOMPARE(countType(2, SegType::Start), 0);
     }
 
     // -----------------------------------------------------------------

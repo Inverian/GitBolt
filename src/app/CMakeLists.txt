@@ -92,3 +92,19 @@ install(TARGETS gitbolt
     BUNDLE DESTINATION .
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
+
+# Bundle the Qt runtime into the INSTALLED app. This runs at
+# `cmake --install` time — and therefore also inside CPack's own
+# staging install, which is what actually ends up in the DMG/NSIS
+# payload. Running macdeployqt/windeployqt by hand on some other
+# install tree (as CI used to) never affects what CPack ships.
+# Linux stays on system Qt: the DEB declares shared-lib deps and the
+# AppImage is assembled by linuxdeploy in CI.
+if(APPLE OR WIN32)
+    qt_generate_deploy_app_script(
+        TARGET gitbolt
+        OUTPUT_SCRIPT gitbolt_deploy_script
+        NO_UNSUPPORTED_PLATFORM_ERROR
+    )
+    install(SCRIPT ${gitbolt_deploy_script})
+endif()

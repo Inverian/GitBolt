@@ -19,11 +19,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # qtsvg/qtdeclarative/qttools ship in the default Qt 6 desktop
+      # install; the `modules:` input is only for ADDON modules
+      # (qtcharts, qtwebengine, ...) and rejects base-archive names
+      # like 'qtbase', so we don't pass it at all.
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.7.*'
-          modules: 'qtbase'
           cache: true    # Cache Qt between runs (~1.5 GB save)
 
       - name: Install Ninja
@@ -33,12 +36,13 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install libgit2 pkg-config
 
+      # libgl1-mesa-dev: Qt6::Gui links OpenGL on Linux, and the aqt
+      # Qt binaries expect the system GL headers/libs at link time.
       - name: Install libgit2 (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgit2-dev pkg-config
-
+          sudo apt-get install -y libgit2-dev pkg-config libgl1-mesa-dev
       - name: Install libgit2 (Windows)
         if: runner.os == 'Windows'
         run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
@@ -60,7 +64,11 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
+      # platform, and the Linux runners have no display server.
       - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
   # ==========================================================================
@@ -87,7 +95,6 @@ jobs:
         uses: jurplel/install-qt-action@v4
         with:
           version: '6.7.*'
-          modules: 'qtbase'
           cache: true
 
       - name: Install Ninja
@@ -126,30 +133,25 @@ jobs:
         run: cmake --install build --prefix build/install
 
       # ----------------------------------------------------------------------
-      # macOS — DMG via CPack + code signing
+      # macOS — DMG via CPack. The Qt runtime is bundled into the app
+      # DURING cpack's staging install (qt_generate_deploy_app_script in
+      # src/app/CMakeLists.txt), so the DMG payload is self-contained.
+      # Running macdeployqt on a separate install tree afterwards — as
+      # this workflow once did — never affected what cpack shipped.
       # ----------------------------------------------------------------------
       - name: Package DMG (macOS)
         if: runner.os == 'macOS'
         working-directory: build
         run: cpack -G DragNDrop -C Release
 
-      - name: macOS deploy Qt
-        if: runner.os == 'macOS'
-        run: |
-          macdeployqt build/install/GitBolt.app -dmg || true
-
       # ----------------------------------------------------------------------
-      # Windows — NSIS installer via CPack
+      # Windows — NSIS installer via CPack; Qt DLLs land in the payload
+      # through the same install-time deploy script.
       # ----------------------------------------------------------------------
       - name: Package NSIS (Windows)
         if: runner.os == 'Windows'
         working-directory: build
         run: cpack -G NSIS -C Release
-
-      - name: Windows deploy Qt
-        if: runner.os == 'Windows'
-        run: |
-          windeployqt build/install/bin/GitBolt.exe
 
       # ----------------------------------------------------------------------
       # Linux — DEB via CPack + AppImage via linuxdeploy
@@ -183,7 +185,9 @@ jobs:
           fi
 
           export QMAKE=$(find $Qt6_DIR -name qmake -type f 2>/dev/null | head -1 || echo "qmake")
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage || true
+          # No `|| true`: if AppImage assembly breaks we want the job
+          # red, not a silently missing artifact.
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage
 
       # ----------------------------------------------------------------------
       # Upload build artifacts
