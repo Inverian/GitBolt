@@ -2341,23 +2341,11 @@ void MainWindow::createMenuBar()
             connect(dlg, &dialogs::RebaseDialog::rebaseAbortRequested,
                     gitService_, &services::GitService::rebaseAbort);
 
-            // rebaseComplete is async — surface to the status bar
-            // so the user knows whether it ran cleanly. Connection
-            // is owned by `this` so it persists across rebases;
-            // we use a unique signal so reconnecting is harmless.
-            // (StatusBar message lives 4s, then the standard
-            // "Ready" reasserts.)
-            connect(gitService_, &services::GitService::rebaseComplete,
-                    this, [this](bool success) {
-                statusBar()->showMessage(
-                    success ? tr("Rebase complete.")
-                            : tr("Rebase paused or failed — "
-                                 "use Continue/Abort to resolve."),
-                    4000);
-                gitService_->refreshLog();
-                gitService_->refreshStatus();
-                gitService_->refreshBranches();
-            }, Qt::UniqueConnection);
+            // rebaseComplete feedback is wired ONCE in
+            // setupConnections() — Qt::UniqueConnection does not
+            // dedupe lambda functors, so connecting here stacked a
+            // fresh permanent connection per dialog open (N opens →
+            // N status messages and 3N refresh workers per rebase).
 
             dlg->show();
         });
@@ -3889,6 +3877,22 @@ void MainWindow::setupConnections()
     // --- GitService signals ---
     connect(gitService_, &services::GitService::repositoryOpened,
             this, &MainWindow::onRepositoryOpened);
+
+    // Rebase completion: status-bar note + refresh triple. Lives
+    // here (not in the Commands → Rebase handler) because
+    // Qt::UniqueConnection does not dedupe lambdas — re-connecting
+    // per dialog open accumulated handlers forever.
+    connect(gitService_, &services::GitService::rebaseComplete,
+            this, [this](bool success) {
+        statusBar()->showMessage(
+            success ? tr("Rebase complete.")
+                    : tr("Rebase paused or failed — "
+                         "use Continue/Abort to resolve."),
+            4000);
+        gitService_->refreshLog();
+        gitService_->refreshStatus();
+        gitService_->refreshBranches();
+    });
 
     connect(gitService_, &services::GitService::repositoryOpenFailed,
             this, &MainWindow::onRepositoryOpenFailed);

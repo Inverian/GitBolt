@@ -191,6 +191,13 @@ void TerminalWidget::stopShell()
         readNotifier_->deleteLater();
         readNotifier_ = nullptr;
     }
+    if (writeNotifier_) {
+        writeNotifier_->setEnabled(false);
+        writeNotifier_->deleteLater();
+        writeNotifier_ = nullptr;
+    }
+    writeQueue_.clear();
+    pendingOutput_.clear();
     if (masterFd_ >= 0) {
         ::close(masterFd_);
         masterFd_ = -1;
@@ -238,6 +245,34 @@ void TerminalWidget::writeToPty(const QByteArray& bytes)
 {
     if (masterFd_ < 0 || bytes.isEmpty())
         return;
+
+    // Preserve ordering: if a backlog exists, everything new goes
+    // behind it.
+    if (!writeQueue_.isEmpty()) {
+        writeQueue_.append(bytes);
+        return;
+    }
+
+    const int written = writeRaw(bytes);
+    if (written < bytes.size() && masterFd_ >= 0) {
+        // PTY master buffer is full (~1-4 KB) — typical for a paste,
+        // which arrives as one large chunk. Queue the remainder and
+        // drain as the fd signals writable; the old code dropped it
+        // ("the user can't type fast enough" — true, but paste
+        // isn't typing).
+        writeQueue_ = bytes.mid(written);
+        if (!writeNotifier_) {
+            writeNotifier_ = new QSocketNotifier(
+                masterFd_, QSocketNotifier::Write, this);
+            connect(writeNotifier_, &QSocketNotifier::activated,
+                    this, &TerminalWidget::onPtyWritable);
+        }
+        writeNotifier_->setEnabled(true);
+    }
+}
+
+int TerminalWidget::writeRaw(const QByteArray& bytes)
+{
     int written = 0;
     while (written < bytes.size()) {
         const ssize_t n = ::write(masterFd_,
@@ -246,15 +281,25 @@ void TerminalWidget::writeToPty(const QByteArray& bytes)
         if (n < 0) {
             if (errno == EINTR)
                 continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Master is full — drop the rest. In practice the
-                // user can't type fast enough to hit this.
-                break;
-            }
-            break;
+            break;  // EAGAIN/EWOULDBLOCK or real error — caller queues
         }
         written += static_cast<int>(n);
     }
+    return written;
+}
+
+void TerminalWidget::onPtyWritable()
+{
+    if (masterFd_ < 0) {
+        writeQueue_.clear();
+        if (writeNotifier_)
+            writeNotifier_->setEnabled(false);
+        return;
+    }
+    const int written = writeRaw(writeQueue_);
+    writeQueue_.remove(0, written);
+    if (writeQueue_.isEmpty() && writeNotifier_)
+        writeNotifier_->setEnabled(false);
 }
 
 void TerminalWidget::onPtyReadable()
@@ -310,7 +355,16 @@ void TerminalWidget::onPtyReadable()
 // and fullscreen-TUI support (vim/htop) remain follow-up work.
 void TerminalWidget::appendOutput(const QByteArray& bytes)
 {
-    QString text = QString::fromLocal8Bit(bytes);
+    // Re-attach the tail of any escape sequence the previous read
+    // chopped mid-sequence (see pendingOutput_).
+    QByteArray data;
+    if (!pendingOutput_.isEmpty()) {
+        data = pendingOutput_ + bytes;
+        pendingOutput_.clear();
+    } else {
+        data = bytes;
+    }
+    QString text = QString::fromLocal8Bit(data);
 
     // Pre-strip OSC (terminal title / OSC-8 hyperlinks) and BEL —
     // neither affects visible layout and they have well-defined
@@ -366,7 +420,13 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
         }
         if (u == 0x1b) {
             // Escape sequence
-            if (i + 1 >= n) { ++i; continue; }
+            if (i + 1 >= n) {
+                // Chunk ended ON the ESC — hold it for the next
+                // read instead of dropping it (the rest of the
+                // sequence is in flight).
+                pendingOutput_ = text.mid(i).toUtf8();
+                break;
+            }
             const ushort next = text[i + 1].unicode();
             if (next == '[') {
                 // CSI: ESC [ <params> <intermediates> <final-byte>
@@ -394,8 +454,13 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                     ++j;
                 }
                 if (!handled) {
-                    // Unterminated CSI — skip the ESC [ and bail
-                    i += 2;
+                    // Unterminated CSI — its final byte is in the
+                    // next chunk. Park everything from the ESC and
+                    // resume when it arrives. (Params/intermediates
+                    // are pure ASCII, so the UTF-8 round-trip is
+                    // lossless.)
+                    pendingOutput_ = text.mid(i).toUtf8();
+                    i = n;
                 }
                 continue;
             }

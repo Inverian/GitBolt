@@ -414,13 +414,22 @@ Result<DiffResult> Repository::diffTreeToTree(const ObjectId& oldTreeId, const O
     std::memcpy(oldOid.id, oldTreeId.raw().data(), ObjectId::RAW_SIZE);
     std::memcpy(newOid.id, newTreeId.raw().data(), ObjectId::RAW_SIZE);
 
+    // Failed lookups must be errors, not silently-null trees — a
+    // bad id otherwise produced a misleading "everything added/
+    // deleted" diff instead of a diagnosable failure.
     git_tree* oldTree = nullptr;
+    int err = git_tree_lookup(&oldTree, repo_, &oldOid);
+    if (err < 0)
+        return GitError::fromLibgit2(err);
     git_tree* newTree = nullptr;
-    git_tree_lookup(&oldTree, repo_, &oldOid);
-    git_tree_lookup(&newTree, repo_, &newOid);
+    err = git_tree_lookup(&newTree, repo_, &newOid);
+    if (err < 0) {
+        git_tree_free(oldTree);
+        return GitError::fromLibgit2(err);
+    }
 
     git_diff* diff = nullptr;
-    int err = git_diff_tree_to_tree(&diff, repo_, oldTree, newTree, nullptr);
+    err = git_diff_tree_to_tree(&diff, repo_, oldTree, newTree, nullptr);
     if (oldTree) git_tree_free(oldTree);
     if (newTree) git_tree_free(newTree);
     if (err < 0) return GitError::fromLibgit2(err);
@@ -446,8 +455,13 @@ Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
     if (git_commit_parentcount(commit) > 0) {
         git_commit* parent = nullptr;
         if (git_commit_parent(&parent, commit, 0) == 0) {
-            git_commit_tree(&parentTree, parent);
+            err = git_commit_tree(&parentTree, parent);
             git_commit_free(parent);
+            if (err < 0) {
+                git_tree_free(commitTree);
+                git_commit_free(commit);
+                return GitError::fromLibgit2(err);
+            }
         }
     }
 
@@ -844,7 +858,9 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
     if (err < 0) return GitError::fromLibgit2(err);
 
     git_index* index = nullptr;
-    git_repository_index(&index, repo_);
+    err = git_repository_index(&index, repo_);
+    if (err < 0)
+        return GitError::fromLibgit2(err);
     MergeResult result;
     result.analysis = MergeAnalysis::Normal;
     result.hasConflicts = git_index_has_conflicts(index) != 0;
@@ -970,7 +986,7 @@ Result<void> Repository::removeRemote(const std::string& name) {
 
 Result<std::vector<TagInfo>> Repository::tags() const {
     std::vector<TagInfo> result;
-    git_tag_foreach(repo_, [](const char* name, git_oid* oid, void* payload) -> int {
+    int err = git_tag_foreach(repo_, [](const char* name, git_oid* oid, void* payload) -> int {
         auto* tags = static_cast<std::vector<TagInfo>*>(payload);
         TagInfo info;
         info.name = name;
@@ -979,6 +995,10 @@ Result<std::vector<TagInfo>> Repository::tags() const {
         tags->push_back(std::move(info));
         return 0;
     }, &result);
+    // Enumeration failure (corrupt packed-refs etc.) must not be
+    // reported as "no tags".
+    if (err < 0)
+        return GitError::fromLibgit2(err);
     return result;
 }
 
@@ -1183,8 +1203,21 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     git_cherrypick_options opts = GIT_CHERRYPICK_OPTIONS_INIT;
     err = git_cherrypick(repo_, commit, &opts);
     git_commit_free(commit);
+    // A real failure (bad object, bare repo, OOM) is an ERROR with
+    // git_error_last context; a conflicted index is the normal
+    // "needs resolution" outcome and returns 0. The old code
+    // collapsed both into hasConflicts, so genuine failures
+    // surfaced as "produced conflicts" with the message discarded.
+    if (err < 0)
+        return GitError::fromLibgit2(err);
+
+    git_index* index = nullptr;
+    err = git_repository_index(&index, repo_);
+    if (err < 0)
+        return GitError::fromLibgit2(err);
     CherryPickResult result;
-    result.hasConflicts = (err < 0);
+    result.hasConflicts = git_index_has_conflicts(index) != 0;
+    git_index_free(index);
     return result;
 }
 

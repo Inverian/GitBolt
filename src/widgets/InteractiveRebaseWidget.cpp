@@ -87,12 +87,15 @@ bool RebaseListModel::moveRows(const QModelIndex& sourceParent, int sourceRow, i
     if (sourceRow == destinationChild || sourceRow + count == destinationChild)
         return false;
 
-    int dest = destinationChild;
-    if (destinationChild > sourceRow)
-        dest += count;
-
+    // Qt's convention (see QStringListModel::moveRows):
+    // destinationChild is the pre-move insert-before row — exactly
+    // what dropMimeData hands us — and goes to beginMoveRows
+    // UNMODIFIED. The old +count adjustment announced a destination
+    // one slot too far on downward drags; the rows displayed right
+    // (data() refetches) but persistent indexes — the selection —
+    // remapped to the wrong row.
     beginMoveRows(QModelIndex(), sourceRow, sourceRow + count - 1,
-                  QModelIndex(), dest > sourceRow ? dest : destinationChild);
+                  QModelIndex(), destinationChild);
 
     // Collect the moved items
     std::vector<git::RebaseOperation> moved(

@@ -55,16 +55,31 @@ protected:
 
 private slots:
     void onPtyReadable();
+    void onPtyWritable();
 
 private:
     void stopShell();
     void writeToPty(const QByteArray& bytes);
+    /// Write as much as the master fd accepts right now; returns the
+    /// byte count written (stops at EAGAIN without dropping).
+    int writeRaw(const QByteArray& bytes);
     void appendOutput(const QByteArray& bytes);
     void updatePtySize();
 
     int              masterFd_     = -1;
     pid_t            childPid_     = -1;
     QSocketNotifier* readNotifier_ = nullptr;
+    QSocketNotifier* writeNotifier_ = nullptr;
+    /// Bytes accepted by writeToPty but not yet written — the PTY
+    /// master buffer is only ~1-4 KB, so a paste overflows it
+    /// easily. Drained via writeNotifier_ as the fd becomes
+    /// writable again (the old code silently dropped the tail).
+    QByteArray writeQueue_;
+    /// Tail of an escape sequence split across a 4096-byte read()
+    /// boundary, re-prepended to the next chunk. Colored output
+    /// splits like this constantly; without the carry the tail
+    /// ("[0m", "[K", …) printed as literal text.
+    QByteArray pendingOutput_;
 
     // The directory the shell should cd into the next time it
     // starts. Cached so RepositoryView can call setInitialPath
