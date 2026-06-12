@@ -28,3 +28,8 @@ gitbolt_add_test(test_status         git/TestStatus.cpp)
 
 # models/ tests — exercise the Qt model layer without needing a live repo
 gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
+
+# services/ tests — GitService orchestration against real temp repos.
+# Needs the services lib on top of the defaults the helper links.
+gitbolt_add_test(test_git_service services/TestGitService.cpp)
+target_link_libraries(test_git_service PRIVATE gitbolt_services)

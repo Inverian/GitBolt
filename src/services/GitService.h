@@ -280,6 +280,23 @@ private:
     /// requested it.
     void startWatchEnumeration(const QString& path, quint64 gen);
 
+    // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
+    // until every worker finishes, and those workers lock repoMutex_
+    // and compare against repo_ — so runner_ is declared LAST (and
+    // therefore destroyed first, draining the workers while the
+    // mutex and repo are still alive).
+
+    // libgit2 is not safe for concurrent access on a single
+    // git_repository*. AsyncRunner submits to the global QThreadPool,
+    // so two refreshStatus / refreshLog / refreshBranches calls can
+    // land on different worker threads and corrupt libgit2's internal
+    // pool state. Real crash seen in the wild was a malloc_zone_error
+    // inside git_pool_clear under git_status_list_new while another
+    // worker was reading the log. Every Repository call from worker
+    // threads (and from the main-thread mutators that compete with
+    // them) acquires this mutex first.
+    mutable std::mutex repoMutex_;
+
     // shared_ptr (not unique_ptr) for two reasons: the async-open
     // worker hands a freshly opened Repository back through a
     // QFuture, which requires a copyable result type; and refresh
@@ -287,8 +304,6 @@ private:
     // destroy the object under their feet (they finish against the
     // old repo, then notice it's stale and drop their result).
     std::shared_ptr<git::Repository> repo_;
-    util::AsyncRunner runner_;
-    watcher::FileWatcher watcher_;
     LogScope logScope_ = LogScope::Head;
     QStringList selectedBranches_;
 
@@ -305,16 +320,12 @@ private:
     // its own flag; the old walk sees its flag flip and bails.
     std::shared_ptr<std::atomic<bool>> watchEnumCancel_;
 
-    // libgit2 is not safe for concurrent access on a single
-    // git_repository*. AsyncRunner submits to the global QThreadPool,
-    // so two refreshStatus / refreshLog / refreshBranches calls can
-    // land on different worker threads and corrupt libgit2's internal
-    // pool state. Real crash seen in the wild was a malloc_zone_error
-    // inside git_pool_clear under git_status_list_new while another
-    // worker was reading the log. Every Repository call from worker
-    // threads (and from the main-thread mutators that compete with
-    // them) acquires this mutex first.
-    mutable std::mutex repoMutex_;
+    watcher::FileWatcher watcher_;
+
+    // Declared last on purpose: ~AsyncRunner drains every in-flight
+    // worker, and it must do so while repoMutex_ / repo_ above are
+    // still alive (members destruct in reverse declaration order).
+    util::AsyncRunner runner_;
 };
 
 } // namespace gitbolt::services
