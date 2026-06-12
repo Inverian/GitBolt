@@ -1,5 +1,6 @@
 #include "git/GitProcess.h"
 #include "git/GitProcessLog.h"
+#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QProcess>
@@ -22,6 +23,22 @@ void GitProcess::applyEnvironment(QProcess& process) {
     // libsecret, manager-core) are unaffected — only terminal
     // prompting is disabled.
     env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+
+    // When git (or ssh underneath it) does need a credential and no
+    // helper supplies one, route the question to a GUI prompt: the
+    // GitBolt binary re-invoked in askpass mode (see main.cpp, keyed
+    // on GITBOLT_ASKPASS_MODE — ssh passes no flags, so an env marker
+    // is the only reliable switch). SSH_ASKPASS_REQUIRE=force makes
+    // OpenSSH ≥ 8.4 use the askpass even when a TTY exists.
+    const QString self = QCoreApplication::applicationFilePath();
+    if (!self.isEmpty()) {
+        env.insert(QStringLiteral("GIT_ASKPASS"), self);
+        env.insert(QStringLiteral("SSH_ASKPASS"), self);
+        env.insert(QStringLiteral("SSH_ASKPASS_REQUIRE"),
+                   QStringLiteral("force"));
+        env.insert(QStringLiteral("GITBOLT_ASKPASS_MODE"),
+                   QStringLiteral("1"));
+    }
     process.setProcessEnvironment(env);
 }
 

@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProgressBar>
@@ -230,13 +231,56 @@ void CloneDialog::onCloneClicked()
         accept();
     });
 
+    // Private HTTPS remotes answer the first fetch with 401; libgit2
+    // then asks this prompt for credentials. It runs on the clone
+    // worker, so the dialogs are marshaled to the GUI thread and the
+    // worker parks until the user answers (BlockingQueuedConnection).
+    // The dialog outlives the worker by design: reject() defers while
+    // cloning_ is set.
+    git::CredentialPrompt credPrompt =
+        [this](const std::string& credUrl, std::string& user,
+               std::string& pass) -> bool {
+            bool accepted = false;
+            QString qUser = QString::fromStdString(user);
+            QString qPass;
+            const QString qUrl = QString::fromStdString(credUrl);
+            QMetaObject::invokeMethod(
+                this,
+                [this, qUrl, &qUser, &qPass, &accepted]() {
+                    bool ok = false;
+                    const QString u = QInputDialog::getText(
+                        this, tr("Authentication Required"),
+                        tr("Username for %1").arg(qUrl),
+                        QLineEdit::Normal, qUser, &ok);
+                    if (!ok)
+                        return;
+                    const QString p = QInputDialog::getText(
+                        this, tr("Authentication Required"),
+                        tr("Password or access token for %1").arg(qUrl),
+                        QLineEdit::Password, QString(), &ok);
+                    if (!ok)
+                        return;
+                    qUser = u;
+                    qPass = p;
+                    accepted = true;
+                },
+                Qt::BlockingQueuedConnection);
+            if (accepted) {
+                user = qUser.toStdString();
+                pass = qPass.toStdString();
+            }
+            return accepted;
+        };
+
     watcher->setFuture(QtConcurrent::run(
         [url, path, progressCb = std::move(progressCb),
-         flag = cancelFlag_]() -> std::optional<QString> {
+         flag = cancelFlag_,
+         credPrompt = std::move(credPrompt)]() -> std::optional<QString> {
             auto result = git::Repository::clone(url.toStdString(),
                                                  path.toStdString(),
                                                  progressCb,
-                                                 flag);
+                                                 flag,
+                                                 credPrompt);
             if (!result.ok())
                 return QString::fromStdString(result.error().message());
             return std::nullopt;

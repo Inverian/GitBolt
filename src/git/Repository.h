@@ -67,6 +67,17 @@ struct CloneProgress {
 /// QMetaObject::invokeMethod or similar.
 using CloneProgressCallback = std::function<void(const CloneProgress&)>;
 
+/// Invoked from the clone worker thread when the server demands
+/// credentials (HTTPS user/password or token). `username` arrives
+/// prefilled from the URL when it carried one, and both parameters
+/// return the user's answers. Implementations must marshal to the
+/// GUI thread themselves and block until answered; return false to
+/// abort the clone. SSH URLs are not routed here — those
+/// authenticate via ssh-agent.
+using CredentialPrompt = std::function<bool(const std::string& url,
+                                            std::string& username,
+                                            std::string& password)>;
+
 /// Returns the runtime libgit2 version as "MAJOR.MINOR.PATCH" (e.g.
 /// "1.9.2"). This reads from libgit2's own reported version rather
 /// than the LIBGIT2_VERSION macro, so it reflects the actual shared
@@ -106,7 +117,8 @@ public:
         const std::string& url,
         const std::string& path,
         CloneProgressCallback onProgress,
-        std::shared_ptr<std::atomic<bool>> cancelFlag = nullptr);
+        std::shared_ptr<std::atomic<bool>> cancelFlag = nullptr,
+        CredentialPrompt onCredentials = nullptr);
 
     std::string path() const;
     std::string workdir() const;

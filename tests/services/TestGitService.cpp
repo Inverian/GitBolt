@@ -24,10 +24,12 @@
 // or QTRY_*.
 //
 
+#include <QCoreApplication>
 #include <QSignalSpy>
 #include <QTest>
 
 #include "../TestRepoHelper.h"
+#include "git/GitProcess.h"
 #include "services/GitService.h"
 
 using gitbolt::services::GitService;
@@ -61,6 +63,28 @@ private slots:
     void initTestCase() {
         gitbolt::test::TestRepo touch;
         QVERIFY(!touch.path().isEmpty());
+    }
+
+    // -----------------------------------------------------------------
+    // Every git child must carry the askpass wiring: GIT_ASKPASS /
+    // SSH_ASKPASS point back at this binary so auth questions become
+    // GUI prompts instead of instant failures. A shell alias executed
+    // BY git prints what's really in git's child environment — `git
+    // var GIT_ASKPASS` would be more direct but only exists in newer
+    // gits (Apple's 2.39 lacks it).
+    // -----------------------------------------------------------------
+    void gitChildrenGetAskpassEnvironment() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+
+        gitbolt::git::GitProcess proc(repo->path().toStdString());
+        auto result = proc.run(
+            {"-c", "alias.echo-askpass=!printf '%s' \"$GIT_ASKPASS\"",
+             "echo-askpass"});
+        QVERIFY(result.ok());
+        QCOMPARE(result.value().exitCode, 0);
+        QCOMPARE(QString::fromStdString(result.value().stdoutData).trimmed(),
+                 QCoreApplication::applicationFilePath());
     }
 
     // -----------------------------------------------------------------

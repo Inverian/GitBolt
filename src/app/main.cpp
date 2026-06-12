@@ -10,13 +10,52 @@
 #include <QCommandLineParser>
 #include <QFileInfo>
 #include <QIcon>
+#include <QInputDialog>
 #include <QMessageBox>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QSharedMemory>
 #include <QStyleHints>
+#include <QTextStream>
 
 #include <git2.h>
+
+namespace {
+
+// Askpass mode: git and ssh re-invoke this same binary as
+// `$GIT_ASKPASS "<prompt>"` when they need a credential (the env is
+// wired up in GitProcess::applyEnvironment). Show one modal field,
+// print the answer to stdout, exit. Cancel exits nonzero, which makes
+// git abort the operation with a normal auth error instead of hanging.
+int runAskpass(const QString& prompt)
+{
+    // "Username for 'https://…'" wants visible text; everything else
+    // (Password for…, Enter passphrase for key…) is a secret.
+    const bool secret =
+        !prompt.contains(QStringLiteral("username"), Qt::CaseInsensitive);
+
+    QInputDialog dialog;
+    dialog.setWindowTitle(QStringLiteral("GitBolt"));
+    dialog.setLabelText(prompt.trimmed().isEmpty()
+                            ? QStringLiteral("Credential:")
+                            : prompt.trimmed());
+    dialog.setInputMode(QInputDialog::TextInput);
+    if (secret)
+        dialog.setTextEchoMode(QLineEdit::Password);
+    // The parent process is a faceless git child — nothing focuses
+    // this window for us, and it must not get lost behind the app.
+    dialog.setWindowFlag(Qt::WindowStaysOnTopHint);
+    dialog.show();
+    dialog.raise();
+    dialog.activateWindow();
+    if (dialog.exec() != QDialog::Accepted)
+        return 1;
+
+    QTextStream(stdout) << dialog.textValue() << "\n";
+    return 0;
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     // Install crash handler before anything else
@@ -47,6 +86,17 @@ int main(int argc, char* argv[]) {
     // further wiring. Covers Linux taskbar / Windows title bar;
     // macOS layers the .icns bundle file on top via CFBundleIconFile.
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/gitbolt-256.png")));
+
+    // Askpass re-invocation MUST short-circuit before the single-
+    // instance guard: with GitBolt already running, the guard would
+    // forward this process's argument (the prompt text!) to the open
+    // window and exit 0 — git would read empty stdout as an empty
+    // password. ssh passes no identifying flag, so the env marker set
+    // by GitProcess::applyEnvironment is the switch.
+    if (qEnvironmentVariableIsSet("GITBOLT_ASKPASS_MODE")) {
+        return runAskpass(argc > 1 ? QString::fromLocal8Bit(argv[1])
+                                   : QString());
+    }
 
     // Single-instance guard via shared memory.
     //

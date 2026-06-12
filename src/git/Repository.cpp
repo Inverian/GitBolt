@@ -1,5 +1,9 @@
 #include "git/Repository.h"
 #include <git2.h>
+// git_error_set_str lives in the sys/ headers since libgit2 1.4 —
+// setting the thread-local error from inside our own callbacks is
+// exactly the "advanced" use they were carved out for.
+#include <git2/sys/errors.h>
 #include <cstring>
 #include <sstream>
 
@@ -123,15 +127,70 @@ Result<Repository> Repository::clone(
     const std::string& url,
     const std::string& path,
     CloneProgressCallback onProgress,
-    std::shared_ptr<std::atomic<bool>> cancelFlag)
+    std::shared_ptr<std::atomic<bool>> cancelFlag,
+    CredentialPrompt onCredentials)
 {
     struct CallbackState {
         CloneProgressCallback cb;
         std::shared_ptr<std::atomic<bool>> cancel;
+        CredentialPrompt creds;
+        int credAttempts = 0;
     };
-    CallbackState state{std::move(onProgress), std::move(cancelFlag)};
+    CallbackState state{std::move(onProgress), std::move(cancelFlag),
+                        std::move(onCredentials)};
 
     git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
+
+    // ---- Credentials: prompt for HTTPS, agent for SSH ----
+    opts.fetch_opts.callbacks.credentials =
+        [](git_credential** out, const char* url,
+           const char* usernameFromUrl, unsigned int allowedTypes,
+           void* payload) -> int {
+            auto* s = static_cast<CallbackState*>(payload);
+            if (!s)
+                return GIT_PASSTHROUGH;
+            if (s->cancel && s->cancel->load())
+                return GIT_EUSER;
+
+            // SSH: hand the question to the agent once. Reading and
+            // decrypting key files (passphrase prompts, key search)
+            // is deliberately out of scope — ssh-agent is the norm
+            // and the error says so when it isn't running.
+            if (allowedTypes & GIT_CREDENTIAL_SSH_KEY) {
+                if (s->credAttempts++ == 0)
+                    return git_credential_ssh_key_from_agent(
+                        out, usernameFromUrl ? usernameFromUrl : "git");
+                git_error_set_str(
+                    GIT_ERROR_NET,
+                    "SSH authentication failed — is your key loaded "
+                    "in ssh-agent?");
+                return GIT_EUSER;
+            }
+
+            if (allowedTypes & GIT_CREDENTIAL_USERPASS_PLAINTEXT) {
+                if (!s->creds) {
+                    git_error_set_str(GIT_ERROR_NET,
+                                      "authentication required");
+                    return GIT_EUSER;
+                }
+                // A rejected answer re-enters this callback; cap the
+                // rounds so wrong credentials can't loop forever.
+                if (s->credAttempts++ >= 3) {
+                    git_error_set_str(
+                        GIT_ERROR_NET,
+                        "authentication failed after 3 attempts");
+                    return GIT_EUSER;
+                }
+                std::string user =
+                    usernameFromUrl ? usernameFromUrl : "";
+                std::string pass;
+                if (!s->creds(url ? url : "", user, pass))
+                    return GIT_EUSER;   // user cancelled the prompt
+                return git_credential_userpass_plaintext_new(
+                    out, user.c_str(), pass.c_str());
+            }
+            return GIT_PASSTHROUGH;
+        };
 
     // ---- Fetch progress: objects received + deltas indexed ----
     opts.fetch_opts.callbacks.transfer_progress =
