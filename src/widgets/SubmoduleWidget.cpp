@@ -4,6 +4,8 @@
 #include <QClipboard>
 #include <QFont>
 #include <QHeaderView>
+#include <QTableView>
+#include <QToolBar>
 #include <QMenu>
 #include <QVBoxLayout>
 
@@ -161,10 +163,8 @@ QString SubmoduleTableModel::statusString(git::SubmoduleStatus status) {
 // ---------------------------------------------------------------------------
 
 SubmoduleWidget::SubmoduleWidget(QWidget* parent)
-    : QWidget(parent)
-    , tableView_(new QTableView(this))
+    : RecordTablePanel(parent)
     , model_(new SubmoduleTableModel(this))
-    , toolbar_(new QToolBar(this))
 {
     setupUI();
 }
@@ -175,7 +175,7 @@ SubmoduleWidget::SubmoduleWidget(QWidget* parent)
 
 void SubmoduleWidget::setSubmodules(std::vector<git::SubmoduleInfo> submodules) {
     model_->setSubmodules(std::move(submodules));
-    tableView_->resizeColumnsToContents();
+    table_->resizeColumnsToContents();
 }
 
 void SubmoduleWidget::clear() {
@@ -187,17 +187,11 @@ void SubmoduleWidget::clear() {
 // ---------------------------------------------------------------------------
 
 QString SubmoduleWidget::selectedSubmoduleName() const {
-    const auto indexes = tableView_->selectionModel()->selectedRows();
-    if (indexes.isEmpty())
-        return {};
-    return model_->nameAtRow(indexes.first().row());
+    return model_->nameAtRow(selectedRow());
 }
 
 QString SubmoduleWidget::selectedSubmodulePath() const {
-    const auto indexes = tableView_->selectionModel()->selectedRows();
-    if (indexes.isEmpty())
-        return {};
-    return model_->pathAtRow(indexes.first().row());
+    return model_->pathAtRow(selectedRow());
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +223,7 @@ void SubmoduleWidget::onDeinitClicked() {
 }
 
 void SubmoduleWidget::onContextMenu(const QPoint& pos) {
-    const QModelIndex index = tableView_->indexAt(pos);
+    const QModelIndex index = table_->indexAt(pos);
     if (!index.isValid())
         return;
 
@@ -265,7 +259,7 @@ void SubmoduleWidget::onContextMenu(const QPoint& pos) {
         QApplication::clipboard()->setText(url);
     });
 
-    menu.exec(tableView_->viewport()->mapToGlobal(pos));
+    menu.exec(table_->viewport()->mapToGlobal(pos));
 }
 
 // ---------------------------------------------------------------------------
@@ -273,13 +267,8 @@ void SubmoduleWidget::onContextMenu(const QPoint& pos) {
 // ---------------------------------------------------------------------------
 
 void SubmoduleWidget::setupUI() {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-
-    // Toolbar
-    toolbar_->setIconSize(QSize(16, 16));
-    toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    // Toolbar actions (toolbar/table scaffold lives in
+    // RecordTablePanel — shared with every record-table panel).
 
     initAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("document-new")),
@@ -309,26 +298,10 @@ void SubmoduleWidget::setupUI() {
     connect(deinitAction_, &QAction::triggered,
             this, &SubmoduleWidget::onDeinitClicked);
 
-    layout->addWidget(toolbar_);
-
-    // Table view
-    tableView_->setModel(model_);
-    tableView_->setAlternatingRowColors(true);
-    tableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    tableView_->setSelectionMode(QAbstractItemView::SingleSelection);
-    tableView_->setShowGrid(false);
-    tableView_->setContextMenuPolicy(Qt::CustomContextMenu);
-    tableView_->verticalHeader()->setVisible(false);
-    tableView_->verticalHeader()->setDefaultSectionSize(22);
-
-    auto* hdr = tableView_->horizontalHeader();
-    hdr->setStretchLastSection(true);
-    hdr->setSectionResizeMode(QHeaderView::ResizeToContents);
-
-    layout->addWidget(tableView_, 1);
+    initPanel(model_);
 
     // Connections
-    connect(tableView_, &QTableView::customContextMenuRequested,
+    connect(table_, &QTableView::customContextMenuRequested,
             this, &SubmoduleWidget::onContextMenu);
 }
 

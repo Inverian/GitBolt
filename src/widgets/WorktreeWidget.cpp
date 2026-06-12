@@ -4,6 +4,8 @@
 #include <QClipboard>
 #include <QFont>
 #include <QHeaderView>
+#include <QTableView>
+#include <QToolBar>
 #include <QMenu>
 #include <QVBoxLayout>
 
@@ -140,10 +142,8 @@ bool WorktreeTableModel::isLockedAtRow(int row) const {
 // ---------------------------------------------------------------------------
 
 WorktreeWidget::WorktreeWidget(QWidget* parent)
-    : QWidget(parent)
-    , tableView_(new QTableView(this))
+    : RecordTablePanel(parent)
     , model_(new WorktreeTableModel(this))
-    , toolbar_(new QToolBar(this))
 {
     setupUI();
 }
@@ -154,7 +154,7 @@ WorktreeWidget::WorktreeWidget(QWidget* parent)
 
 void WorktreeWidget::setWorktrees(std::vector<git::WorktreeInfo> worktrees) {
     model_->setWorktrees(std::move(worktrees));
-    tableView_->resizeColumnsToContents();
+    table_->resizeColumnsToContents();
 }
 
 void WorktreeWidget::clear() {
@@ -166,24 +166,15 @@ void WorktreeWidget::clear() {
 // ---------------------------------------------------------------------------
 
 QString WorktreeWidget::selectedWorktreeName() const {
-    const auto indexes = tableView_->selectionModel()->selectedRows();
-    if (indexes.isEmpty())
-        return {};
-    return model_->nameAtRow(indexes.first().row());
+    return model_->nameAtRow(selectedRow());
 }
 
 QString WorktreeWidget::selectedWorktreePath() const {
-    const auto indexes = tableView_->selectionModel()->selectedRows();
-    if (indexes.isEmpty())
-        return {};
-    return model_->pathAtRow(indexes.first().row());
+    return model_->pathAtRow(selectedRow());
 }
 
 bool WorktreeWidget::selectedWorktreeLocked() const {
-    const auto indexes = tableView_->selectionModel()->selectedRows();
-    if (indexes.isEmpty())
-        return false;
-    return model_->isLockedAtRow(indexes.first().row());
+    return model_->isLockedAtRow(selectedRow());
 }
 
 // ---------------------------------------------------------------------------
@@ -208,7 +199,7 @@ void WorktreeWidget::onLockUnlockClicked() {
 }
 
 void WorktreeWidget::onContextMenu(const QPoint& pos) {
-    const QModelIndex index = tableView_->indexAt(pos);
+    const QModelIndex index = table_->indexAt(pos);
     if (!index.isValid())
         return;
 
@@ -248,7 +239,7 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
         QApplication::clipboard()->setText(path);
     });
 
-    menu.exec(tableView_->viewport()->mapToGlobal(pos));
+    menu.exec(table_->viewport()->mapToGlobal(pos));
 }
 
 // ---------------------------------------------------------------------------
@@ -256,13 +247,8 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
 // ---------------------------------------------------------------------------
 
 void WorktreeWidget::setupUI() {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
-
-    // Toolbar
-    toolbar_->setIconSize(QSize(16, 16));
-    toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    // Toolbar actions (toolbar/table scaffold lives in
+    // RecordTablePanel — shared with every record-table panel).
 
     addAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("list-add")),
@@ -285,26 +271,10 @@ void WorktreeWidget::setupUI() {
     connect(lockUnlockAction_, &QAction::triggered,
             this, &WorktreeWidget::onLockUnlockClicked);
 
-    layout->addWidget(toolbar_);
-
-    // Table view
-    tableView_->setModel(model_);
-    tableView_->setAlternatingRowColors(true);
-    tableView_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    tableView_->setSelectionMode(QAbstractItemView::SingleSelection);
-    tableView_->setShowGrid(false);
-    tableView_->setContextMenuPolicy(Qt::CustomContextMenu);
-    tableView_->verticalHeader()->setVisible(false);
-    tableView_->verticalHeader()->setDefaultSectionSize(22);
-
-    auto* hdr = tableView_->horizontalHeader();
-    hdr->setStretchLastSection(true);
-    hdr->setSectionResizeMode(QHeaderView::ResizeToContents);
-
-    layout->addWidget(tableView_, 1);
+    initPanel(model_);
 
     // Connections
-    connect(tableView_, &QTableView::customContextMenuRequested,
+    connect(table_, &QTableView::customContextMenuRequested,
             this, &WorktreeWidget::onContextMenu);
 }
 

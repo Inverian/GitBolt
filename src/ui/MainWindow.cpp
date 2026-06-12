@@ -1,5 +1,8 @@
 #include "ui/MainWindow.h"
 
+#include "ui/InlineOpIndicator.h"
+#include "ui/RepoCommandController.h"
+
 #include <QFutureWatcher>
 #include <QtConcurrent>
 #include "ui/RepositoryView.h"
@@ -126,6 +129,7 @@ MainWindow::MainWindow(QWidget* parent)
     // --- Core services ---
     gitService_ = new services::GitService(this);
     settingsService_ = new conf::SettingsService(this);
+    repoCmd_ = new RepoCommandController(gitService_, this, this);
 
     // Apply startup window size. Two modes, controlled by the user
     // setting `restoreLastWindowSize()`:
@@ -292,6 +296,57 @@ void MainWindow::createMenuBar()
         connect(aboutAct, &QAction::triggered, this, &MainWindow::showAbout);
     }
 #endif
+    // Each top-level menu is built by its own function — pure
+    // code motion out of what used to be a single ~3,100-line
+    // body. Order here defines menu-bar order.
+    buildFileMenu();
+    buildRepositoryMenu();
+    buildNavigateMenu();
+    buildViewMenu();
+    buildCommandsMenu();
+    buildPluginsMenu();
+    buildToolsMenu();
+    buildHelpMenu();
+
+
+    // Force icon visibility on every QAction in the menu bar and its
+    // submenus. macOS-specific: even with AA_DontShowIconsInMenus set
+    // to false, Qt6 sometimes defaults per-action visibility to false.
+    std::function<void(QWidget*)> enableIcons = [&](QWidget* w) {
+        for (QAction* a : w->actions()) {
+            a->setIconVisibleInMenu(true);
+            if (a->menu()) enableIcons(a->menu());
+        }
+    };
+    enableIcons(menuBar());
+
+    // Guarantee every menu action is addressable by the test bridge
+    // (docs/AGENT_TESTING.md): assign a stable objectName derived
+    // from the menu path to any action that doesn't already have an
+    // explicit one. New features SHOULD still call setObjectName()
+    // themselves — an explicit name survives a display-text change,
+    // whereas this fallback is derived from the text — but this
+    // ensures nothing is ever untestable, including actions added
+    // later by someone who forgets. See assignActionObjectNames().
+    assignActionObjectNames(menuBar(), QString());
+
+    // Now that every action is named, build the shortcut registry
+    // and apply any persisted user overrides.
+    collectAndApplyShortcuts();
+
+    // Navigate, View, and Commands only make sense with a repository
+    // open. Gray out every child action on the dashboard/home screen
+    // so the menus still open but every item is disabled — matching
+    // GitExtensions' behavior. We disable the children (not the
+    // top-level menu via menuAction()) because Qt's Fusion style on
+    // macOS does not visibly dim a disabled menu bar title, but it
+    // DOES dim each disabled item in the dropdown. Toggling in
+    // onRepositoryOpened() and the Close action keeps this in sync.
+    setRepoOnlyMenusEnabled(false);
+}
+
+void MainWindow::buildFileMenu()
+{
 
     // ---- File ----
     auto* fileMenu = menuBar()->addMenu(tr("&File"));
@@ -345,6 +400,10 @@ void MainWindow::createMenuBar()
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, qApp, &QApplication::quit);
     fileMenu->addAction(quitAction);
+}
+
+void MainWindow::buildRepositoryMenu()
+{
 
     // ---- Repository ----
     //
@@ -369,16 +428,11 @@ void MainWindow::createMenuBar()
 
         // Mirror what runRemoteOp does for fetch/pull/push: show an
         // inline indicator so the click is visible. Refresh fires
-        // five async ops in parallel and there's no single "done"
+        // six async ops in parallel and there's no single "done"
         // signal to listen for, so we just flash the label for a
         // short window — enough to confirm the click registered.
-        if (remoteOpClearTimer_ && remoteOpClearTimer_->isActive())
-            remoteOpClearTimer_->stop();
-        if (remoteOpLabel_) {
-            remoteOpLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { color: palette(window-text); font-style: italic; }"));
-            remoteOpLabel_->setText(tr("Refreshing…"));
-        }
+        if (opIndicator_)
+            opIndicator_->flash(tr("Refreshing…"), 1500);
         statusBar()->showMessage(tr("Refreshing…"), 1500);
 
         gitService_->refreshStatus();
@@ -387,18 +441,6 @@ void MainWindow::createMenuBar()
         gitService_->refreshStashes();
         gitService_->refreshSubmodules();
         gitService_->refreshTags();
-
-        if (!remoteOpClearTimer_) {
-            remoteOpClearTimer_ = new QTimer(this);
-            remoteOpClearTimer_->setSingleShot(true);
-            connect(remoteOpClearTimer_, &QTimer::timeout, this, [this]() {
-                if (remoteOpLabel_) {
-                    remoteOpLabel_->clear();
-                    remoteOpLabel_->setStyleSheet(QString());
-                }
-            });
-        }
-        remoteOpClearTimer_->start(1500);
     });
     repoMenu->addAction(refreshAction_);
 
@@ -573,12 +615,10 @@ void MainWindow::createMenuBar()
                     });
             connect(widget, &widgets::SubmoduleWidget::syncRequested,
                     this, [this](const QString& n) {
-                        auto out = gitService_->process().run(
-                            {"submodule", "sync", "--",
-                             n.toStdString()});
-                        handleProcessResult(
-                            this, tr("Submodule Sync Failed"), out);
-                        gitService_->refreshSubmodules();
+                        repoCmd_->run({"submodule", "sync", "--",
+                                       n.toStdString()},
+                                      tr("Submodule Sync Failed"),
+                                      RepoCommandController::RefreshSubmodules);
                     });
             connect(widget, &widgets::SubmoduleWidget::deinitRequested,
                     this, [this, dlg](const QString& n) {
@@ -594,12 +634,10 @@ void MainWindow::createMenuBar()
                                "Init + Update).").arg(n));
                         if (answer != QMessageBox::Yes)
                             return;
-                        auto out = gitService_->process().run(
-                            {"submodule", "deinit", "-f", "--",
-                             n.toStdString()});
-                        handleProcessResult(
-                            this, tr("Submodule Deinit Failed"), out);
-                        gitService_->refreshSubmodules();
+                        repoCmd_->run({"submodule", "deinit", "-f",
+                                       "--", n.toStdString()},
+                                      tr("Submodule Deinit Failed"),
+                                      RepoCommandController::RefreshSubmodules);
                     });
             connect(widget, &widgets::SubmoduleWidget::openRequested,
                     this, [](const QString& p) {
@@ -620,11 +658,11 @@ void MainWindow::createMenuBar()
         a->setObjectName(QStringLiteral("repository.update-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"submodule", "update", "--init", "--recursive"},
-                /*timeoutMs=*/120000);
-            handleProcessResult(this, tr("Submodule Update Failed"), out);
-            gitService_->refreshSubmodules();
+            repoCmd_->run({"submodule", "update", "--init",
+                           "--recursive"},
+                          tr("Submodule Update Failed"),
+                          RepoCommandController::RefreshSubmodules,
+                          nullptr, /*timeoutMs=*/120000);
         });
         repoMenu->addAction(a);
     }
@@ -636,10 +674,9 @@ void MainWindow::createMenuBar()
         a->setObjectName(QStringLiteral("repository.synchronize-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"submodule", "sync", "--recursive"});
-            handleProcessResult(this, tr("Submodule Sync Failed"), out);
-            gitService_->refreshSubmodules();
+            repoCmd_->run({"submodule", "sync", "--recursive"},
+                          tr("Submodule Sync Failed"),
+                          RepoCommandController::RefreshSubmodules);
         });
         repoMenu->addAction(a);
     }
@@ -833,10 +870,9 @@ void MainWindow::createMenuBar()
         initA->setObjectName(QStringLiteral("repository.sparse-working-copy.initialize-cone-mode"));
         connect(initA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            const auto out = gitService_->process().run(
-                {"sparse-checkout", "init", "--cone"});
-            handleProcessResult(this, tr("Sparse Init Failed"), out);
-            gitService_->refreshStatus();
+            repoCmd_->run({"sparse-checkout", "init", "--cone"},
+                          tr("Sparse Init Failed"),
+                          RepoCommandController::RefreshStatus);
         });
         sub->addAction(initA);
 
@@ -904,10 +940,9 @@ void MainWindow::createMenuBar()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (confirm != QMessageBox::Yes) return;
-            const auto out = gitService_->process().run(
-                {"sparse-checkout", "disable"});
-            handleProcessResult(this, tr("Sparse Disable Failed"), out);
-            gitService_->refreshStatus();
+            repoCmd_->run({"sparse-checkout", "disable"},
+                          tr("Sparse Disable Failed"),
+                          RepoCommandController::RefreshStatus);
         });
         sub->addAction(disableA);
     }
@@ -967,6 +1002,10 @@ void MainWindow::createMenuBar()
             commitAction_->setText(tr("Co&mmit..."));
     });
     repoMenu->addAction(closeAction);
+}
+
+void MainWindow::buildNavigateMenu()
+{
 
     // ---- Navigate ----
     navMenu_ = menuBar()->addMenu(tr("&Navigate"));
@@ -1247,6 +1286,10 @@ void MainWindow::createMenuBar()
         });
         navMenu->addAction(a);
     }
+}
+
+void MainWindow::buildViewMenu()
+{
 
     // ---- View ----
     viewMenu_ = menuBar()->addMenu(tr("&View"));
@@ -1477,12 +1520,12 @@ void MainWindow::createMenuBar()
                         .arg(sha.left(8)));
                 if (answer != QMessageBox::Yes)
                     return;
-                auto out = gitService_->process().run(
-                    {"checkout", sha.toStdString()});
-                handleProcessResult(dlg, tr("Checkout Failed"), out);
-                gitService_->refreshStatus();
-                gitService_->refreshLog();
-                gitService_->refreshBranches();
+                repoCmd_->run({"checkout", sha.toStdString()},
+                              tr("Checkout Failed"),
+                              RepoCommandController::RefreshStatus
+                                  | RepoCommandController::RefreshLog
+                                  | RepoCommandController::RefreshBranches,
+                              dlg);
                 dlg->refreshCurrentRef();
             });
             connect(dlg, &dialogs::ReflogDialog::resetRequested,
@@ -1500,13 +1543,13 @@ void MainWindow::createMenuBar()
                     dlg, tr("Reset Branch"), warning);
                 if (answer != QMessageBox::Yes)
                     return;
-                auto out = gitService_->process().run(
-                    {"reset", "--" + mode.toStdString(),
-                     sha.toStdString()});
-                handleProcessResult(dlg, tr("Reset Failed"), out);
-                gitService_->refreshStatus();
-                gitService_->refreshLog();
-                gitService_->refreshBranches();
+                repoCmd_->run({"reset", "--" + mode.toStdString(),
+                               sha.toStdString()},
+                              tr("Reset Failed"),
+                              RepoCommandController::RefreshStatus
+                                  | RepoCommandController::RefreshLog
+                                  | RepoCommandController::RefreshBranches,
+                              dlg);
                 dlg->refreshCurrentRef();
             });
 
@@ -1759,6 +1802,10 @@ void MainWindow::createMenuBar()
                      QStringLiteral("hash"),
                      static_cast<int>(models::CommitLogColumn::Hash),
                      QStringLiteral("view/showHashColumn"));
+}
+
+void MainWindow::buildCommandsMenu()
+{
 
     // ---- Commands ----
     //
@@ -1794,11 +1841,9 @@ void MainWindow::createMenuBar()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (ret != QMessageBox::Yes) return;
-            auto out = gitService_->process().run(
-                {"reset", "--soft", "HEAD~1"});
-            handleProcessResult(this, tr("Undo Failed"), out);
-            gitService_->refreshStatus();
-            gitService_->refreshLog();
+            repoCmd_->run({"reset", "--soft", "HEAD~1"},
+                          tr("Undo Failed"),
+                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog);
         });
         cmdMenu->addAction(a);
     }
@@ -1842,17 +1887,11 @@ void MainWindow::createMenuBar()
         remoteOpRunning_ = true;
         lastRemoteOpFailed_ = false;
 
-        // Cancel any pending "clear the label" timer from a previous
-        // op — otherwise a quick second click could clear our label
-        // mid-op when the old timer fires.
-        if (remoteOpClearTimer_ && remoteOpClearTimer_->isActive())
-            remoteOpClearTimer_->stop();
-
-        if (remoteOpLabel_) {
-            remoteOpLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { color: palette(window-text); font-style: italic; }"));
-            remoteOpLabel_->setText(startMsg);
-        }
+        // start() also cancels any pending auto-clear from a
+        // previous op, so a stale timer can't blank this message
+        // mid-run.
+        if (opIndicator_)
+            opIndicator_->start(startMsg);
         statusBar()->showMessage(startMsg);
         if (sourceAction) sourceAction->setEnabled(false);
 
@@ -2055,10 +2094,9 @@ void MainWindow::createMenuBar()
                     QMessageBox::Cancel);
                 if (ret != QMessageBox::Yes) return;
             }
-            auto out = gitService_->process().run(
-                {"reset", flag, "HEAD"});
-            handleProcessResult(this, tr("Reset Failed"), out);
-            gitService_->refreshStatus();
+            repoCmd_->run({"reset", flag, "HEAD"},
+                          tr("Reset Failed"),
+                          RepoCommandController::RefreshStatus);
         });
         cmdMenu->addAction(a);
     }
@@ -2079,10 +2117,9 @@ void MainWindow::createMenuBar()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (ret != QMessageBox::Yes) return;
-            auto out = gitService_->process().run(
-                {"clean", "-f", "-d"});
-            handleProcessResult(this, tr("Clean Failed"), out);
-            gitService_->refreshStatus();
+            repoCmd_->run({"clean", "-f", "-d"},
+                          tr("Clean Failed"),
+                          RepoCommandController::RefreshStatus);
         });
         cmdMenu->addAction(a);
     }
@@ -2216,13 +2253,11 @@ void MainWindow::createMenuBar()
                 tr("Merge which branch into the current one?"),
                 names, 0, /*editable=*/false, &ok);
             if (!ok || picked.isEmpty()) return;
-            auto out = gitService_->process().run(
-                {"merge", picked.toStdString()});
-            const bool merged =
-                handleProcessResult(this, tr("Merge Failed"), out);
-            gitService_->refreshStatus();
-            gitService_->refreshLog();
-            gitService_->refreshBranches();
+            const bool merged = repoCmd_->run(
+                {"merge", picked.toStdString()},
+                tr("Merge Failed"),
+                RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
+                    | RepoCommandController::RefreshBranches);
             if (!merged)
                 offerConflictResolution(tr("merge"));
         });
@@ -2526,11 +2561,10 @@ void MainWindow::createMenuBar()
             if (outFile.isEmpty()) return;
             const std::string format = outFile.endsWith(".tar")
                 ? "tar" : "zip";
-            auto out = gitService_->process().run(
-                {"archive", "--format=" + format,
-                 "-o", outFile.toStdString(),
-                 ref.toStdString()});
-            handleProcessResult(this, tr("Archive Failed"), out);
+            repoCmd_->run({"archive", "--format=" + format,
+                           "-o", outFile.toStdString(),
+                           ref.toStdString()},
+                          tr("Archive Failed"));
         });
         cmdMenu->addAction(a);
     }
@@ -2595,10 +2629,8 @@ void MainWindow::createMenuBar()
             if (!gitService_ || !gitService_->isOpen()) return;
             std::vector<std::string> stdArgs = {"bisect"};
             for (const auto& a : args) stdArgs.push_back(a.toStdString());
-            auto out = gitService_->process().run(stdArgs);
-            handleProcessResult(this, failTitle, out);
-            gitService_->refreshStatus();
-            gitService_->refreshLog();
+            repoCmd_->run(stdArgs, failTitle,
+                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog);
         };
 
         auto* startA = new QAction(tr("&Start..."), this);
@@ -2732,14 +2764,16 @@ void MainWindow::createMenuBar()
             std::vector<std::string> args;
             args.push_back(useAm ? "am" : "apply");
             for (const auto& f : files) args.push_back(f.toStdString());
-            auto out = gitService_->process().run(
-                args, /*timeout=*/120000);
-            handleProcessResult(this, tr("Apply Patch Failed"), out);
-            gitService_->refreshStatus();
-            gitService_->refreshLog();
+            repoCmd_->run(args, tr("Apply Patch Failed"),
+                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
+                          nullptr, /*timeoutMs=*/120000);
         });
         cmdMenu->addAction(a);
     }
+}
+
+void MainWindow::buildPluginsMenu()
+{
 
     // ---- Plugins ----
     auto* pluginsMenu = menuBar()->addMenu(tr("&Plugins"));
@@ -3221,6 +3255,10 @@ void MainWindow::createMenuBar()
                 this, &MainWindow::showSettingsDialog);
         pluginsMenu->addAction(a);
     }
+}
+
+void MainWindow::buildToolsMenu()
+{
     // "Plugins settings" removed — each plugin already gets its
     // own page under Tools → Settings (following Git Extensions'
     // model), so a separate menu entry duplicates that path.
@@ -3361,6 +3399,10 @@ void MainWindow::createMenuBar()
     connect(settingsAct, &QAction::triggered,
             this, &MainWindow::showSettingsDialog);
     toolsMenu->addAction(settingsAct);
+}
+
+void MainWindow::buildHelpMenu()
+{
 
     // ---- Help ----
     auto* helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -3440,41 +3482,6 @@ void MainWindow::createMenuBar()
     aboutMenuAct->setObjectName(QStringLiteral("help.about-gitbolt"));
     connect(aboutMenuAct, &QAction::triggered, this, &MainWindow::showAbout);
     helpMenu->addAction(aboutMenuAct);
-
-    // Force icon visibility on every QAction in the menu bar and its
-    // submenus. macOS-specific: even with AA_DontShowIconsInMenus set
-    // to false, Qt6 sometimes defaults per-action visibility to false.
-    std::function<void(QWidget*)> enableIcons = [&](QWidget* w) {
-        for (QAction* a : w->actions()) {
-            a->setIconVisibleInMenu(true);
-            if (a->menu()) enableIcons(a->menu());
-        }
-    };
-    enableIcons(menuBar());
-
-    // Guarantee every menu action is addressable by the test bridge
-    // (docs/AGENT_TESTING.md): assign a stable objectName derived
-    // from the menu path to any action that doesn't already have an
-    // explicit one. New features SHOULD still call setObjectName()
-    // themselves — an explicit name survives a display-text change,
-    // whereas this fallback is derived from the text — but this
-    // ensures nothing is ever untestable, including actions added
-    // later by someone who forgets. See assignActionObjectNames().
-    assignActionObjectNames(menuBar(), QString());
-
-    // Now that every action is named, build the shortcut registry
-    // and apply any persisted user overrides.
-    collectAndApplyShortcuts();
-
-    // Navigate, View, and Commands only make sense with a repository
-    // open. Gray out every child action on the dashboard/home screen
-    // so the menus still open but every item is disabled — matching
-    // GitExtensions' behavior. We disable the children (not the
-    // top-level menu via menuAction()) because Qt's Fusion style on
-    // macOS does not visibly dim a disabled menu bar title, but it
-    // DOES dim each disabled item in the dropdown. Toggling in
-    // onRepositoryOpened() and the Close action keeps this in sync.
-    setRepoOnlyMenusEnabled(false);
 }
 
 // Walk the Navigate / View / Commands menus and enable or disable
@@ -3668,13 +3675,8 @@ void MainWindow::createToolBar()
             // problem fetch/pull/push had. The label gets cleared
             // automatically by the next branchesReady (which the
             // checkout triggers via refreshBranches).
-            if (remoteOpClearTimer_ && remoteOpClearTimer_->isActive())
-                remoteOpClearTimer_->stop();
-            if (remoteOpLabel_) {
-                remoteOpLabel_->setStyleSheet(QStringLiteral(
-                    "QLabel { color: palette(window-text); font-style: italic; }"));
-                remoteOpLabel_->setText(tr("Switching to %1…").arg(name));
-            }
+            if (opIndicator_)
+                opIndicator_->start(tr("Switching to %1…").arg(name));
             statusBar()->showMessage(
                 tr("Switching to %1…").arg(name), 2000);
 
@@ -3690,34 +3692,18 @@ void MainWindow::createToolBar()
             lastRemoteOpFailed_ = false;
             gitService_->checkoutBranch(name);
 
-            if (remoteOpLabel_) {
+            if (opIndicator_) {
                 if (lastRemoteOpFailed_) {
-                    QString status = statusBar()->currentMessage();
+                    const QString status = statusBar()->currentMessage();
                     QString oneLine = status;
                     oneLine.replace(QChar('\n'), QStringLiteral(" | "));
                     oneLine.replace(QChar('\r'), QString());
-                    remoteOpLabel_->setStyleSheet(QStringLiteral(
-                        "QLabel { color: #c43c3c; font-weight: bold; }"));
-                    remoteOpLabel_->setText(tr("✗ %1").arg(oneLine));
-                    remoteOpLabel_->setToolTip(status);
+                    opIndicator_->fail(oneLine, status, 6000);
                 } else {
-                    remoteOpLabel_->setStyleSheet(QStringLiteral(
-                        "QLabel { color: #2e9c36; font-weight: bold; }"));
-                    remoteOpLabel_->setText(tr("✓ Switched to %1").arg(name));
-                    remoteOpLabel_->setToolTip(QString());
+                    opIndicator_->succeed(
+                        tr("Switched to %1").arg(name), 2500);
                 }
             }
-            if (!remoteOpClearTimer_) {
-                remoteOpClearTimer_ = new QTimer(this);
-                remoteOpClearTimer_->setSingleShot(true);
-                connect(remoteOpClearTimer_, &QTimer::timeout, this, [this]() {
-                    if (remoteOpLabel_) {
-                        remoteOpLabel_->clear();
-                        remoteOpLabel_->setStyleSheet(QString());
-                    }
-                });
-            }
-            remoteOpClearTimer_->start(lastRemoteOpFailed_ ? 6000 : 2500);
         });
         branchComboAction_ = toolbar->addWidget(branchCombo_);
     }
@@ -3784,6 +3770,7 @@ void MainWindow::createToolBar()
     // while the op runs and "✓ Fetch complete" (or red "✗ failed")
     // afterwards.
     remoteOpLabel_ = new QLabel(toolbar);
+    opIndicator_ = new InlineOpIndicator(remoteOpLabel_, this);
     remoteOpLabel_->setContentsMargins(12, 0, 12, 0);
     remoteOpLabel_->setText(QString());
     remoteOpLabelAction_ = toolbar->addWidget(remoteOpLabel_);
@@ -4050,11 +4037,10 @@ void MainWindow::setupConnections()
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
                 this, [this](const QString& oldName, const QString& newName) {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"branch", "-m", oldName.toStdString(),
-                 newName.toStdString()});
-            handleProcessResult(this, tr("Rename Branch Failed"), out);
-            gitService_->refreshBranches();
+            repoCmd_->run({"branch", "-m", oldName.toStdString(),
+                           newName.toStdString()},
+                          tr("Rename Branch Failed"),
+                          RepoCommandController::RefreshBranches);
         });
         connect(branchTree, &widgets::BranchTreeWidget::mergeRequested,
                 this, [this](const QString& name) {
@@ -4119,12 +4105,12 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     // Only the first open of a burst snapshots; if another open is
     // already pending, the current widget/title ARE the loading
     // screen, which would be a useless revert target.
-    if (pendingOpenPath_.isEmpty()) {
-        widgetBeforeOpen_ = centralStack_->currentWidget();
-        titleBeforeOpen_  = windowTitle();
+    if (!pendingOpen_.active()) {
+        pendingOpen_.widgetBefore = centralStack_->currentWidget();
+        pendingOpen_.titleBefore  = windowTitle();
     }
-    pendingOpenPath_   = path;
-    awaitingInitialLog_ = true;
+    pendingOpen_.path   = path;
+    pendingOpen_.awaitingInitialLog = true;
 
     const QString repoName = QDir(path).dirName();
     setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? path : repoName));
@@ -4188,7 +4174,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // Async open landed (or a sync open from another path
     // completed) — no longer pending. The loading overlay stays up
     // until the first commit-log page arrives in onLogReady.
-    pendingOpenPath_.clear();
+    pendingOpen_.path.clear();
 
     // Lead with the repo name (the working-tree directory's
     // basename) instead of the app name. "GitBolt - /path" was
@@ -4293,8 +4279,8 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
     // refreshLog always emits for offset 0), so drop the loading
     // overlay. Stale logReady from a previous repo can't get here:
     // GitService discards results whose repository was swapped out.
-    if (offset == 0 && awaitingInitialLog_) {
-        awaitingInitialLog_ = false;
+    if (offset == 0 && pendingOpen_.awaitingInitialLog) {
+        pendingOpen_.awaitingInitialLog = false;
         if (repoView_)
             repoView_->hideLoading();
     }
@@ -4302,8 +4288,8 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
 
 void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& error)
 {
-    pendingOpenPath_.clear();
-    awaitingInitialLog_ = false;
+    pendingOpen_.path.clear();
+    pendingOpen_.awaitingInitialLog = false;
     if (repoView_)
         repoView_->hideLoading();
 
@@ -4312,9 +4298,9 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         // repository — put the user back where they were and
         // repopulate the models we cleared optimistically. The
         // refreshes are async and cheap for an already-open repo.
-        setWindowTitle(titleBeforeOpen_);
+        setWindowTitle(pendingOpen_.titleBefore);
         centralStack_->setCurrentWidget(
-            widgetBeforeOpen_ ? widgetBeforeOpen_
+            pendingOpen_.widgetBefore ? pendingOpen_.widgetBefore
                               : static_cast<QWidget*>(dashboardView_));
         setRepoActionsEnabled(true);
         setRepoOnlyMenusEnabled(true);  // re-arm for the still-open repo
@@ -4615,46 +4601,26 @@ void MainWindow::offerConflictResolution(const QString& operation)
 // the inline label + status bar + clear timer accordingly.
 void MainWindow::finishRemoteOpFeedback(const QString& successMsg)
 {
-    if (remoteOpLabel_) {
+    if (opIndicator_) {
         if (lastRemoteOpFailed_) {
             // The operationFailed handler already set the status-bar
             // text to "fetch failed: <err>" and persists it long
             // enough; mirror it inline in red. Collapse any newlines
             // (git stderr is multi-line: "remote: …\nfatal: …\n") to
-            // " | " so the toolbar label stays one row tall, and
-            // park the full text in a tooltip in case it elides.
-            QString status = statusBar()->currentMessage();
+            // " | " so the toolbar label stays one row tall; the
+            // tooltip carries the full text in case it elides.
+            const QString status = statusBar()->currentMessage();
             QString oneLine = status;
             oneLine.replace(QChar('\n'), QStringLiteral(" | "));
             oneLine.replace(QChar('\r'), QString());
-            remoteOpLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { color: #c43c3c; font-weight: bold; }"));
-            remoteOpLabel_->setText(tr("✗ %1").arg(oneLine));
-            remoteOpLabel_->setToolTip(status);
+            opIndicator_->fail(oneLine, status, 8000);
         } else {
-            remoteOpLabel_->setStyleSheet(QStringLiteral(
-                "QLabel { color: #2e9c36; font-weight: bold; }"));
-            remoteOpLabel_->setText(tr("✓ %1").arg(successMsg));
-            remoteOpLabel_->setToolTip(QString());
+            opIndicator_->succeed(successMsg, 4000);
         }
     }
 
     if (!lastRemoteOpFailed_)
         statusBar()->showMessage(successMsg, 4000);
-
-    // Clear the inline label after a delay. Lazily construct the
-    // timer on first use so the constructor doesn't pay for it.
-    if (!remoteOpClearTimer_) {
-        remoteOpClearTimer_ = new QTimer(this);
-        remoteOpClearTimer_->setSingleShot(true);
-        connect(remoteOpClearTimer_, &QTimer::timeout, this, [this]() {
-            if (remoteOpLabel_) {
-                remoteOpLabel_->clear();
-                remoteOpLabel_->setStyleSheet(QString());
-            }
-        });
-    }
-    remoteOpClearTimer_->start(lastRemoteOpFailed_ ? 8000 : 4000);
 }
 
 } // namespace gitbolt::ui

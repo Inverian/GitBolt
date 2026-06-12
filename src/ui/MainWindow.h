@@ -29,6 +29,8 @@ namespace gitbolt::ui {
 
 class RepositoryView;
 class DashboardView;
+class InlineOpIndicator;
+class RepoCommandController;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -69,6 +71,17 @@ private:
 
 private:
     void createMenuBar();
+    // Per-menu builders — one function per top-level menu, called in
+    // menu-bar order by createMenuBar(). Pure structure; handlers
+    // they declare delegate to GitService / repoCmd_ helpers.
+    void buildFileMenu();
+    void buildRepositoryMenu();
+    void buildNavigateMenu();
+    void buildViewMenu();
+    void buildCommandsMenu();
+    void buildPluginsMenu();
+    void buildToolsMenu();
+    void buildHelpMenu();
     void createToolBar();
     /// Enable or disable every child action under the Navigate,
     /// View, and Commands menus. Called with `false` when no repo
@@ -130,20 +143,37 @@ private:
     conf::ThemeService*     themeService_    = nullptr;  // owned by main()
     models::CommitLogModel* commitLogModel_  = nullptr;
 
-    // Async-open state. pendingOpenPath_ is non-empty while a
+    // Async-open state. pendingOpen_.path is non-empty while a
     // GitService::openRepositoryAsync is in flight; the snapshot
     // pair records where the user was before the optimistic switch
     // to the repo view so a failed open can put them back (only the
     // FIRST open of a burst snapshots — a second open while one is
     // pending must not capture the loading screen itself).
-    // awaitingInitialLog_ latches the spinner: it's armed on open
+    // pendingOpen_.awaitingInitialLog latches the spinner: armed on open
     // and cleared by the first logReady(offset==0), which is
     // guaranteed to arrive (refreshLog emits an empty page even on
     // walk errors).
-    QString  pendingOpenPath_;
-    QWidget* widgetBeforeOpen_ = nullptr;
-    QString  titleBeforeOpen_;
-    bool     awaitingInitialLog_ = false;
+    // The whole in-flight-open record lives in one value so the
+    // begin (openRepositoryAtPath), success (onRepositoryOpened),
+    // and failure (onRepositoryOpenFailed) handlers can't half-
+    // update it. This is the session state the review's
+    // "RepoSessionController" sketch wanted isolated; the handlers
+    // stay on MainWindow because they ARE window manipulation
+    // (title, central stack, model clears).
+    struct PendingOpen {
+        QString  path;                 // non-empty while in flight
+        QWidget* widgetBefore = nullptr;  // revert target on failure
+        QString  titleBefore;
+        bool     awaitingInitialLog = false;  // spinner latch
+
+        bool active() const { return !path.isEmpty(); }
+        void clear() {
+            path.clear();
+            widgetBefore = nullptr;
+            titleBefore.clear();
+            awaitingInitialLog = false;
+        }
+    } pendingOpen_;
 
     QStackedWidget* centralStack_  = nullptr;
     DashboardView*  dashboardView_ = nullptr;
@@ -259,7 +289,12 @@ private:
     // bar at the bottom of the window is easy to miss.
     QLabel*  remoteOpLabel_      = nullptr;
     QAction* remoteOpLabelAction_ = nullptr;
-    QTimer*  remoteOpClearTimer_ = nullptr;
+    // Inline toolbar op narration (start/succeed/fail/flash) — owns
+    // the auto-clear timer that three sites used to hand-roll.
+    InlineOpIndicator* opIndicator_ = nullptr;
+    // Shared guard→run→report→refresh spine for menu actions that
+    // shell out to git.
+    RepoCommandController* repoCmd_ = nullptr;
 };
 
 } // namespace gitbolt::ui

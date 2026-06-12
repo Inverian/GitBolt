@@ -4,8 +4,7 @@
 
 #include <QAbstractTableModel>
 #include <QAction>
-#include <QTableView>
-#include <QToolBar>
+#include "widgets/RecordTablePanel.h"
 #include <QWidget>
 #include <vector>
 
@@ -56,7 +55,7 @@ private:
 // WorktreeWidget
 // ---------------------------------------------------------------------------
 
-class WorktreeWidget : public QWidget {
+class WorktreeWidget : public RecordTablePanel {
     Q_OBJECT
 public:
     explicit WorktreeWidget(QWidget* parent = nullptr);
@@ -82,9 +81,7 @@ private:
     QString selectedWorktreePath() const;
     bool selectedWorktreeLocked() const;
 
-    QTableView* tableView_ = nullptr;
     WorktreeTableModel* model_ = nullptr;
-    QToolBar* toolbar_ = nullptr;
     QAction* addAction_ = nullptr;
     QAction* removeAction_ = nullptr;
     QAction* lockUnlockAction_ = nullptr;

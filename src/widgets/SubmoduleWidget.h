@@ -4,8 +4,7 @@
 
 #include <QAbstractTableModel>
 #include <QAction>
-#include <QTableView>
-#include <QToolBar>
+#include "widgets/RecordTablePanel.h"
 #include <QWidget>
 #include <vector>
 
@@ -58,7 +57,7 @@ private:
 // SubmoduleWidget
 // ---------------------------------------------------------------------------
 
-class SubmoduleWidget : public QWidget {
+class SubmoduleWidget : public RecordTablePanel {
     Q_OBJECT
 public:
     explicit SubmoduleWidget(QWidget* parent = nullptr);
@@ -85,9 +84,7 @@ private:
     QString selectedSubmoduleName() const;
     QString selectedSubmodulePath() const;
 
-    QTableView* tableView_ = nullptr;
     SubmoduleTableModel* model_ = nullptr;
-    QToolBar* toolbar_ = nullptr;
     QAction* initAction_ = nullptr;
     QAction* updateAction_ = nullptr;
     QAction* syncAction_ = nullptr;
