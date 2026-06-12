@@ -16,7 +16,8 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - **Power user features** — Interactive rebase, blame drill-down, three-way merge, Git Flow
 - **Lightweight** — Compiled binary, hardware-accelerated rendering
 - **Cross-platform** — Identical experience on macOS, Linux, and Windows
-- **Extensible** — Plugin system for custom workflows
+- **Scriptable** — env-gated test/automation bridge drives the full UI
+  from scripts and AI agents (see docs/AGENT_TESTING.md)
 
 ---
 
@@ -69,9 +70,9 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
   tracking branches)
 - File-status legend tooltip in the Commit dialog headers (hover the
   ⓘ icon to see what M / A / D / R / U / ? mean)
-- Plugin system with built-in extensions:
-  - Background fetch with new commit notifications
-  - Repository statistics with charts
+- Built-in background tools:
+  - Periodic fetch with new-commit notifications
+  - Repository statistics summary
 
 ### Platform Integration
 - macOS Finder Sync extension ("Open in GitBolt" context menu)
@@ -83,7 +84,7 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 
 ## Architecture
 
-GitBolt uses a **12-module architecture** following Qt convention with strict single-responsibility:
+GitBolt uses an **11-module architecture** following Qt convention with strict single-responsibility:
 
 ```
 src/
@@ -97,7 +98,6 @@ src/
 ├── widgets/    Reusable UI components (graph, diff, staging, blame, etc.)
 ├── ui/         Main windows and views (MainWindow, RepositoryView, Dashboard)
 ├── dialogs/    Modal dialogs (clone, settings, rebase, merge, etc.)
-├── plugins/    Extension system with built-in plugins
 └── app/        Application entry point and platform-specific integrations
 ```
 
@@ -116,8 +116,8 @@ editor/  widgets/             ← Rendering & reusable components
      \   /
       ui/                     ← Main windows
       |
-   dialogs/   plugins/        ← Modal UI & extensions
-      \       /
+   dialogs/                   ← Modal UI
+      |
        app/                   ← Entry point
 ```
 
@@ -132,7 +132,7 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 | **Headers and sources together** | Qt convention; matches Gittyup, KeePassXC, FreeCAD |
 | **PascalCase filenames** | Qt convention (`QMainWindow.h` style) |
 | **Background threading via QtConcurrent** | All git ops run on worker threads with QFutureWatcher signals back to UI |
-| **Paged commit log model** | `fetchMore()` with 256-row pages + sliding-window cache eviction |
+| **Paged commit log model** | `fetchMore()` with 256-row pages and incremental lane computation |
 | **Lane-based revision graph** | Greedy lane assignment with bezier merge curves, custom QStyledItemDelegate |
 
 ---
@@ -183,7 +183,7 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 11 — Git Flow & Maintenance | Complete |
 | Phase 12 — Performance & Hardening | Complete |
 
-**~28,900 lines of C++ across 185 source files.**
+**~30,300 lines of C++ across 170 source files.**
 
 ### Roadmap
 

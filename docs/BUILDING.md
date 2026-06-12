@@ -321,8 +321,12 @@ Or to see stdout/stderr in your terminal:
 **Windows:**
 
 ```cmd
-build\src\app\Debug\GitBolt.exe
+build\src\app\GitBolt.exe
 ```
+
+(With the recommended Ninja generator the build is single-config, so
+there is no `Debug\`/`Release\` subdirectory; multi-config generators
+like Visual Studio add one.)
 
 To open a specific repository on launch, pass it as an argument:
 
@@ -337,14 +341,16 @@ To open a specific repository on launch, pass it as an argument:
 GitBolt uses **QTest** integrated with **CTest**.
 
 ```bash
-cmake --build build --target gitbolt_tests
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-To run a single test executable directly with verbose output:
+Each suite is its own executable (`test_repository`, `test_revwalk`,
+`test_diff`, `test_status`, `test_commit_log_model`,
+`test_git_service`). To run one directly with verbose output:
 
 ```bash
-./build/tests/gitbolt_tests
+./build/tests/test_git_service
 ```
 
 ---
@@ -356,9 +362,8 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | Option | Default | Description |
 |---|---|---|
 | `GITBOLT_BUILD_TESTS` | `ON` | Build the unit test executables |
-| `GITBOLT_BUILD_PLUGINS` | `ON` | Build the plugin system and built-in plugins |
-| `GITBOLT_SANITIZERS` | `OFF` | Enable AddressSanitizer + UndefinedBehaviorSanitizer (Debug only) |
-| `CMAKE_BUILD_TYPE` | (none) | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` |
+| `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
+| `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 
 Example — debug build with sanitizers:
 
@@ -471,21 +476,21 @@ GitBolt builds and runs on Linux too. The instructions are very similar to macOS
 ```bash
 sudo apt update
 sudo apt install build-essential cmake ninja-build pkg-config \
-                 qt6-base-dev qt6-base-dev-tools \
-                 libgit2-dev git
+                 qt6-base-dev qt6-base-dev-tools qt6-svg-dev \
+                 libgl1-mesa-dev libgit2-dev git
 ```
 
 **Fedora:**
 
 ```bash
 sudo dnf install cmake ninja-build pkgconf-pkg-config gcc-c++ \
-                 qt6-qtbase-devel libgit2-devel git
+                 qt6-qtbase-devel qt6-qtsvg-devel libgit2-devel git
 ```
 
 **Arch:**
 
 ```bash
-sudo pacman -S cmake ninja pkgconf gcc qt6-base libgit2 git
+sudo pacman -S cmake ninja pkgconf gcc qt6-base qt6-svg libgit2 git
 ```
 
 After installing dependencies, the configure and build commands are identical to macOS.
