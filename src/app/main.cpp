@@ -125,6 +125,14 @@ int main(int argc, char* argv[]) {
     // further down for window-geometry persistence.
     gitbolt::conf::SettingsService settings;
 
+    // Let QStyleHints report the real OS scheme — applyTheme's
+    // "System" branch samples it. This MUST run before the theme is
+    // applied: resetting the scheme afterwards regenerates the
+    // application palette from the system and silently clobbers an
+    // explicit Light/Dark restore (the bug that made a persisted
+    // Dark theme come back light).
+    app.styleHints()->setColorScheme(Qt::ColorScheme::Unknown);
+
     // Initialize theme service and apply before showing any window.
     // setTheme() no-ops when the saved name equals the default, so
     // the explicit applyTheme covers the fresh-install/System case.
@@ -141,9 +149,6 @@ int main(int argc, char* argv[]) {
                      [&settings](const QString& name) {
                          settings.setTheme(name);
                      });
-
-    // Respect system dark mode as fallback
-    app.styleHints()->setColorScheme(Qt::ColorScheme::Unknown);
 
     // Check for crash report from a previous session
     if (gitbolt::util::CrashHandler::hasPendingCrashReport()) {
