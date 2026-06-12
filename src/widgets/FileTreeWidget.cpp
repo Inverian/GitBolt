@@ -2,6 +2,7 @@
 
 #include "git/Repository.h"
 #include "git/Tree.h"
+#include "services/GitService.h"
 
 #include <QAction>
 #include <QApplication>
@@ -166,11 +167,11 @@ void FileTreeWidget::setupUi()
 // Public API
 // ---------------------------------------------------------------------------
 
-void FileTreeWidget::setRepository(git::Repository* repo)
+void FileTreeWidget::setGitService(services::GitService* service)
 {
-    if (repo_ == repo)
+    if (svc_ == service)
         return;
-    repo_ = repo;
+    svc_ = service;
     clear();
 }
 
@@ -205,10 +206,14 @@ void FileTreeWidget::rebuildTree()
     preview_->clear();
     previewHeader_->setText(tr("Loading file tree…"));
 
-    if (!repo_ || currentCommit_.isZero())
+    if (!svc_ || currentCommit_.isZero())
         return;
 
-    auto walk = repo_->walkTreeAtCommit(currentCommit_);
+    // Walk under the service's repo lock — background refresh
+    // workers use the same libgit2 handle concurrently.
+    auto walk = svc_->withRepository([&](git::Repository& r) {
+        return r.walkTreeAtCommit(currentCommit_);
+    });
     if (!walk) {
         previewHeader_->setText(tr("Failed to load tree at commit %1")
                                     .arg(QString::fromStdString(
@@ -384,7 +389,7 @@ void FileTreeWidget::showBlobPreview(const git::ObjectId& blobId,
                                 .arg(path, formatSize(size)));
     preview_->clear();
 
-    if (!repo_) {
+    if (!svc_) {
         preview_->setPlainText(tr("(no repository loaded)"));
         return;
     }
@@ -395,7 +400,9 @@ void FileTreeWidget::showBlobPreview(const git::ObjectId& blobId,
         return;
     }
 
-    auto blob = repo_->readBlob(blobId);
+    auto blob = svc_->withRepository([&](git::Repository& r) {
+        return r.readBlob(blobId);
+    });
     if (!blob) {
         preview_->setPlainText(tr("(failed to read blob)"));
         return;

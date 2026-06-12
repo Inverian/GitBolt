@@ -471,25 +471,35 @@ void CommitDialog::wireConnections()
 
 void CommitDialog::updateTitle()
 {
-    if (!svc_ || !svc_->repository()) {
+    if (!svc_ || !svc_->isOpen()) {
         setWindowTitle(tr("Commit"));
         return;
     }
-    auto* repo = svc_->repository();
 
-    const QString workdir = QString::fromStdString(repo->workdir());
-    repoName_ = QDir(workdir).dirName();
+    // One locked read for everything the title needs — the dialog
+    // must not touch the Repository outside the service's repo lock
+    // (background refresh workers share the libgit2 handle).
+    struct TitleInfo {
+        QString workdir;
+        QString branch;
+    };
+    const TitleInfo info = svc_->withRepository(
+        [this](git::Repository& r) {
+            TitleInfo t;
+            t.workdir = QString::fromStdString(r.workdir());
+            if (auto branchRes = r.headBranchName(); branchRes.ok())
+                t.branch = QString::fromStdString(branchRes.value());
+            else if (r.isHeadDetached())
+                t.branch = tr("(detached HEAD)");
+            else
+                t.branch = tr("(no branch)");
+            return t;
+        });
+
+    repoName_ = QDir(info.workdir).dirName();
     if (repoName_.isEmpty())
         repoName_ = QStringLiteral("GitBolt");
-
-    auto branchRes = repo->headBranchName();
-    if (branchRes.ok()) {
-        currentBranch_ = QString::fromStdString(branchRes.value());
-    } else if (repo->isHeadDetached()) {
-        currentBranch_ = tr("(detached HEAD)");
-    } else {
-        currentBranch_ = tr("(no branch)");
-    }
+    currentBranch_ = info.branch;
 
     setWindowTitle(tr("%1 - Commit to %2").arg(repoName_, currentBranch_));
 
@@ -505,14 +515,16 @@ void CommitDialog::updateTitle()
 void CommitDialog::readCommitterFromConfig()
 {
     if (!committerLabel_) return;
-    if (!svc_ || !svc_->repository()) {
+    if (!svc_ || !svc_->isOpen()) {
         committerLabel_->setText(tr("Committer: (no repository)"));
         return;
     }
 
-    auto cfg = svc_->repository()->config();
-    const auto name  = cfg.userName();
-    const auto email = cfg.userEmail();
+    const auto [name, email] = svc_->withRepository(
+        [](git::Repository& r) {
+            auto cfg = r.config();
+            return std::make_pair(cfg.userName(), cfg.userEmail());
+        });
 
     if (name && email) {
         committerLabel_->setText(tr("Committer: %1 <%2>")
@@ -664,9 +676,10 @@ void CommitDialog::onStagedActivated(const QModelIndex& index)
 
 void CommitDialog::showDiffForUnstaged(const QString& path)
 {
-    if (!svc_ || !svc_->repository() || !diffView_) return;
+    if (!svc_ || !svc_->isOpen() || !diffView_) return;
 
-    auto res = svc_->repository()->diffIndexToWorkdir();
+    auto res = svc_->withRepository(
+        [](git::Repository& r) { return r.diffIndexToWorkdir(); });
     if (!res.ok()) {
         clearDiff();
         return;
@@ -688,9 +701,10 @@ void CommitDialog::showDiffForUnstaged(const QString& path)
 
 void CommitDialog::showDiffForStaged(const QString& path)
 {
-    if (!svc_ || !svc_->repository() || !diffView_) return;
+    if (!svc_ || !svc_->isOpen() || !diffView_) return;
 
-    auto res = svc_->repository()->diffHeadToIndex();
+    auto res = svc_->withRepository(
+        [](git::Repository& r) { return r.diffHeadToIndex(); });
     if (!res.ok()) {
         clearDiff();
         return;

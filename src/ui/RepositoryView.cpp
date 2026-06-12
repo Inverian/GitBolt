@@ -248,8 +248,9 @@ void RepositoryView::openFileExternally(const QString& path)
 {
     if (!gitService_ || !gitService_->isOpen())
         return;
-    const QString workdir =
-        QString::fromStdString(gitService_->repository()->workdir());
+    const QString workdir = QString::fromStdString(
+        gitService_->withRepository(
+            [](git::Repository& r) { return r.workdir(); }));
     const QString full = QDir(workdir).filePath(path);
     if (!QFileInfo::exists(full)) {
         QMessageBox::information(this, tr("Open Externally"),
@@ -524,14 +525,12 @@ QWidget* RepositoryView::buildDiffTab()
 void RepositoryView::setGitService(services::GitService* service)
 {
     gitService_ = service;
-    // Hand the underlying Repository* to the file tree so it can
-    // walk libgit2 directly. We deliberately use the raw Repository
-    // pointer instead of routing every read through GitService —
-    // tree walks are synchronous and lookup-only, so the extra
-    // signals/slots layer would just add latency without buying us
-    // any background-thread isolation.
+    // The file tree drives its own libgit2 reads (tree walk + blob
+    // preview). It gets the service — not a raw Repository*, which
+    // dies on every repo switch — so its reads run under the repo
+    // lock via GitService::withRepository.
     if (fileTreeWidget_)
-        fileTreeWidget_->setRepository(service ? service->repository() : nullptr);
+        fileTreeWidget_->setGitService(service);
 }
 
 void RepositoryView::setCommitLogModel(models::CommitLogModel* model)
@@ -796,17 +795,12 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
         if (commit && commit->id == targetId) {
             showCommitDetails(*commit);
             showCommitDiff(commit->id);
-            // Load the file tree for this commit. We re-bind the
-            // Repository* on every selection because setGitService
-            // ran before any repo was open — the original
-            // gitService_->repository() was nullptr at that time.
-            // setRepository is a no-op when the pointer is
-            // unchanged, so this is cheap.
-            if (fileTreeWidget_) {
-                fileTreeWidget_->setRepository(
-                    gitService_ ? gitService_->repository() : nullptr);
+            // Load the file tree for this commit. The widget holds
+            // the GitService (wired in setGitService) and resolves
+            // the live repository per read, so no per-selection
+            // pointer re-bind is needed anymore.
+            if (fileTreeWidget_)
                 fileTreeWidget_->setCommit(commit->id);
-            }
             return;
         }
     }
@@ -960,8 +954,9 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // re-walk anything. The lookup is fast (libgit2 caches the
     // tree pair) but only run when we actually have a repository.
     QString statsRow;
-    if (gitService_ && gitService_->repository()) {
-        auto diffResult = gitService_->repository()->diffCommit(commit.id);
+    if (gitService_ && gitService_->isOpen()) {
+        auto diffResult = gitService_->withRepository(
+            [&](git::Repository& r) { return r.diffCommit(commit.id); });
         if (diffResult) {
             const auto& d = *diffResult;
             statsRow = QStringLiteral(
@@ -1010,9 +1005,11 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // can be reachable from hundreds of branches in active repos,
     // which would blow out the inspector's vertical space.
     QString containsBranchesText;
-    if (gitService_ && gitService_->repository()) {
+    if (gitService_ && gitService_->isOpen()) {
         const std::string sha = commit.id.toHex();
-        auto out = gitService_->repository()->process().run(
+        // GitService::process() locks internally and returns the
+        // GitProcess by value — no repository access needed here.
+        auto out = gitService_->process().run(
             {"branch", "--all", "--contains", sha,
              "--format=%(refname:short)"},
             /*timeoutMs=*/5000);
@@ -1208,11 +1205,11 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
         changedFilesModel_->clear();
     diffWidget_->clear();
 
-    if (!gitService_ || !gitService_->repository())
+    if (!gitService_ || !gitService_->isOpen())
         return;
 
-    auto* repo = gitService_->repository();
-    auto diffResult = repo->diffCommit(commitId);
+    auto diffResult = gitService_->withRepository(
+        [&](git::Repository& r) { return r.diffCommit(commitId); });
     if (!diffResult)
         return;
 

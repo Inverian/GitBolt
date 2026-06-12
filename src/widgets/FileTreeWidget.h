@@ -15,6 +15,7 @@ class QTreeView;
 class QModelIndex;
 
 namespace gitbolt::git { class Repository; }
+namespace gitbolt::services { class GitService; }
 
 namespace gitbolt::widgets {
 
@@ -42,9 +43,13 @@ class FileTreeWidget : public QWidget {
 public:
     explicit FileTreeWidget(QWidget* parent = nullptr);
 
-    /// Set the active repository. Calling with nullptr clears the
-    /// view. Safe to call repeatedly when switching repos.
-    void setRepository(git::Repository* repo);
+    /// Set the git service whose open repository this widget browses.
+    /// Calling with nullptr clears the view. Safe to call repeatedly
+    /// when switching repos. The widget never holds a raw
+    /// git::Repository* — that pointer dies on every repo switch,
+    /// and tree walks must run under the service's repo lock anyway
+    /// (GitService::withRepository).
+    void setGitService(services::GitService* service);
 
     /// Load the tree at the given commit. If the commit is the
     /// same as the currently-loaded one this is a no-op. Pass an
@@ -81,7 +86,7 @@ private:
     static bool looksBinary(const QByteArray& data);
     static QString formatSize(quint64 bytes);
 
-    git::Repository* repo_         = nullptr;
+    services::GitService* svc_     = nullptr;
     git::ObjectId    currentCommit_;
 
     QSplitter*             splitter_     = nullptr;

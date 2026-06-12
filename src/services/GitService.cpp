@@ -774,9 +774,17 @@ void GitService::rebaseSkip() {
 
 void GitService::cherryPick(const std::vector<git::ObjectId>& commits) {
     if (!repo_) return;
-    auto* r = repo_.get();
+    // Pin the repository like every other async op does: the
+    // shared_ptr keeps the object alive across a close/switch while
+    // this job sits in the thread pool, and the staleness check
+    // drops the work instead of cherry-picking onto a repository
+    // that is no longer the open one. (This used to capture the raw
+    // pointer with no re-check — a use-after-free.)
+    std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r, commits]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_)
+            return;  // superseded: repo closed or swapped mid-flight
         for (const auto& commitId : commits) {
             auto result = r->cherryPick(commitId);
             if (!result) {

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 
 namespace gitbolt::services {
 
@@ -35,15 +36,48 @@ public:
     git::Repository* repository() const;
 
     /// Mutex that serializes all libgit2 access through this service.
-    /// UI code that calls Repository methods directly (via
-    /// `gitService->repository()->...`) should take this lock for the
-    /// duration of those calls — otherwise it races against the
-    /// background workers that GitService spawns for refreshStatus /
-    /// refreshLog / refreshBranches. libgit2 is not safe for
-    /// concurrent access on a single git_repository*. The seen-in-the-
-    /// wild crash was a malloc_zone_error inside git_pool_clear under
-    /// git_status_list_new while another worker was reading the log.
+    /// libgit2 is not safe for concurrent access on a single
+    /// git_repository*, and GitService's background workers
+    /// (refreshStatus / refreshLog / refreshBranches / the watcher-
+    /// triggered refreshes) hold this lock while they run. The
+    /// seen-in-the-wild crash was a malloc_zone_error inside
+    /// git_pool_clear under git_status_list_new while another worker
+    /// was reading the log.
+    ///
+    /// UI code should NOT lock this directly — use withRepository(),
+    /// which can't be forgotten at one of two dozen call sites.
     std::mutex& repoMutex() const { return repoMutex_; }
+
+    /// The only safe way for UI code to call git::Repository methods
+    /// directly: runs `fn(repo)` while holding repoMutex_, so the call
+    /// cannot race the background refresh workers. Returns whatever
+    /// the callable returns. When no repository is open:
+    ///   - git::Result<T> returns carry a "no repository open" error
+    ///     (so existing `.ok()` / boolean checks just work),
+    ///   - void callables are skipped,
+    ///   - anything else returns a value-initialized default.
+    /// Keep the callable small — the lock starves refresh workers
+    /// while it runs. Never call GitService methods from inside `fn`
+    /// (deadlock: the mutex is not recursive), and never let the raw
+    /// Repository& escape the lambda.
+    template <typename Fn>
+    auto withRepository(Fn&& fn) const
+        -> std::invoke_result_t<Fn&, git::Repository&>
+    {
+        using R = std::invoke_result_t<Fn&, git::Repository&>;
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        if (!repo_) {
+            if constexpr (std::is_void_v<R>) {
+                return;
+            } else if constexpr (IsGitResult<R>::value) {
+                return git::GitError(git::GitErrorCode::GenericError,
+                                     "no repository open");
+            } else {
+                return R{};
+            }
+        }
+        return std::forward<Fn>(fn)(*repo_);
+    }
 
     /// Thread-safe construction of a GitProcess for the open repository.
     /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
@@ -216,6 +250,14 @@ signals:
     void maintenanceComplete(const QString& output);
 
 private:
+    // Trait backing withRepository's closed-repo fallback: detects
+    // git::Result<T> so it can synthesize an error instead of a
+    // default-constructed value.
+    template <typename>
+    struct IsGitResult : std::false_type {};
+    template <typename T>
+    struct IsGitResult<git::Result<T>> : std::true_type {};
+
     /// Kicks the working-tree watch enumeration onto a worker and
     /// applies the result on the main thread (QFileSystemWatcher is
     /// not thread-safe). `gen` ties the apply to the open that

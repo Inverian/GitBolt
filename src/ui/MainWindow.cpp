@@ -427,7 +427,8 @@ void MainWindow::createMenuBar()
             if (!gitService_ || !gitService_->isOpen())
                 return;
             const QString path = QString::fromStdString(
-                gitService_->repository()->workdir());
+                gitService_->withRepository(
+                    [](git::Repository& r) { return r.workdir(); }));
             QDesktopServices::openUrl(QUrl::fromLocalFile(path));
         });
         repoMenu->addAction(a);
@@ -448,7 +449,8 @@ void MainWindow::createMenuBar()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
 
             auto refresh = [this, dlg]() {
-                auto res = gitService_->repository()->remotes();
+                auto res = gitService_->withRepository(
+                    [](git::Repository& r) { return r.remotes(); });
                 if (res.ok()) dlg->setRemotes(res.value());
             };
             refresh();
@@ -456,8 +458,11 @@ void MainWindow::createMenuBar()
             connect(dlg, &dialogs::RemotesDialog::addRequested,
                     this, [this, dlg, refresh](const QString& name,
                                                const QString& url) {
-                auto res = gitService_->repository()->addRemote(
-                    name.toStdString(), url.toStdString());
+                auto res = gitService_->withRepository(
+                    [&](git::Repository& r) {
+                        return r.addRemote(name.toStdString(),
+                                           url.toStdString());
+                    });
                 if (!res.ok()) {
                     QMessageBox::warning(dlg, tr("Add Remote Failed"),
                         QString::fromStdString(res.error().message()));
@@ -467,21 +472,33 @@ void MainWindow::createMenuBar()
             connect(dlg, &dialogs::RemotesDialog::editUrlRequested,
                     this, [this, dlg, refresh](const QString& name,
                                                const QString& newUrl) {
-                // Remove + re-add. If the remove succeeds but the
-                // add fails we surface the add error and the user
-                // is left without that remote — they can re-add
-                // manually. Reasonable trade-off vs. plumbing a
-                // setUrl path through Repository.
-                auto* repo = gitService_->repository();
-                auto rm = repo->removeRemote(name.toStdString());
+                // Remove + re-add, both halves under ONE repo lock
+                // so no background worker interleaves between them.
+                // If the remove succeeds but the add fails we
+                // surface the add error and the user is left without
+                // that remote — they can re-add manually. Reasonable
+                // trade-off vs. plumbing a setUrl path through
+                // Repository.
+                const auto outcome = gitService_->withRepository(
+                    [&](git::Repository& repo)
+                        -> std::pair<git::Result<void>,
+                                     git::Result<void>> {
+                        auto rm = repo.removeRemote(name.toStdString());
+                        if (!rm.ok())
+                            return {std::move(rm),
+                                    git::Result<void>::success()};
+                        auto add = repo.addRemote(
+                            name.toStdString(), newUrl.toStdString());
+                        return {std::move(rm), std::move(add)};
+                    });
+                const auto& rm = outcome.first;
                 if (!rm.ok()) {
                     QMessageBox::warning(dlg, tr("Edit URL Failed"),
                         QString::fromStdString(rm.error().message()));
                     refresh();
                     return;
                 }
-                auto add = repo->addRemote(
-                    name.toStdString(), newUrl.toStdString());
+                const auto& add = outcome.second;
                 if (!add.ok()) {
                     QMessageBox::warning(dlg, tr("Edit URL Failed"),
                         tr("Removed remote but could not re-add "
@@ -501,8 +518,10 @@ void MainWindow::createMenuBar()
                     QMessageBox::Yes | QMessageBox::Cancel,
                     QMessageBox::Cancel);
                 if (confirm != QMessageBox::Yes) return;
-                auto res = gitService_->repository()->removeRemote(
-                    name.toStdString());
+                auto res = gitService_->withRepository(
+                    [&](git::Repository& r) {
+                        return r.removeRemote(name.toStdString());
+                    });
                 if (!res.ok()) {
                     QMessageBox::warning(dlg, tr("Remove Failed"),
                         QString::fromStdString(res.error().message()));
@@ -540,7 +559,8 @@ void MainWindow::createMenuBar()
             // Prime the widget with the current submodule list and
             // keep it in sync as GitService re-emits after mutations.
             auto populate = [widget, this]() {
-                auto res = gitService_->repository()->submodules();
+                auto res = gitService_->withRepository(
+                    [](git::Repository& r) { return r.submodules(); });
                 if (res.ok())
                     widget->setSubmodules(res.value());
                 else
@@ -677,8 +697,10 @@ void MainWindow::createMenuBar()
                     this, [this]() {
                 dialogs::WorktreeDialog addDlg(this);
                 QStringList branchNames;
-                if (auto res = gitService_->repository()->branches(
-                        git::BranchType::Local); res.ok()) {
+                if (auto res = gitService_->withRepository(
+                        [](git::Repository& r) {
+                            return r.branches(git::BranchType::Local);
+                        }); res.ok()) {
                     for (const auto& b : res.value())
                         branchNames << QString::fromStdString(b.name);
                 }
@@ -728,7 +750,8 @@ void MainWindow::createMenuBar()
                                      const QString& title) {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QString workdir = QString::fromStdString(
-                gitService_->repository()->workdir());
+                gitService_->withRepository(
+                    [](git::Repository& r) { return r.workdir(); }));
             QString fullPath = workdir;
             if (!fullPath.endsWith('/')) fullPath += '/';
             fullPath += relativePath;
@@ -841,7 +864,8 @@ void MainWindow::createMenuBar()
             // honored — writing the file directly works too but
             // skips git's own validation.
             const QString workdir = QString::fromStdString(
-                gitService_->repository()->workdir());
+                gitService_->withRepository(
+                    [](git::Repository& r) { return r.workdir(); }));
             const QString filePath = workdir +
                 QStringLiteral("/.git/info/sparse-checkout");
             QFile f(filePath);
@@ -973,7 +997,8 @@ void MainWindow::createMenuBar()
                 return;
             auto* graph = repoView_->revisionGraph();
             if (!graph) return;
-            auto headRes = gitService_->repository()->head();
+            auto headRes = gitService_->withRepository(
+                [](git::Repository& r) { return r.head(); });
             if (!headRes.ok()) {
                 statusBar()->showMessage(
                     tr("Could not resolve HEAD: %1").arg(
@@ -1013,8 +1038,10 @@ void MainWindow::createMenuBar()
             if (!ok) return;
             const QString trimmed = spec.trimmed();
             if (trimmed.isEmpty()) return;
-            auto resolved = gitService_->repository()->resolveRef(
-                trimmed.toStdString());
+            auto resolved = gitService_->withRepository(
+                [&](git::Repository& r) {
+                    return r.resolveRef(trimmed.toStdString());
+                });
             if (!resolved.ok()) {
                 QMessageBox::information(this, tr("Not Found"),
                     tr("Couldn't resolve \"%1\": %2").arg(
@@ -1333,12 +1360,14 @@ void MainWindow::createMenuBar()
 
             // Build the branch list. If GitService isn't open yet
             // there's nothing to filter against; bail and revert.
-            if (!gitService_ || !gitService_->repository()) {
+            if (!gitService_ || !gitService_->isOpen()) {
                 showHead->setChecked(true);
                 return;
             }
-            auto branchesRes = gitService_->repository()
-                                   ->branches(git::BranchType::Local);
+            auto branchesRes = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return r.branches(git::BranchType::Local);
+                });
             if (!branchesRes.ok()) {
                 showHead->setChecked(true);
                 return;
@@ -1416,8 +1445,10 @@ void MainWindow::createMenuBar()
             // libgit2 reflog read finds the on-disk file.
             QStringList refs;
             refs << QStringLiteral("HEAD");
-            if (auto br = gitService_->repository()->branches(
-                    git::BranchType::Local); br.ok()) {
+            if (auto br = gitService_->withRepository(
+                    [](git::Repository& r) {
+                        return r.branches(git::BranchType::Local);
+                    }); br.ok()) {
                 for (const auto& b : br.value())
                     refs << QStringLiteral("refs/heads/%1")
                             .arg(QString::fromStdString(b.name));
@@ -1425,11 +1456,16 @@ void MainWindow::createMenuBar()
             // refSelected wiring: every selection re-runs the
             // reflog read and updates the table. Connect first
             // so the initial setRefs() trigger populates the
-            // table for HEAD.
-            auto* repo = gitService_->repository();
+            // table for HEAD. The dialog is modeless and can
+            // outlive a repo switch, so it captures the service —
+            // never the Repository*, which dies on the swap — and
+            // resolves the live repo per selection under the lock.
             connect(dlg, &dialogs::ReflogDialog::refSelected,
-                    dlg, [dlg, repo](const QString& ref) {
-                auto res = repo->reflog(ref.toStdString());
+                    dlg, [dlg, svc = gitService_](const QString& ref) {
+                auto res = svc->withRepository(
+                    [&](git::Repository& r) {
+                        return r.reflog(ref.toStdString());
+                    });
                 if (res.ok()) {
                     dlg->setEntries(res.value());
                 } else {
@@ -1955,7 +1991,8 @@ void MainWindow::createMenuBar()
 
             // Initial population from the synchronous Repository
             // call. Subsequent updates arrive via stashesReady.
-            auto initial = gitService_->repository()->stashes();
+            auto initial = gitService_->withRepository(
+                [](git::Repository& r) { return r.stashes(); });
             if (initial.ok())
                 dlg->setStashes(initial.value());
 
@@ -1983,7 +2020,8 @@ void MainWindow::createMenuBar()
                 // who has half a dozen stashes; the message line
                 // they wrote is what they remember.
                 QString message;
-                if (auto res = gitService_->repository()->stashes();
+                if (auto res = gitService_->withRepository(
+                        [](git::Repository& r) { return r.stashes(); });
                     res.ok()) {
                     for (const auto& s : res.value()) {
                         if (s.index == i) {
@@ -2091,8 +2129,10 @@ void MainWindow::createMenuBar()
         QStringList names;
         if (!gitService_ || !gitService_->isOpen())
             return names;
-        auto res = gitService_->repository()->branches(
-            git::BranchType::Local);
+        auto res = gitService_->withRepository(
+            [](git::Repository& r) {
+                return r.branches(git::BranchType::Local);
+            });
         if (!res.ok()) return names;
         for (const auto& b : res.value())
             names << QString::fromStdString(b.name);
@@ -2126,8 +2166,10 @@ void MainWindow::createMenuBar()
             // won't let you delete it and offering it to the user
             // is confusing. `branches(Local)` flags HEAD with
             // isHead = true.
-            auto branchesRes = gitService_->repository()->branches(
-                git::BranchType::Local);
+            auto branchesRes = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return r.branches(git::BranchType::Local);
+                });
             if (!branchesRes.ok()) return;
             QStringList names;
             for (const auto& b : branchesRes.value()) {
@@ -2190,8 +2232,10 @@ void MainWindow::createMenuBar()
         a->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_M));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto branchesRes = gitService_->repository()->branches(
-                git::BranchType::Local);
+            auto branchesRes = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return r.branches(git::BranchType::Local);
+                });
             if (!branchesRes.ok()) return;
             QStringList names;
             for (const auto& b : branchesRes.value()) {
@@ -2258,38 +2302,60 @@ void MainWindow::createMenuBar()
             // Branch picker: every local branch except HEAD —
             // rebasing onto your own branch is a no-op and
             // confuses the preview.
-            auto* repo = gitService_->repository();
             std::vector<git::BranchInfo> branches;
-            if (auto res = repo->branches(git::BranchType::Local);
-                res.ok()) {
+            if (auto res = gitService_->withRepository(
+                    [](git::Repository& r) {
+                        return r.branches(git::BranchType::Local);
+                    }); res.ok()) {
                 for (const auto& b : res.value()) {
                     if (!b.isHead) branches.push_back(b);
                 }
             }
             dlg->setBranches(branches);
 
+            // The dialog is modeless and survives repo switches, so
+            // the preview lambda captures the service — never a raw
+            // Repository*, which the swap destroys — and resolves
+            // the live repo per invocation, holding the repo lock
+            // for the whole resolve-and-walk so refresh workers
+            // can't interleave.
             connect(dlg, &dialogs::RebaseDialog::targetRefChanged,
-                    dlg, [dlg, repo](const QString& ref) {
+                    dlg, [dlg, svc = gitService_](const QString& ref) {
                 if (ref.trimmed().isEmpty()) return;
-                // Resolve the user-entered target → ObjectId.
-                auto onto = repo->resolveRef(ref.toStdString());
-                if (!onto.ok()) return;
+                struct RebasePreview {
+                    std::vector<git::CommitData> commits;
+                    git::ObjectId onto;
+                    bool valid = false;
+                };
+                const auto preview = svc->withRepository(
+                    [&](git::Repository& repo) {
+                        RebasePreview p;
+                        // Resolve the user-entered target → ObjectId.
+                        auto onto = repo.resolveRef(ref.toStdString());
+                        if (!onto.ok()) return p;
 
-                // Walk commits reachable from HEAD but not from
-                // the target — the canonical "what would be
-                // replayed" set. RevWalk's hide() excludes a
-                // commit and its ancestors from the walk; we
-                // also push HEAD as the starting point.
-                auto walkRes = repo->createRevWalk();
-                if (!walkRes.ok()) return;
-                auto& walk = walkRes.value();
-                walk.setSorting(git::SortOrder::TopologicalTime);
-                if (!walk.pushHead().ok()) return;
-                if (!walk.hide(onto.value()).ok()) return;
-                auto commitsRes = walk.all();
-                if (!commitsRes.ok()) return;
-                dlg->setCommitsToRebase(commitsRes.value(),
-                                        onto.value());
+                        // Walk commits reachable from HEAD but not
+                        // from the target — the canonical "what
+                        // would be replayed" set. RevWalk's hide()
+                        // excludes a commit and its ancestors from
+                        // the walk; we also push HEAD as the
+                        // starting point.
+                        auto walkRes = repo.createRevWalk();
+                        if (!walkRes.ok()) return p;
+                        auto& walk = walkRes.value();
+                        walk.setSorting(git::SortOrder::TopologicalTime);
+                        if (!walk.pushHead().ok()) return p;
+                        if (!walk.hide(onto.value()).ok()) return p;
+                        auto commitsRes = walk.all();
+                        if (!commitsRes.ok()) return p;
+                        p.commits = std::move(commitsRes).value();
+                        p.onto = onto.value();
+                        p.valid = true;
+                        return p;
+                    });
+                if (preview.valid)
+                    dlg->setCommitsToRebase(preview.commits,
+                                            preview.onto);
             });
 
             connect(dlg, &dialogs::RebaseDialog::rebaseRequested,
@@ -2342,8 +2408,10 @@ void MainWindow::createMenuBar()
                 return;
             dialogs::TagDialog dlg(this);
             QStringList branchNames;
-            if (auto res = gitService_->repository()->branches(
-                    git::BranchType::Local); res.ok()) {
+            if (auto res = gitService_->withRepository(
+                    [](git::Repository& r) {
+                        return r.branches(git::BranchType::Local);
+                    }); res.ok()) {
                 for (const auto& b : res.value())
                     branchNames << QString::fromStdString(b.name);
             }
@@ -2373,7 +2441,9 @@ void MainWindow::createMenuBar()
             if (!gitService_ || !gitService_->isOpen())
                 return;
             QStringList tagNames;
-            if (auto res = gitService_->repository()->tags(); res.ok()) {
+            if (auto res = gitService_->withRepository(
+                    [](git::Repository& r) { return r.tags(); });
+                res.ok()) {
                 for (const auto& t : res.value())
                     tagNames << QString::fromStdString(t.name);
             }
@@ -2421,24 +2491,39 @@ void MainWindow::createMenuBar()
             auto* dlg = new dialogs::CherryPickDialog(this);
             dlg->setAttribute(Qt::WA_DeleteOnClose);
 
-            auto* repo = gitService_->repository();
             // Use Repository::resolveRef so the user can paste full
             // SHAs, short SHAs (>=4 hex), branch names, tags,
             // HEAD~3, etc. — anything libgit2's revparse accepts.
-            auto resolve = [repo](const QString& spec)
+            // The dialog is modeless, so these lambdas capture the
+            // service — never a raw Repository*, which a repo switch
+            // destroys — and resolve the live repo under its lock.
+            auto resolve = [svc = gitService_](const QString& spec)
                     -> std::optional<git::ObjectId> {
                 const QString trimmed = spec.trimmed();
                 if (trimmed.isEmpty()) return std::nullopt;
-                auto res = repo->resolveRef(trimmed.toStdString());
+                auto res = svc->withRepository(
+                    [&](git::Repository& r) {
+                        return r.resolveRef(trimmed.toStdString());
+                    });
                 if (!res.ok()) return std::nullopt;
                 return res.value();
             };
 
             connect(dlg, &dialogs::CherryPickDialog::commitHashChanged,
-                    dlg, [dlg, repo, resolve](const QString& hash) {
-                auto oid = resolve(hash);
-                if (!oid) { dlg->clearCommitDetails(); return; }
-                auto cmtRes = repo->lookupCommit(*oid);
+                    dlg, [dlg, svc = gitService_](const QString& hash) {
+                const QString trimmed = hash.trimmed();
+                if (trimmed.isEmpty()) {
+                    dlg->clearCommitDetails();
+                    return;
+                }
+                // Resolve + commit lookup under one lock.
+                auto cmtRes = svc->withRepository(
+                    [&](git::Repository& r)
+                        -> git::Result<git::CommitData> {
+                        auto oid = r.resolveRef(trimmed.toStdString());
+                        if (!oid.ok()) return oid.error();
+                        return r.lookupCommit(oid.value());
+                    });
                 if (!cmtRes.ok()) {
                     dlg->clearCommitDetails();
                     return;
@@ -2517,8 +2602,10 @@ void MainWindow::createMenuBar()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (confirm != QMessageBox::Yes) return;
-            auto res = gitService_->repository()->checkout(
-                ref.trimmed().toStdString());
+            auto res = gitService_->withRepository(
+                [&](git::Repository& r) {
+                    return r.checkout(ref.trimmed().toStdString());
+                });
             if (!res.ok()) {
                 QMessageBox::warning(this, tr("Checkout Failed"),
                     QString::fromStdString(res.error().message()));
@@ -2818,8 +2905,11 @@ void MainWindow::createMenuBar()
                 }
             } guard{statusBar()};
 
-            auto* repo = gitService_->repository();
-            auto revRes = repo->process().run(
+            // GitService::process() locks internally and returns
+            // the GitProcess by value; shell calls then run without
+            // touching libgit2 state.
+            auto proc = gitService_->process();
+            auto revRes = proc.run(
                 {"rev-list", "--objects", "--all"}, /*timeout=*/120000);
             if (!revRes.ok() || !revRes.value().success()) {
                 handleProcessResult(this, tr("Find Large Files Failed"),
@@ -2845,7 +2935,9 @@ void MainWindow::createMenuBar()
 
             QProcess cat;
             cat.setWorkingDirectory(QString::fromStdString(
-                repo->workdir()));
+                gitService_->withRepository([](git::Repository& r) {
+                    return r.workdir();
+                })));
             cat.start("git", QStringList{
                 "cat-file", "--batch-check=%(objectname) "
                             "%(objecttype) %(objectsize)"});
@@ -3042,37 +3134,66 @@ void MainWindow::createMenuBar()
         a->setObjectName(QStringLiteral("plugins.statistics"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto* repo = gitService_->repository();
 
-            auto walkRes = repo->createRevWalk();
-            if (!walkRes.ok()) {
+            // One locked pass for the walk + ref counts. The repo
+            // lock is held for the whole history walk — background
+            // refreshes queue behind it; that's the price of
+            // correctness until this moves to a worker thread.
+            struct RepoStats {
+                bool ok = false;
+                QString error;
+                int commitCount = 0;
+                QHash<QString, int> commitsByAuthor;
+                int branchCount = 0;
+                int tagCount = 0;
+                int remoteCount = 0;
+                QString headBranch;
+            };
+            const RepoStats stats = gitService_->withRepository(
+                [](git::Repository& repo) {
+                    RepoStats s;
+                    auto walkRes = repo.createRevWalk();
+                    if (!walkRes.ok()) {
+                        s.error = QString::fromStdString(
+                            walkRes.error().message());
+                        return s;
+                    }
+                    auto& walk = walkRes.value();
+                    walk.setSorting(git::SortOrder::None);
+                    walk.pushHead();
+                    walk.walk([&](const git::CommitData& c) {
+                        ++s.commitCount;
+                        s.commitsByAuthor[QString::fromStdString(
+                            c.author.name)]++;
+                        return true;
+                    });
+                    if (auto br = repo.branches(git::BranchType::Local);
+                        br.ok())
+                        s.branchCount =
+                            static_cast<int>(br.value().size());
+                    if (auto tg = repo.tags(); tg.ok())
+                        s.tagCount =
+                            static_cast<int>(tg.value().size());
+                    if (auto rm = repo.remotes(); rm.ok())
+                        s.remoteCount =
+                            static_cast<int>(rm.value().size());
+                    if (auto hb = repo.headBranchName(); hb.ok())
+                        s.headBranch =
+                            QString::fromStdString(hb.value());
+                    s.ok = true;
+                    return s;
+                });
+            if (!stats.ok) {
                 QMessageBox::warning(this, tr("Statistics"),
-                    tr("Could not create revwalk: %1").arg(
-                        QString::fromStdString(
-                            walkRes.error().message())));
+                    tr("Could not create revwalk: %1").arg(stats.error));
                 return;
             }
-            auto& walk = walkRes.value();
-            walk.setSorting(git::SortOrder::None);
-            walk.pushHead();
-
-            int commitCount = 0;
-            QHash<QString, int> commitsByAuthor;
-            walk.walk([&](const git::CommitData& c) {
-                ++commitCount;
-                commitsByAuthor[QString::fromStdString(c.author.name)]++;
-                return true;
-            });
-
-            int branchCount = 0;
-            if (auto br = repo->branches(git::BranchType::Local);
-                br.ok()) branchCount = static_cast<int>(br.value().size());
-            int tagCount = 0;
-            if (auto tg = repo->tags(); tg.ok())
-                tagCount = static_cast<int>(tg.value().size());
-            int remoteCount = 0;
-            if (auto rm = repo->remotes(); rm.ok())
-                remoteCount = static_cast<int>(rm.value().size());
+            const int commitCount = stats.commitCount;
+            const QHash<QString, int>& commitsByAuthor =
+                stats.commitsByAuthor;
+            const int branchCount = stats.branchCount;
+            const int tagCount = stats.tagCount;
+            const int remoteCount = stats.remoteCount;
 
             // Top 5 contributors.
             QList<QPair<QString,int>> top;
@@ -3089,9 +3210,7 @@ void MainWindow::createMenuBar()
                 topLines << QStringLiteral("  %1 (%2)")
                     .arg(top[i].first).arg(top[i].second);
 
-            QString headBranch;
-            if (auto hb = repo->headBranchName(); hb.ok())
-                headBranch = QString::fromStdString(hb.value());
+            const QString headBranch = stats.headBranch;
 
             const QString text = tr(
                 "Repository statistics\n"
@@ -3173,7 +3292,8 @@ void MainWindow::createMenuBar()
             auto* term = new widgets::TerminalWidget(dlg);
             layout->addWidget(term);
             term->start(QString::fromStdString(
-                gitService_->repository()->workdir()));
+                gitService_->withRepository(
+                    [](git::Repository& r) { return r.workdir(); })));
             dlg->show();
         });
         toolsMenu->addAction(a);
@@ -3189,7 +3309,8 @@ void MainWindow::createMenuBar()
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const QString workdir = QString::fromStdString(
-                gitService_->repository()->workdir());
+                gitService_->withRepository(
+                    [](git::Repository& r) { return r.workdir(); }));
             const bool ok = QProcess::startDetached(
                 QStringLiteral("gitk"), QStringList{}, workdir);
             if (!ok) {
@@ -4121,16 +4242,16 @@ void MainWindow::onRepositoryOpened(const QString& path)
 
     repoPathLabel_->setText(path);
 
-    auto* repo = gitService_->repository();
-    if (repo) {
-        auto branchResult = repo->headBranchName();
-        if (branchResult) {
-            branchLabel_->setText(
-                tr("Branch: %1").arg(QString::fromStdString(*branchResult)));
-        } else {
-            branchLabel_->setText(tr("HEAD (detached)"));
-        }
-    }
+    const QString headBranch = gitService_->withRepository(
+        [](git::Repository& r) -> QString {
+            auto branchResult = r.headBranchName();
+            return branchResult
+                ? QString::fromStdString(*branchResult)
+                : QString();
+        });
+    branchLabel_->setText(headBranch.isEmpty()
+        ? tr("HEAD (detached)")
+        : tr("Branch: %1").arg(headBranch));
 
     // Refresh the remaining sidebar categories.
     gitService_->refreshStashes();
@@ -4178,17 +4299,25 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
                               : static_cast<QWidget*>(dashboardView_));
         setRepoActionsEnabled(true);
 
-        auto* repo = gitService_->repository();
-        if (repo) {
-            repoPathLabel_->setText(
-                QString::fromStdString(repo->workdir()));
-            auto branchResult = repo->headBranchName();
-            if (branchResult) {
-                branchLabel_->setText(tr("Branch: %1")
-                    .arg(QString::fromStdString(*branchResult)));
-            } else {
-                branchLabel_->setText(tr("HEAD (detached)"));
-            }
+        struct HeadInfo {
+            bool open = false;
+            QString workdir;
+            QString branch;
+        };
+        const HeadInfo info = gitService_->withRepository(
+            [](git::Repository& r) {
+                HeadInfo h;
+                h.open = true;
+                h.workdir = QString::fromStdString(r.workdir());
+                if (auto branchResult = r.headBranchName(); branchResult)
+                    h.branch = QString::fromStdString(*branchResult);
+                return h;
+            });
+        if (info.open) {
+            repoPathLabel_->setText(info.workdir);
+            branchLabel_->setText(info.branch.isEmpty()
+                ? tr("HEAD (detached)")
+                : tr("Branch: %1").arg(info.branch));
         }
         gitService_->refreshStatus();
         gitService_->refreshLog();
@@ -4238,14 +4367,15 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
         repoView_->setBranches(std::move(branches));
 
     // Also update the branch label in the status bar.
-    auto* repo = gitService_->repository();
-    if (repo) {
-        auto branchResult = repo->headBranchName();
-        if (branchResult) {
-            branchLabel_->setText(
-                tr("Branch: %1").arg(QString::fromStdString(*branchResult)));
-        }
-    }
+    const QString headBranch = gitService_->withRepository(
+        [](git::Repository& r) -> QString {
+            auto branchResult = r.headBranchName();
+            return branchResult
+                ? QString::fromStdString(*branchResult)
+                : QString();
+        });
+    if (!headBranch.isEmpty())
+        branchLabel_->setText(tr("Branch: %1").arg(headBranch));
 }
 
 void MainWindow::showAbout()
@@ -4411,12 +4541,10 @@ void MainWindow::offerConflictResolution(const QString& operation)
     // Only offer when the repo is actually mid-operation — a merge
     // can fail for plenty of non-conflict reasons (dirty tree,
     // unknown ref) where the resolver would have nothing to show.
-    bool inProgress = false;
-    {
-        std::lock_guard<std::mutex> lock(gitService_->repoMutex());
-        inProgress = gitService_->repository()->state()
-                     != git::RepoState::None;
-    }
+    const bool inProgress = gitService_->withRepository(
+        [](git::Repository& r) {
+            return r.state() != git::RepoState::None;
+        });
     if (!inProgress)
         return;
 
