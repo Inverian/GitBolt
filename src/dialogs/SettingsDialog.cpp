@@ -547,10 +547,12 @@ QWidget* SettingsDialog::createGitConfigPage()
     auto* identityForm = new QFormLayout(identityGroup);
     identityForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     userNameEdit_ = new QLineEdit(identityGroup);
+    userNameEdit_->setObjectName(QStringLiteral("settings.git-user-name"));
     userNameEdit_->setPlaceholderText(tr("Your Name"));
     sizeEdit(userNameEdit_);
     identityForm->addRow(tr("user.name:"), userNameEdit_);
     userEmailEdit_ = new QLineEdit(identityGroup);
+    userEmailEdit_->setObjectName(QStringLiteral("settings.git-user-email"));
     userEmailEdit_->setPlaceholderText(tr("you@example.com"));
     sizeEdit(userEmailEdit_);
     identityForm->addRow(tr("user.email:"), userEmailEdit_);
@@ -591,6 +593,7 @@ QWidget* SettingsDialog::createAppearancePage()
     auto* form = new QFormLayout;
     form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     themeCombo_ = new QComboBox(page);
+    themeCombo_->setObjectName(QStringLiteral("settings.theme"));
     themeCombo_->setMinimumWidth(180);
     themeCombo_->setMaximumWidth(260);
     if (theme_)
@@ -667,6 +670,7 @@ QWidget* SettingsDialog::createShortcutsPage()
     auto* layout = new QVBoxLayout(page);
 
     shortcutsTable_ = new QTableWidget(page);
+    shortcutsTable_->setObjectName(QStringLiteral("settings.shortcuts"));
     shortcutsTable_->setColumnCount(2);
     shortcutsTable_->setHorizontalHeaderLabels({tr("Action"), tr("Shortcut")});
     shortcutsTable_->horizontalHeader()->setStretchLastSection(true);

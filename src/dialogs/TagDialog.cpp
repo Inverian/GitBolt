@@ -90,6 +90,7 @@ void TagDialog::setupUI() {
 
     // Tag name
     nameEdit_ = new QLineEdit(this);
+    nameEdit_->setObjectName(QStringLiteral("tag.name"));
     nameEdit_->setPlaceholderText(tr("v1.0.0"));
     formLayout->addRow(tr("Tag name:"), nameEdit_);
 
@@ -100,6 +101,7 @@ void TagDialog::setupUI() {
 
     // Arbitrary ref/hash
     targetRefEdit_ = new QLineEdit(this);
+    targetRefEdit_->setObjectName(QStringLiteral("tag.target"));
     targetRefEdit_->setPlaceholderText(tr("Or enter a ref / commit hash"));
     formLayout->addRow(tr("Or target ref:"), targetRefEdit_);
 
@@ -128,6 +130,7 @@ void TagDialog::setupUI() {
 
     // --- Push checkbox -----------------------------------------------------
     pushCheckBox_ = new QCheckBox(tr("Push tag after creation"), this);
+    pushCheckBox_->setObjectName(QStringLiteral("tag.push"));
     mainLayout->addWidget(pushCheckBox_);
 
     // --- Button box --------------------------------------------------------

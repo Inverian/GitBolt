@@ -133,7 +133,7 @@ T* resolveWidget(const QString& spec)
 {
     QString className = spec;
     int index = 0;
-    const int colon = spec.lastIndexOf(QLatin1Char(':'));
+    const qsizetype colon = spec.lastIndexOf(QLatin1Char(':'));
     if (colon > 0) {
         bool okNum = false;
         const int n = spec.mid(colon + 1).toInt(&okNum);
@@ -194,6 +194,11 @@ TestBridge::TestBridge(ui::MainWindow* window, QObject* parent)
 
     server_ = new QLocalServer(this);
     QLocalServer::removeServer(name);   // clear a stale socket file
+    // macOS puts the socket in the per-user $TMPDIR (mode 700), but
+    // on Linux it lands in world-traversable /tmp with umask-derived
+    // permissions — under a group-writable umask any same-group user
+    // could drive the GUI. Restrict to the owning user everywhere.
+    server_->setSocketOptions(QLocalServer::UserAccessOption);
     if (!server_->listen(name)) {
         qWarning("TestBridge: listen(%s) failed: %s",
                  qPrintable(name),
@@ -240,14 +245,25 @@ QByteArray TestBridge::handleLine(const QString& line)
         return cmdListWidgets();
     if (verb == QStringLiteral("click") && parts.size() >= 2)
         return cmdClick(line.section(QLatin1Char(' '), 1));
-    if (verb == QStringLiteral("select-row") && parts.size() >= 3)
-        return cmdSelectRow(parts.at(1), parts.at(2).toInt());
+    if (verb == QStringLiteral("select-row") && parts.size() >= 3) {
+        // toInt() without the ok-flag yields 0 on garbage — which
+        // silently selected row 0 instead of erroring. An agent-
+        // facing surface must fail loudly.
+        bool okRow = false;
+        const int row = parts.at(2).toInt(&okRow);
+        if (!okRow)
+            return errLine(QStringLiteral("select-row: not an integer: ")
+                           + parts.at(2));
+        return cmdSelectRow(parts.at(1), row);
+    }
     if (verb == QStringLiteral("type") && parts.size() >= 3)
         return cmdType(parts.at(1), line.section(QLatin1Char(' '), 2));
     if (verb == QStringLiteral("dump-state"))
         return cmdDumpState();
     if (verb == QStringLiteral("screenshot") && parts.size() >= 2)
-        return cmdScreenshot(parts.at(1));
+        // section() keeps the remainder intact so paths containing
+        // spaces aren't silently truncated at the first one.
+        return cmdScreenshot(line.section(QLatin1Char(' '), 1));
 
     return errLine(QStringLiteral("unknown command: ") + verb);
 }

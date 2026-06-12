@@ -36,6 +36,7 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
     // ----- URL row -----
     layout->addWidget(new QLabel(tr("Repository URL:"), this));
     urlEdit_ = new QLineEdit(this);
+    urlEdit_->setObjectName(QStringLiteral("clone.url"));
     urlEdit_->setPlaceholderText(QStringLiteral("https://github.com/user/repo.git"));
     layout->addWidget(urlEdit_);
     connect(urlEdit_, &QLineEdit::textChanged,
@@ -46,6 +47,7 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
     auto* pathRow = new QHBoxLayout;
     pathRow->setSpacing(6);
     pathEdit_ = new QLineEdit(this);
+    pathEdit_->setObjectName(QStringLiteral("clone.path"));
     pathEdit_->setPlaceholderText(defaultParentDir());
     pathRow->addWidget(pathEdit_);
     browseBtn_ = new QPushButton(tr("Browse..."), this);

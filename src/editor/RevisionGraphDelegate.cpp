@@ -18,6 +18,10 @@ void RevisionGraphDelegate::paint(QPainter* painter, const QStyleOptionViewItem&
                                    const QModelIndex& index) const {
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing);
+    // Backstop: bezier merge curves and pass-through verticals from
+    // a wider region must never paint over the Message column while
+    // the fixed column width is catching up.
+    painter->setClipRect(option.rect);
     if (option.state & QStyle::State_Selected)
         painter->fillRect(option.rect, option.palette.highlight());
 

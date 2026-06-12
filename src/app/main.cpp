@@ -11,6 +11,8 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QMessageBox>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QSharedMemory>
 #include <QStyleHints>
 
@@ -64,10 +66,33 @@ int main(int argc, char* argv[]) {
         // detach to release our handle.
         singleInstanceGuard.detach();
     }
+    const QString instanceServerName =
+        QStringLiteral("gitbolt-instance");
     if (!singleInstanceGuard.create(1)) {
-        // create() can still fail if there's a real concurrent instance
-        // (the rare race) OR if the orphan was held by another user.
-        // Surface a clear, dismissable warning rather than block silently.
+        // A real instance is running (or a foreign-user orphan holds
+        // the segment). Forward our repo argument to it — this is
+        // how "Open in GitBolt" from Finder/Nautilus reaches an
+        // already-open window; both shell extensions spawn a fresh
+        // process that used to die here with a modal warning,
+        // dropping the path on the floor.
+        QLocalSocket forwarder;
+        forwarder.connectToServer(instanceServerName);
+        if (forwarder.waitForConnected(1000)) {
+            // argv[1] is the repo path when present; an empty
+            // payload still raises the running window.
+            QString fwd;
+            if (app.arguments().size() > 1) {
+                const QFileInfo fi(app.arguments().at(1));
+                fwd = fi.absoluteFilePath();
+            }
+            forwarder.write(fwd.toUtf8());
+            forwarder.flush();
+            forwarder.waitForBytesWritten(1000);
+            return 0;
+        }
+        // No listener (e.g. the other instance is still starting up,
+        // or the segment is a foreign-user orphan): fall back to the
+        // old clear, dismissable warning.
         QMessageBox::warning(nullptr, QStringLiteral("GitBolt"),
                              QObject::tr("Another instance of GitBolt is already running."));
         return 1;
@@ -157,6 +182,37 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<gitbolt::app::TestBridge> testBridge;
     if (qEnvironmentVariableIsSet("GITBOLT_TEST_BRIDGE"))
         testBridge = std::make_unique<gitbolt::app::TestBridge>(&window);
+
+    // Second-instance handshake: a later `gitbolt <path>` (the shell
+    // extensions, a plain CLI launch) forwards its path here instead
+    // of dying on the single-instance guard. UserAccessOption keeps
+    // other local users from driving our window.
+    QLocalServer instanceServer;
+    QLocalServer::removeServer(instanceServerName);  // stale socket
+    instanceServer.setSocketOptions(QLocalServer::UserAccessOption);
+    if (instanceServer.listen(instanceServerName)) {
+        QObject::connect(
+            &instanceServer, &QLocalServer::newConnection,
+            &window, [&instanceServer, &window]() {
+                while (QLocalSocket* sock =
+                           instanceServer.nextPendingConnection()) {
+                    QObject::connect(
+                        sock, &QLocalSocket::readyRead, &window,
+                        [sock, &window]() {
+                            const QString path = QString::fromUtf8(
+                                sock->readAll()).trimmed();
+                            window.show();
+                            window.raise();
+                            window.activateWindow();
+                            if (!path.isEmpty())
+                                window.openRepositoryAtPath(path);
+                            sock->disconnectFromServer();
+                        });
+                    QObject::connect(sock, &QLocalSocket::disconnected,
+                                     sock, &QObject::deleteLater);
+                }
+            });
+    }
 
     // Open repository from command line if provided. We queue the call so
     // it runs after the event loop starts and the window is fully shown.

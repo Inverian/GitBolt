@@ -2,8 +2,10 @@
 #include "editor/RevisionGraphDelegate.h"
 #include "widgets/CommitFilterProxy.h"
 
+#include <QAbstractProxyModel>
 #include <QEvent>
 #include <QHeaderView>
+#include <QScrollBar>
 #include <QMouseEvent>
 #include <QTableView>
 #include <QVBoxLayout>
@@ -80,6 +82,10 @@ void RevisionGraphWidget::setModel(models::CommitLogModel* model)
             this, &RevisionGraphWidget::resizeMetaColumns);
     connect(model, &QAbstractItemModel::rowsInserted,
             this, &RevisionGraphWidget::resizeMetaColumns);
+    // Wider graph regions can scroll into view long after the
+    // insert that created them — re-fit as the viewport moves.
+    connect(tableView_->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, &RevisionGraphWidget::resizeGraphColumn);
 
     // Configure column sizing. Author/Date/Hash are Interactive because
     // ResizeToContents jams text right up against the next column — we
@@ -357,16 +363,32 @@ void RevisionGraphWidget::resizeGraphColumn()
     if (!model_ || model_->rowCount() == 0)
         return;
 
-    // Scan visible rows to determine the widest graph column needed
+    // Scan visible rows to determine the widest graph column
+    // needed. rowAt() speaks VIEW coordinates — with the filter
+    // proxy attached those differ from source rows, so map each one
+    // back before consulting the source model (the old code indexed
+    // graphAt() with proxy rows and sized the column from the wrong
+    // rows whenever a filter was active).
+    const QAbstractItemModel* viewModel = tableView_->model();
+    const int viewRows = viewModel ? viewModel->rowCount() : 0;
+    if (viewRows == 0)
+        return;
     int firstVisible = tableView_->rowAt(0);
     int lastVisible = tableView_->rowAt(tableView_->viewport()->height());
     if (firstVisible < 0) firstVisible = 0;
-    if (lastVisible < 0) lastVisible = model_->rowCount() - 1;
-    lastVisible = std::min(lastVisible, model_->rowCount() - 1);
+    if (lastVisible < 0) lastVisible = viewRows - 1;
+    lastVisible = std::min(lastVisible, viewRows - 1);
 
     int maxLane = 0;
     for (int row = firstVisible; row <= lastVisible; ++row) {
-        const auto* g = model_->graphAt(row);
+        QModelIndex idx = viewModel->index(row, 0);
+        const QAbstractItemModel* m = viewModel;
+        while (auto* proxy =
+                   qobject_cast<const QAbstractProxyModel*>(m)) {
+            idx = proxy->mapToSource(idx);
+            m = proxy->sourceModel();
+        }
+        const auto* g = model_->graphAt(idx.row());
         if (g) maxLane = std::max(maxLane, g->maxLane);
     }
 

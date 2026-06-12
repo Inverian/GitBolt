@@ -38,6 +38,10 @@ void RemotesDialog::setRemotes(
         }
         auto* urlItem = new QTableWidgetItem(urlText);
         urlItem->setFlags(urlItem->flags() & ~Qt::ItemIsEditable);
+        // The display text may carry the "\n(push: …)" annotation;
+        // Edit URL must pre-fill and round-trip the REAL fetch URL,
+        // so the clean value rides in UserRole.
+        urlItem->setData(Qt::UserRole, QString::fromStdString(r.url));
         table_->setItem(row, 0, nameItem);
         table_->setItem(row, 1, urlItem);
     }
@@ -138,7 +142,7 @@ QString RemotesDialog::selectedName() const {
 
 QString RemotesDialog::selectedUrl() const {
     auto* item = table_->item(table_->currentRow(), 1);
-    return item ? item->text() : QString();
+    return item ? item->data(Qt::UserRole).toString() : QString();
 }
 
 } // namespace gitbolt::dialogs
