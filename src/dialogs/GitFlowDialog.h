@@ -22,7 +22,6 @@ public:
     void showSetupWizardIfNeeded();
 
 private:
-    void initializeWithDefaults();
 
     services::GitService* gitService_ = nullptr;
     widgets::GitFlowWidget* gitFlowWidget_ = nullptr;

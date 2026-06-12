@@ -787,14 +787,13 @@ void CommitDialog::onCommitClicked()
 
 void CommitDialog::onCommitAndPushClicked()
 {
-    // Commit first; the push step is wired by MainWindow via the
-    // `commitAndPushRequested` signal in the original CommitEditorWidget.
-    // Mirror that: emit a commit, and on success kick a push to the
-    // tracking remote/branch. For the moment we issue commit only and
-    // leave the push to the user — Commit & Push wiring lives in
-    // MainWindow's connection table for the original CommitEditorWidget;
-    // this dialog can drive that path once we wire push too.
+    // Commit, then push. The push half fires as
+    // pushAfterCommitRequested once commitComplete reports success —
+    // never before, so a failed or rejected commit pushes nothing.
+    pushAfterCommit_ = true;
     onCommitClicked();
+    if (!pendingCommit_)
+        pushAfterCommit_ = false;  // validation failed, nothing queued
 }
 
 void CommitDialog::onCommitComplete(bool success, const QString& message)
@@ -805,11 +804,16 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
     commitPushBtn_->setEnabled(true);
 
     if (success) {
+        const bool pushRequested = pushAfterCommit_;
+        pushAfterCommit_ = false;
         messageEdit_->clear();
         amendCheck_->setChecked(false);
         errorLabel_->hide();
         close();
+        if (pushRequested)
+            emit pushAfterCommitRequested();
     } else {
+        pushAfterCommit_ = false;
         errorLabel_->setText(tr("Commit failed: %1").arg(message));
         errorLabel_->show();
     }
@@ -826,6 +830,7 @@ void CommitDialog::onOperationFailed(const QString& op, const QString& err)
         commitBtn_->setEnabled(true);
         commitPushBtn_->setEnabled(true);
         pendingCommit_ = false;
+        pushAfterCommit_ = false;
     }
 }
 

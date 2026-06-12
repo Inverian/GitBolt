@@ -212,7 +212,9 @@ public:
 
     // Stash
     Result<std::vector<StashEntry>> stashes() const;
-    Result<ObjectId> stashSave(const std::string& message = "", bool includeUntracked = false);
+    Result<ObjectId> stashSave(const std::string& message = "",
+                               bool includeUntracked = false,
+                               bool keepIndex = false);
     Result<void> stashApply(size_t index = 0);
     Result<void> stashPop(size_t index = 0);
     Result<void> stashDrop(size_t index = 0);
@@ -225,7 +227,8 @@ public:
 
     // Worktrees
     Result<std::vector<WorktreeInfo>> worktrees() const;
-    Result<void> addWorktree(const std::string& name, const std::string& path, const std::string& branch);
+    Result<void> addWorktree(const std::string& name, const std::string& path,
+                             const std::string& branch, bool createBranch = false);
     /// Prunes the worktree's administrative files AND deletes its
     /// working directory from disk. Refuses locked worktrees —
     /// unlock first. Caller is expected to confirm with the user.

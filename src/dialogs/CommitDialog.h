@@ -61,6 +61,13 @@ public:
     /// working-tree state. Called on show().
     void refresh();
 
+signals:
+    /// Emitted after a "Commit & Push" commit lands successfully.
+    /// MainWindow triggers its toolbar Push action in response, so
+    /// the push half gets the same inline feedback (wait cursor,
+    /// toolbar label, status bar) as a manual push.
+    void pushAfterCommitRequested();
+
 protected:
     void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;
@@ -148,6 +155,7 @@ private:
 
     // Commit completion handshake
     bool pendingCommit_ = false;
+    bool pushAfterCommit_ = false;
 
     // Geometry restore guard
     bool restored_ = false;

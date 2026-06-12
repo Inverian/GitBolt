@@ -1102,12 +1102,14 @@ Result<std::vector<StashEntry>> Repository::stashes() const {
     return result;
 }
 
-Result<ObjectId> Repository::stashSave(const std::string& message, bool includeUntracked) {
+Result<ObjectId> Repository::stashSave(const std::string& message, bool includeUntracked,
+                                       bool keepIndex) {
     git_signature* sig = nullptr;
     int err = git_signature_default(&sig, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
     uint32_t flags = GIT_STASH_DEFAULT;
     if (includeUntracked) flags |= GIT_STASH_INCLUDE_UNTRACKED;
+    if (keepIndex) flags |= GIT_STASH_KEEP_INDEX;
     git_oid oid;
     err = git_stash_save(&oid, repo_, sig, message.empty() ? nullptr : message.c_str(), flags);
     git_signature_free(sig);
@@ -1209,11 +1211,36 @@ Result<std::vector<WorktreeInfo>> Repository::worktrees() const {
     return result;
 }
 
-Result<void> Repository::addWorktree(const std::string& name, const std::string& path, const std::string& branch) {
+Result<void> Repository::addWorktree(const std::string& name, const std::string& path,
+                                     const std::string& branch, bool createBranch) {
     git_worktree_add_options opts = GIT_WORKTREE_ADD_OPTIONS_INIT;
     git_reference* ref = nullptr;
-    if (!branch.empty())
-        git_branch_lookup(&ref, repo_, branch.c_str(), GIT_BRANCH_LOCAL);
+    if (!branch.empty()) {
+        if (createBranch) {
+            // Mirror `git worktree add -b <branch>`: new branch at
+            // the current HEAD commit, checked out in the worktree.
+            git_reference* headRef = nullptr;
+            int err = git_repository_head(&headRef, repo_);
+            if (err < 0) return GitError::fromLibgit2(err);
+            git_commit* headCommit = nullptr;
+            err = git_reference_peel(
+                reinterpret_cast<git_object**>(&headCommit), headRef,
+                GIT_OBJECT_COMMIT);
+            git_reference_free(headRef);
+            if (err < 0) return GitError::fromLibgit2(err);
+            err = git_branch_create(&ref, repo_, branch.c_str(),
+                                    headCommit, 0);
+            git_commit_free(headCommit);
+            if (err < 0) return GitError::fromLibgit2(err);
+        } else {
+            // Surface a bad branch name instead of silently letting
+            // git_worktree_add invent a branch named after the
+            // worktree (the old behavior when lookup failed).
+            int err = git_branch_lookup(&ref, repo_, branch.c_str(),
+                                        GIT_BRANCH_LOCAL);
+            if (err < 0) return GitError::fromLibgit2(err);
+        }
+    }
     opts.ref = ref;
 
     git_worktree* wt = nullptr;

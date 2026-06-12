@@ -31,9 +31,6 @@ signals:
     /// Emitted when the input text changes so the host can validate / lookup.
     void commitHashChanged(const QString& hash);
 
-    /// Emitted when the user clicks the browse button to open a commit log.
-    void browseCommitsRequested();
-
 private slots:
     void onHashEdited();
 
@@ -41,7 +38,6 @@ private:
     void setupUi();
 
     QLineEdit*        hashEdit_      = nullptr;
-    QPushButton*      browseBtn_     = nullptr;
     QDialogButtonBox* buttonBox_     = nullptr;
 
     // Details area

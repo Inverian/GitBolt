@@ -813,13 +813,15 @@ void GitService::cherryPick(const std::vector<git::ObjectId>& commits) {
 // Stash
 // ---------------------------------------------------------------------------
 
-void GitService::stashSave(const QString& message, bool includeUntracked) {
+void GitService::stashSave(const QString& message, bool includeUntracked,
+                           bool keepIndex) {
     if (!repo_) return;
     bool ok = false;
     QString err;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        auto result = repo_->stashSave(message.toStdString(), includeUntracked);
+        auto result = repo_->stashSave(message.toStdString(), includeUntracked,
+                                       keepIndex);
         ok = result.ok();
         if (!ok) err = QString::fromStdString(result.error().message());
     }
@@ -904,7 +906,8 @@ void GitService::refreshTags() {
 }
 
 void GitService::createTag(const QString& name, const QString& target,
-                            const QString& message, bool annotated) {
+                            const QString& message, bool annotated,
+                            bool pushAfter) {
     if (!repo_) return;
     auto targetId = git::ObjectId::fromHex(target.toStdString());
 
@@ -918,8 +921,17 @@ void GitService::createTag(const QString& name, const QString& target,
         ok = result.ok();
         if (!ok) err = QString::fromStdString(result.error().message());
     }
-    if (!ok) emit operationFailed("createTag", err);
-    else     refreshTags();
+    if (!ok) {
+        emit operationFailed("createTag", err);
+        return;
+    }
+    refreshTags();
+    if (pushAfter) {
+        // A tag name is a valid refspec, so this is `git push origin
+        // <tag>` on the same synchronous CLI path as push(remote,
+        // branch); failures surface via operationFailed("push").
+        push(QStringLiteral("origin"), name);
+    }
 }
 
 void GitService::deleteTag(const QString& name) {
@@ -993,14 +1005,14 @@ void GitService::refreshWorktrees() {
 }
 
 void GitService::addWorktree(const QString& name, const QString& path,
-                              const QString& branch) {
+                              const QString& branch, bool createBranch) {
     if (!repo_) return;
     bool ok = false;
     QString err;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
         auto result = repo_->addWorktree(name.toStdString(), path.toStdString(),
-                                          branch.toStdString());
+                                          branch.toStdString(), createBranch);
         ok = result.ok();
         if (!ok) err = QString::fromStdString(result.error().message());
     }
@@ -1062,8 +1074,27 @@ bool GitService::isGitFlowInitialized() {
     return master.ok();
 }
 
-void GitService::gitFlowInit() {
+void GitService::gitFlowInit(const QString& master, const QString& develop,
+                             const QString& featurePrefix,
+                             const QString& releasePrefix,
+                             const QString& hotfixPrefix) {
     if (!repo_) return;
+    {
+        // `git flow init -d` answers every prompt with its default,
+        // and (AVH git-flow) each prompt's default is the existing
+        // gitflow.* config value when one is set. Write the caller's
+        // names first so the non-interactive init adopts them
+        // instead of silently using master/develop.
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        auto cfg = repo_->config();
+        cfg.setString("gitflow.branch.master", master.toStdString());
+        cfg.setString("gitflow.branch.develop", develop.toStdString());
+        cfg.setString("gitflow.prefix.feature", featurePrefix.toStdString());
+        cfg.setString("gitflow.prefix.release", releasePrefix.toStdString());
+        cfg.setString("gitflow.prefix.hotfix", hotfixPrefix.toStdString());
+        cfg.setString("gitflow.prefix.support", "support/");
+        cfg.setString("gitflow.prefix.versiontag", "");
+    }
     git::GitProcess proc{[&]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         return repo_->process();

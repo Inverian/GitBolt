@@ -71,14 +71,23 @@ void GitFlowDialog::showSetupWizardIfNeeded() {
     connect(buttons, &QDialogButtonBox::rejected, &wizard, &QDialog::reject);
 
     if (wizard.exec() == QDialog::Accepted) {
-        initializeWithDefaults();
+        // Hand every wizard answer to the init — previously the five
+        // fields were collected and then silently discarded in favor
+        // of git-flow's defaults. Blank answers fall back to the
+        // conventional names so a cleared field can't produce an
+        // empty branch name.
+        auto orDefault = [](const QString& v, const char* dflt) {
+            const QString t = v.trimmed();
+            return t.isEmpty() ? QString::fromLatin1(dflt) : t;
+        };
+        gitService_->gitFlowInit(
+            orDefault(masterEdit->text(), "master"),
+            orDefault(developEdit->text(), "develop"),
+            orDefault(featurePrefixEdit->text(), "feature/"),
+            orDefault(releasePrefixEdit->text(), "release/"),
+            orDefault(hotfixPrefixEdit->text(), "hotfix/"));
+        // The widget refreshes via gitFlowOperationComplete.
     }
-}
-
-void GitFlowDialog::initializeWithDefaults() {
-    if (!gitService_) return;
-    gitService_->gitFlowInit();
-    // After initialization completes, the widget will refresh via the signal
 }
 
 } // namespace gitbolt::dialogs

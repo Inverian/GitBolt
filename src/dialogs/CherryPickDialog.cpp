@@ -17,7 +17,6 @@ namespace gitbolt::dialogs {
 CherryPickDialog::CherryPickDialog(QWidget* parent)
     : QDialog(parent)
     , hashEdit_(new QLineEdit(this))
-    , browseBtn_(new QPushButton(tr("Browse..."), this))
     , summaryLabel_(new QLabel(this))
     , authorLabel_(new QLabel(this))
     , dateLabel_(new QLabel(this))
@@ -41,7 +40,6 @@ void CherryPickDialog::setupUi() {
     hashEdit_->setPlaceholderText(tr("Enter commit hash"));
     hashEdit_->setFont(QFont(QStringLiteral("Menlo,Consolas,monospace")));
     inputLayout->addWidget(hashEdit_, 1);
-    inputLayout->addWidget(browseBtn_);
     mainLayout->addLayout(inputLayout);
 
     // --- Commit details group ---
@@ -73,8 +71,6 @@ void CherryPickDialog::setupUi() {
     // Connections
     connect(hashEdit_, &QLineEdit::textChanged,
             this, &CherryPickDialog::onHashEdited);
-    connect(browseBtn_, &QPushButton::clicked,
-            this, &CherryPickDialog::browseCommitsRequested);
 }
 
 QString CherryPickDialog::commitHash() const {

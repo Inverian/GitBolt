@@ -32,8 +32,6 @@ void GitFlowWidget::setGitService(services::GitService* service) {
 void GitFlowWidget::refresh() {
     if (!gitService_ || !gitService_->isOpen()) return;
 
-    updateUiState();
-
     if (gitService_->isGitFlowInitialized()) {
         featureList_->clear();
         featureList_->addItems(gitService_->activeFeatures());
@@ -44,6 +42,11 @@ void GitFlowWidget::refresh() {
         hotfixList_->clear();
         hotfixList_->addItems(gitService_->activeHotfixes());
     }
+
+    // AFTER the lists are rebuilt — clear() wipes the selection, so
+    // evaluating button state first left Finish enabled/disabled by
+    // the PREVIOUS selection.
+    updateUiState();
 }
 
 void GitFlowWidget::setupUi() {
@@ -107,6 +110,17 @@ void GitFlowWidget::setupUi() {
 
     connect(startHotfixBtn_, &QPushButton::clicked, this, &GitFlowWidget::onStartHotfix);
     connect(finishHotfixBtn_, &QPushButton::clicked, this, &GitFlowWidget::onFinishHotfix);
+
+    // The Finish buttons gate on a selected row, so re-evaluate
+    // whenever any list's selection changes — without these, the
+    // buttons only updated on refresh() and clicking a feature
+    // never enabled "Finish Feature".
+    connect(featureList_, &QListWidget::itemSelectionChanged,
+            this, &GitFlowWidget::updateUiState);
+    connect(releaseList_, &QListWidget::itemSelectionChanged,
+            this, &GitFlowWidget::updateUiState);
+    connect(hotfixList_, &QListWidget::itemSelectionChanged,
+            this, &GitFlowWidget::updateUiState);
 
     // Console output
     console_ = new ConsoleOutputWidget;

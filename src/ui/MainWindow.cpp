@@ -307,27 +307,11 @@ void MainWindow::createMenuBar()
     fileMenu->addAction(cloneAction);
 
     {
-        // Pick a folder with QFileDialog, then Repository::init
-        // creates `.git/` in it. If init succeeds we immediately
-        // open the new repo so the user is dropped into the repo
-        // view as if they'd cloned it.
         auto* a = new QAction(menuIcon(QStringLiteral("new_repo")),
                               tr("Create &New Repository..."), this);
         a->setObjectName(QStringLiteral("file.create-new-repository"));
-        connect(a, &QAction::triggered, this, [this]() {
-            const QString dir = QFileDialog::getExistingDirectory(
-                this, tr("Choose a folder for the new repository"),
-                QDir::homePath());
-            if (dir.isEmpty()) return;
-            auto res = git::Repository::init(dir.toStdString(), false);
-            if (!res.ok()) {
-                QMessageBox::warning(this, tr("Init Failed"),
-                    tr("Could not initialize a repository at:\n%1\n\n%2")
-                        .arg(dir, QString::fromStdString(res.error().message())));
-                return;
-            }
-            openRepositoryAtPath(dir);
-        });
+        connect(a, &QAction::triggered,
+                this, &MainWindow::createNewRepository);
         fileMenu->addAction(a);
     }
 
@@ -708,7 +692,8 @@ void MainWindow::createMenuBar()
                 if (addDlg.exec() == QDialog::Accepted) {
                     gitService_->addWorktree(addDlg.worktreeName(),
                                              addDlg.worktreePath(),
-                                             addDlg.branch());
+                                             addDlg.branch(),
+                                             addDlg.createNewBranch());
                 }
             });
             connect(widget, &widgets::WorktreeWidget::removeRequested,
@@ -2048,7 +2033,8 @@ void MainWindow::createMenuBar()
                 dialogs::StashDialog save(dlg);
                 if (save.exec() == QDialog::Accepted) {
                     gitService_->stashSave(save.message(),
-                                           save.includeUntracked());
+                                           save.includeUntracked(),
+                                           save.keepIndex());
                 }
             });
 
@@ -2420,7 +2406,8 @@ void MainWindow::createMenuBar()
                 gitService_->createTag(dlg.tagName(),
                                        dlg.targetRef(),
                                        dlg.message(),
-                                       dlg.isAnnotated());
+                                       dlg.isAnnotated(),
+                                       dlg.shouldPush());
             }
         });
         cmdMenu->addAction(a);
@@ -4015,6 +4002,11 @@ void MainWindow::setupConnections()
             });
     connect(dashboardView_, &DashboardView::cloneRequested,
             this, &MainWindow::cloneRepository);
+    // The "Create New Repository" card reuses the File-menu init
+    // flow; the card's path payload is always empty today, so the
+    // folder picker inside createNewRepository asks for the target.
+    connect(dashboardView_, &DashboardView::initRequested,
+            this, [this](const QString&) { createNewRepository(); });
 
     // --- Branch tree actions (BranchTreeWidget lives inside RepositoryView).
     // Every context-menu entry and the sidebar's "New Branch" button
@@ -4404,6 +4396,27 @@ void MainWindow::setThemeService(conf::ThemeService* theme)
     themeService_ = theme;
 }
 
+void MainWindow::createNewRepository()
+{
+    // Pick a folder with QFileDialog, then Repository::init creates
+    // `.git/` in it. If init succeeds we immediately open the new
+    // repo so the user is dropped into the repo view as if they'd
+    // cloned it. Reached from File → Create New Repository and the
+    // dashboard's "Create New Repository" card.
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, tr("Choose a folder for the new repository"),
+        QDir::homePath());
+    if (dir.isEmpty()) return;
+    auto res = git::Repository::init(dir.toStdString(), false);
+    if (!res.ok()) {
+        QMessageBox::warning(this, tr("Init Failed"),
+            tr("Could not initialize a repository at:\n%1\n\n%2")
+                .arg(dir, QString::fromStdString(res.error().message())));
+        return;
+    }
+    openRepositoryAtPath(dir);
+}
+
 void MainWindow::showCommitDialog()
 {
     if (!gitService_ || !gitService_->isOpen())
@@ -4412,6 +4425,17 @@ void MainWindow::showCommitDialog()
     if (!commitDialog_) {
         commitDialog_ = new dialogs::CommitDialog(
             gitService_, settingsService_, this);
+        // Commit & Push: the dialog asks for the push half only
+        // after the commit lands. Triggering the toolbar action
+        // (instead of calling GitService::push directly) reuses the
+        // full remote-op feedback — wait cursor, inline label,
+        // disabled button, status bar.
+        connect(commitDialog_,
+                &dialogs::CommitDialog::pushAfterCommitRequested,
+                this, [this]() {
+            if (pushAction_ && pushAction_->isEnabled())
+                pushAction_->trigger();
+        });
     }
     commitDialog_->show();
     commitDialog_->raise();

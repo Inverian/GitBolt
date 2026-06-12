@@ -56,6 +56,7 @@ private slots:
     void showAbout();
     void showCommitDialog();
     void showSettingsDialog();
+    void createNewRepository();
 
 private:
     void createMenuBar();

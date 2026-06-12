@@ -178,7 +178,8 @@ public:
     void cherryPick(const std::vector<git::ObjectId>& commits);
 
     // Stash
-    void stashSave(const QString& message, bool includeUntracked = false);
+    void stashSave(const QString& message, bool includeUntracked = false,
+                   bool keepIndex = false);
     void stashApply(int index);
     void stashPop(int index);
     void stashDrop(int index);
@@ -186,8 +187,11 @@ public:
 
     // Tags
     void refreshTags();
+    /// `pushAfter` pushes the new tag to origin once creation
+    /// succeeds (same synchronous CLI path as push()).
     void createTag(const QString& name, const QString& target,
-                   const QString& message, bool annotated);
+                   const QString& message, bool annotated,
+                   bool pushAfter = false);
     void deleteTag(const QString& name);
 
     // Submodules
@@ -197,14 +201,26 @@ public:
 
     // Worktrees
     void refreshWorktrees();
-    void addWorktree(const QString& name, const QString& path, const QString& branch);
+    /// `createBranch` mirrors `git worktree add -b`: create `branch`
+    /// at HEAD and check it out in the new worktree, instead of
+    /// requiring an existing branch.
+    void addWorktree(const QString& name, const QString& path, const QString& branch,
+                     bool createBranch = false);
     void removeWorktree(const QString& name);
     void lockWorktree(const QString& name);
     void unlockWorktree(const QString& name);
 
     // Git Flow
     bool isGitFlowInitialized();
-    void gitFlowInit();
+    /// Initialize git-flow non-interactively. The names are written
+    /// to gitflow.* config first; `git flow init -d` then adopts the
+    /// configured values as its defaults (AVH behavior), so the
+    /// wizard's answers actually take effect.
+    void gitFlowInit(const QString& master = QStringLiteral("master"),
+                     const QString& develop = QStringLiteral("develop"),
+                     const QString& featurePrefix = QStringLiteral("feature/"),
+                     const QString& releasePrefix = QStringLiteral("release/"),
+                     const QString& hotfixPrefix = QStringLiteral("hotfix/"));
     void featureStart(const QString& name);
     void featureFinish(const QString& name);
     void releaseStart(const QString& version);
