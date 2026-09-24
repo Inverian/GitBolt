@@ -7,6 +7,15 @@ cmake_minimum_required(VERSION 3.21)
 if(POLICY CMP0156)
     cmake_policy(SET CMP0156 NEW)
 endif()
+
+# vcpkg (Windows): also copy the DLLs our vcpkg deps need (git2.dll,
+# pcre.dll, z.dll today) next to the INSTALLED GitBolt.exe, i.e. into
+# CPack's NSIS staging tree; windeployqt deploys only Qt's own DLLs.
+# No effect without the vcpkg toolchain file. Must precede project(),
+# where the toolchain is loaded. An existing build dir keeps a cached
+# OFF from before until it is configured fresh.
+set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
+    "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
 project(GitBolt VERSION 0.9.0 LANGUAGES CXX)
 
 # An empty build type builds with NO optimization and no debug info —

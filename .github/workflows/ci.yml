@@ -1,20 +1,47 @@
 name: CI
 
+# pull_request      -> build + test on macOS, Linux and Windows
+# push to main      -> build + test + installers (DMG, NSIS .exe, DEB,
+#                      AppImage), then a GitHub Release when the version in
+#                      CMakeLists.txt has no v<version> tag yet
+# workflow_dispatch -> build + test + installers on any branch (a dry run);
+#                      never releases
+#   Dry-run a branch before merging (gh >= 2.87 prints the new run's URL):
+#     url=$(gh workflow run ci.yml --ref <branch>) && gh run watch "${url##*/}" --exit-status
 on:
   push:
-    branches: [main]
+    branches: [main]   # branches only, so tag pushes never trigger this
   pull_request:
     branches: [main]
-  release:
-    types: [published]
+  workflow_dispatch:
+
+# Read-only for every job; only the release job raises contents to write.
+permissions:
+  contents: read
+
+# A newer push to a PR cancels that PR's older run. Push and dispatch runs
+# get a unique group (run_id), so they're never cancelled: every green push
+# to main still produces installers.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # ==========================================================================
+  # Build + test everywhere. On pushes to main and dry runs the same job
+  # also packages the binaries it just tested and smoke-tests the
+  # installers: no second compile, and what ships is what passed.
+  # ==========================================================================
   build:
     strategy:
       fail-fast: false  # Don't cancel other jobs if one platform fails
       matrix:
         os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
+    # Default is 360 min. A hung step (hdiutil, an installer) on the
+    # 10x-priced macOS runner would burn a Free plan's monthly minutes.
+    # Normal legs take 5-25 min including packaging.
+    timeout-minutes: 60
 
     steps:
       # v7 = node24. Its fork-PR guard only affects pull_request_target /
@@ -53,9 +80,7 @@ jobs:
       # vswhere finds the newest VS with the x64 C++ tools, Microsoft's
       # Launch-VsDevShell.ps1 loads its dev env into this process, and
       # every variable it changed goes to GITHUB_ENV for later steps.
-      # Reused by the package job through the &msvc_env anchor.
-      - &msvc_env
-        name: MSVC environment (Windows)
+      - name: MSVC environment (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -104,9 +129,8 @@ jobs:
         run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
 
       # ------------------------------------------------------------------
-      # Configure, build, test. We use Ninja on every platform for
-      # consistency and speed. On Windows we need the vcpkg toolchain
-      # file so CMake can find libgit2.
+      # Configure, build, test. Ninja on every platform; on Windows the
+      # vcpkg toolchain file lets CMake find libgit2.
       # ------------------------------------------------------------------
       - name: Configure (Unix)
         if: runner.os != 'Windows'
@@ -128,172 +152,566 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
-  # ==========================================================================
-  # Release packaging — runs only on published releases (tag push)
-  # ==========================================================================
-  package:
-    if: github.event_name == 'release'
-    needs: build
-    # The repo's default GITHUB_TOKEN is read-only, and action-gh-release
-    # PATCHes the release and uploads assets, which needs contents: write.
-    permissions:
-      contents: write
-    strategy:
-      matrix:
-        include:
-          - os: macos-latest
-            artifact: GitBolt-macOS
-          - os: ubuntu-24.04
-            artifact: GitBolt-Linux
-          - os: windows-latest
-            artifact: GitBolt-Windows
-    runs-on: ${{ matrix.os }}
+      # ==================================================================
+      # Installers: pushes to main and dry runs only, never pull requests.
+      # Every format is smoke-tested BEFORE it can become an artifact or a
+      # release asset, from the installed/mounted package with the build
+      # environment (aqt's Qt on PATH, the runner's VC++ runtime) kept out
+      # of the way, so a package that only works on the runner fails here.
+      # ==================================================================
 
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Qt
-        uses: jurplel/install-qt-action@v4
-        with:
-          # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
-          # `-framework AGL`, which current macOS SDKs no longer ship.
-          # Not 6.11 yet: aqtinstall 3.3.0 can't read its Windows metadata.
-          version: '6.10.*'
-          cache: true
-
-      # Preinstalled on all GitHub-hosted images; see the build job.
-      - name: Check Ninja
+      # ---- macOS: DMG ------------------------------------------------
+      # During CPack's staging install, qt_generate_deploy_app_script runs
+      # macdeployqt (Qt plus Homebrew's libgit2 & co into the bundle), then
+      # an install(CODE) rule in src/app/CMakeLists.txt re-signs the bundle
+      # ad-hoc and verifies it: Qt 6.10's macdeployqt strips and renames
+      # without re-signing, which Gatekeeper reports as "damaged".
+      # hdiutil fails intermittently with "Resource busy" on hosted macOS
+      # runners (actions/runner-images#7522), so retry the whole cpack run,
+      # which re-stages from scratch.
+      - name: Package DMG (macOS)
+        if: github.event_name != 'pull_request' && runner.os == 'macOS'
+        working-directory: build
         shell: bash
         run: |
-          command -v ninja || { echo "::error::ninja not found on PATH (runner image changed?)"; exit 1; }
-          ninja --version
+          for attempt in 1 2 3; do
+            cpack -G DragNDrop -C Release && exit 0
+            [ "$attempt" = 3 ] && break
+            echo "::warning::cpack DragNDrop attempt $attempt failed; retrying"
+            sleep $((attempt * 15))
+          done
+          echo "::error::cpack DragNDrop failed 3 times"
+          exit 1
 
-      # Identical to the build job's MSVC step (YAML alias of &msvc_env),
-      # so every PR run exercises what this release-only job will run.
-      - *msvc_env
-
-      - name: Install libgit2 (macOS)
-        if: runner.os == 'macOS'
-        run: brew install libgit2 pkg-config
-
-      - name: Install libgit2 (Ubuntu)
-        if: runner.os == 'Linux'
+      # The launch check uses the cocoa QPA (macdeployqt bundles no
+      # offscreen plugin); hosted macOS images auto-login a GUI session.
+      # timeout-minutes: if the single-instance guard ever fell through to
+      # its QMessageBox, the step would otherwise block until the job limit.
+      - name: Smoke-test DMG (macOS)
+        if: github.event_name != 'pull_request' && runner.os == 'macOS'
+        timeout-minutes: 10
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libgit2-dev pkg-config libfuse2
+          set -euo pipefail
+          ver=$(sed -nE 's/^project\(GitBolt VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          dmg=build/GitBolt-$ver-Darwin-arm64.dmg
+          [ -f "$dmg" ] || { echo "::error::$dmg not found"; ls build/*.dmg || true; exit 1; }
+          fail=0
+          err() { echo "::error::$*"; fail=1; }
 
-      - name: Install libgit2 (Windows)
-        if: runner.os == 'Windows'
-        run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
+          mnt=$(mktemp -d "$RUNNER_TEMP/gitbolt-dmg.XXXXXX")
+          # attach/detach hit the same intermittent "Resource busy" as create
+          for i in 1 2 3 4 5; do
+            hdiutil attach -nobrowse -readonly -noautoopen -mountpoint "$mnt" "$dmg" >/dev/null && break
+            [ "$i" = 5 ] && { echo "::error::hdiutil attach failed 5 times"; exit 1; }
+            sleep $((i * 5))
+          done
+          trap 'for i in 1 2 3 4 5; do hdiutil detach "$mnt" >/dev/null 2>&1 && break; sleep 3; done
+                hdiutil detach -force "$mnt" >/dev/null 2>&1 || true' EXIT
 
-      # ----------------------------------------------------------------------
-      # Configure & Build
-      # ----------------------------------------------------------------------
-      - name: Configure (Unix)
-        if: runner.os != 'Windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_INSTALL_PREFIX=/usr
+          app="$mnt/GitBolt.app"
+          [ -x "$app/Contents/MacOS/GitBolt" ] || { echo "::error::no GitBolt.app in $dmg"; exit 1; }
+          [ -L "$mnt/Applications" ] || err "missing /Applications symlink"
 
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        # Quoted: PowerShell passes `$env:...` through literally in an
-        # unquoted argument that starts with `-`.
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          # 1) Nested frameworks/dylibs/plugins + bundle seal. An invalid one
+          #    is what Gatekeeper shows as "GitBolt is damaged".
+          codesign --verify --deep --strict "$app" || err "codesign --verify failed"
 
-      - name: Build
-        run: cmake --build build --parallel
+          # 2) No dependency/LC_RPATH load command may point at the build
+          #    host (Homebrew, the aqt Qt under /Users/runner, /usr/local).
+          #    Warn (not fail) when an image needs a newer macOS than
+          #    Info.plist claims: Homebrew bottles target the runner's macOS.
+          min=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
+          newer=()
+          while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q '^Mach-O' || continue
+            rel=${f#"$mnt"/}
+            lc=$(otool -l "$f")
+            refs=$(awk '/cmd LC_(LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/ {d=1}
+                        d && $1=="name" {print $2; d=0}
+                        /cmd LC_RPATH$/ {r=1}
+                        r && $1=="path" {print $2; r=0}' <<<"$lc")
+            if bad=$(grep -E '^/(opt/homebrew|usr/local|Users)/' <<<"$refs"); then
+              err "$rel references build-host path(s): $(tr '\n' ' ' <<<"$bad")"
+            fi
+            m=$(awk '/cmd LC_BUILD_VERSION$/ {b=1} b && $1=="minos" {print $2; exit}' <<<"$lc")
+            if [ -n "$m" ] && [ "$(printf '%s\n%s\n' "$min" "$m" | sort -V | tail -n1)" != "$min" ]; then
+              newer+=("$m  $rel")
+            fi
+          done < <(find "$app/Contents" -type f -print0)
+          if [ ${#newer[@]} -gt 0 ]; then
+            echo "::warning::${#newer[@]} Mach-O files need a newer macOS than LSMinimumSystemVersion $min (highest: $(printf '%s\n' "${newer[@]}" | sort -V | tail -n1))"
+            printf '  minos %s\n' "${newer[@]}" | sort -V
+          fi
+          deps=$(otool -L "$app/Contents/MacOS/GitBolt")
+          grep -Eq '(@executable_path/\.\./Frameworks|@rpath)/libgit2\.' <<<"$deps" \
+            || err "libgit2 is not loaded from inside the bundle"
 
-      - name: Install
-        run: cmake --install build --prefix build/install
+          # 3) Exec from the mounted image. --version exits 0 only after dyld
+          #    loaded every linked image, git_libgit2_init() ran and
+          #    QApplication loaded the bundled cocoa plugin.
+          if out=$(GITBOLT_INSTANCE_NAME="ci-smoke-$$" "$app/Contents/MacOS/GitBolt" --version 2>&1); then
+            echo "$out"
+            grep -qx "GitBolt $ver" <<<"$out" || err "--version printed '$out', expected 'GitBolt $ver'"
+          else
+            rc=$?; echo "$out"; err "GitBolt --version exited $rc"
+          fi
 
-      # ----------------------------------------------------------------------
-      # macOS — DMG via CPack. The Qt runtime is bundled into the app
-      # DURING cpack's staging install (qt_generate_deploy_app_script in
-      # src/app/CMakeLists.txt), so the DMG payload is self-contained.
-      # Running macdeployqt on a separate install tree afterwards — as
-      # this workflow once did — never affected what cpack shipped.
-      # ----------------------------------------------------------------------
-      - name: Package DMG (macOS)
-        if: runner.os == 'macOS'
-        working-directory: build
-        run: cpack -G DragNDrop -C Release
+          [ "$fail" = 0 ] && echo "DMG smoke test passed"
+          exit "$fail"
 
-      # ----------------------------------------------------------------------
-      # Windows — NSIS installer via CPack; Qt DLLs land in the payload
-      # through the same install-time deploy script.
-      # ----------------------------------------------------------------------
+      # ---- Windows: NSIS ---------------------------------------------
+      # NSIS is not on the windows-2025 images (actions/runner-images
+      # #11754, closed "not planned": add it at runtime). Same Chocolatey
+      # package the windows-2022 image's Install-NSIS.ps1 uses; it embeds
+      # the NSIS setup, so nothing is fetched from SourceForge. CPack finds
+      # makensis via HKLM\SOFTWARE\NSIS; the GITHUB_PATH line is a backup.
+      # Pinned so an NSIS release can't change the installer without a commit.
+      - name: Install NSIS (Windows)
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 3; $i++) {   # the community feed rate-limits now and then
+            choco install nsis --version 3.12.0 -y --no-progress
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { throw "choco install nsis failed ($LASTEXITCODE)" }
+            Start-Sleep -Seconds (20 * $i)
+          }
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
+          & (Join-Path $nsis 'makensis.exe') /VERSION
+          if ($LASTEXITCODE) { throw 'makensis.exe is not runnable' }
+          Add-Content -Path $env:GITHUB_PATH -Value $nsis
+
+      # Qt DLLs/plugins reach the payload via windeployqt (install-time
+      # deploy script), vcpkg's git2/pcre/z DLLs via
+      # X_VCPKG_APPLOCAL_DEPS_INSTALL, the MSVC runtime via
+      # InstallRequiredSystemLibraries -- all inside cpack's own staging
+      # install. cmake/cpack printed so an image change is visible.
       - name: Package NSIS (Windows)
-        if: runner.os == 'Windows'
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
         working-directory: build
-        run: cpack -G NSIS -C Release
+        shell: pwsh
+        run: |
+          cmake --version
+          (Get-Command cpack -CommandType Application -TotalCount 1).Source
+          cpack -G NSIS -C Release
 
-      # ----------------------------------------------------------------------
-      # Linux — DEB via CPack + AppImage via linuxdeploy
-      # ----------------------------------------------------------------------
+      - name: NSIS log (Windows, on failure)
+        if: failure() && github.event_name != 'pull_request' && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem build/_CPack_Packages -Recurse -Filter NSISOutput.log -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "== $($_.FullName)"; Get-Content $_.FullName -Tail 200 }
+
+      # Install the real installer silently, then prove the INSTALLED app
+      # starts. timeout-minutes: Start-Process -Wait is unbounded, and NSIS
+      # shows any MessageBox lacking /SD even under /S.
+      - name: Smoke-test NSIS installer (Windows)
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(GitBolt VERSION ([0-9]+\.[0-9]+\.[0-9]+)').Matches[0].Groups[1].Value
+          $setup = @(Get-ChildItem build -Filter "GitBolt-$version-*.exe")
+          if ($setup.Count -ne 1) { throw "expected one build/GitBolt-$version-*.exe, found $($setup.Count)" }
+
+          # /D= must be last and unquoted (no spaces in RUNNER_TEMP=D:\a\_temp).
+          # Hosted Windows runners are admin with UAC off, so
+          # RequestExecutionLevel admin cannot prompt.
+          $dest = Join-Path $env:RUNNER_TEMP 'gitbolt-smoke'
+          $inst = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S', "/D=$dest" -Wait -PassThru
+          if ($inst.ExitCode -ne 0) { throw "NSIS installer exited with $($inst.ExitCode)" }
+          $bin = Join-Path $dest 'bin'
+
+          # 1) Layout + plugins nothing imports directly.
+          $bad = @()
+          foreach ($f in 'bin\GitBolt.exe', 'bin\qt.conf',
+                         'plugins\platforms\qwindows.dll', 'plugins\iconengines\qsvgicon.dll') {
+            if (-not (Test-Path (Join-Path $dest $f))) { $bad += "missing $f" }
+          }
+
+          # 2) Import closure (dumpbin from the MSVC env). The VC++ runtime
+          #    only counts if it is in bin\: the runner has it in System32, a
+          #    clean Windows does not.
+          $sys = Join-Path $env:SystemRoot 'System32'
+          foreach ($pe in Get-ChildItem $dest -Recurse -Include *.exe, *.dll) {
+            $deps = dumpbin /nologo /dependents $pe.FullName |
+                    Select-String '^\s+(\S+\.dll)\s*$' |
+                    ForEach-Object { $_.Matches[0].Groups[1].Value }
+            foreach ($dep in $deps) {
+              if ($dep -match '^(api|ext)-ms-') { continue }
+              if (Test-Path (Join-Path $bin $dep)) { continue }
+              if ($dep -notmatch '^(vcruntime|msvcp|concrt|vccorlib)\d' -and
+                  (Test-Path (Join-Path $sys $dep))) { continue }
+              $bad += "$($pe.FullName.Substring($dest.Length + 1)) imports $dep, which is not in bin\"
+            }
+          }
+          if ($bad) {
+            Get-ChildItem $dest -Recurse -File | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }
+            throw "NSIS payload is incomplete:`n$($bad -join "`n")"
+          }
+
+          # 3) Launch the INSTALLED exe with PATH = System32 only and no Qt
+          #    env vars (install-qt-action put Qt\bin on PATH and exported
+          #    QT_PLUGIN_PATH/QML2_IMPORT_PATH). --version exits after
+          #    QApplication (loads qwindows.dll), the single-instance guard
+          #    and git_libgit2_init. Redirected handles + the env var stop
+          #    QCommandLineParser from using a MessageBox.
+          $psi = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'GitBolt.exe'), '--version')
+          $psi.UseShellExecute = $false
+          $psi.RedirectStandardOutput = $true
+          $psi.RedirectStandardError = $true
+          $psi.WorkingDirectory = $env:RUNNER_TEMP
+          $psi.Environment['PATH'] = "$sys;$env:SystemRoot"
+          foreach ($v in 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM') {
+            [void]$psi.Environment.Remove($v)
+          }
+          $psi.Environment['QT_COMMAND_LINE_PARSER_NO_GUI_MESSAGE_BOXES'] = '1'
+          $p = [System.Diagnostics.Process]::Start($psi)
+          $stdout = $p.StandardOutput.ReadToEndAsync()
+          $stderr = $p.StandardError.ReadToEndAsync()
+          if (-not $p.WaitForExit(60000)) { $p.Kill($true); throw 'GitBolt --version did not exit within 60 s' }
+          $out = $stdout.Result.Trim()
+          Write-Host ("exit {0} (0x{0:X8}), stdout '{1}'" -f $p.ExitCode, $out)
+          if ($stderr.Result.Trim()) { Write-Host "stderr: $($stderr.Result.Trim())" }
+          # 0xC0000135 = DLL not found, 0xC0000139 = entry point not found.
+          if ($p.ExitCode -ne 0) { throw "installed GitBolt.exe --version failed" }
+          if ($out -ne "GitBolt $version") { throw "expected 'GitBolt $version', got '$out'" }
+
+      # ---- Linux: DEB + AppImage ---------------------------------------
+      # appstream + desktop-file-utils: the metadata lint. xvfb: the
+      # AppImage launch check. No libfuse2 (only a virtual package on
+      # noble): linuxdeploy runs with APPIMAGE_EXTRACT_AND_RUN, never FUSE.
+      - name: Packaging tools (Linux)
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
+        run: sudo apt-get install -y appstream desktop-file-utils xvfb
+
+      # Deterministic metadata lint (appimagetool's own appstreamcli run
+      # depends on the image and on network access).
+      - name: Lint desktop entry + AppStream metainfo (Linux)
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
+        run: |
+          desktop-file-validate src/app/platform/linux/gitbolt.desktop
+          appstreamcli validate --no-net --explain src/app/platform/linux/com.gitbolt.app.metainfo.xml
+
+      # build/gitbolt_<ver>_amd64.deb (DEB-DEFAULT naming lowercases the
+      # package name). Qt is bundled privately under /usr/lib/gitbolt by
+      # the install-time deploy script (no distro Qt is new enough).
       - name: Package DEB (Linux)
-        if: runner.os == 'Linux'
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
         working-directory: build
         run: cpack -G DEB -C Release
 
       - name: Build AppImage (Linux)
-        if: runner.os == 'Linux'
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
+        env:
+          # linuxdeploy and its Qt plugin are AppImages; extract-and-run
+          # needs no FUSE and is inherited by the processes it spawns.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+          # appimagetool would run appstreamcli only if the image ships
+          # it; the metadata is linted explicitly above instead.
+          LDAI_NO_APPSTREAM: '1'
         run: |
-          # Download linuxdeploy and Qt plugin
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
-          wget -q https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage
+          set -euo pipefail
+          # install-qt-action v4 exports QT_ROOT_DIR, never Qt6_DIR.
+          export QMAKE="$QT_ROOT_DIR/bin/qmake"
+          [ -x "$QMAKE" ] || { echo "::error::qmake not found at $QMAKE"; exit 1; }
+          export LINUXDEPLOY_OUTPUT_VERSION="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
+          [ -n "$LINUXDEPLOY_OUTPUT_VERSION" ] || { echo "::error::no project version in CMakeCache"; exit 1; }
+
+          dl=https://github.com/linuxdeploy
+          curl -fsSL --retry 3 -o linuxdeploy-x86_64.AppImage \
+            "$dl/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          curl -fsSL --retry 3 -o linuxdeploy-plugin-qt-x86_64.AppImage \
+            "$dl/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
           chmod +x linuxdeploy*.AppImage
+          sha256sum linuxdeploy*.AppImage   # 'continuous' moves; record what this build used
 
-          # Set up AppDir structure
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/metainfo
-          cp build/install/bin/GitBolt AppDir/usr/bin/ || cp build/GitBolt AppDir/usr/bin/
-          cp src/app/platform/linux/gitbolt.desktop AppDir/usr/share/applications/
-          cp src/app/platform/linux/gitbolt.appdata.xml AppDir/usr/share/metainfo/
-          # Use icon if available, otherwise create placeholder.
-          # The hicolor spec expects the file named after the Icon=
-          # key in the .desktop file (gitbolt.png), so we rename the
-          # canonical 256-size PNG at copy time.
-          if [ -f resources/icons/gitbolt-256.png ]; then
-            cp resources/icons/gitbolt-256.png AppDir/usr/share/icons/hicolor/256x256/apps/gitbolt.png
-          else
-            convert -size 256x256 xc:steelblue AppDir/usr/share/icons/hicolor/256x256/apps/gitbolt.png 2>/dev/null || true
+          # Icon file stem must equal the desktop Icon= key (gitbolt).
+          for s in 16 32 48 64 128 256 512; do
+            install -Dm644 "resources/icons/gitbolt-$s.png" \
+              "AppDir/usr/share/icons/hicolor/${s}x${s}/apps/gitbolt.png"
+          done
+          install -Dm644 src/app/platform/linux/com.gitbolt.app.metainfo.xml \
+            AppDir/usr/share/metainfo/com.gitbolt.app.metainfo.xml
+
+          # --executable: the build-tree binary (RPATH rewritten, stripped)
+          # plus what it links outside the AppImage excludelist.
+          # Exec=gitbolt must name a file in usr/bin.
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --executable build/src/app/gitbolt \
+            --desktop-file src/app/platform/linux/gitbolt.desktop \
+            --plugin qt --output appimage
+          ls -l "GitBolt-${LINUXDEPLOY_OUTPUT_VERSION}-x86_64.AppImage"
+
+      - name: Smoke-test Linux packages
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
+          deb="build/gitbolt_${ver}_amd64.deb"
+          appimage="GitBolt-${ver}-x86_64.AppImage"
+          # Separate checks: under set -e, the first test in `a && b` failing does not abort.
+          [ -f "$deb" ]      || { echo "::error::missing $deb"; exit 1; }
+          [ -f "$appimage" ] || { echo "::error::missing $appimage"; exit 1; }
+
+          # 1) DEB shape
+          dpkg-deb -f "$deb" Package Version Depends
+          dpkg-deb -c "$deb" | awk '{print $6}' > deb.lst
+          for f in ./usr/bin/gitbolt ./usr/lib/gitbolt/gitbolt ./usr/lib/gitbolt/qt.conf \
+                   ./usr/lib/gitbolt/lib/libQt6Core.so.6 \
+                   ./usr/lib/gitbolt/plugins/platforms/libqxcb.so \
+                   ./usr/share/applications/gitbolt.desktop \
+                   ./usr/share/metainfo/com.gitbolt.app.metainfo.xml \
+                   ./usr/share/icons/hicolor/256x256/apps/gitbolt.png; do
+            grep -qxF "$f" deb.lst || { echo "::error::DEB lacks $f"; exit 1; }
+          done
+          if grep -E '^\./usr/(lib/(x86_64-linux-gnu/)?[^/]+\.so|bin/qt\.conf$|plugins/|translations/)' deb.lst; then
+            echo "::error::DEB puts private Qt files on shared system paths"; exit 1
           fi
+          dpkg-deb -f "$deb" Depends | grep -q 'libxcb-cursor0' \
+            || { echo "::error::Depends lacks bundled Qt's system deps (shlibdeps didn't scan Qt)"; exit 1; }
+          # Plugins must find the private Qt libs on their own: glibc does
+          # not apply the exe's RUNPATH to a dlopen'd plugin's deps.
+          rm -rf debroot && dpkg-deb -x "$deb" debroot
+          readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' | grep -qF '[$ORIGIN/../../lib]' \
+            || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
-          export QMAKE=$(find $Qt6_DIR -name qmake -type f 2>/dev/null | head -1 || echo "qmake")
-          # No `|| true`: if AppImage assembly breaks we want the job
-          # red, not a silently missing artifact.
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir --plugin qt --output appimage
+          # 2) DEB on a stock Ubuntu 24.04 (no aqt LD_LIBRARY_PATH or
+          #    QT_PLUGIN_PATH to mask gaps)
+          docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" \
+            public.ecr.aws/docker/library/ubuntu:24.04 bash -euo pipefail -c '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
+              out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
+                QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
+              echo "DEB: $out"
+              test "$out" = "GitBolt $VER"'
 
-      # ----------------------------------------------------------------------
-      # Upload build artifacts
-      # ----------------------------------------------------------------------
-      - name: Collect artifacts
+          # 3) AppImage on the runner with install-qt-action's env removed
+          chmod +x "$appimage"
+          out=$(env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+                  APPIMAGE_EXTRACT_AND_RUN=1 GITBOLT_INSTANCE_NAME=ci-smoke \
+                  xvfb-run -a "./$appimage" --version)
+          echo "AppImage: $out"
+          test "$out" = "GitBolt $ver"
+
+      # ---- all: collect + upload ------------------------------------------
+      # Each green leg must carry its OS's installers; a missing one fails
+      # here, on a dry run, rather than at the first real release.
+      - name: Collect installers
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
+          set -euo pipefail
+          shopt -s nullglob
           mkdir -p dist
-          cp build/GitBolt-*.dmg dist/ 2>/dev/null || true
-          cp build/GitBolt-*.exe dist/ 2>/dev/null || true
-          cp build/GitBolt-*.deb dist/ 2>/dev/null || true
-          cp build/GitBolt-*.tar.gz dist/ 2>/dev/null || true
-          cp GitBolt-*.AppImage dist/ 2>/dev/null || true
+          case "$RUNNER_OS" in
+            macOS)   pats=('build/GitBolt-*.dmg') ;;
+            Windows) pats=('build/GitBolt-*.exe') ;;
+            Linux)   pats=('build/gitbolt_*_amd64.deb' 'GitBolt-*-x86_64.AppImage') ;;
+            *)       echo "::error::unexpected RUNNER_OS '$RUNNER_OS'"; exit 1 ;;
+          esac
+          for p in "${pats[@]}"; do
+            m=($p)
+            [ ${#m[@]} -gt 0 ] || { echo "::error::no installer matches $p"; exit 1; }
+            cp -- "${m[@]}" dist/
+          done
           ls -la dist/
 
-      # v7 = node24 (v5 was still node20). `archive` defaults to true, which
-      # dist/* needs: it can hold several files (.deb + .AppImage).
-      - name: Upload artifacts
+      # v7 = node24. `archive` (default true) zips dist/*, which can hold
+      # several files. Short retention: a private repo pays for artifact
+      # storage; released versions live on as release assets instead.
+      - name: Upload installers
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact }}
+          name: GitBolt-${{ runner.os }}
           path: dist/*
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
 
-      # ----------------------------------------------------------------------
-      # Attach installers to the GitHub Release
-      # ----------------------------------------------------------------------
-      - name: Upload to GitHub Release
-        if: github.event_name == 'release'
-        # v3 = node24; v2 is frozen at v2.6.2 on node20. Same inputs and
-        # outputs (action.yml differs only in runs.using); 3.0.x adds upload
-        # and error-handling fixes. No token wiring: the `token` input
-        # defaults to github.token (the old env GITHUB_TOKEN is deprecated).
-        uses: softprops/action-gh-release@v3
+  # ==========================================================================
+  # Version gate: which version is this commit, and is it released yet?
+  # Runs next to `build` (no needs) on push and dispatch; seconds on Linux.
+  # ==========================================================================
+  version:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      release: ${{ steps.version.outputs.release }}
+      notes: ${{ steps.notes.outputs.notes }}
+    steps:
+      # Only the two root files this job reads. Depth 1 is enough: the tag
+      # lookup below asks the remote, not the shallow clone.
+      - uses: actions/checkout@v7
         with:
-          files: dist/*
+          sparse-checkout: |
+            /CMakeLists.txt
+            /CHANGELOG.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # One single-line `project(GitBolt VERSION x.y.z ...)` is the only
+      # version source (CPack, the About dialog and package names read it).
+      # Anything else fails loudly here instead of releasing a wrong tag.
+      # Tag lookup: matching-refs is a prefix match (v1.2.3 also matches
+      # v1.2.30), so jq keeps exact hits only; a missing tag is a 200 with
+      # [], so any non-zero exit from gh is a real error, never "absent".
+      - name: Version and tag
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^[[:space:]]*project[[:space:]]*\([[:space:]]*GitBolt[[:space:]]+VERSION[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)([[:space:]].*|\).*)?$/\1/p' CMakeLists.txt)
+          if ! [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=CMakeLists.txt::need exactly one single-line 'project(GitBolt VERSION x.y.z ...)', got '${version}'"
+            exit 1
+          fi
+          tag="v$version"
+          n=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$tag" \
+                --jq "map(select(.ref == \"refs/tags/$tag\")) | length")
+          if [ "$n" = 0 ]; then release=true; else release=false; fi
+          { echo "version=$version"; echo "tag=$tag"; echo "release=$release"; } >> "$GITHUB_OUTPUT"
+          if [ "$release" = true ]; then
+            echo "::notice::$tag is not tagged yet: a green push to main releases it"
+          else
+            echo "::notice::$tag already exists: no release"
+          fi
+
+      # The "## [x.y.z] ..." section of CHANGELOG.md, up to the next "## "
+      # heading or the link-reference footer, blank lines trimmed. String
+      # compare, so the dots in the version aren't regex wildcards. On a
+      # dry run this is the check that a version bump came with its notes.
+      - name: Release notes
+        id: notes
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          notes="$RUNNER_TEMP/release-notes.md"
+          awk -v v="$VERSION" '
+            /^## /      { if (on) exit; on = (index($0, "## [" v "]") == 1); next }
+            !on         { next }
+            /^\[.*\]: / { exit }
+            NF == 0     { if (seen) blank++; next }
+                        { while (blank > 0) { print ""; blank-- }; print; seen = 1 }
+          ' CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then
+            echo "::error file=CHANGELOG.md::no '## [$VERSION]' section; $TAG can't be released without notes"
+            exit 1
+          fi
+          delim="NOTES_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+          { echo "notes<<$delim"; cat "$notes"; echo "$delim"; } >> "$GITHUB_OUTPUT"
+          { echo "### Release notes for $TAG"; echo; cat "$notes"; } >> "$GITHUB_STEP_SUMMARY"
+
+  # ==========================================================================
+  # Release: push to main only, every build/test/package/smoke test green,
+  # and the version has no tag yet. Creates tag v<version> at this commit
+  # plus the GitHub Release with every installer and the CHANGELOG section
+  # as notes. Dry runs never get here, on any branch, including main.
+  # ==========================================================================
+  release:
+    name: release ${{ needs.version.outputs.tag }}
+    needs: [version, build]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.version.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write   # create the tag + release, upload assets
+    # Serialize releases across runs; the re-check below runs inside the
+    # lock, so two quick pushes can't both create the same release.
+    concurrency:
+      group: gitbolt-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      # Look again now that we hold the lock. Release only if this commit
+      # is still main's tip: if main moved on, the newer commit's run
+      # releases (same version, still untagged), so the tag lands on the
+      # newest green main. It also avoids the Releases API refusing
+      # GITHUB_TOKEN (404/403) when the target commit's .github/workflows
+      # differs from the default branch's; main's tip trivially matches.
+      - name: Re-check tag and main tip
+        id: recheck
+        run: |
+          set -euo pipefail
+          n=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" \
+                --jq "map(select(.ref == \"refs/tags/$TAG\")) | length")
+          tip=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          if [ "$n" != 0 ]; then
+            echo "::notice::$TAG was created meanwhile; nothing to do"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          elif [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main moved on to $tip; that commit's run will release $TAG"
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # v8 = node24 and the pair for upload-artifact v7. merge-multiple
+      # puts all three platforms' files in one directory.
+      - name: Download installers
+        if: steps.recheck.outputs.go == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          pattern: GitBolt-*
+          path: dist
+          merge-multiple: true
+
+      # Every format must be present (a missing one fails the release rather
+      # than publishing a partial one). The CPack names derive from CMake's
+      # PROJECT_VERSION, so they also cross-check the version job's read.
+      - name: Check installers, write checksums
+        if: steps.recheck.outputs.go == 'true'
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          ls -la
+          for ext in dmg exe deb AppImage; do
+            files=(*."$ext")
+            [ ${#files[@]} -gt 0 ] || { echo "::error::no .$ext installer in the artifacts"; exit 1; }
+          done
+          for f in *.dmg *.exe *.deb *.AppImage; do
+            [[ $f == *"$VERSION"* ]] || { echo "::error::$f doesn't carry version $VERSION"; exit 1; }
+          done
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # gh (preinstalled) instead of a Node action: it creates the release
+      # as a draft, uploads every file, and only then publishes, so a failed
+      # upload leaves no tag and the next push to main simply tries again.
+      # It refuses to touch an already-published release with this tag.
+      # Notes arrive through env, never ${{ }} inside the script.
+      - name: Create tag and release
+        if: steps.recheck.outputs.go == 'true'
+        env:
+          NOTES: ${{ needs.version.outputs.notes }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "GitBolt $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"
+          tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
+          [ "$tagged" = "$GITHUB_SHA" ] || { echo "::error::$TAG points at $tagged, expected $GITHUB_SHA"; exit 1; }
+          echo "### Released [$TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG) at \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"

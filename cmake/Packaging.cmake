@@ -1,6 +1,7 @@
 # ============================================================================
 # GitBolt CPack Packaging Configuration
-# Supports: DMG (macOS), NSIS (Windows), AppImage/DEB (Linux)
+# Supports: DMG (macOS), NSIS (Windows), DEB (Linux); the AppImage is
+# built by linuxdeploy in CI
 # ============================================================================
 
 set(CPACK_PACKAGE_NAME "GitBolt")
@@ -32,11 +33,12 @@ if(APPLE)
     # Qt is deployed into the bundle during CPack's staging install via
     # the qt_generate_deploy_app_script hook in src/app/CMakeLists.txt.
     #
-    # Code signing & notarization are intentionally NOT wired here:
-    # the CPACK_BUNDLE_* variables (including APPLE_CERT_APP) apply
-    # only to the Bundle generator, not DragNDrop. When signing lands
-    # it belongs in CI: codesign the .app before cpack, then
-    # `notarytool submit` + `stapler staple` on the finished DMG.
+    # The bundle is ad-hoc signed by an install(CODE) rule after the Qt
+    # deploy step in src/app/CMakeLists.txt. CPack re-stages the .app
+    # itself, so signing has to happen at install time, not "before
+    # cpack". Developer ID signing + notarization are not wired: they need
+    # inside-out signing with -o runtime --timestamp in that same hook,
+    # then `notarytool submit` + `stapler staple` on the finished DMG.
 
 # ============================================================================
 # Windows — NSIS installer
@@ -48,8 +50,19 @@ elseif(WIN32)
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\GitBolt.exe")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/ThePieMonster/GitBolt")
     set(CPACK_NSIS_HELP_LINK "https://github.com/ThePieMonster/GitBolt/issues")
-    set(CPACK_NSIS_MODIFY_PATH ON)
+    # Not ON: bin\ holds Qt6*.dll, z.dll, pcre.dll and the MSVC runtime,
+    # which on the system PATH could shadow other programs' DLLs, and a
+    # GUI app gains nothing from being on PATH.
+    set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+
+    # Ship the MSVC runtime (msvcp140*.dll, vcruntime140*.dll,
+    # concrt140.dll) app-local in bin\ from VS's redist folder. CI runners
+    # have the VC++ redist in System32, so without this the installer
+    # passes in CI but fails on a clean Windows ("VCRUNTIME140_1.dll was
+    # not found"), and an older system msvcp140.dll hits the VS 17.10+
+    # std::mutex crash. The UCRT is part of Windows 10+.
+    include(InstallRequiredSystemLibraries)
 
     # Start menu shortcuts
     set(CPACK_NSIS_CREATE_ICONS_EXTRA
@@ -81,11 +94,11 @@ else()
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "GitBolt Team <team@gitbolt.dev>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
-    # Let dpkg-shlibdeps compute the real shared-library dependencies
-    # (libqt6svg6, the actual libgit2 soname of the build host, etc.)
-    # instead of hand-pinning a list that drifts — the old hardcoded
-    # "libgit2-1.7" pin was already wrong on newer Ubuntu, and it
-    # omitted Qt SVG entirely.
+    # Let dpkg-shlibdeps compute the real shared-library dependencies:
+    # the build host's libgit2 soname plus the system libraries the
+    # BUNDLED Qt needs (xcb-cursor, xkbcommon-x11, fontconfig, GL, ...),
+    # instead of hand-pinning a list that drifts. The bundled Qt itself
+    # (/usr/lib/gitbolt, see src/app/CMakeLists.txt) has no package.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/ThePieMonster/GitBolt")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
@@ -93,7 +106,9 @@ else()
     # Install Linux desktop integration files
     install(FILES "${CMAKE_SOURCE_DIR}/src/app/platform/linux/gitbolt.desktop"
             DESTINATION share/applications)
-    install(FILES "${CMAKE_SOURCE_DIR}/src/app/platform/linux/gitbolt.appdata.xml"
+    # Named after the AppStream <id>; validators reject a metainfo file
+    # whose name doesn't match it (metainfo-filename-cid-mismatch).
+    install(FILES "${CMAKE_SOURCE_DIR}/src/app/platform/linux/com.gitbolt.app.metainfo.xml"
             DESTINATION share/metainfo)
     install(FILES "${CMAKE_SOURCE_DIR}/src/app/platform/linux/nautilus-gitbolt.py"
             DESTINATION share/nautilus-python/extensions
@@ -111,8 +126,7 @@ else()
                 RENAME gitbolt.png)
     endforeach()
 
-    # AppImage support (used via linuxdeploy in CI, not CPack directly)
-    # The CI workflow handles AppImage creation with linuxdeploy
+    # The AppImage is assembled by linuxdeploy in CI, not by CPack.
 endif()
 
 # ============================================================================

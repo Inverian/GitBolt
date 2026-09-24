@@ -2,12 +2,19 @@
 <component type="desktop-application">
   <id>com.gitbolt.app</id>
   <metadata_license>MIT</metadata_license>
-  <project_license>MIT</project_license>
+  <project_license>GPL-3.0-only</project_license>
   <name>GitBolt</name>
   <summary>Fast cross-platform Git GUI client</summary>
   <description>
     <p>GitBolt is a high-performance Git GUI client built with Qt 6 and libgit2.</p>
   </description>
+  <developer id="dev.gitbolt">
+    <name>GitBolt Team</name>
+  </developer>
+  <launchable type="desktop-id">gitbolt.desktop</launchable>
   <url type="homepage">https://github.com/ThePieMonster/GitBolt</url>
-  <provides><binary>gitbolt</binary></provides>
+  <provides>
+    <binary>gitbolt</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
 </component>

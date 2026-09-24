@@ -77,6 +77,14 @@ set_target_properties(gitbolt PROPERTIES
     OUTPUT_NAME "GitBolt"
 )
 
+# Linux executables are lowercase by convention, and gitbolt.desktop
+# (Exec=gitbolt), the Nautilus extension and the AppStream <binary> all
+# run `gitbolt`; linuxdeploy rejects an Exec= that names no file in
+# usr/bin (the match is case-sensitive).
+if(UNIX AND NOT APPLE)
+    set_target_properties(gitbolt PROPERTIES OUTPUT_NAME "gitbolt")
+endif()
+
 if(APPLE)
     set_target_properties(gitbolt PROPERTIES
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.gitbolt.app"
@@ -94,23 +102,87 @@ endif()
 target_compile_definitions(gitbolt PRIVATE
     GITBOLT_VERSION="${PROJECT_VERSION}")
 
-install(TARGETS gitbolt
-    BUNDLE DESTINATION .
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-
 # Bundle the Qt runtime into the INSTALLED app. This runs at
 # `cmake --install` time — and therefore also inside CPack's own
-# staging install, which is what actually ends up in the DMG/NSIS
-# payload. Running macdeployqt/windeployqt by hand on some other
-# install tree (as CI used to) never affects what CPack ships.
-# Linux stays on system Qt: the DEB declares shared-lib deps and the
-# AppImage is assembled by linuxdeploy in CI.
+# staging install, which is what actually ends up in the DMG / NSIS /
+# DEB payload. Running a deploy tool by hand on some other install tree
+# (as CI used to) never affects what CPack ships.
 if(APPLE OR WIN32)
+    install(TARGETS gitbolt
+        BUNDLE DESTINATION .
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
     qt_generate_deploy_app_script(
         TARGET gitbolt
         OUTPUT_SCRIPT gitbolt_deploy_script
+        # windeployqt would otherwise copy the ~25 MB vc_redist.x64.exe
+        # into bin/ for Release builds, and nothing runs it. The MSVC
+        # runtime DLLs go in app-local via InstallRequiredSystemLibraries
+        # (cmake/Packaging.cmake). Only affects the windeployqt branch.
+        NO_COMPILER_RUNTIME
         NO_UNSUPPORTED_PLATFORM_ERROR
     )
     install(SCRIPT ${gitbolt_deploy_script})
+else()
+    # Linux: self-contained like the macOS bundle and the Windows dir,
+    # because no distro Qt is new enough (Ubuntu 24.04 ships 6.4). The
+    # real binary, a private Qt and its plugins live in lib/gitbolt, with
+    # a bin/gitbolt symlink (DEB: /usr/lib/gitbolt + /usr/bin/gitbolt).
+    # Never let the private Qt reach <prefix>/lib (the shared linker path)
+    # or qt.conf reach <prefix>/bin (every Qt app in /usr/bin would read
+    # it), which is what the default deploy layout would do.
+    set(GITBOLT_PRIVATE_DIR "lib/gitbolt")
+    set_target_properties(gitbolt PROPERTIES INSTALL_RPATH "\$ORIGIN/lib")
+    install(TARGETS gitbolt RUNTIME DESTINATION "${GITBOLT_PRIVATE_DIR}")
+    # EXECUTABLE is the BUILD-tree binary, as in Qt's own Linux deploy
+    # script: file(GET_RUNTIME_DEPENDENCIES) resolves only through
+    # RPATH/RUNPATH, the ldconfig dirs and DIRECTORIES (never
+    # LD_LIBRARY_PATH), and only the build RUNPATH points at the Qt
+    # install. QT_DEPLOY_LIB_DIR (not a LIB_DIR argument) is what Qt uses
+    # to compute each plugin's new RUNPATH, so it names the private lib
+    # dir (plugins get $ORIGIN/../../lib). EXCLUDE_PLUGIN_TYPES: evdev/
+    # libinput, eglfs/KMS and GTK-theme plugins pull system libraries a
+    # desktop Git client doesn't need. NO_TRANSLATIONS: the default target
+    # would be <prefix>/translations.
+    qt_generate_deploy_script(
+        TARGET gitbolt
+        OUTPUT_SCRIPT gitbolt_deploy_script
+        CONTENT "
+set(QT_DEPLOY_BIN_DIR \"${GITBOLT_PRIVATE_DIR}\")
+set(QT_DEPLOY_LIB_DIR \"${GITBOLT_PRIVATE_DIR}/lib\")
+set(QT_DEPLOY_PLUGINS_DIR \"${GITBOLT_PRIVATE_DIR}/plugins\")
+qt_deploy_runtime_dependencies(
+    EXECUTABLE \"$<TARGET_FILE:gitbolt>\"
+    EXCLUDE_PLUGIN_TYPES generic egldeviceintegrations platformthemes
+    GENERATE_QT_CONF
+    NO_TRANSLATIONS
+)
+")
+    install(SCRIPT "${gitbolt_deploy_script}")
+    file(CREATE_LINK "../${GITBOLT_PRIVATE_DIR}/gitbolt"
+         "${CMAKE_CURRENT_BINARY_DIR}/gitbolt-bin-link" SYMBOLIC)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/gitbolt-bin-link"
+            DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME gitbolt)
+endif()
+
+# macdeployqt strips every framework and dylib it copies into the bundle
+# (Qt, plus Homebrew's libgit2 and its deps) and rewrites their install
+# names, which invalidates their signatures. Qt 6.10's macdeployqt does
+# not re-sign (ad-hoc signing became its default only in 6.11,
+# QTBUG-138019), so the bundle fails `codesign --verify` and Gatekeeper
+# calls a downloaded copy "damaged". Re-sign ad-hoc after the deploy
+# script; this also runs inside CPack's staging install, so it is what
+# the DMG ships. Fail the install if the result doesn't verify.
+# "GitBolt.app" = OUTPUT_NAME above, installed to BUNDLE DESTINATION ".".
+if(APPLE)
+    install(CODE [[
+        set(_gitbolt_app "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/GitBolt.app")
+        message(STATUS "Ad-hoc signing ${_gitbolt_app}")
+        execute_process(
+            COMMAND codesign --force --deep --sign - "${_gitbolt_app}"
+            COMMAND_ERROR_IS_FATAL ANY)
+        execute_process(
+            COMMAND codesign --verify --deep --strict "${_gitbolt_app}"
+            COMMAND_ERROR_IS_FATAL ANY)
+    ]])
 endif()
