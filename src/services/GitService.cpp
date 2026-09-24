@@ -6,7 +6,7 @@
 namespace gitbolt::services {
 
 GitService::GitService(QObject* parent)
-    : QObject(parent), runner_(this), watcher_(this) {
+    : QObject(parent), watcher_(this), runner_(this) {
     connect(&watcher_, &watcher::FileWatcher::repositoryChanged, this, [this]() {
         refreshStatus();
         emit repositoryChanged();
@@ -1297,7 +1297,7 @@ QStringList GitService::activeFeatures() {
         // Strip leading "* " for current branch indicator
         if (trimmed.startsWith("* ")) trimmed = trimmed.mid(2);
         // Extract just the name after "feature/"
-        int idx = trimmed.indexOf("feature/");
+        qsizetype idx = trimmed.indexOf("feature/");
         if (idx >= 0)
             names.append(trimmed.mid(idx + 8));
     }
@@ -1317,7 +1317,7 @@ QStringList GitService::activeReleases() {
     for (const auto& line : lines) {
         QString trimmed = line.trimmed();
         if (trimmed.startsWith("* ")) trimmed = trimmed.mid(2);
-        int idx = trimmed.indexOf("release/");
+        qsizetype idx = trimmed.indexOf("release/");
         if (idx >= 0)
             names.append(trimmed.mid(idx + 8));
     }
@@ -1337,7 +1337,7 @@ QStringList GitService::activeHotfixes() {
     for (const auto& line : lines) {
         QString trimmed = line.trimmed();
         if (trimmed.startsWith("* ")) trimmed = trimmed.mid(2);
-        int idx = trimmed.indexOf("hotfix/");
+        qsizetype idx = trimmed.indexOf("hotfix/");
         if (idx >= 0)
             names.append(trimmed.mid(idx + 7));
     }

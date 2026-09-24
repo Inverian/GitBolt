@@ -19,6 +19,7 @@
 #elif defined(Q_OS_WIN)
 #include <windows.h>
 #include <dbghelp.h>
+#include <share.h>
 #pragma comment(lib, "dbghelp.lib")
 #endif
 
@@ -210,7 +211,9 @@ void CrashHandler::signalHandler(int signal) {
 // dbghelp calls below have no fd-based equivalents).
 void CrashHandler::writeStackTrace(int signal) {
 #if defined(Q_OS_WIN)
-    FILE* fp = std::fopen(g_crashPath, "w");
+    // Same as fopen (which the CRT implements as _fsopen with
+    // _SH_DENYNO) without MSVC's C4996; fopen_s would open unshared.
+    FILE* fp = _fsopen(g_crashPath, "w", _SH_DENYNO);
     if (!fp) return;
 
     std::fwrite(g_header, 1, g_headerLen, fp);

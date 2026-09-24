@@ -29,9 +29,14 @@ The Mac and Windows instructions are intentionally kept as parallel as possible.
 |---|---|---|---|
 | C++ compiler | C++20 (Apple Clang 14+ / MSVC 19.30+) | Xcode Command Line Tools | Visual Studio 2022 |
 | CMake | 3.21 | Homebrew | Visual Studio installer or [cmake.org](https://cmake.org/download/) |
-| Qt | 6.5 | Homebrew (`qt`) | [Qt Online Installer](https://www.qt.io/download-qt-installer) |
+| Qt | 6.5 (6.9.2 on macOS; see note) | Homebrew (`qt`) | [Qt Online Installer](https://www.qt.io/download-qt-installer) |
 | libgit2 | 1.7 | Homebrew | vcpkg |
 | pkg-config / pkgconf | any recent | Homebrew | vcpkg |
+
+> **Qt on macOS:** with a current Xcode SDK, Qt before 6.9.2 fails to link
+> (`ld: framework 'AGL' not found`) because its CMake package still requests
+> the AGL framework, which the SDK no longer ships. Homebrew's `qt` is well
+> past that; CI uses Qt 6.10 everywhere.
 | Ninja | any recent | Homebrew | Qt installer or [ninja-build.org](https://ninja-build.org/) |
 | Git | 2.30+ | Apple CLT (already installed) | [git-scm.com](https://git-scm.com/download/win) |
 
@@ -184,8 +189,8 @@ Qt does not have an official Windows package manager equivalent to Homebrew. Use
 2. Run the installer. You'll need to create a free Qt account (or use an existing one) — Qt requires this for the open-source download.
 3. Choose **Custom installation**.
 4. Select these components:
-   - **Qt → Qt 6.7.x → MSVC 2019 64-bit** (or newer MSVC variant matching your VS install)
-   - **Qt → Qt 6.7.x → Sources** (optional, but useful for debugging)
+   - **Qt → Qt 6.10.x → MSVC 2022 64-bit** (Qt 6.8 and later ship only MSVC 2022 builds for x64; CI uses 6.10)
+   - **Qt → Qt 6.10.x → Sources** (optional, but useful for debugging)
    - **Developer and Designer Tools → CMake** (skip if you already installed CMake via VS)
    - **Developer and Designer Tools → Ninja**
 5. Accept the open-source license and click **Install**. Expect ~1.5 GB download.
@@ -221,7 +226,7 @@ So CMake can find both Qt and vcpkg, set these environment variables. Open **Set
 
 | Variable | Value |
 |---|---|
-| `CMAKE_PREFIX_PATH` | `C:\Qt\6.7.2\msvc2019_64` (adjust version) |
+| `CMAKE_PREFIX_PATH` | `C:\Qt\6.10.3\msvc2022_64` (adjust version) |
 | `VCPKG_ROOT` | `C:\vcpkg` |
 
 (Alternatively, pass `-DCMAKE_PREFIX_PATH` and `-DCMAKE_TOOLCHAIN_FILE` on the command line at configure time — see [Building](#building).)
@@ -264,7 +269,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja
 > On Windows, if you didn't set `CMAKE_PREFIX_PATH` and `VCPKG_ROOT` as environment variables, pass them explicitly:
 > ```cmd
 > cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja ^
->   -DCMAKE_PREFIX_PATH=C:\Qt\6.7.2\msvc2019_64 ^
+>   -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64 ^
 >   -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 > ```
 

@@ -830,7 +830,8 @@ void SettingsDialog::populateShortcutsTable()
     if (shortcutActions_.isEmpty())
         return;
 
-    shortcutsTable_->setRowCount(shortcutActions_.size());
+    // One row per named MainWindow menu action (~100) — fits the int row count.
+    shortcutsTable_->setRowCount(static_cast<int>(shortcutActions_.size()));
     int row = 0;
     for (const auto& ap : shortcutActions_) {
         QAction* a = ap.data();

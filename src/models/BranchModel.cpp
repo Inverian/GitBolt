@@ -119,7 +119,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (cat == RootCategory::LocalBranches) {
         if (row < 0 || row >= static_cast<int>(localBranches_.size()))
             return {};
-        const auto& b = localBranches_[row];
+        const auto& b = localBranches_[static_cast<size_t>(row)];
 
         switch (role) {
         case Qt::DisplayRole: {
@@ -171,7 +171,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (cat == RootCategory::RemoteBranches) {
         if (row < 0 || row >= static_cast<int>(remoteBranches_.size()))
             return {};
-        const auto& b = remoteBranches_[row];
+        const auto& b = remoteBranches_[static_cast<size_t>(row)];
 
         switch (role) {
         case Qt::DisplayRole:
@@ -196,7 +196,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (cat == RootCategory::Tags) {
         if (row < 0 || row >= static_cast<int>(tags_.size()))
             return {};
-        const auto& t = tags_[row];
+        const auto& t = tags_[static_cast<size_t>(row)];
 
         switch (role) {
         case Qt::DisplayRole:
@@ -220,7 +220,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (cat == RootCategory::Submodules) {
         if (row < 0 || row >= static_cast<int>(submodules_.size()))
             return {};
-        const auto& sm = submodules_[row];
+        const auto& sm = submodules_[static_cast<size_t>(row)];
 
         switch (role) {
         case Qt::DisplayRole:
@@ -243,7 +243,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (cat == RootCategory::Stashes) {
         if (row < 0 || row >= static_cast<int>(stashes_.size()))
             return {};
-        const auto& s = stashes_[row];
+        const auto& s = stashes_[static_cast<size_t>(row)];
 
         switch (role) {
         case Qt::DisplayRole:
@@ -355,14 +355,14 @@ QString BranchModel::branchNameAt(const QModelIndex& index) const {
 
     if (cat == RootCategory::LocalBranches && row >= 0
         && row < static_cast<int>(localBranches_.size()))
-        return QString::fromStdString(localBranches_[row].name);
+        return QString::fromStdString(localBranches_[static_cast<size_t>(row)].name);
 
     if (cat == RootCategory::RemoteBranches && row >= 0
         && row < static_cast<int>(remoteBranches_.size()))
-        return QString::fromStdString(remoteBranches_[row].name);
+        return QString::fromStdString(remoteBranches_[static_cast<size_t>(row)].name);
 
     if (cat == RootCategory::Tags && row >= 0 && row < static_cast<int>(tags_.size()))
-        return QString::fromStdString(tags_[row].name);
+        return QString::fromStdString(tags_[static_cast<size_t>(row)].name);
 
     return {};
 }

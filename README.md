@@ -180,8 +180,12 @@ Required tools at a glance:
 |---|---|
 | C++ compiler | C++20 (Apple Clang 14+, GCC 11+, MSVC 19.30+) |
 | CMake | 3.21 |
-| Qt | 6.5 |
+| Qt | 6.5 (6.9.2 on macOS) |
 | libgit2 | 1.7 |
+
+On macOS with a current Xcode SDK, Qt before 6.9.2 fails to link: its CMake
+package still requests the AGL framework, which the SDK no longer ships.
+CI builds with Qt 6.10 on all three platforms and libgit2 1.7 on Linux.
 
 See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on your platform, configure CMake, run the tests, build installers, and troubleshoot common issues.
 
@@ -189,7 +193,9 @@ See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on you
 
 ## Project Status
 
-GitBolt is currently in **early development**. The core architecture and all major modules are scaffolded:
+GitBolt **0.9.0** is a beta: every planned module is implemented and
+wired into the UI, and CI builds and tests it on macOS, Linux, and Windows.
+See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
 
 | Phase | Status |
 |-------|--------|
@@ -202,12 +208,12 @@ GitBolt is currently in **early development**. The core architecture and all maj
 | Phase 6 — Interactive Rebase, Cherry-Pick, Stash | Complete |
 | Phase 7 — Tags, Submodules, Worktrees, Reflog | Complete |
 | Phase 8 — Settings, Themes, Dashboard | Complete |
-| Phase 9 — Plugin System | Complete |
+| Phase 9 — Built-in Tools (Plugins menu) | Complete |
 | Phase 10 — Shell Integration & Packaging | Complete |
 | Phase 11 — Git Flow & Maintenance | Complete |
 | Phase 12 — Performance & Hardening | Complete |
 
-**~30,300 lines of C++ across 170 source files.**
+**~30,900 lines of C++ across 170 source files.**
 
 ### Roadmap
 

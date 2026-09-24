@@ -30,7 +30,8 @@ QVariant RebaseListModel::data(const QModelIndex& index, int role) const {
     if (row < 0 || row >= static_cast<int>(ops_.size()))
         return {};
 
-    const auto& op = ops_[row];
+    // row >= 0 checked above.
+    const auto& op = ops_[static_cast<size_t>(row)];
 
     switch (role) {
     case Qt::DisplayRole:
@@ -57,7 +58,8 @@ bool RebaseListModel::setData(const QModelIndex& index, const QVariant& value, i
         return false;
 
     if (role == OperationTypeRole) {
-        ops_[row].type = static_cast<git::RebaseOperationType>(value.toInt());
+        // row >= 0 checked above.
+        ops_[static_cast<size_t>(row)].type = static_cast<git::RebaseOperationType>(value.toInt());
         emit dataChanged(index, index, {role, Qt::DisplayRole});
         return true;
     }

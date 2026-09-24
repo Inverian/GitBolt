@@ -2953,8 +2953,8 @@ void MainWindow::buildPluginsMenu()
                 entries.push_back({shaToPath.value(p[0]), p[0], sz});
             }
             std::sort(entries.begin(), entries.end(),
-                [](const Entry& a, const Entry& b) {
-                    return a.size > b.size;
+                [](const Entry& lhs, const Entry& rhs) {
+                    return lhs.size > rhs.size;
                 });
             if (entries.size() > 50) entries.resize(50);
 
@@ -2980,17 +2980,18 @@ void MainWindow::buildPluginsMenu()
             for (size_t i = 0; i < entries.size(); ++i) {
                 const auto& e = entries[i];
                 // Human-readable size: KB / MB / GB. Locale-aware
-                // formatting for the number part.
+                // formatting for the number part. The double casts
+                // are exact below 2^53 bytes (~9 PB).
                 QString humanSize;
                 if (e.size >= 1024LL * 1024 * 1024)
                     humanSize = QStringLiteral("%1 GB").arg(
-                        e.size / (1024.0 * 1024 * 1024), 0, 'f', 2);
+                        static_cast<double>(e.size) / (1024.0 * 1024 * 1024), 0, 'f', 2);
                 else if (e.size >= 1024 * 1024)
                     humanSize = QStringLiteral("%1 MB").arg(
-                        e.size / (1024.0 * 1024), 0, 'f', 2);
+                        static_cast<double>(e.size) / (1024.0 * 1024), 0, 'f', 2);
                 else if (e.size >= 1024)
                     humanSize = QStringLiteral("%1 KB").arg(
-                        e.size / 1024.0, 0, 'f', 1);
+                        static_cast<double>(e.size) / 1024.0, 0, 'f', 1);
                 else
                     humanSize = QStringLiteral("%1 B").arg(e.size);
                 auto* sizeItem = new QTableWidgetItem(humanSize);
@@ -3181,8 +3182,8 @@ void MainWindow::buildPluginsMenu()
                  it != commitsByAuthor.cend(); ++it)
                 top.append({it.key(), it.value()});
             std::sort(top.begin(), top.end(),
-                [](const auto& a, const auto& b) {
-                    return a.second > b.second;
+                [](const auto& lhs, const auto& rhs) {
+                    return lhs.second > rhs.second;
                 });
             QStringList topLines;
             const int topN = std::min<int>(5, static_cast<int>(top.size()));
@@ -3595,15 +3596,10 @@ void MainWindow::assignActionObjectNames(QWidget* widget,
 // Toolbar
 // ---------------------------------------------------------------------------
 //
-// Layout matches the GitExtensions browse window toolbar:
+// Layout follows the GitExtensions browse window toolbar:
 //
-//   Refresh | Fetch Pull Push | Commit | Stash | Settings
-//                                              | <stretch>
-//                                              | Filter: [____]
-//
-// Several buttons are still wired to the placeholder helper that
-// pops a status-bar message — we want them visible in the chrome
-// so users can see what's coming.
+//   Refresh | Branch: [combo] | Fetch Pull Push | Commit | Stash
+//           | <op status label> | <stretch> | Filter: [____]
 // ---------------------------------------------------------------------------
 void MainWindow::createToolBar()
 {

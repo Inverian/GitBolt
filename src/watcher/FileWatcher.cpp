@@ -167,7 +167,7 @@ void FileWatcher::applyNextChunk()
     if (pendingDirs_.isEmpty())
         return;
 
-    const int n = std::min<int>(kAddPathsChunk, pendingDirs_.size());
+    const qsizetype n = std::min<qsizetype>(kAddPathsChunk, pendingDirs_.size());
     watcher_.addPaths(pendingDirs_.mid(0, n));
     pendingDirs_ = pendingDirs_.mid(n);
 

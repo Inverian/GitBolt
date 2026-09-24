@@ -38,7 +38,7 @@ QVariant SubmoduleTableModel::data(const QModelIndex& index, int role) const {
     if (row < 0 || row >= static_cast<int>(submodules_.size()))
         return {};
 
-    const auto& sub = submodules_[row];
+    const auto& sub = submodules_[static_cast<size_t>(row)];
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
@@ -125,19 +125,19 @@ void SubmoduleTableModel::clear() {
 
 QString SubmoduleTableModel::nameAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(submodules_.size()))
-        return QString::fromStdString(submodules_[row].name);
+        return QString::fromStdString(submodules_[static_cast<size_t>(row)].name);
     return {};
 }
 
 QString SubmoduleTableModel::pathAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(submodules_.size()))
-        return QString::fromStdString(submodules_[row].path);
+        return QString::fromStdString(submodules_[static_cast<size_t>(row)].path);
     return {};
 }
 
 QString SubmoduleTableModel::urlAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(submodules_.size()))
-        return QString::fromStdString(submodules_[row].url);
+        return QString::fromStdString(submodules_[static_cast<size_t>(row)].url);
     return {};
 }
 

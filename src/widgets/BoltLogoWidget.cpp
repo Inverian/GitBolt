@@ -219,9 +219,9 @@ void BoltLogoWidget::stepAnimation()
     // overlay feel like real data rather than confetti.
     auto* rng = QRandomGenerator::global();
     const int flips = 4;
-    const int total = digits_.size();
+    const qsizetype total = digits_.size();
     for (int i = 0; i < flips && total > 0; ++i) {
-        const int idx = rng->bounded(total);
+        const qsizetype idx = rng->bounded(total);
         digits_[idx] ^= 1;
     }
 

@@ -6,6 +6,8 @@
 #include <QSplitter>
 #include <QVBoxLayout>
 
+#include <utility>
+
 namespace gitbolt::widgets {
 
 static const QColor kOursColor(173, 216, 230, 60);    // light blue
@@ -193,18 +195,20 @@ void MergeConflictWidget::showConflict(int index) {
     // Save current result before switching
     if (currentConflict_ >= 0
         && currentConflict_ < static_cast<int>(resolvedContents_.size()))
-        resolvedContents_[currentConflict_] = resultEditor_->toPlainText();
+        resolvedContents_[static_cast<size_t>(currentConflict_)] =
+            resultEditor_->toPlainText();
 
     currentConflict_ = index;
-    const auto& conflict = conflicts_[index];
+    const auto idx = static_cast<size_t>(index);  // index >= 0, checked above
+    const auto& conflict = conflicts_[idx];
 
     oursEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
     baseEditor_->setPlainText(QString::fromStdString(conflict.ancestorContent));
     theirsEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
 
     // If we already have a resolved version, show it; otherwise default to ours
-    if (!resolvedContents_[index].isEmpty()) {
-        resultEditor_->setPlainText(resolvedContents_[index]);
+    if (!resolvedContents_[idx].isEmpty()) {
+        resultEditor_->setPlainText(resolvedContents_[idx]);
     } else {
         resultEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
     }
@@ -245,21 +249,21 @@ void MergeConflictWidget::updateNavigationState() {
 void MergeConflictWidget::onAcceptOurs() {
     if (currentConflict_ < 0)
         return;
-    const auto& conflict = conflicts_[currentConflict_];
+    const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
     resultEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
 }
 
 void MergeConflictWidget::onAcceptTheirs() {
     if (currentConflict_ < 0)
         return;
-    const auto& conflict = conflicts_[currentConflict_];
+    const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
     resultEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
 }
 
 void MergeConflictWidget::onAcceptBoth() {
     if (currentConflict_ < 0)
         return;
-    const auto& conflict = conflicts_[currentConflict_];
+    const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
     QString combined = QString::fromStdString(conflict.oursContent);
     if (!combined.endsWith(QLatin1Char('\n')) && !combined.isEmpty())
         combined += QLatin1Char('\n');
@@ -271,12 +275,14 @@ void MergeConflictWidget::onMarkAllResolved() {
     // Save current
     if (currentConflict_ >= 0
         && currentConflict_ < static_cast<int>(resolvedContents_.size()))
-        resolvedContents_[currentConflict_] = resultEditor_->toPlainText();
+        resolvedContents_[static_cast<size_t>(currentConflict_)] =
+            resultEditor_->toPlainText();
 
     // Check that all conflicts have been visited
     bool allResolved = true;
-    for (int i = 0; i < static_cast<int>(resolvedContents_.size()); ++i) {
-        if (resolvedContents_[i].isEmpty() && i != currentConflict_) {
+    for (size_t i = 0; i < resolvedContents_.size(); ++i) {
+        if (resolvedContents_[i].isEmpty()
+            && std::cmp_not_equal(i, currentConflict_)) {
             allResolved = false;
             break;
         }
@@ -293,7 +299,7 @@ void MergeConflictWidget::onMarkAllResolved() {
             return;
 
         // Fill in any unresolved ones with ours content as default
-        for (int i = 0; i < static_cast<int>(resolvedContents_.size()); ++i) {
+        for (size_t i = 0; i < resolvedContents_.size(); ++i) {
             if (resolvedContents_[i].isEmpty()) {
                 resolvedContents_[i] =
                     QString::fromStdString(conflicts_[i].oursContent);

@@ -38,7 +38,7 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
     if (row < 0 || row >= static_cast<int>(worktrees_.size()))
         return {};
 
-    const auto& wt = worktrees_[row];
+    const auto& wt = worktrees_[static_cast<size_t>(row)];
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
@@ -117,19 +117,19 @@ void WorktreeTableModel::clear() {
 
 QString WorktreeTableModel::nameAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(worktrees_.size()))
-        return QString::fromStdString(worktrees_[row].name);
+        return QString::fromStdString(worktrees_[static_cast<size_t>(row)].name);
     return {};
 }
 
 QString WorktreeTableModel::pathAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(worktrees_.size()))
-        return QString::fromStdString(worktrees_[row].path);
+        return QString::fromStdString(worktrees_[static_cast<size_t>(row)].path);
     return {};
 }
 
 bool WorktreeTableModel::isLockedAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(worktrees_.size()))
-        return worktrees_[row].isLocked;
+        return worktrees_[static_cast<size_t>(row)].isLocked;
     return false;
 }
 

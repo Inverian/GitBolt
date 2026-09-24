@@ -42,7 +42,7 @@ QVariant BlameModel::data(const QModelIndex& index, int role) const {
     if (row < 0 || row >= static_cast<int>(lines_.size()))
         return {};
 
-    const auto& line = lines_[row];
+    const auto& line = lines_[static_cast<size_t>(row)];
 
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
@@ -118,7 +118,7 @@ void BlameModel::clear() {
 
 gitbolt::git::ObjectId BlameModel::commitIdAtRow(int row) const {
     if (row >= 0 && row < static_cast<int>(lines_.size()))
-        return lines_[row].commitId;
+        return lines_[static_cast<size_t>(row)].commitId;
     return {};
 }
 
@@ -136,8 +136,9 @@ void BlameModel::flattenHunks() {
     // Create a mapping from 1-based line number to hunk index
     std::vector<int> lineToHunk(fileLines.size() + 1, -1);
     for (int h = 0; h < static_cast<int>(hunks.size()); ++h) {
-        uint32_t start = hunks[h].startLine;
-        uint32_t count = hunks[h].lineCount;
+        const auto& hunk = hunks[static_cast<size_t>(h)];
+        uint32_t start = hunk.startLine;
+        uint32_t count = hunk.lineCount;
         for (uint32_t i = 0; i < count; ++i) {
             uint32_t ln = start + i;
             if (ln > 0 && ln <= fileLines.size())
@@ -148,8 +149,8 @@ void BlameModel::flattenHunks() {
     lines_.reserve(fileLines.size());
     for (size_t i = 0; i < fileLines.size(); ++i) {
         int lineNum = static_cast<int>(i + 1);
-        int hIdx = (lineNum < static_cast<int>(lineToHunk.size()))
-                       ? lineToHunk[lineNum]
+        int hIdx = (i + 1 < lineToHunk.size())
+                       ? lineToHunk[i + 1]
                        : -1;
 
         BlameLine bl;
@@ -158,7 +159,7 @@ void BlameModel::flattenHunks() {
         bl.hunkIndex = hIdx;
 
         if (hIdx >= 0 && hIdx < static_cast<int>(hunks.size())) {
-            const auto& hunk = hunks[hIdx];
+            const auto& hunk = hunks[static_cast<size_t>(hIdx)];
             bl.commitId = hunk.commitId;
             bl.author = QString::fromStdString(hunk.signature.name);
 

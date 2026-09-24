@@ -492,7 +492,7 @@ void CommitDialog::updateTitle()
         QString branch;
     };
     const TitleInfo info = svc_->withRepository(
-        [this](git::Repository& r) {
+        [](git::Repository& r) {
             TitleInfo t;
             t.workdir = QString::fromStdString(r.workdir());
             if (auto branchRes = r.headBranchName(); branchRes.ok())

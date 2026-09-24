@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.21)
+
+# Link each static library once. Under the OLD behaviour CMake repeats
+# static libraries on link lines, and Apple's linker (Xcode 15+) warns
+# "ignoring duplicate libraries" for every test binary. NEW only drops
+# the repeats on linkers that don't need them (not GNU ld).
+if(POLICY CMP0156)
+    cmake_policy(SET CMP0156 NEW)
+endif()
 project(GitBolt VERSION 0.9.0 LANGUAGES CXX)
 
 # An empty build type builds with NO optimization and no debug info —

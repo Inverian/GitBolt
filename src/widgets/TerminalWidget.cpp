@@ -172,9 +172,10 @@ void TerminalWidget::start(const QString& workingDirectory)
 
     if (pid == 0) {
         // ----- child: async-signal-safe calls ONLY -----
-        if (!cwdBytes.isEmpty()) {
+        if (!cwdBytes.isEmpty() && chdir(cwdBytes.constData()) != 0) {
             // Non-fatal — fall through with whatever cwd we have.
-            (void)chdir(cwdBytes.constData());
+            // (Tested rather than (void)-cast: glibc marks chdir
+            // warn_unused_result, which a cast doesn't silence.)
         }
         execve(shellBytes.constData(), argv.data(), envp.data());
         // exec failed — terminate the child.
@@ -380,14 +381,14 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 {
     // Re-attach the tail of any escape sequence the previous read
     // chopped mid-sequence (see pendingOutput_).
-    QByteArray data;
+    QByteArray chunk;
     if (!pendingOutput_.isEmpty()) {
-        data = pendingOutput_ + bytes;
+        chunk = pendingOutput_ + bytes;
         pendingOutput_.clear();
     } else {
-        data = bytes;
+        chunk = bytes;
     }
-    QString text = QString::fromLocal8Bit(data);
+    QString text = QString::fromLocal8Bit(chunk);
 
     // Pre-strip OSC (terminal title / OSC-8 hyperlinks) and BEL —
     // neither affects visible layout and they have well-defined

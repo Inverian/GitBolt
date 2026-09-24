@@ -17,15 +17,30 @@ CommitFilterProxy::CommitFilterProxy(QObject* parent)
         static_cast<int>(models::CommitLogColumn::Message));
 }
 
+// begin/endFilterChange() replace the deprecated invalidateFilter()
+// from Qt 6.10 on; older Qt (README minimum is 6.5) lacks
+// endFilterChange(), so keep the old call there.
 void CommitFilterProxy::setCriteria(const Criteria& c) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+    criteria_ = c;
+    endFilterChange();
+#else
     criteria_ = c;
     invalidateFilter();
+#endif
 }
 
 void CommitFilterProxy::setMessageFilter(const QString& text) {
     if (criteria_.messageContains == text) return;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 10, 0)
+    beginFilterChange();
+    criteria_.messageContains = text;
+    endFilterChange();
+#else
     criteria_.messageContains = text;
     invalidateFilter();
+#endif
 }
 
 bool CommitFilterProxy::filterAcceptsRow(int srcRow,

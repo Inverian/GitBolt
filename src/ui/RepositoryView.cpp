@@ -859,7 +859,9 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     auto colorFor = [](const QString& key) -> QString {
         if (key.isEmpty())
             return QStringLiteral("#888");
-        const uint h = qHash(key);
+        // Deliberately the low 32 bits of the size_t hash; widening h
+        // would change every author's hue.
+        const auto h = static_cast<uint>(qHash(key));
         const int hue = static_cast<int>(h % 360u);
         return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
     };

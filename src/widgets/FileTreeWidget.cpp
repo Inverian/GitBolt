@@ -451,9 +451,10 @@ QString FileTreeWidget::formatSize(quint64 bytes)
     constexpr quint64 KB = 1024;
     constexpr quint64 MB = KB * 1024;
     constexpr quint64 GB = MB * 1024;
-    if (bytes >= GB) return QStringLiteral("%1 GB").arg(bytes / double(GB), 0, 'f', 1);
-    if (bytes >= MB) return QStringLiteral("%1 MB").arg(bytes / double(MB), 0, 'f', 1);
-    if (bytes >= KB) return QStringLiteral("%1 KB").arg(bytes / double(KB), 0, 'f', 1);
+    // double is exact up to 2^53 bytes (8 PiB), far past any file we show at 1 decimal.
+    if (bytes >= GB) return QStringLiteral("%1 GB").arg(static_cast<double>(bytes) / double(GB), 0, 'f', 1);
+    if (bytes >= MB) return QStringLiteral("%1 MB").arg(static_cast<double>(bytes) / double(MB), 0, 'f', 1);
+    if (bytes >= KB) return QStringLiteral("%1 KB").arg(static_cast<double>(bytes) / double(KB), 0, 'f', 1);
     return QStringLiteral("%1 B").arg(bytes);
 }
 

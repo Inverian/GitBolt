@@ -38,7 +38,9 @@ void DiffSyntaxHighlighter::highlightBlock(const QString& text)
     if (text.isEmpty())
         return;
 
-    const int len = text.length();
+    // A block's text always fits in int: QTextDocument positions (and
+    // setFormat()'s arguments) are int.
+    const int len = static_cast<int>(text.length());
 
     if (text.startsWith(QLatin1String("diff --git "))) {
         setFormat(0, len, fileHeaderFmt_);

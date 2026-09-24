@@ -141,11 +141,16 @@ Result<Repository> Repository::clone(
     CallbackState state{std::move(onProgress), std::move(cancelFlag),
                         std::move(onCredentials)};
 
-    git_clone_options opts = GIT_CLONE_OPTIONS_INIT;
+    // git_clone_options_init() (like the other git_*_options_init()
+    // calls in this file) is libgit2's documented equivalent of the
+    // GIT_*_OPTIONS_INIT macro, whose partial brace-init list trips
+    // -Wmissing-field-initializers.
+    git_clone_options opts;
+    git_clone_options_init(&opts, GIT_CLONE_OPTIONS_VERSION);
 
     // ---- Credentials: prompt for HTTPS, agent for SSH ----
     opts.fetch_opts.callbacks.credentials =
-        [](git_credential** out, const char* url,
+        [](git_credential** out, const char* remoteUrl,
            const char* usernameFromUrl, unsigned int allowedTypes,
            void* payload) -> int {
             auto* s = static_cast<CallbackState*>(payload);
@@ -186,7 +191,7 @@ Result<Repository> Repository::clone(
                 std::string user =
                     usernameFromUrl ? usernameFromUrl : "";
                 std::string pass;
-                if (!s->creds(url ? url : "", user, pass))
+                if (!s->creds(remoteUrl ? remoteUrl : "", user, pass))
                     return GIT_EUSER;   // user cancelled the prompt
                 return git_credential_userpass_plaintext_new(
                     out, user.c_str(), pass.c_str());
@@ -336,7 +341,8 @@ Result<CommitData> Repository::lookupCommit(const ObjectId& id) const {
 }
 
 Result<std::vector<StatusEntry>> Repository::status() const {
-    git_status_options opts = GIT_STATUS_OPTIONS_INIT;
+    git_status_options opts;
+    git_status_options_init(&opts, GIT_STATUS_OPTIONS_VERSION);
     opts.show = GIT_STATUS_SHOW_INDEX_AND_WORKDIR;
     opts.flags = GIT_STATUS_OPT_INCLUDE_UNTRACKED | GIT_STATUS_OPT_RENAMES_HEAD_TO_INDEX
                | GIT_STATUS_OPT_SORT_CASE_SENSITIVELY;
@@ -445,7 +451,8 @@ static DiffResult loadDiffResult(git_diff* diff) {
 
 Result<DiffResult> Repository::diffIndexToWorkdir() const {
     git_diff* diff = nullptr;
-    git_diff_options opts = GIT_DIFF_OPTIONS_INIT;
+    git_diff_options opts;
+    git_diff_options_init(&opts, GIT_DIFF_OPTIONS_VERSION);
     opts.flags = GIT_DIFF_INCLUDE_UNTRACKED;
     int err = git_diff_index_to_workdir(&diff, repo_, nullptr, &opts);
     if (err < 0) return GitError::fromLibgit2(err);
@@ -620,7 +627,7 @@ Result<std::vector<char>> Repository::readBlob(const ObjectId& blobId) const
     if (err < 0) return GitError::fromLibgit2(err);
 
     const void*    data = git_blob_rawcontent(blob);
-    const git_off_t size = git_blob_rawsize(blob);
+    const git_object_size_t size = git_blob_rawsize(blob);
 
     std::vector<char> bytes;
     if (data && size > 0) {
@@ -657,7 +664,8 @@ Result<void> Repository::stageAll() {
 }
 
 Result<void> Repository::discardWorkdirChanges(const std::string& path) {
-    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_checkout_options opts;
+    git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_FORCE;
     const char* paths[] = {path.c_str()};
     opts.paths.strings = const_cast<char**>(paths);
@@ -852,7 +860,8 @@ Result<void> Repository::checkout(const std::string& branchOrRef) {
     git_object_free(target);
     if (err < 0) return GitError::fromLibgit2(err);
 
-    git_checkout_options opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_checkout_options opts;
+    git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_SAFE;
     err = git_checkout_tree(repo_, peeled, &opts);
     if (err < 0) {
@@ -909,8 +918,10 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
     int err = git_annotated_commit_lookup(&annotated, repo_, &oid);
     if (err < 0) return GitError::fromLibgit2(err);
 
-    git_merge_options merge_opts = GIT_MERGE_OPTIONS_INIT;
-    git_checkout_options checkout_opts = GIT_CHECKOUT_OPTIONS_INIT;
+    git_merge_options merge_opts;
+    git_merge_options_init(&merge_opts, GIT_MERGE_OPTIONS_VERSION);
+    git_checkout_options checkout_opts;
+    git_checkout_options_init(&checkout_opts, GIT_CHECKOUT_OPTIONS_VERSION);
     checkout_opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_ALLOW_CONFLICTS;
 
     const git_annotated_commit* heads[] = {annotated};
@@ -1101,7 +1112,8 @@ Result<void> Repository::deleteTag(const std::string& name) {
 
 Result<BlameResult> Repository::blame(const std::string& path,
                                       const ObjectId& newestCommit) const {
-    git_blame_options opts = GIT_BLAME_OPTIONS_INIT;
+    git_blame_options opts;
+    git_blame_options_init(&opts, GIT_BLAME_OPTIONS_VERSION);
     // Blame "as of" a specific commit when one is given (used by
     // the blame view's "Blame Before" action to re-blame at the
     // parent of a selected commit). Zero/default = HEAD, which is
@@ -1126,8 +1138,10 @@ Result<BlameResult> Repository::blame(const std::string& path,
         bh.origCommitId = ObjectId(&hunk->orig_commit_id);
         bh.signature = Signature::fromGit(hunk->final_signature);
         bh.origPath = hunk->orig_path ? hunk->orig_path : "";
-        bh.startLine = hunk->final_start_line_number;
-        bh.lineCount = hunk->lines_in_hunk;
+        // BlameHunk stores uint32_t (as does libgit2's hunk count);
+        // exceeding it takes a file of > 4G lines, i.e. > 4 GiB.
+        bh.startLine = static_cast<uint32_t>(hunk->final_start_line_number);
+        bh.lineCount = static_cast<uint32_t>(hunk->lines_in_hunk);
         bh.boundary = hunk->boundary != 0;
         result.hunks.push_back(std::move(bh));
     }
@@ -1261,7 +1275,8 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     git_commit* commit = nullptr;
     int err = git_commit_lookup(&commit, repo_, &oid);
     if (err < 0) return GitError::fromLibgit2(err);
-    git_cherrypick_options opts = GIT_CHERRYPICK_OPTIONS_INIT;
+    git_cherrypick_options opts;
+    git_cherrypick_options_init(&opts, GIT_CHERRYPICK_OPTIONS_VERSION);
     err = git_cherrypick(repo_, commit, &opts);
     git_commit_free(commit);
     // A real failure (bad object, bare repo, OOM) is an ERROR with
@@ -1346,7 +1361,8 @@ Result<std::vector<WorktreeInfo>> Repository::worktrees() const {
 
 Result<void> Repository::addWorktree(const std::string& name, const std::string& path,
                                      const std::string& branch, bool createBranch) {
-    git_worktree_add_options opts = GIT_WORKTREE_ADD_OPTIONS_INIT;
+    git_worktree_add_options opts;
+    git_worktree_add_options_init(&opts, GIT_WORKTREE_ADD_OPTIONS_VERSION);
     git_reference* ref = nullptr;
     if (!branch.empty()) {
         if (createBranch) {

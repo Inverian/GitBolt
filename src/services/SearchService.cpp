@@ -4,6 +4,7 @@
 #include "git/Revwalk.h"
 
 #include <QDateTime>
+#include <QTimeZone>
 #include <algorithm>
 #include <chrono>
 
@@ -129,8 +130,8 @@ void SearchService::searchByDateRange(git::Repository* repo,
     emit searchStarted();
 
     // Convert QDate to time_point boundaries
-    auto fromEpoch = QDateTime(from, QTime(0, 0, 0), Qt::LocalTime).toSecsSinceEpoch();
-    auto toEpoch = QDateTime(to, QTime(23, 59, 59), Qt::LocalTime).toSecsSinceEpoch();
+    auto fromEpoch = QDateTime(from, QTime(0, 0, 0), QTimeZone::LocalTime).toSecsSinceEpoch();
+    auto toEpoch = QDateTime(to, QTime(23, 59, 59), QTimeZone::LocalTime).toSecsSinceEpoch();
 
     auto fromTp = std::chrono::system_clock::from_time_t(
         static_cast<std::time_t>(fromEpoch));

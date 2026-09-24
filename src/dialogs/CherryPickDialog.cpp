@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QTimeZone>
 #include <QVBoxLayout>
 #include <chrono>
 
@@ -89,7 +90,7 @@ void CherryPickDialog::setCommitDetails(const git::CommitData& commit) {
                      commit.author.when.time_since_epoch())
                      .count();
     QDateTime dt = QDateTime::fromSecsSinceEpoch(
-        static_cast<qint64>(epoch), Qt::LocalTime);
+        static_cast<qint64>(epoch), QTimeZone::LocalTime);
     dateLabel_->setText(dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
 
     if (buttonBox_)

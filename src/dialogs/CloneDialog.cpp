@@ -461,12 +461,13 @@ QString CloneDialog::humanBytes(quint64 n)
 {
     // Small helper for the status line — "12.3 MB", "843 KB", etc.
     // Stays in decimal (1000-based) units; matches how GitHub and
-    // most clone tools display transfer sizes.
+    // most clone tools display transfer sizes. The double conversions
+    // are exact below 2^53 bytes (~9 PB) — far past any real clone.
     constexpr double K = 1000.0;
     if (n < 1000)              return QStringLiteral("%1 B").arg(n);
-    if (n < 1000ull*1000)      return QStringLiteral("%1 KB").arg(n / K, 0, 'f', 1);
-    if (n < 1000ull*1000*1000) return QStringLiteral("%1 MB").arg(n / (K*K), 0, 'f', 1);
-    return QStringLiteral("%1 GB").arg(n / (K*K*K), 0, 'f', 2);
+    if (n < 1000ull*1000)      return QStringLiteral("%1 KB").arg(static_cast<double>(n) / K, 0, 'f', 1);
+    if (n < 1000ull*1000*1000) return QStringLiteral("%1 MB").arg(static_cast<double>(n) / (K*K), 0, 'f', 1);
+    return QStringLiteral("%1 GB").arg(static_cast<double>(n) / (K*K*K), 0, 'f', 2);
 }
 
 QString CloneDialog::repoNameFromUrl(const QString& url)
@@ -478,18 +479,18 @@ QString CloneDialog::repoNameFromUrl(const QString& url)
     if (s.isEmpty())
         return {};
     // SSH-style: split off everything before the first ":"
-    const int colon = s.indexOf(QLatin1Char(':'));
+    const qsizetype colon = s.indexOf(QLatin1Char(':'));
     if (colon >= 0 && !s.startsWith(QStringLiteral("http"), Qt::CaseInsensitive))
         s = s.mid(colon + 1);
     // Strip query/fragment
-    const int q = s.indexOf(QLatin1Char('?'));
+    const qsizetype q = s.indexOf(QLatin1Char('?'));
     if (q >= 0) s.truncate(q);
-    const int h = s.indexOf(QLatin1Char('#'));
+    const qsizetype h = s.indexOf(QLatin1Char('#'));
     if (h >= 0) s.truncate(h);
     // Last path segment
     while (s.endsWith(QLatin1Char('/')))
         s.chop(1);
-    const int slash = s.lastIndexOf(QLatin1Char('/'));
+    const qsizetype slash = s.lastIndexOf(QLatin1Char('/'));
     if (slash >= 0)
         s = s.mid(slash + 1);
     if (s.endsWith(QStringLiteral(".git"), Qt::CaseInsensitive))
