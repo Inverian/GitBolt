@@ -176,7 +176,12 @@ Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::str
     // thing (push the current branch to its upstream). Drop empty
     // arguments so the toolbar's "Push" with no specific branch hits
     // the bare `git push origin` form, which honors push.default.
-    std::vector<std::string> args = {"push"};
+    // reserve() instead of `= {"push"}`: growing a vector built from a
+    // one-element initializer list trips GCC 13's -Warray-bounds false
+    // positive inside <basic_string.h> (same in pull/fetch below).
+    std::vector<std::string> args;
+    args.reserve(5);
+    args.emplace_back("push");
     if (force) args.emplace_back("--force-with-lease");
     if (setUpstream) args.emplace_back("--set-upstream");
     if (!remote.empty()) args.push_back(remote);
@@ -188,14 +193,18 @@ Result<ProcessOutput> GitProcess::pull(const std::string& remote, const std::str
     // Same empty-arg avoidance as push — `git pull origin ""` errors
     // out, but bare `git pull origin` (or just `git pull`) honors the
     // tracking branch.
-    std::vector<std::string> args = {"pull"};
+    std::vector<std::string> args;
+    args.reserve(3);
+    args.emplace_back("pull");
     if (!remote.empty()) args.push_back(remote);
     if (!branch.empty()) args.push_back(branch);
     return run(args, 120000);
 }
 
 Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) const {
-    std::vector<std::string> args = {"fetch"};
+    std::vector<std::string> args;
+    args.reserve(3);
+    args.emplace_back("fetch");
     if (!remote.empty()) args.push_back(remote);
     if (prune) args.emplace_back("--prune");
     return run(args, 120000);
