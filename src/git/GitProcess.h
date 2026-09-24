@@ -36,7 +36,10 @@ public:
     Result<std::string> diffRaw(const std::string& from, const std::string& to) const;
     Result<std::string> showFile(const std::string& revision, const std::string& path) const;
 
-    Result<ProcessOutput> push(const std::string& remote, const std::string& branch, bool force = false) const;
+    /// setUpstream adds --set-upstream: publish a branch and record
+    /// <remote>/<branch> as its upstream (what `git push -u` does).
+    Result<ProcessOutput> push(const std::string& remote, const std::string& branch,
+                               bool force = false, bool setUpstream = false) const;
     Result<ProcessOutput> pull(const std::string& remote, const std::string& branch) const;
     Result<ProcessOutput> fetch(const std::string& remote = "", bool prune = false) const;
 

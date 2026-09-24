@@ -26,6 +26,7 @@
 
 #include <QCoreApplication>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTest>
 
 #include "../TestRepoHelper.h"
@@ -313,6 +314,93 @@ private slots:
         // Reaching this line without a crash is the other half of
         // the assertion — the worker must not touch the destroyed
         // repository.
+    }
+
+    // -----------------------------------------------------------------
+    // Remote branches against a local bare "origin". push() of a branch
+    // that has never been pushed publishes it with --set-upstream (it
+    // used to fail with "has no upstream branch"); once tracked, a
+    // later push is an ordinary one; deleteRemoteBranch() removes it
+    // on the server and drops the local remote-tracking ref.
+    // -----------------------------------------------------------------
+    void pushPublishesNewBranchThenDeleteRemoteRemovesIt() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        gitbolt::git::GitProcess origin(originDir.path().toStdString());
+        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
+        QVERIFY(succeeded(work.run({"remote", "add", "origin",
+                                    originDir.path().toStdString()})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "feature"})));
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        // First push: publish + upstream.
+        svc.push(QStringLiteral("origin"), QString());
+        QCOMPARE(failedSpy.count(), 0);
+        QCOMPARE(output(origin.run({"rev-parse", "refs/heads/feature"})),
+                 output(work.run({"rev-parse", "HEAD"})));
+        QCOMPARE(output(work.run({"rev-parse", "--abbrev-ref",
+                                  "feature@{upstream}"})),
+                 QStringLiteral("origin/feature"));
+
+        // Tracked now: a new commit goes up with an ordinary push.
+        QVERIFY(repo->writeAndCommit(QStringLiteral("more.txt"),
+                                     QByteArrayLiteral("more\n"),
+                                     QStringLiteral("more")).ok());
+        svc.push(QStringLiteral("origin"), QString());
+        QCOMPARE(failedSpy.count(), 0);
+        QCOMPARE(output(origin.run({"rev-parse", "refs/heads/feature"})),
+                 output(work.run({"rev-parse", "HEAD"})));
+
+        // Delete on the server; the tracking ref goes with it.
+        svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("feature"));
+        QCOMPARE(failedSpy.count(), 0);
+        QVERIFY(!succeeded(origin.run({"rev-parse", "--verify", "-q",
+                                       "refs/heads/feature"})));
+        QVERIFY(!succeeded(work.run({"rev-parse", "--verify", "-q",
+                                     "refs/remotes/origin/feature"})));
+    }
+
+    // A failed remote delete must surface as operationFailed under the
+    // op name MainWindow keys its remote-op feedback on.
+    void deleteRemoteBranchFailureIsReported() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        gitbolt::git::GitProcess origin(originDir.path().toStdString());
+        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
+        QVERIFY(succeeded(work.run({"remote", "add", "origin",
+                                    originDir.path().toStdString()})));
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        svc.deleteRemoteBranch(QStringLiteral("origin"),
+                               QStringLiteral("no-such-branch"));
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(failedSpy.at(0).at(0).toString(),
+                 QStringLiteral("delete remote branch"));
+        QVERIFY(!failedSpy.at(0).at(1).toString().isEmpty());
+    }
+
+private:
+    static bool succeeded(
+        const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
+        return r.ok() && r.value().success();
+    }
+    // Trimmed stdout, or an empty string when git failed (so a QCOMPARE
+    // against an expected value fails instead of crashing).
+    static QString output(
+        const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
+        return succeeded(r) ? QString::fromStdString(r.value().stdoutData).trimmed()
+                            : QString();
     }
 };
 

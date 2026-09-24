@@ -8,6 +8,7 @@
 #include <QKeySequence>
 #include <QList>
 #include <QMainWindow>
+#include <functional>
 #include <vector>
 
 class QStackedWidget;
@@ -67,6 +68,18 @@ private:
     /// Paints the inline toolbar label / status bar / clear-timer
     /// after a fetch-pull-push worker finishes.
     void finishRemoteOpFeedback(const QString& successMsg);
+
+    /// Run a network git op (fetch/pull/push/remote-branch delete) on a
+    /// pool thread with inline-indicator + status-bar narration. `after`
+    /// runs on the GUI thread once the op finishes, success or failure.
+    void runRemoteOp(QAction* sourceAction, const QString& startMsg,
+                     const QString& successMsg, std::function<void()> op,
+                     std::function<void()> after = {});
+
+    /// Confirm with the user, then delete `remoteBranch` ("origin/x")
+    /// on its remote through runRemoteOp.
+    void confirmAndDeleteRemoteBranch(const QString& remoteBranch,
+                                      QAction* sourceAction);
 
 
 private:

@@ -246,6 +246,17 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
                 localName = localName.mid(slashPos + 1);
             emit checkoutRequested(localName);
         });
+
+        menu.addSeparator();
+
+        // Delete on the server. MainWindow owns the confirmation, so
+        // this entry and Commands > Delete remote branch ask the same.
+        auto* deleteRemoteAction = menu.addAction(
+            QIcon::fromTheme(QStringLiteral("edit-delete")),
+            tr("Delete '%1' from remote...").arg(branchName));
+        connect(deleteRemoteAction, &QAction::triggered, this, [this, branchName]() {
+            emit deleteRemoteBranchRequested(branchName);
+        });
     }
 
     if (isTag) {

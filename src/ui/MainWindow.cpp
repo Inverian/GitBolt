@@ -1853,67 +1853,9 @@ void MainWindow::buildCommandsMenu()
     // -----------------------------------------------------------------
     // Fetch / Pull / Push.
     //
-    // GitService::{fetch,pull,push} block the UI thread until the
-    // subprocess returns (libgit2 transport calls aren't piped through
-    // the AsyncRunner yet). That means a click on these buttons used
-    // to look like nothing happened: the icon never changed, no status
-    // bar text appeared, and "already up to date" succeeded silently.
-    //
-    // The wrapper below gives the user four independent cues that
-    // their click was registered:
-    //   1) wait cursor (visible immediately, even before the message
-    //      paints — Qt repaints the cursor synchronously)
-    //   2) inline toolbar label: "Fetching from origin…" while running,
-    //      "✓ Fetch complete" (green) or "✗ Fetch failed" (red) after
-    //   3) the action button itself disables for the duration of the
-    //      op so the user sees a state change on the thing they clicked
-    //   4) status bar message at the bottom (legacy cue)
-    //
-    // On failure the operationFailed handler beats us to the status
-    // bar with "fetch failed: <err>" — `lastRemoteOpFailed_` records
-    // that and we suppress the success message so the failure stays
-    // visible for its full 5-second timeout.
-    auto runRemoteOp = [this](QAction* sourceAction,
-                              const QString& startMsg,
-                              const QString& successMsg,
-                              std::function<void()> op) {
-        // One remote op at a time: the ops mutate the same repo,
-        // and the inline label can only narrate one of them.
-        if (remoteOpRunning_) {
-            statusBar()->showMessage(
-                tr("Another remote operation is still running…"), 3000);
-            return;
-        }
-        remoteOpRunning_ = true;
-        lastRemoteOpFailed_ = false;
-
-        // start() also cancels any pending auto-clear from a
-        // previous op, so a stale timer can't blank this message
-        // mid-run.
-        if (opIndicator_)
-            opIndicator_->start(startMsg);
-        statusBar()->showMessage(startMsg);
-        if (sourceAction) sourceAction->setEnabled(false);
-
-        // The op runs on a pool thread, so the window stays live —
-        // no wait cursor, and no QApplication::processEvents()
-        // reentrancy hole (the old synchronous version pumped events
-        // right before blocking, so a queued second click ran NESTED
-        // inside the first op). GitService::{fetch,pull,push} are
-        // safe off the GUI thread: they snapshot a GitProcess under
-        // the repo lock and shell out; their failure signals arrive
-        // queued, and are delivered before the finished handler
-        // below because they're posted first.
-        auto* opWatcher = new QFutureWatcher<void>(this);
-        connect(opWatcher, &QFutureWatcher<void>::finished, this,
-                [this, opWatcher, sourceAction, successMsg]() {
-            opWatcher->deleteLater();
-            remoteOpRunning_ = false;
-            if (sourceAction) sourceAction->setEnabled(true);
-            finishRemoteOpFeedback(successMsg);
-        });
-        opWatcher->setFuture(QtConcurrent::run(std::move(op)));
-    };
+    // Each runs through runRemoteOp() (a member so the branch tree can
+    // share it): off the GUI thread, with visible start / success /
+    // failure feedback; see its definition.
 
 
     fetchAction_ = new QAction(tr("&Fetch"), this);
@@ -1924,7 +1866,7 @@ void MainWindow::buildCommandsMenu()
     fetchAction_->setStatusTip(tr("Download new commits from origin without merging."));
     fetchAction_->setEnabled(false);
     connect(fetchAction_, &QAction::triggered, this,
-            [this, runRemoteOp]() {
+            [this]() {
         runRemoteOp(fetchAction_,
                     tr("Fetching from origin…"),
                     tr("Fetch complete."),
@@ -1939,7 +1881,7 @@ void MainWindow::buildCommandsMenu()
     pullAction_->setStatusTip(tr("Fetch and merge from the tracking branch on origin."));
     pullAction_->setEnabled(false);
     connect(pullAction_, &QAction::triggered, this,
-            [this, runRemoteOp]() {
+            [this]() {
         runRemoteOp(pullAction_,
                     tr("Pulling from origin…"),
                     tr("Pull complete."),
@@ -1955,11 +1897,15 @@ void MainWindow::buildCommandsMenu()
     pushAction_->setStatusTip(tr("Upload local commits on the current branch to origin."));
     pushAction_->setEnabled(false);
     connect(pushAction_, &QAction::triggered, this,
-            [this, runRemoteOp]() {
+            [this]() {
         runRemoteOp(pushAction_,
                     tr("Pushing to origin…"),
                     tr("Push complete."),
-                    [this]() { gitService_->push("origin", ""); });
+                    [this]() { gitService_->push("origin", ""); },
+                    // A first push publishes the branch and records its
+                    // upstream in .git/config, which the file watcher
+                    // doesn't cover; refresh so the sidebar shows it.
+                    [this]() { gitService_->refreshBranches(); });
     });
     cmdMenu->addAction(pushAction_);
 
@@ -2142,6 +2088,24 @@ void MainWindow::buildCommandsMenu()
             names << QString::fromStdString(b.name);
         return names;
     };
+    // Remote-tracking branches ("origin/feature"), minus the symbolic
+    // "<remote>/HEAD" pointer, which isn't a branch you can delete.
+    auto remoteBranchNames = [this]() -> QStringList {
+        QStringList names;
+        if (!gitService_ || !gitService_->isOpen())
+            return names;
+        auto res = gitService_->withRepository(
+            [](git::Repository& r) {
+                return r.branches(git::BranchType::Remote);
+            });
+        if (!res.ok()) return names;
+        for (const auto& b : res.value()) {
+            const QString name = QString::fromStdString(b.name);
+            if (!name.endsWith(QLatin1String("/HEAD")))
+                names << name;
+        }
+        return names;
+    };
 
     {
         auto* a = new QAction(menuIcon(QStringLiteral("branch_create")),
@@ -2200,6 +2164,32 @@ void MainWindow::buildCommandsMenu()
                 QMessageBox::Cancel);
             if (confirm == QMessageBox::Yes)
                 gitService_->deleteBranch(picked);
+        });
+        cmdMenu->addAction(a);
+    }
+    {
+        // Remote counterpart of Delete branch. Also reachable from a
+        // remote branch's context menu in the sidebar; this entry is
+        // the keyboard/menu (and test bridge) path to it.
+        auto* a = new QAction(menuIcon(QStringLiteral("branch_delete")),
+                              tr("Delete &remote branch..."), this);
+        a->setObjectName(QStringLiteral("commands.delete-remote-branch"));
+        connect(a, &QAction::triggered, this, [this, a, remoteBranchNames]() {
+            if (!gitService_ || !gitService_->isOpen()) return;
+            const QStringList names = remoteBranchNames();
+            if (names.isEmpty()) {
+                QMessageBox::information(this, tr("Delete Remote Branch"),
+                    tr("There are no remote branches. Fetch first if you "
+                       "expect some."));
+                return;
+            }
+            bool ok = false;
+            const QString picked = QInputDialog::getItem(
+                this, tr("Delete Remote Branch"),
+                tr("Select a remote branch to delete:"),
+                names, 0, /*editable=*/false, &ok);
+            if (ok && !picked.isEmpty())
+                confirmAndDeleteRemoteBranch(picked, a);
         });
         cmdMenu->addAction(a);
     }
@@ -3951,13 +3941,19 @@ void MainWindow::setupConnections()
     // place to dump passive log messages.
     connect(gitService_, &services::GitService::operationFailed,
             this, [this](const QString& op, const QString& err) {
-                statusBar()->showMessage(op + tr(" failed: ") + err, 5000);
-                // Tell the fetch/pull/push wrappers to skip their
-                // own success-confirmation message — the failure
-                // text we just put on the status bar should stay.
-                if (op.startsWith(QLatin1String("fetch"),    Qt::CaseInsensitive) ||
+                // Tell the remote-op wrapper to skip its success
+                // message. A remote op's failure stays on the status
+                // bar (timeout 0) until the next op replaces it; the
+                // rest keep the old 5-second message.
+                const bool remoteOp =
+                    op.startsWith(QLatin1String("fetch"),    Qt::CaseInsensitive) ||
                     op.startsWith(QLatin1String("pull"),     Qt::CaseInsensitive) ||
                     op.startsWith(QLatin1String("push"),     Qt::CaseInsensitive) ||
+                    op.startsWith(QLatin1String("delete remote branch"),
+                                  Qt::CaseInsensitive);
+                statusBar()->showMessage(op + tr(" failed: ") + err,
+                                         remoteOp ? 0 : 5000);
+                if (remoteOp ||
                     op.startsWith(QLatin1String("checkout"), Qt::CaseInsensitive)) {
                     lastRemoteOpFailed_ = true;
                 }
@@ -4033,8 +4029,24 @@ void MainWindow::setupConnections()
                 gitService_, &services::GitService::createBranch);
         connect(branchTree, &widgets::BranchTreeWidget::deleteBranchRequested,
                 gitService_, &services::GitService::deleteBranch);
+        // Through runRemoteOp like the toolbar Push: this used to call
+        // GitService::push directly on the GUI thread, freezing the
+        // window for the whole network round trip, with no feedback.
         connect(branchTree, &widgets::BranchTreeWidget::pushRequested,
-                gitService_, &services::GitService::push);
+                this, [this](const QString& remote, const QString& branch) {
+            if (!gitService_ || !gitService_->isOpen()) return;
+            runRemoteOp(nullptr,
+                        tr("Pushing %1 to %2…").arg(branch, remote),
+                        tr("Push complete."),
+                        [this, remote, branch]() {
+                            gitService_->push(remote, branch);
+                        },
+                        [this]() { gitService_->refreshBranches(); });
+        });
+        connect(branchTree, &widgets::BranchTreeWidget::deleteRemoteBranchRequested,
+                this, [this](const QString& remoteBranch) {
+            confirmAndDeleteRemoteBranch(remoteBranch, nullptr);
+        });
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
                 this, [this](const QString& oldName, const QString& newName) {
             if (!gitService_ || !gitService_->isOpen()) return;
@@ -4596,6 +4608,96 @@ void MainWindow::offerConflictResolution(const QString& operation)
         showConflictResolver();
 }
 
+// Confirm, then `git push <remote> --delete <branch>` via runRemoteOp.
+// `remoteBranch` is the remote-tracking name ("origin/feature/x"); the
+// remote is everything before the first '/', the same assumption the
+// sidebar's "Checkout as local branch" makes.
+void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
+                                              QAction* sourceAction)
+{
+    if (!gitService_ || !gitService_->isOpen()) return;
+    const qsizetype slash = remoteBranch.indexOf(QLatin1Char('/'));
+    if (slash <= 0 || slash == remoteBranch.size() - 1) return;
+    const QString remote = remoteBranch.left(slash);
+    const QString branch = remoteBranch.mid(slash + 1);
+
+    const auto confirm = QMessageBox::question(
+        this, tr("Delete Remote Branch"),
+        tr("Delete branch \"%1\" from remote \"%2\"?\n\nThis removes it "
+           "on the server for everyone who uses that remote. Local "
+           "branches are not affected.").arg(branch, remote),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (confirm != QMessageBox::Yes) return;
+
+    runRemoteOp(sourceAction,
+                tr("Deleting %1 from %2…").arg(branch, remote),
+                tr("Deleted %1 from %2.").arg(branch, remote),
+                [this, remote, branch]() {
+                    gitService_->deleteRemoteBranch(remote, branch);
+                },
+                [this]() { gitService_->refreshBranches(); });
+}
+
+// ---------------------------------------------------------------------------
+// Remote ops (fetch / pull / push / remote-branch delete)
+//
+// Every remote op gives three cues that the click registered:
+//   1) the inline toolbar label: "Fetching from origin…" while it runs,
+//      then "✓ Fetch complete." (green) or "✗ …" (red)
+//   2) the triggering action disables for the duration of the op
+//   3) a status-bar message
+// On failure the operationFailed handler reaches the status bar first
+// and sets lastRemoteOpFailed_; the failure then stays up (label and
+// status bar) until the next remote op starts, rather than vanishing
+// after a few seconds while the user is looking elsewhere.
+// ---------------------------------------------------------------------------
+void MainWindow::runRemoteOp(QAction* sourceAction,
+                             const QString& startMsg,
+                             const QString& successMsg,
+                             std::function<void()> op,
+                             std::function<void()> after)
+{
+    // One remote op at a time: the ops mutate the same repo,
+    // and the inline label can only narrate one of them.
+    if (remoteOpRunning_) {
+        statusBar()->showMessage(
+            tr("Another remote operation is still running…"), 3000);
+        return;
+    }
+    remoteOpRunning_ = true;
+    lastRemoteOpFailed_ = false;
+
+    // start() also cancels any pending auto-clear from a
+    // previous op, so a stale timer can't blank this message
+    // mid-run — and replaces a sticky failure from the last op.
+    if (opIndicator_)
+        opIndicator_->start(startMsg);
+    statusBar()->showMessage(startMsg);
+    if (sourceAction) sourceAction->setEnabled(false);
+
+    // The op runs on a pool thread, so the window stays live —
+    // no wait cursor, and no QApplication::processEvents()
+    // reentrancy hole (the old synchronous version pumped events
+    // right before blocking, so a queued second click ran NESTED
+    // inside the first op). GitService's network ops are safe off
+    // the GUI thread: they snapshot a GitProcess under the repo
+    // lock and shell out; their failure signals arrive queued, and
+    // are delivered before the finished handler below because
+    // they're posted first.
+    auto* opWatcher = new QFutureWatcher<void>(this);
+    connect(opWatcher, &QFutureWatcher<void>::finished, this,
+            [this, opWatcher, sourceAction, successMsg,
+             after = std::move(after)]() {
+        opWatcher->deleteLater();
+        remoteOpRunning_ = false;
+        if (sourceAction) sourceAction->setEnabled(true);
+        finishRemoteOpFeedback(successMsg);
+        if (after)
+            after();
+    });
+    opWatcher->setFuture(QtConcurrent::run(std::move(op)));
+}
+
 // Completion half of the toolbar fetch/pull/push wrapper: reads
 // lastRemoteOpFailed_ (set by the operationFailed handler, which is
 // always delivered before the worker's finished signal) and paints
@@ -4614,7 +4716,8 @@ void MainWindow::finishRemoteOpFeedback(const QString& successMsg)
             QString oneLine = status;
             oneLine.replace(QChar('\n'), QStringLiteral(" | "));
             oneLine.replace(QChar('\r'), QString());
-            opIndicator_->fail(oneLine, status, 8000);
+            // 0 = no auto-clear: stays until the next remote op.
+            opIndicator_->fail(oneLine, status, 0);
         } else {
             opIndicator_->succeed(successMsg, 4000);
         }

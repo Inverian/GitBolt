@@ -15,7 +15,9 @@ namespace gitbolt::ui {
 ///     succeed("Fetch complete.")         green "✓ …", auto-clears
 ///     fail("fetch failed: …", full)      red bold "✗ …", tooltip
 ///                                        carries the full text,
-///                                        longer auto-clear
+///                                        longer auto-clear, or none
+///                                        (clearAfterMs <= 0: stays
+///                                        until the next start())
 ///     flash("Refreshed.")                plain transient note
 ///
 /// Replaces three hand-rolled copies of the same label/stylesheet/
@@ -38,6 +40,9 @@ public:
     void cancelPendingClear();
 
 private:
+    /// Set the label, elided to a bounded width; an elided message
+    /// keeps its full text in the tooltip (or `tooltip` when given).
+    void setText(const QString& text, const QString& tooltip = QString());
     void scheduleClear(int ms);
     void clearNow();
 

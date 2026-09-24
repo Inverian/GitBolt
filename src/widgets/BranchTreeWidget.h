@@ -42,6 +42,9 @@ signals:
     void renameBranchRequested(const QString& oldName, const QString& newName);
     void mergeRequested(const QString& name);
     void pushRequested(const QString& remote, const QString& branch);
+    /// A remote-tracking branch ("origin/feature") to delete on its
+    /// remote; the receiver confirms before doing anything.
+    void deleteRemoteBranchRequested(const QString& remoteBranch);
     void setUpstreamRequested(const QString& branch, const QString& upstream);
 
 private slots:

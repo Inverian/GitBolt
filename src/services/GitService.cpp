@@ -617,12 +617,51 @@ void GitService::push(const QString& remote, const QString& branch) {
         std::lock_guard<std::mutex> lock(repoMutex_);
         return repo_->process();
     }()};
-    auto result = proc.push(remote.toStdString(), branch.toStdString());
+    // A branch that has never been pushed has no upstream, and the bare
+    // `git push <remote>` then fails with "has no upstream branch" — so
+    // the first push of every new branch failed. Publish it instead,
+    // which is what a first push means in every Git GUI. A detached
+    // HEAD has no branch to publish; git's own error explains that.
+    std::string target = branch.toStdString();
+    if (target.empty()) {
+        auto head = proc.run({"symbolic-ref", "--quiet", "--short", "HEAD"});
+        if (head && head.value().success())
+            target = QString::fromStdString(head.value().stdoutData)
+                         .trimmed().toStdString();
+    }
+    bool publish = false;
+    if (!target.empty()) {
+        auto upstream = proc.run({"rev-parse", "--abbrev-ref",
+                                  "--symbolic-full-name", target + "@{upstream}"});
+        publish = upstream && !upstream.value().success();
+    }
+
+    auto result = publish
+        ? proc.push(remote.toStdString(), target, /*force=*/false, /*setUpstream=*/true)
+        : proc.push(remote.toStdString(), branch.toStdString());
     if (!result) {
         emit operationFailed("push", QString::fromStdString(result.error().message()));
     } else if (result.value().exitCode != 0) {
         emit operationFailed("push", stderrOrFallback(result.value(),
             tr("git push exited with code %1").arg(result.value().exitCode)));
+    }
+}
+
+void GitService::deleteRemoteBranch(const QString& remote, const QString& branch) {
+    if (!repo_) return;
+    git::GitProcess proc{[&]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        return repo_->process();
+    }()};
+    auto result = proc.run({"push", remote.toStdString(), "--delete",
+                            branch.toStdString()}, 120000);
+    if (!result) {
+        emit operationFailed(QStringLiteral("delete remote branch"),
+                             QString::fromStdString(result.error().message()));
+    } else if (result.value().exitCode != 0) {
+        emit operationFailed(QStringLiteral("delete remote branch"),
+            stderrOrFallback(result.value(),
+                tr("git push --delete exited with code %1").arg(result.value().exitCode)));
     }
 }
 

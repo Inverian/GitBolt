@@ -169,7 +169,8 @@ Result<std::string> GitProcess::showFile(const std::string& revision, const std:
     return result->stdoutData;
 }
 
-Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::string& branch, bool force) const {
+Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::string& branch,
+                                       bool force, bool setUpstream) const {
     // git is strict about empty refspecs: `git push origin ""` errors
     // with "fatal: invalid refspec ''" instead of doing the sensible
     // thing (push the current branch to its upstream). Drop empty
@@ -177,6 +178,7 @@ Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::str
     // the bare `git push origin` form, which honors push.default.
     std::vector<std::string> args = {"push"};
     if (force) args.emplace_back("--force-with-lease");
+    if (setUpstream) args.emplace_back("--set-upstream");
     if (!remote.empty()) args.push_back(remote);
     if (!branch.empty()) args.push_back(branch);
     return run(args, 120000);

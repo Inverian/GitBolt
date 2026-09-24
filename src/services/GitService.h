@@ -164,7 +164,15 @@ public:
     void deleteBranch(const QString& name);
     void checkoutBranch(const QString& name);
 
+    /// Pushes `branch` (empty = the checked-out branch). A branch with
+    /// no upstream yet is published with --set-upstream instead of
+    /// failing. Safe off the GUI thread, like pull/fetch.
     void push(const QString& remote, const QString& branch);
+    /// `git push <remote> --delete <branch>`: removes the branch on the
+    /// server and, on success, the local remote-tracking ref. Failures
+    /// surface as operationFailed("delete remote branch", …). Safe off
+    /// the GUI thread.
+    void deleteRemoteBranch(const QString& remote, const QString& branch);
     void pull(const QString& remote, const QString& branch);
     void fetch(const QString& remote = "");
 
