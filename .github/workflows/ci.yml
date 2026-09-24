@@ -148,9 +148,36 @@ jobs:
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
       # platform, and the Linux runners have no display server.
       - name: Test
+        id: test
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
+
+      # Only when tests failed: rerun each failed test binary directly,
+      # verbosely, and print its exact exit code. A test that dies without
+      # flushing its output leaves ctest nothing to show, and the code tells
+      # a missing DLL (0xC0000135) from a crash (0xC0000005) from a plain
+      # failure count. e2e tests (Python) already show their output above.
+      - name: Rerun failed tests verbosely
+        if: failure() && steps.test.outcome == 'failure'
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $failed = Get-Content build/Testing/Temporary/LastTestsFailed.log -ErrorAction SilentlyContinue
+          foreach ($line in $failed) {
+            $name = ($line -split ':', 2)[1]
+            $exe = Get-ChildItem build/tests -File |
+                   Where-Object { $_.BaseName -eq $name -and $_.Extension -in '.exe', '' } |
+                   Select-Object -First 1
+            if (-not $exe) { Write-Host "== $name: not a test binary (see ctest output above)"; continue }
+            Write-Host "== $name -v2"
+            $out = Join-Path $env:RUNNER_TEMP "$name.out"; $err = Join-Path $env:RUNNER_TEMP "$name.err"
+            $p = Start-Process -FilePath $exe.FullName -ArgumentList '-v2' -WorkingDirectory $exe.DirectoryName `
+                   -NoNewWindow -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError $err
+            Get-Content $out, $err
+            Write-Host ("== $name exit {0} (0x{0:X8})" -f $p.ExitCode)
+          }
 
       # ==================================================================
       # Installers: pushes to main and dry runs only, never pull requests.
@@ -487,10 +514,13 @@ jobs:
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
+              export LC_ALL=C.UTF-8   # the stock image has no UTF-8 locale; Qt warns without one
               out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
                 QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
               echo "DEB: $out"
-              test "$out" = "GitBolt $VER"'
+              # xvfb-run merges stderr into stdout, so match the version line
+              # rather than the whole output.
+              grep -qx "GitBolt $VER" <<<"$out"'
 
           # 3) AppImage on the runner with install-qt-action's env removed
           chmod +x "$appimage"
@@ -498,7 +528,7 @@ jobs:
                   APPIMAGE_EXTRACT_AND_RUN=1 GITBOLT_INSTANCE_NAME=ci-smoke \
                   xvfb-run -a "./$appimage" --version)
           echo "AppImage: $out"
-          test "$out" = "GitBolt $ver"
+          grep -qx "GitBolt $ver" <<<"$out"
 
       # ---- all: collect + upload ------------------------------------------
       # Each green leg must carry its OS's installers; a missing one fails
