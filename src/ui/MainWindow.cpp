@@ -3643,6 +3643,7 @@ void MainWindow::createToolBar()
         branchLabelAction_ = toolbar->addWidget(branchLabel);
 
         branchCombo_ = new QComboBox(toolbar);
+        branchCombo_->setObjectName(QStringLiteral("toolbar.branchCombo"));
         branchCombo_->setMinimumWidth(180);
         branchCombo_->setMaximumWidth(280);
         branchCombo_->setEnabled(false);

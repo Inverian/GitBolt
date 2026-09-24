@@ -10,6 +10,8 @@ Launch the app with the bridge enabled, then send commands:
     tools/bridge.py select-row QTableView:0 0
     tools/bridge.py select-row commit.unstagedList 0,2,5
     tools/bridge.py click "Lock/Unlock"
+    tools/bridge.py select-item toolbar.branchCombo feature/login
+    tools/bridge.py select-item QComboBox:0 '#1'
     tools/bridge.py type CommitMessageEdit:0 'subject\\n\\nbody'
     tools/bridge.py quit
 

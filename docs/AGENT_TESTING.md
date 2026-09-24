@@ -93,6 +93,7 @@ tools/bridge.py list-widgets          # windows, buttons, views, editors (with c
 tools/bridge.py select-row QTableView:0 0     # the AX-impossible operation
 tools/bridge.py select-row commit.unstagedList 0,2,5   # multi-row (ExtendedSelection lists)
 tools/bridge.py click "Lock/Unlock"
+tools/bridge.py select-item toolbar.branchCombo feature/login   # exact text, or '#N'
 tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ decoded
 tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay issues
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
@@ -109,6 +110,12 @@ Addressing:
   opens a modal returns immediately — assert with `dump-state`.
 - **Buttons** by visible text (case-insensitive, mnemonics/`...` stripped)
   with a prefix fallback so `Commit` matches the live-count `Commit (1)`.
+- **Combo boxes** (`select-item`) by `objectName` or `QComboBox[:index]`;
+  the item by exact text or `#N`. It also emits `activated` /
+  `textActivated` (queued), because code that must react only to a real
+  user pick — the toolbar branch switcher checks out on `activated` —
+  never sees a bare `setCurrentIndex`. `list-widgets` reports every
+  visible combo with its items.
 - **Views / editors** by `objectName` or `ClassName[:index]`, matched
   against the whole superclass chain — `QPlainTextEdit:0` resolves a
   `CommitMessageEdit`. Active window's widgets are ordered first.

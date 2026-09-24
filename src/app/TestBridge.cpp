@@ -8,6 +8,7 @@
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
+#include <QComboBox>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -17,6 +18,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QToolBar>
 #include <QWindow>
@@ -153,7 +155,11 @@ QList<T*> visibleWidgets()
             continue;
         const auto found = top->findChildren<T*>();
         for (T* w : found) {
-            if (w->isVisible())
+            // A dialog parented to the main window is both a top-level
+            // and the main window's descendant, so without the window()
+            // check its widgets were listed twice and `Class:N` indices
+            // skipped over the duplicates.
+            if (w->isVisible() && w->window() == top)
                 out.append(w);
         }
     }
@@ -298,6 +304,9 @@ QByteArray TestBridge::handleLine(const QString& line)
             return errLine(QStringLiteral("select-row: no rows given"));
         return cmdSelectRow(parts.at(1), rows);
     }
+    if (verb == QStringLiteral("select-item") && parts.size() >= 3)
+        // section() keeps the remainder, so item texts with spaces work.
+        return cmdSelectItem(parts.at(1), line.section(QLatin1Char(' '), 2));
     if (verb == QStringLiteral("type") && parts.size() >= 3)
         return cmdType(parts.at(1),
                        unescapeTypeText(line.section(QLatin1Char(' '), 2)));
@@ -431,11 +440,33 @@ QByteArray TestBridge::cmdListWidgets()
     addEditors(lineList, "QLineEdit");
     addEditors(plainList, "QPlainTextEdit");
 
+    // Combo boxes with their entries, so an agent can see what
+    // `select-item` can pick without guessing at item texts.
+    QJsonArray combos;
+    int comboIndex = 0;
+    for (QComboBox* c : visibleWidgets<QComboBox>()) {
+        QJsonObject o;
+        o[QStringLiteral("class")] = QString::fromLatin1(
+                                         c->metaObject()->className())
+                                         .section(QStringLiteral("::"), -1);
+        o[QStringLiteral("index")] = comboIndex++;
+        if (!c->objectName().isEmpty())
+            o[QStringLiteral("objectName")] = c->objectName();
+        o[QStringLiteral("current")] = c->currentText();
+        o[QStringLiteral("enabled")] = c->isEnabled();
+        QJsonArray items;
+        for (int i = 0; i < c->count(); ++i)
+            items.append(c->itemText(i));
+        o[QStringLiteral("items")] = items;
+        combos.append(o);
+    }
+
     return jsonLine({{QStringLiteral("ok"), true},
                      {QStringLiteral("windows"), windows},
                      {QStringLiteral("buttons"), buttons},
                      {QStringLiteral("views"), views},
-                     {QStringLiteral("editors"), editors}});
+                     {QStringLiteral("editors"), editors},
+                     {QStringLiteral("combos"), combos}});
 }
 
 QByteArray TestBridge::cmdClick(const QString& spec)
@@ -511,6 +542,56 @@ QByteArray TestBridge::cmdSelectRow(const QString& viewSpec,
         {{QStringLiteral("ok"), true},
          {QStringLiteral("selectedRows"),
           view->selectionModel()->selectedRows().count()}});
+}
+
+QByteArray TestBridge::cmdSelectItem(const QString& comboSpec,
+                                     const QString& item)
+{
+    auto* combo = resolveWidget<QComboBox>(comboSpec);
+    if (!combo)
+        return errLine(QStringLiteral("no visible combo box matches: ")
+                       + comboSpec);
+
+    // "#N" picks by index; anything else must match an entry's text
+    // exactly. A fuzzy match could quietly check out the wrong branch.
+    int index = -1;
+    if (item.startsWith(QLatin1Char('#'))) {
+        bool okNum = false;
+        index = item.mid(1).toInt(&okNum);
+        if (!okNum || index < 0 || index >= combo->count())
+            return errLine(QStringLiteral("select-item: no index ") + item);
+    } else {
+        index = combo->findText(item, Qt::MatchExactly);
+        if (index < 0) {
+            QStringList have;
+            for (int i = 0; i < combo->count(); ++i)
+                have.append(combo->itemText(i));
+            return errLine(QStringLiteral("select-item: no item \"%1\"; have: %2")
+                               .arg(item, have.join(QStringLiteral(", "))));
+        }
+    }
+
+    combo->setCurrentIndex(index);
+    // A user's pick also emits activated/textActivated, and code that
+    // must react only to real choices listens for those, not for
+    // setCurrentIndex (the toolbar branch switcher checks out on
+    // `activated`). Queued like trigger/click so a modal the handler
+    // opens can't hold the reply hostage.
+    QPointer<QComboBox> guard(combo);
+    QMetaObject::invokeMethod(
+        combo,
+        [guard, index]() {
+            if (!guard)
+                return;
+            emit guard->activated(index);
+            emit guard->textActivated(guard->itemText(index));
+        },
+        Qt::QueuedConnection);
+
+    return jsonLine({{QStringLiteral("ok"), true},
+                     {QStringLiteral("dispatched"), true},
+                     {QStringLiteral("index"), index},
+                     {QStringLiteral("text"), combo->itemText(index)}});
 }
 
 QByteArray TestBridge::cmdType(const QString& widgetSpec,

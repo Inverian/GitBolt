@@ -26,12 +26,17 @@ namespace gitbolt::app {
 ///   list-actions                     menu/toolbar actions + slugs
 ///   trigger <slug-or-objectName>     queue a QAction::trigger
 ///   list-widgets                     top-level windows + the active
-///                                    window's buttons/views/fields
+///                                    window's buttons/views/fields/
+///                                    combo boxes (with their items)
 ///   click <objectName-or-text>       queue a QAbstractButton::click
 ///   select-row <viewSpec> <rows>     drive a view's selection model;
 ///                                    rows = "3" or comma list "0,2,5"
 ///                                    (viewSpec = objectName or
 ///                                    ClassName[:index] among visible)
+///   select-item <comboSpec> <item…>  pick a combo box entry by exact
+///                                    text, or "#N" by index; also
+///                                    emits activated/textActivated
+///                                    (queued) like a real user pick
 ///   type <widgetSpec> <text…>        focus + set a line/text edit;
 ///                                    \n \t \\ escapes are decoded so
 ///                                    one protocol line can carry a
@@ -44,7 +49,7 @@ namespace gitbolt::app {
 ///                                    closeEvent, persists geometry —
 ///                                    clean exit for relaunch tests)
 ///
-/// trigger/click respond {"ok":true,"dispatched":true} BEFORE the
+/// trigger/click/select-item respond {"ok":true,"dispatched":true} BEFORE the
 /// action runs (queued invocation): a triggered action may open a
 /// modal dialog whose exec() would otherwise hold the reply hostage.
 /// Assert outcomes with dump-state / on-disk git, not the reply.
@@ -69,6 +74,7 @@ private:
     QByteArray cmdClick(const QString& spec);
     QByteArray cmdSelectRow(const QString& viewSpec,
                             const QList<int>& rows);
+    QByteArray cmdSelectItem(const QString& comboSpec, const QString& item);
     QByteArray cmdType(const QString& widgetSpec, const QString& text);
     QByteArray cmdDumpState();
     QByteArray cmdScreenshot(const QString& path);
