@@ -26,11 +26,19 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.7.*'
+          # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
+          # `-framework AGL`, which current macOS SDKs no longer ship.
+          version: '6.11.*'
           cache: true    # Cache Qt between runs (~1.5 GB save)
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v6
+
+      # The Ninja generator finds no compiler unless the MSVC developer
+      # environment (cl.exe, INCLUDE, LIB) is on PATH.
+      - name: MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -58,8 +66,9 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
-             -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+        # Quoted: PowerShell passes `$env:...` through literally in an
+        # unquoted argument that starts with `-`.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build
         run: cmake --build build --parallel
@@ -94,11 +103,19 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
-          version: '6.7.*'
+          # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
+          # `-framework AGL`, which current macOS SDKs no longer ship.
+          version: '6.11.*'
           cache: true
 
       - name: Install Ninja
         uses: seanmiddleditch/gha-setup-ninja@v6
+
+      # The Ninja generator finds no compiler unless the MSVC developer
+      # environment (cl.exe, INCLUDE, LIB) is on PATH.
+      - name: MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -123,8 +140,9 @@ jobs:
 
       - name: Configure (Windows)
         if: runner.os == 'Windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
-             -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake
+        # Quoted: PowerShell passes `$env:...` through literally in an
+        # unquoted argument that starts with `-`.
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
 
       - name: Build
         run: cmake --build build --parallel

@@ -1,9 +1,11 @@
 #include "git/Repository.h"
 #include <git2.h>
-// git_error_set_str lives in the sys/ headers since libgit2 1.4 —
-// setting the thread-local error from inside our own callbacks is
-// exactly the "advanced" use they were carved out for.
+// git_error_set_str moved from the public errors.h (which <git2.h>
+// already pulls in) to the sys/ headers in libgit2 1.8.0. 1.7 — still
+// what Ubuntu 24.04 ships — has no git2/sys/errors.h at all.
+#if LIBGIT2_VER_MAJOR > 1 || (LIBGIT2_VER_MAJOR == 1 && LIBGIT2_VER_MINOR >= 8)
 #include <git2/sys/errors.h>
+#endif
 #include <cstring>
 #include <sstream>
 

@@ -67,7 +67,10 @@ public:
     void writeFile(const QString& relPath, const QByteArray& content) {
         QFile f(QDir(path()).absoluteFilePath(relPath));
         QDir().mkpath(QFileInfo(f).absolutePath());
-        Q_ASSERT(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        // Not Q_ASSERT: it compiles out in Release (QT_NO_DEBUG) and takes
+        // the open() call with it, so every write silently went nowhere.
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            qFatal("TestRepo: cannot open %s", qPrintable(f.fileName()));
         f.write(content);
         f.close();
     }
@@ -76,7 +79,8 @@ public:
     void appendFile(const QString& relPath, const QByteArray& content) {
         QFile f(QDir(path()).absoluteFilePath(relPath));
         QDir().mkpath(QFileInfo(f).absolutePath());
-        Q_ASSERT(f.open(QIODevice::WriteOnly | QIODevice::Append));
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Append))
+            qFatal("TestRepo: cannot open %s", qPrintable(f.fileName()));
         f.write(content);
         f.close();
     }
