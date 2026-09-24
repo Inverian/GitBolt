@@ -17,7 +17,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      # v7 = node24. Its fork-PR guard only affects pull_request_target /
+      # workflow_run, and it was already backported to the v4.4.0 we ran.
+      - uses: actions/checkout@v7
 
       # qtsvg/qtdeclarative/qttools ship in the default Qt 6 desktop
       # install; the `modules:` input is only for ADDON modules
@@ -32,14 +34,59 @@ jobs:
           version: '6.10.*'
           cache: true    # Cache Qt between runs (~1.5 GB save)
 
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
+      # Ninja is preinstalled on every GitHub-hosted image in the matrix
+      # (ubuntu: /usr/local/bin, macOS: Homebrew, Windows: Chocolatey bin,
+      # ahead of the VS-bundled copy). seanmiddleditch/gha-setup-ninja is
+      # archived and still node20. The image's ninja moves with image
+      # updates, and 1.13.0 once broke MSVC links on Windows images
+      # (actions/runner-images#12531); if that recurs, pin a version by
+      # downloading a ninja-build/ninja release zip onto $GITHUB_PATH.
+      - name: Check Ninja
+        shell: bash
+        run: |
+          command -v ninja || { echo "::error::ninja not found on PATH (runner image changed?)"; exit 1; }
+          ninja --version
 
       # The Ninja generator finds no compiler unless the MSVC developer
-      # environment (cl.exe, INCLUDE, LIB) is on PATH.
-      - name: MSVC environment (Windows)
+      # environment (cl.exe, INCLUDE, LIB, ...) is in the job env. Plain
+      # pwsh instead of ilammy/msvc-dev-cmd (unmaintained, still node20):
+      # vswhere finds the newest VS with the x64 C++ tools, Microsoft's
+      # Launch-VsDevShell.ps1 loads its dev env into this process, and
+      # every variable it changed goes to GITHUB_ENV for later steps.
+      # Reused by the package job through the &msvc_env anchor.
+      - &msvc_env
+        name: MSVC environment (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -nologo -latest -products '*' `
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                  -property installationPath
+          if (-not $vs) { throw 'vswhere: no Visual Studio with the x64 C++ tools' }
+          Write-Host "Visual Studio: $vs"
+
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+
+          # -Arch/-HostArch default to x86; Qt (msvc2022_64) and vcpkg's
+          # x64-windows libgit2 need the x64-hosted, x64-targeting tools.
+          & (Join-Path $vs 'Common7\Tools\Launch-VsDevShell.ps1') `
+              -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $cl = (Get-Command cl.exe -CommandType Application -TotalCount 1 -ErrorAction SilentlyContinue).Source
+          if ($cl -notmatch '\\Hostx64\\x64\\cl\.exe$') { throw "expected x64-hosted x64 cl.exe, got '$cl'" }
+          Write-Host "cl.exe: $cl"
+
+          # Export only what the dev shell added or changed. Path goes out
+          # whole (env names are case-insensitive on Windows, so `Path=`
+          # replaces the job's Path); the runner re-prepends earlier
+          # GITHUB_PATH entries (Qt) on every later step. VCPKG_ROOT is
+          # skipped: the dev shell points it at VS's bundled vcpkg, not
+          # the image's C:\vcpkg that `vcpkg install` and the toolchain use.
+          Get-ChildItem env: |
+            Where-Object { $_.Name -ne 'VCPKG_ROOT' -and $before[$_.Name] -cne $_.Value } |
+            ForEach-Object { "$($_.Name)=$($_.Value)" } |
+            Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -87,6 +134,10 @@ jobs:
   package:
     if: github.event_name == 'release'
     needs: build
+    # The repo's default GITHUB_TOKEN is read-only, and action-gh-release
+    # PATCHes the release and uploads assets, which needs contents: write.
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -99,7 +150,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
@@ -110,14 +161,16 @@ jobs:
           version: '6.10.*'
           cache: true
 
-      - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
+      # Preinstalled on all GitHub-hosted images; see the build job.
+      - name: Check Ninja
+        shell: bash
+        run: |
+          command -v ninja || { echo "::error::ninja not found on PATH (runner image changed?)"; exit 1; }
+          ninja --version
 
-      # The Ninja generator finds no compiler unless the MSVC developer
-      # environment (cl.exe, INCLUDE, LIB) is on PATH.
-      - name: MSVC environment (Windows)
-        if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+      # Identical to the build job's MSVC step (YAML alias of &msvc_env),
+      # so every PR run exercises what this release-only job will run.
+      - *msvc_env
 
       - name: Install libgit2 (macOS)
         if: runner.os == 'macOS'
@@ -223,8 +276,10 @@ jobs:
           cp GitBolt-*.AppImage dist/ 2>/dev/null || true
           ls -la dist/
 
+      # v7 = node24 (v5 was still node20). `archive` defaults to true, which
+      # dist/* needs: it can hold several files (.deb + .AppImage).
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: dist/*
@@ -235,8 +290,10 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v2
+        # v3 = node24; v2 is frozen at v2.6.2 on node20. Same inputs and
+        # outputs (action.yml differs only in runs.using); 3.0.x adds upload
+        # and error-handling fixes. No token wiring: the `token` input
+        # defaults to github.token (the old env GITHUB_TOKEN is deprecated).
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

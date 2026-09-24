@@ -103,23 +103,47 @@ src/
 
 ### Module Dependency Graph
 
+```mermaid
+flowchart TD
+    app["<b>app/</b><br/>entry point"]
+    ui["<b>ui/</b><br/>main windows & views"]
+    dialogs["<b>dialogs/</b><br/>modal dialogs"]
+    widgets["<b>widgets/</b><br/>reusable components"]
+    editor["<b>editor/</b><br/>graph & diff renderers"]
+    services["<b>services/</b><br/>business logic"]
+    models["<b>models/</b><br/>Qt data models"]
+    git["<b>git/</b><br/>libgit2 + CLI fallback"]
+
+    subgraph foundation["Foundation · no internal dependencies"]
+        direction LR
+        util["<b>util/</b><br/>threading & caching"]
+        conf["<b>conf/</b><br/>settings & themes"]
+        watcher["<b>watcher/</b><br/>file monitoring"]
+    end
+
+    app --> ui --> dialogs --> widgets
+    widgets --> editor & services
+    editor --> models
+    services --> models
+    services --> watcher
+    models --> git --> util
+    dialogs --> conf
+
+    classDef entry fill:#fde68a,stroke:#b45309,color:#1f2937
+    classDef presentation fill:#ddd6fe,stroke:#6d28d9,color:#1f2937
+    classDef logic fill:#bbf7d0,stroke:#15803d,color:#1f2937
+    classDef core fill:#bfdbfe,stroke:#1d4ed8,color:#1f2937
+    classDef base fill:#e5e7eb,stroke:#4b5563,color:#1f2937
+    class app entry
+    class ui,dialogs,widgets,editor presentation
+    class services logic
+    class models,git core
+    class util,conf,watcher base
+    style foundation fill:none,stroke:#9ca3af,stroke-dasharray:4 4
 ```
-util  conf  watcher          ← Foundation (zero cross-deps)
-  \    |    /
-   git/                       ← Git operations
-     |
-   models/                    ← Qt data models
-     |
-   services/                  ← Business logic
-   /     \
-editor/  widgets/             ← Rendering & reusable components
-     \   /
-      ui/                     ← Main windows
-      |
-   dialogs/                   ← Modal UI
-      |
-       app/                   ← Entry point
-```
+
+An arrow means *depends on*; edges already implied by a longer path are left out.
+Colours mark the layers: foundation, git core, business logic, presentation, entry point.
 
 Each module is a separate CMake `STATIC` library, enforcing clean dependency boundaries and enabling fast incremental builds.
 
