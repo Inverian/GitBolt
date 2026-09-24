@@ -13,16 +13,25 @@
 #include <QTextCursor>
 
 #include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef Q_OS_WIN
 #include <fcntl.h>
 #include <pwd.h>
 #include <signal.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
-#include <util.h>   // forkpty (BSD/macOS)
+#if defined(Q_OS_MACOS)
+#include <util.h>      // forkpty
+#elif defined(Q_OS_LINUX)
+#include <pty.h>       // forkpty (glibc; linked from libutil before 2.34)
+#else
+#include <libutil.h>   // forkpty (FreeBSD)
+#endif
+#endif
 
 #include <vector>
 
@@ -36,9 +45,9 @@ namespace {
 
 // The host process environment, portably. On macOS `environ` is not
 // directly visible to shared code — Apple provides _NSGetEnviron().
-#ifdef Q_OS_MACOS
+#if defined(Q_OS_MACOS)
 char** hostEnviron() { return *_NSGetEnviron(); }
-#else
+#elif !defined(Q_OS_WIN)
 extern "C" char** environ;
 char** hostEnviron() { return environ; }
 #endif
@@ -99,6 +108,11 @@ void TerminalWidget::start(const QString& workingDirectory)
     if (!workingDirectory.isEmpty())
         pendingCwd_ = workingDirectory;
 
+#ifdef Q_OS_WIN
+    // No PTY backend on Windows yet (see the class doc) — say so
+    // rather than leaving "Starting shell…" up forever.
+    setPlaceholderText(tr("The built-in terminal isn't available on Windows yet."));
+#else
     // -----------------------------------------------------------------
     // Snapshot EVERYTHING the child needs into plain byte buffers
     // BEFORE forking. GitBolt always has QtConcurrent git workers
@@ -182,6 +196,7 @@ void TerminalWidget::start(const QString& workingDirectory)
 
     setPlaceholderText(QString{});
     updatePtySize();
+#endif
 }
 
 void TerminalWidget::stopShell()
@@ -198,6 +213,7 @@ void TerminalWidget::stopShell()
     }
     writeQueue_.clear();
     pendingOutput_.clear();
+#ifndef Q_OS_WIN
     if (masterFd_ >= 0) {
         ::close(masterFd_);
         masterFd_ = -1;
@@ -215,6 +231,7 @@ void TerminalWidget::stopShell()
         }
         childPid_ = -1;
     }
+#endif
 }
 
 void TerminalWidget::changeDirectory(const QString& path)
@@ -273,6 +290,10 @@ void TerminalWidget::writeToPty(const QByteArray& bytes)
 
 int TerminalWidget::writeRaw(const QByteArray& bytes)
 {
+#ifdef Q_OS_WIN
+    Q_UNUSED(bytes);
+    return 0;  // no PTY on Windows
+#else
     int written = 0;
     while (written < bytes.size()) {
         const ssize_t n = ::write(masterFd_,
@@ -286,6 +307,7 @@ int TerminalWidget::writeRaw(const QByteArray& bytes)
         written += static_cast<int>(n);
     }
     return written;
+#endif
 }
 
 void TerminalWidget::onPtyWritable()
@@ -306,7 +328,7 @@ void TerminalWidget::onPtyReadable()
 {
     if (masterFd_ < 0)
         return;
-
+#ifndef Q_OS_WIN
     char buf[4096];
     while (true) {
         const ssize_t n = ::read(masterFd_, buf, sizeof(buf));
@@ -329,6 +351,7 @@ void TerminalWidget::onPtyReadable()
         appendPlainText(tr("\n[gitbolt] shell exited"));
         break;
     }
+#endif
 }
 
 // Stream PTY output into the scrollback with just-enough terminal
@@ -593,7 +616,7 @@ void TerminalWidget::updatePtySize()
 {
     if (masterFd_ < 0)
         return;
-
+#ifndef Q_OS_WIN
     // Compute the character grid size from the current font and
     // viewport. Subtract a small fudge for the padding declared
     // in the stylesheet (6px each side).
@@ -611,6 +634,7 @@ void TerminalWidget::updatePtySize()
     ws.ws_col = static_cast<unsigned short>(cols);
     ws.ws_row = static_cast<unsigned short>(rows);
     ::ioctl(masterFd_, TIOCSWINSZ, &ws);
+#endif
 }
 
 } // namespace gitbolt::widgets

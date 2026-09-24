@@ -3,7 +3,9 @@
 #include <QPlainTextEdit>
 #include <QString>
 
+#ifndef Q_OS_WIN
 #include <sys/types.h>  // pid_t
+#endif
 
 class QSocketNotifier;
 
@@ -27,6 +29,9 @@ namespace gitbolt::widgets {
 ///   - changeDirectory(path) sends `cd <path>\n` to the running
 ///     shell so the cwd updates without restarting it.
 ///   - The destructor SIGHUPs the child and closes the PTY.
+///
+/// POSIX only for now: on Windows there is no PTY backend (ConPTY is
+/// the follow-up), so start() shows a notice and no child ever runs.
 class TerminalWidget : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -67,7 +72,11 @@ private:
     void updatePtySize();
 
     int              masterFd_     = -1;
+#ifdef Q_OS_WIN
+    qint64           childPid_     = -1;   // never set — see class doc
+#else
     pid_t            childPid_     = -1;
+#endif
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY

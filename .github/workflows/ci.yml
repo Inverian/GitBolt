@@ -28,7 +28,8 @@ jobs:
         with:
           # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
           # `-framework AGL`, which current macOS SDKs no longer ship.
-          version: '6.11.*'
+          # Not 6.11 yet: aqtinstall 3.3.0 can't read its Windows metadata.
+          version: '6.10.*'
           cache: true    # Cache Qt between runs (~1.5 GB save)
 
       - name: Install Ninja
@@ -105,7 +106,8 @@ jobs:
         with:
           # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
           # `-framework AGL`, which current macOS SDKs no longer ship.
-          version: '6.11.*'
+          # Not 6.11 yet: aqtinstall 3.3.0 can't read its Windows metadata.
+          version: '6.10.*'
           cache: true
 
       - name: Install Ninja

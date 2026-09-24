@@ -52,3 +52,9 @@ target_link_libraries(gitbolt_widgets PUBLIC
     Qt6::Widgets
 )
 gitbolt_set_warnings(gitbolt_widgets)
+
+# TerminalWidget's forkpty: in libc on macOS and glibc >= 2.34, but in
+# libutil on older glibc (an empty stub on newer, so always safe).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(gitbolt_widgets PRIVATE util)
+endif()
