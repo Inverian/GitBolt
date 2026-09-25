@@ -4,11 +4,12 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [0.9.0] — 2026-06-12
+## [0.9.0] — 2026-09-24
 
-First tracked release: the June 2026 feature batch, a 56-item
-hardening pass over the whole codebase, and the test infrastructure
-that now guards both.
+First published release, a beta: the June 2026 feature batch, a
+56-item hardening pass over the whole codebase, the test
+infrastructure that guards both, and the September work that got it
+building, tested and packaged on macOS, Linux and Windows.
 
 ### Added
 
@@ -37,6 +38,17 @@ that now guards both.
   CTest, plus GitService unit tests; 10 suites total.
 - **Performance baseline** tooling (`tools/benchmark.py`) and recorded
   numbers (docs/PERFORMANCE.md).
+- **Installers for every platform**, built and smoke-tested in CI: a
+  macOS DMG (ad-hoc signed), a Windows NSIS installer (Qt, libgit2 and
+  the MSVC runtime bundled), a Linux DEB (private Qt under
+  /usr/lib/gitbolt) and an AppImage. A release is published
+  automatically when the version changes on main.
+- **Publishing new branches**: Push on a branch that has never been
+  pushed publishes it and sets its upstream, instead of failing.
+- **Deleting remote branches**: Commands → Delete remote branch, and on
+  remote branches in the sidebar.
+- Test bridge `select-item` for combo boxes, so agents can switch
+  branches through the UI; `list-widgets` reports combo boxes.
 
 ### Fixed
 
@@ -62,6 +74,20 @@ that now guards both.
   reads; dropped paste chunks on a full pty.
 - O(N²) lane recomputation on every log page; per-click UI stalls on
   branch-contains queries; a 9-second settings-dialog hang.
+- A failed fetch, pull or push now stays visible until the next one
+  (it vanished after 5–8 s), and a long error no longer pushes the
+  toolbar's Filter box into the overflow menu.
+- The sidebar's "Push" no longer freezes the window for the whole
+  network round trip.
+- Linux and Windows build for the first time: libgit2 1.7 support
+  (Ubuntu 24.04), Linux's forkpty header, and the built-in terminal
+  compiles on Windows (showing a "not available yet" notice; a ConPTY
+  backend is still to come).
+- Linux: the binary is now `gitbolt`, matching the desktop entry's
+  Exec=; the AppStream metadata named the wrong license (MIT, now
+  GPL-3.0-only).
+- Tests that only failed in Release builds (a `Q_ASSERT` with a side
+  effect in the test helper).
 
 ### Changed
 
@@ -74,3 +100,10 @@ that now guards both.
   deploys Qt at install time so packages actually contain it.
 - Version now flows from one place (CMake `project()`) into the app,
   the About dialog, and package names.
+- Zero compiler warnings on clang, GCC and MSVC.
+- CI: Qt 6.10 and Node 24 actions on all three platforms; pull requests
+  build and test, pushes to main also package, and a manual dry run
+  packages any branch without publishing.
+- Docs: macOS needs Qt 6.9.2 or later; the Windows build steps now use
+  Qt 6.10 and MSVC 2022; the README architecture graph is a Mermaid
+  diagram checked against the real module dependencies.

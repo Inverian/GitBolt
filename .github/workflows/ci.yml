@@ -731,6 +731,8 @@ jobs:
       # upload leaves no tag and the next push to main simply tries again.
       # It refuses to touch an already-published release with this tag.
       # Notes arrive through env, never ${{ }} inside the script.
+      # 0.x releases are betas: published as pre-releases (never marked
+      # "Latest") until 1.0.0.
       - name: Create tag and release
         if: steps.recheck.outputs.go == 'true'
         env:
@@ -738,10 +740,13 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
+          extra=()
+          [ "${VERSION%%.*}" = 0 ] && extra+=(--prerelease)
           gh release create "$TAG" dist/* \
             --target "$GITHUB_SHA" \
             --title "GitBolt $VERSION" \
-            --notes-file "$RUNNER_TEMP/notes.md"
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            "${extra[@]}"
           tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
           [ "$tagged" = "$GITHUB_SHA" ] || { echo "::error::$TAG points at $tagged, expected $GITHUB_SHA"; exit 1; }
           echo "### Released [$TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG) at \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
