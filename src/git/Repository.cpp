@@ -8,6 +8,7 @@
 #endif
 #include <cstring>
 #include <sstream>
+#include <string_view>
 
 namespace gitbolt::git {
 
@@ -1056,12 +1057,24 @@ Result<void> Repository::removeRemote(const std::string& name) {
     return Result<void>::success();
 }
 
+namespace {
+constexpr std::string_view kTagRefPrefix = "refs/tags/";
+} // namespace
+
 Result<std::vector<TagInfo>> Repository::tags() const {
     std::vector<TagInfo> result;
     int err = git_tag_foreach(repo_, [](const char* name, git_oid* oid, void* payload) -> int {
         auto* tags = static_cast<std::vector<TagInfo>*>(payload);
         TagInfo info;
-        info.name = name;
+        // git_tag_foreach hands over the FULL ref name, while
+        // git_tag_delete and git_tag_create take the short one.
+        // Passing this through as `name` made Delete tag fail for
+        // every tag and put "refs/tags/" all over the UI.
+        info.fullRefName = name;
+        std::string_view shortName = info.fullRefName;
+        if (shortName.starts_with(kTagRefPrefix))
+            shortName.remove_prefix(kTagRefPrefix.size());
+        info.name = shortName;
         info.targetId = ObjectId(oid);
         info.type = TagType::Lightweight;
         tags->push_back(std::move(info));
@@ -1105,7 +1118,13 @@ Result<void> Repository::createLightweightTag(const std::string& name, const Obj
 }
 
 Result<void> Repository::deleteTag(const std::string& name) {
-    int err = git_tag_delete(repo_, name.c_str());
+    // git_tag_delete prepends "refs/tags/" itself, so a full ref name
+    // would look up refs/tags/refs/tags/<tag> and fail as not found.
+    // Accept both forms: callers holding a TagInfo may pass either.
+    std::string_view shortName = name;
+    if (shortName.starts_with(kTagRefPrefix))
+        shortName.remove_prefix(kTagRefPrefix.size());
+    int err = git_tag_delete(repo_, std::string(shortName).c_str());
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
 }

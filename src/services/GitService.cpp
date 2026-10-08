@@ -948,15 +948,23 @@ void GitService::createTag(const QString& name, const QString& target,
                             const QString& message, bool annotated,
                             bool pushAfter) {
     if (!repo_) return;
-    auto targetId = git::ObjectId::fromHex(target.toStdString());
 
     bool ok = false;
     QString err;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        git::Result<void> result = annotated
-            ? repo_->createTag(name.toStdString(), targetId, message.toStdString())
-            : repo_->createLightweightTag(name.toStdString(), targetId);
+        // TagDialog's target is a branch name by default, or whatever
+        // ref / short hash the user typed. Parsing it as a full hex id
+        // turned every branch target into the null OID, so Create tag
+        // failed unless given a complete SHA.
+        git::Result<void> result = git::Result<void>::success();
+        if (auto targetId = repo_->resolveRef(target.toStdString()); !targetId.ok())
+            result = targetId.error();
+        else if (annotated)
+            result = repo_->createTag(name.toStdString(), targetId.value(),
+                                      message.toStdString());
+        else
+            result = repo_->createLightweightTag(name.toStdString(), targetId.value());
         ok = result.ok();
         if (!ok) err = QString::fromStdString(result.error().message());
     }
@@ -966,10 +974,11 @@ void GitService::createTag(const QString& name, const QString& target,
     }
     refreshTags();
     if (pushAfter) {
-        // A tag name is a valid refspec, so this is `git push origin
-        // <tag>` on the same synchronous CLI path as push(remote,
-        // branch); failures surface via operationFailed("push").
-        push(QStringLiteral("origin"), name);
+        // `git push origin refs/tags/<tag>` on the same synchronous CLI
+        // path as push(remote, branch); failures surface via
+        // operationFailed("push"). The full ref, because the short
+        // name is ambiguous whenever a branch shares it.
+        push(QStringLiteral("origin"), QStringLiteral("refs/tags/") + name);
     }
 }
 

@@ -16,7 +16,8 @@
 //     that added these tests),
 //   - the cherry-pick close race: a queued cherry-pick must neither
 //     crash nor emit once the repository it was queued for is gone
-//     (regression test for the raw-pointer capture UAF).
+//     (regression test for the raw-pointer capture UAF),
+//   - tag create / delete as the Commands menu drives them.
 //
 // Signal delivery: workers emit from pool threads, so receipt here
 // crosses threads via queued connections — every assertion on a
@@ -388,6 +389,113 @@ private slots:
         QCOMPARE(failedSpy.at(0).at(0).toString(),
                  QStringLiteral("delete remote branch"));
         QVERIFY(!failedSpy.at(0).at(1).toString().isEmpty());
+    }
+
+    // -----------------------------------------------------------------
+    // Commands > Delete tag hands deleteTag the short name its picker
+    // lists; a full ref name works too. It used to get the full ref
+    // from tags() and fail for every tag. The refresh that follows
+    // reports short names.
+    // -----------------------------------------------------------------
+    void deleteTagRemovesTagAndRefreshes() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        auto head = repo->repo().head();
+        QVERIFY(head.ok());
+        QVERIFY(repo->repo().createLightweightTag("v0.1", head.value()).ok());
+        QVERIFY(repo->repo().createTag("v1.0", head.value(), "release").ok());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QSignalSpy tagsSpy(&svc, &GitService::tagsReady);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        svc.deleteTag(QStringLiteral("v1.0"));
+        QCOMPARE(failedSpy.count(), 0);
+        // The refresh may land before a wait() could start — poll.
+        QTRY_VERIFY_WITH_TIMEOUT(!tagsSpy.isEmpty(), 5000);
+        const auto tags = tagsSpy.last().at(0)
+            .value<std::vector<gitbolt::git::TagInfo>>();
+        QCOMPARE(tags.size(), size_t(1));
+        QCOMPARE(tags.front().name, std::string("v0.1"));
+        QCOMPARE(tags.front().fullRefName, std::string("refs/tags/v0.1"));
+
+        svc.deleteTag(QStringLiteral("refs/tags/v0.1"));
+        QCOMPARE(failedSpy.count(), 0);
+        auto left = repo->repo().tags();
+        QVERIFY(left.ok());
+        QVERIFY(left->empty());
+    }
+
+    void deleteMissingTagReportsFailure() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        svc.deleteTag(QStringLiteral("no-such-tag"));
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(failedSpy.at(0).at(0).toString(), QStringLiteral("deleteTag"));
+        QVERIFY(!failedSpy.at(0).at(1).toString().isEmpty());
+    }
+
+    // -----------------------------------------------------------------
+    // createTag gets TagDialog's target as picked or typed — a branch
+    // name by default, or any ref / short hash — not a full hex id.
+    // "Push after create" pushes the tag's full ref, so a branch with
+    // the same name can't make the refspec ambiguous.
+    // -----------------------------------------------------------------
+    void createTagResolvesTargetAndPushesTag() {
+        auto repo = repoWithCommits(2);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        gitbolt::git::GitProcess origin(originDir.path().toStdString());
+        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
+        QVERIFY(succeeded(work.run({"remote", "add", "origin",
+                                    originDir.path().toStdString()})));
+        QVERIFY(succeeded(work.run({"branch", "v1"})));
+        auto branch = repo->repo().headBranchName();
+        QVERIFY(branch.ok());
+        const QString head = output(work.run({"rev-parse", "HEAD"}));
+        const QString parent = output(work.run({"rev-parse", "HEAD~1"}));
+        QVERIFY(!parent.isEmpty());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        // Annotated, on the branch the dialog preselects, pushed.
+        svc.createTag(QStringLiteral("v1"), QString::fromStdString(branch.value()),
+                      QStringLiteral("release"), /*annotated=*/true,
+                      /*pushAfter=*/true);
+        QVERIFY2(failedSpy.isEmpty(),
+                 qPrintable(failedSpy.isEmpty() ? QString()
+                            : failedSpy.first().at(1).toString()));
+        QCOMPARE(output(work.run({"cat-file", "-t", "refs/tags/v1"})),
+                 QStringLiteral("tag"));
+        QCOMPARE(output(work.run({"rev-parse", "refs/tags/v1^{commit}"})), head);
+        QCOMPARE(output(origin.run({"rev-parse", "refs/tags/v1"})),
+                 output(work.run({"rev-parse", "refs/tags/v1"})));
+        QVERIFY(!succeeded(origin.run({"rev-parse", "--verify", "-q",
+                                       "refs/heads/v1"})));
+
+        // Lightweight, on a short hash typed into "Or target ref".
+        svc.createTag(QStringLiteral("light"), parent.left(8), QString(),
+                      /*annotated=*/false, /*pushAfter=*/false);
+        QVERIFY(failedSpy.isEmpty());
+        QCOMPARE(output(work.run({"rev-parse", "refs/tags/light"})), parent);
+
+        // An unresolvable target fails loudly instead of tagging
+        // something arbitrary.
+        svc.createTag(QStringLiteral("bad"), QStringLiteral("no-such-ref"),
+                      QString(), /*annotated=*/false, /*pushAfter=*/false);
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(failedSpy.at(0).at(0).toString(), QStringLiteral("createTag"));
+        QVERIFY(!succeeded(work.run({"rev-parse", "--verify", "-q",
+                                     "refs/tags/bad"})));
     }
 
 private:

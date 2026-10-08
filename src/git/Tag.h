@@ -12,8 +12,12 @@ enum class TagType {
     Annotated,
 };
 
+// Same naming contract as BranchInfo: `name` is the short form
+// ("v1.0") that users see and that createTag / deleteTag take;
+// `fullRefName` is the unambiguous "refs/tags/v1.0".
 struct TagInfo {
     std::string name;
+    std::string fullRefName;
     ObjectId targetId;
     ObjectId tagId;
     TagType type;

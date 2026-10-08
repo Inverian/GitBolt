@@ -195,11 +195,13 @@ public:
 
     // Tags
     void refreshTags();
+    /// `target` is any revision spec (branch, short or full SHA, …).
     /// `pushAfter` pushes the new tag to origin once creation
     /// succeeds (same synchronous CLI path as push()).
     void createTag(const QString& name, const QString& target,
                    const QString& message, bool annotated,
                    bool pushAfter = false);
+    /// `name` may be short ("v1.0") or the full "refs/tags/v1.0".
     void deleteTag(const QString& name);
 
     // Submodules

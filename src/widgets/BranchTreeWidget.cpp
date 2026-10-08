@@ -119,9 +119,9 @@ void BranchTreeWidget::onDoubleClicked(const QModelIndex& proxyIndex) {
     if (model_->isCategoryIndex(sourceIndex))
         return;
 
-    QString name = model_->branchNameAt(sourceIndex);
-    if (!name.isEmpty()) {
-        emit checkoutRequested(name);
+    QString ref = model_->checkoutRefAt(sourceIndex);
+    if (!ref.isEmpty()) {
+        emit checkoutRequested(ref);
     }
 }
 
@@ -142,6 +142,8 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
     QString branchName = model_->branchNameAt(index);
     if (branchName.isEmpty())
         return;
+    // Labels show the short name; checkout gets the unambiguous ref.
+    const QString checkoutRef = model_->checkoutRefAt(index);
 
     // Determine which category this item belongs to
     QModelIndex parentIdx = index.parent();
@@ -157,8 +159,8 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
     // Checkout
     auto* checkoutAction = menu.addAction(QIcon::fromTheme(QStringLiteral("go-jump")),
                                           tr("Checkout '%1'").arg(branchName));
-    connect(checkoutAction, &QAction::triggered, this, [this, branchName]() {
-        emit checkoutRequested(branchName);
+    connect(checkoutAction, &QAction::triggered, this, [this, checkoutRef]() {
+        emit checkoutRequested(checkoutRef);
     });
 
     menu.addSeparator();
@@ -261,8 +263,8 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
 
     if (isTag) {
         auto* checkoutTag = menu.addAction(tr("Checkout tag '%1'").arg(branchName));
-        connect(checkoutTag, &QAction::triggered, this, [this, branchName]() {
-            emit checkoutRequested(branchName);
+        connect(checkoutTag, &QAction::triggered, this, [this, checkoutRef]() {
+            emit checkoutRequested(checkoutRef);
         });
     }
 

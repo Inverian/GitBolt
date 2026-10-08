@@ -204,12 +204,14 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::DecorationRole:
             return QIcon::fromTheme(QStringLiteral("tag"));
         case Qt::ToolTipRole: {
-            QString tip = QString::fromStdString(t.name);
+            QString tip = QString::fromStdString(t.fullRefName);
             tip += QStringLiteral("\nTarget: ") + QString::fromStdString(t.targetId.toShortHex());
             if (t.type == git::TagType::Annotated && !t.message.empty())
                 tip += QStringLiteral("\n") + QString::fromStdString(t.message);
             return tip;
         }
+        case FullRefNameRole:
+            return QString::fromStdString(t.fullRefName);
         case ObjectIdRole:
             return QString::fromStdString(t.targetId.toHex());
         default:
@@ -365,6 +367,21 @@ QString BranchModel::branchNameAt(const QModelIndex& index) const {
         return QString::fromStdString(tags_[static_cast<size_t>(row)].name);
 
     return {};
+}
+
+QString BranchModel::checkoutRefAt(const QModelIndex& index) const {
+    // A short tag name resolves to the tag, but Repository::checkout
+    // then attaches HEAD to any LOCAL BRANCH of the same name — the
+    // tag's tree under the branch's HEAD. The full ref can't collide.
+    // Branches stay short: checkout only attaches HEAD for a bare
+    // local branch name, so "refs/heads/x" would detach.
+    if (index.isValid() && index.internalId() == static_cast<quintptr>(RootCategory::Tags)) {
+        const int row = index.row();
+        if (row >= 0 && row < static_cast<int>(tags_.size()))
+            return QString::fromStdString(tags_[static_cast<size_t>(row)].fullRefName);
+        return {};
+    }
+    return branchNameAt(index);
 }
 
 bool BranchModel::isCategoryIndex(const QModelIndex& index) const {

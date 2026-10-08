@@ -27,8 +27,10 @@ gitbolt_add_test(test_revwalk        git/TestRevWalk.cpp)
 gitbolt_add_test(test_diff           git/TestDiff.cpp)
 gitbolt_add_test(test_status         git/TestStatus.cpp)
 
-# models/ tests — exercise the Qt model layer without needing a live repo
+# models/ tests — exercise the Qt model layer (the log model from in-memory
+# data, the branch model from what a temp repo reports)
 gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
+gitbolt_add_test(test_branch_model     models/TestBranchModel.cpp)
 
 # services/ tests — GitService orchestration against real temp repos.
 # Needs the services lib on top of the defaults the helper links.

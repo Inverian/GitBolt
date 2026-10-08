@@ -2414,7 +2414,8 @@ void MainWindow::buildCommandsMenu()
         // resolved synchronously via Repository::tags(); if that call
         // fails we fall back to a free-form text prompt so deletion
         // still works against the off-chance of a libgit2 enumeration
-        // hiccup.
+        // hiccup. The picker lists short names ("v1.0"), which is
+        // also what deleteTag takes.
         auto* a = new QAction(menuIcon(QStringLiteral("tag_delete")),
                               tr("De&lete tag..."), this);
         a->setObjectName(QStringLiteral("commands.delete-tag"));
@@ -2422,11 +2423,17 @@ void MainWindow::buildCommandsMenu()
             if (!gitService_ || !gitService_->isOpen())
                 return;
             QStringList tagNames;
-            if (auto res = gitService_->withRepository(
-                    [](git::Repository& r) { return r.tags(); });
-                res.ok()) {
+            const auto res = gitService_->withRepository(
+                [](git::Repository& r) { return r.tags(); });
+            if (res.ok()) {
                 for (const auto& t : res.value())
                     tagNames << QString::fromStdString(t.name);
+                if (tagNames.isEmpty()) {
+                    QMessageBox::information(this, tr("Delete Tag"),
+                        tr("This repository has no tags."));
+                    return;
+                }
+                tagNames.sort();
             }
             bool ok = false;
             QString picked;

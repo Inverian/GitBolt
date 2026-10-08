@@ -52,7 +52,11 @@ public:
     void clear();
 
     // Queries
+    /// Short display name of a branch or tag row ("main", "v1.0").
     QString branchNameAt(const QModelIndex& index) const;
+    /// What a checkout of this row should hand Repository::checkout:
+    /// the short name for branches, "refs/tags/<name>" for tags.
+    QString checkoutRefAt(const QModelIndex& index) const;
     bool isCategoryIndex(const QModelIndex& index) const;
 
 private:

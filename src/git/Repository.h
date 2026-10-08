@@ -198,6 +198,7 @@ public:
     Result<std::vector<TagInfo>> tags() const;
     Result<void> createTag(const std::string& name, const ObjectId& target, const std::string& message = "");
     Result<void> createLightweightTag(const std::string& name, const ObjectId& target);
+    /// `name` may be short ("v1.0") or the full "refs/tags/v1.0".
     Result<void> deleteTag(const std::string& name);
 
     // Blame
