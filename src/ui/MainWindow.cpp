@@ -3418,7 +3418,9 @@ void MainWindow::buildHelpMenu()
         helpMenu->addAction(a);
     }
     {
-        // Changelog → in-app viewer over resources/CHANGELOG.md.
+        // Changelog → in-app viewer over the root CHANGELOG.md, the
+        // file CI publishes release notes from (tests/app/
+        // TestChangelog.cpp keeps its newest entry on this version).
         // Matches Git Extensions' model (bundled file, rendered in
         // a dialog with QTextBrowser's markdown support).
         auto* a = new QAction(menuIcon(QStringLiteral("changelog")),

@@ -10,9 +10,13 @@
     <!--
         In-app content viewed by dialogs (currently only the Help →
         Changelog viewer). Paths resolve via ":/content/<alias>".
+        CHANGELOG.md is the repository-root file, the same one CI cuts
+        release notes from, so the app and the GitHub release can't
+        disagree. tests/app/TestChangelog.cpp fails if this alias
+        points anywhere else.
     -->
     <qresource prefix="/content">
-        <file alias="CHANGELOG.md">../../../resources/CHANGELOG.md</file>
+        <file alias="CHANGELOG.md">../../../CHANGELOG.md</file>
     </qresource>
     <qresource prefix="/icons">
         <file alias="gitbolt-16.png">../../../resources/icons/gitbolt-16.png</file>

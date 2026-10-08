@@ -37,5 +37,14 @@ gitbolt_add_test(test_branch_model     models/TestBranchModel.cpp)
 gitbolt_add_test(test_git_service services/TestGitService.cpp)
 target_link_libraries(test_git_service PRIVATE gitbolt_services)
 
+# app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
+# app's own .qrc so it reads the embedded text, not just the source file.
+gitbolt_add_test(test_changelog app/TestChangelog.cpp)
+target_sources(test_changelog PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
+target_compile_definitions(test_changelog PRIVATE
+    GITBOLT_VERSION="${PROJECT_VERSION}"
+    GITBOLT_CHANGELOG_PATH="${PROJECT_SOURCE_DIR}/CHANGELOG.md")
+
 # e2e/ tests — the real app binary driven through the test bridge.
 add_subdirectory(e2e)

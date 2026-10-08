@@ -352,7 +352,8 @@ ctest --test-dir build --output-on-failure
 
 Each suite is its own executable (`test_repository`, `test_revwalk`,
 `test_diff`, `test_status`, `test_commit_log_model`,
-`test_git_service`). To run one directly with verbose output:
+`test_git_service`, `test_changelog`). To run one directly with verbose
+output:
 
 ```bash
 ./build/tests/test_git_service
