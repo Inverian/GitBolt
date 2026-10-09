@@ -867,41 +867,54 @@ Result<void> Repository::renameBranch(const std::string& oldName, const std::str
 }
 
 Result<void> Repository::checkout(const std::string& branchOrRef) {
-    git_object* target = nullptr;
-    int err = git_revparse_single(&target, repo_, branchOrRef.c_str());
-    if (err < 0) return GitError::fromLibgit2(err);
+    // git's rule for `git checkout <name>`: a LOCAL BRANCH name means
+    // that branch, even when a tag (or anything else) has the same
+    // name. The tree used to come from git_revparse_single, where
+    // refs/tags/<name> beats refs/heads/<name>, while HEAD went to
+    // the branch: the tag's files under the branch, showing up as
+    // phantom changes. Full refs ("refs/tags/x", "refs/heads/x") are
+    // no branch name, so they resolve as written.
+    git_reference* branchRef = nullptr;
+    if (git_branch_lookup(&branchRef, repo_, branchOrRef.c_str(),
+                          GIT_BRANCH_LOCAL) < 0)
+        branchRef = nullptr;
 
     // Annotated tags peel to their commit; commits peel to
     // themselves. Checking out a non-committish fails right here.
     git_object* peeled = nullptr;
-    err = git_object_peel(&peeled, target, GIT_OBJECT_COMMIT);
-    git_object_free(target);
-    if (err < 0) return GitError::fromLibgit2(err);
+    int err = 0;
+    if (branchRef) {
+        err = git_reference_peel(&peeled, branchRef, GIT_OBJECT_COMMIT);
+    } else {
+        git_object* target = nullptr;
+        err = git_revparse_single(&target, repo_, branchOrRef.c_str());
+        if (err == 0) {
+            err = git_object_peel(&peeled, target, GIT_OBJECT_COMMIT);
+            git_object_free(target);
+        }
+    }
+    if (err < 0) {
+        git_reference_free(branchRef);
+        return GitError::fromLibgit2(err);
+    }
 
     git_checkout_options opts;
     git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_SAFE;
     err = git_checkout_tree(repo_, peeled, &opts);
-    if (err < 0) {
-        git_object_free(peeled);
-        return GitError::fromLibgit2(err);
-    }
 
     // HEAD update: only an actual LOCAL BRANCH name gets a symbolic
-    // HEAD; tags, remote-tracking refs, raw SHAs and relative specs
-    // detach. The old code wrote "refs/heads/<input>" for all of
-    // them, leaving HEAD as a broken symbolic ref to a branch that
-    // doesn't exist while the working tree showed the checkout.
-    git_reference* branchRef = nullptr;
-    if (git_branch_lookup(&branchRef, repo_, branchOrRef.c_str(),
-                          GIT_BRANCH_LOCAL) == 0) {
-        git_reference_free(branchRef);
-        const std::string refName = "refs/heads/" + branchOrRef;
-        err = git_repository_set_head(repo_, refName.c_str());
-    } else {
-        err = git_repository_set_head_detached(repo_,
-                                               git_object_id(peeled));
+    // HEAD; tags, remote-tracking refs, full refs, raw SHAs and
+    // relative specs detach, as in git. The old code wrote
+    // "refs/heads/<input>" for all of them, leaving HEAD as a broken
+    // symbolic ref to a branch that doesn't exist while the working
+    // tree showed the checkout.
+    if (err == 0) {
+        err = branchRef
+            ? git_repository_set_head(repo_, git_reference_name(branchRef))
+            : git_repository_set_head_detached(repo_, git_object_id(peeled));
     }
+    git_reference_free(branchRef);
     git_object_free(peeled);
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
@@ -1079,9 +1092,12 @@ constexpr std::string_view kTagRefPrefix = "refs/tags/";
 } // namespace
 
 Result<std::vector<TagInfo>> Repository::tags() const {
-    std::vector<TagInfo> result;
-    int err = git_tag_foreach(repo_, [](const char* name, git_oid* oid, void* payload) -> int {
-        auto* tags = static_cast<std::vector<TagInfo>*>(payload);
+    struct Payload {
+        git_repository* repo;
+        std::vector<TagInfo> tags;
+    } payload{repo_, {}};
+    int err = git_tag_foreach(repo_, [](const char* name, git_oid* oid, void* p) -> int {
+        auto* payload = static_cast<Payload*>(p);
         TagInfo info;
         // git_tag_foreach hands over the FULL ref name, while
         // git_tag_delete and git_tag_create take the short one.
@@ -1094,14 +1110,41 @@ Result<std::vector<TagInfo>> Repository::tags() const {
         info.name = shortName;
         info.targetId = ObjectId(oid);
         info.type = TagType::Lightweight;
-        tags->push_back(std::move(info));
+
+        // `oid` is the ref's target: the commit for a lightweight
+        // tag, but the tag OBJECT for an annotated one. Reporting it
+        // as-is gave annotated tags a target that is in no log (the
+        // sidebar tooltip's "Target:") and dropped their tagger and
+        // message. An object we can't read stays a lightweight tag
+        // at the ref's target rather than failing the whole list.
+        git_object* obj = nullptr;
+        if (git_object_lookup(&obj, payload->repo, oid, GIT_OBJECT_ANY) == 0) {
+            if (git_object_type(obj) == GIT_OBJECT_TAG) {
+                auto* tag = reinterpret_cast<git_tag*>(obj);
+                info.type = TagType::Annotated;
+                info.tagId = ObjectId(oid);
+                info.targetId = ObjectId(git_tag_target_id(tag));
+                // A tag of a tag: peel through to what it finally
+                // names (normally the commit).
+                git_object* peeled = nullptr;
+                if (git_tag_peel(&peeled, tag) == 0) {
+                    info.targetId = ObjectId(git_object_id(peeled));
+                    git_object_free(peeled);
+                }
+                const char* message = git_tag_message(tag);
+                info.message = message ? message : "";
+                info.tagger = Signature::fromGit(git_tag_tagger(tag));
+            }
+            git_object_free(obj);
+        }
+        payload->tags.push_back(std::move(info));
         return 0;
-    }, &result);
+    }, &payload);
     // Enumeration failure (corrupt packed-refs etc.) must not be
     // reported as "no tags".
     if (err < 0)
         return GitError::fromLibgit2(err);
-    return result;
+    return std::move(payload.tags);
 }
 
 Result<void> Repository::createTag(const std::string& name, const ObjectId& target, const std::string& message) {

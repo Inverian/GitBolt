@@ -96,6 +96,51 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // An annotated tag's ref points at the tag object, not the commit.
+    // tags() used to report that object's id as `targetId` and every
+    // tag as lightweight, so the sidebar tooltip showed a hash that
+    // isn't in the log and never the tag's message.
+    // -----------------------------------------------------------------
+    void tagsReportAnnotatedDetails() {
+        gitbolt::test::TestRepo repo;
+        auto tagged = repo.writeAndCommit("a.txt", "a\n", "tagged");
+        QVERIFY(tagged.ok());
+        QVERIFY(repo.repo().createTag("v1.0", tagged.value(), "release notes").ok());
+        QVERIFY(repo.repo().createLightweightTag("v0.1", tagged.value()).ok());
+        // HEAD moves on, so a tag can't pass by pointing at HEAD.
+        QVERIFY(repo.writeAndCommit("b.txt", "b\n", "later").ok());
+        auto tagObject = repo.repo().resolveRef("refs/tags/v1.0");
+        QVERIFY(tagObject.ok());
+        QVERIFY(tagObject.value() != tagged.value());
+
+        auto tags = repo.repo().tags();
+        QVERIFY(tags.ok());
+        QCOMPARE(tags->size(), size_t(2));
+        auto byName = [&](const std::string& name) {
+            return std::find_if(tags->begin(), tags->end(),
+                                [&](const auto& t) { return t.name == name; });
+        };
+
+        auto annotated = byName("v1.0");
+        QVERIFY(annotated != tags->end());
+        QCOMPARE(annotated->type, gitbolt::git::TagType::Annotated);
+        QCOMPARE(annotated->targetId, tagged.value());
+        QCOMPARE(annotated->tagId, tagObject.value());
+        QCOMPARE(QString::fromStdString(annotated->message).trimmed(),
+                 QStringLiteral("release notes"));
+        QCOMPARE(annotated->tagger.name, std::string("Test User"));
+        QCOMPARE(annotated->tagger.email, std::string("test@gitbolt.local"));
+
+        auto light = byName("v0.1");
+        QVERIFY(light != tags->end());
+        QCOMPARE(light->type, gitbolt::git::TagType::Lightweight);
+        QCOMPARE(light->targetId, tagged.value());
+        QVERIFY(light->tagId.isZero());
+        QVERIFY(light->message.empty());
+        QVERIFY(light->tagger.name.empty());
+    }
+
+    // -----------------------------------------------------------------
     // deleteTag accepts the short name and the full ref name, for
     // both tag kinds, and leaves every other tag alone.
     // -----------------------------------------------------------------
@@ -162,6 +207,78 @@ private slots:
         QVERIFY(repo.repo().deleteTag("v1").ok());
         QVERIFY(tagNames(repo.repo()).isEmpty());
         QVERIFY(repo.repo().resolveRef("refs/heads/v1").ok());
+    }
+
+    // -----------------------------------------------------------------
+    // checkout of a name that is both a local branch and a tag follows
+    // git's `git checkout <name>`: the branch wins, for HEAD AND for
+    // the files. It used to attach HEAD to the branch but check out
+    // the tag's tree, leaving phantom changes. Full refs check out
+    // what they name; like git, only a bare branch name attaches HEAD.
+    // -----------------------------------------------------------------
+    void checkoutNameSharedByBranchAndTag_data() {
+        QTest::addColumn<bool>("annotated");
+        QTest::addColumn<QString>("spec");
+        QTest::addColumn<QString>("expectedBranch");   // empty: detached
+        QTest::addColumn<QString>("expectedContent");
+
+        for (const bool annotated : {true, false}) {
+            const char* kind = annotated ? "annotated" : "lightweight";
+            QTest::addRow("%s tag, bare name", kind)
+                << annotated << "v1" << "v1" << "on branch\n";
+            QTest::addRow("%s tag, refs/tags/", kind)
+                << annotated << "refs/tags/v1" << "" << "at tag\n";
+            QTest::addRow("%s tag, refs/heads/", kind)
+                << annotated << "refs/heads/v1" << "" << "on branch\n";
+            QTest::addRow("%s tag, no such branch", kind)
+                << annotated << "only-tag" << "" << "at tag\n";
+        }
+    }
+
+    void checkoutNameSharedByBranchAndTag() {
+        QFETCH(bool, annotated);
+        QFETCH(QString, spec);
+        QFETCH(QString, expectedBranch);
+        QFETCH(QString, expectedContent);
+
+        gitbolt::test::TestRepo repo;
+        auto atTag = repo.writeAndCommit("a.txt", "at tag\n", "tagged");
+        QVERIFY(atTag.ok());
+        for (const char* name : {"v1", "only-tag"}) {
+            auto created = annotated
+                ? repo.repo().createTag(name, atTag.value(), "release")
+                : repo.repo().createLightweightTag(name, atTag.value());
+            QVERIFY(created.ok());
+        }
+        auto onBranch = repo.writeAndCommit("a.txt", "on branch\n", "branch tip");
+        QVERIFY(onBranch.ok());
+        QVERIFY(repo.repo().createBranch("v1", onBranch.value()).ok());
+        // HEAD's own branch moves on, so neither target is current.
+        QVERIFY(repo.writeAndCommit("a.txt", "on main\n", "main tip").ok());
+
+        auto result = repo.repo().checkout(spec.toStdString());
+        QVERIFY2(result.ok(), result.ok() ? "" : result.error().message().c_str());
+
+        if (expectedBranch.isEmpty()) {
+            QVERIFY(repo.repo().isHeadDetached());
+        } else {
+            QVERIFY(!repo.repo().isHeadDetached());
+            auto branch = repo.repo().headBranchName();
+            QVERIFY(branch.ok());
+            QCOMPARE(QString::fromStdString(branch.value()), expectedBranch);
+        }
+        auto head = repo.repo().head();
+        QVERIFY(head.ok());
+        QCOMPARE(head.value(), expectedContent == QStringLiteral("at tag\n")
+                                   ? atTag.value() : onBranch.value());
+
+        // The files match HEAD: nothing staged, nothing modified.
+        QFile file(QDir(repo.path()).absoluteFilePath(QStringLiteral("a.txt")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(QString::fromUtf8(file.readAll()), expectedContent);
+        auto status = repo.repo().status();
+        QVERIFY(status.ok());
+        QCOMPARE(status->size(), size_t(0));
     }
 
     // -----------------------------------------------------------------

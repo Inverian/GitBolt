@@ -18,6 +18,7 @@
 //     crash nor emit once the repository it was queued for is gone
 //     (regression test for the raw-pointer capture UAF),
 //   - tag create / delete as the Commands menu drives them,
+//   - branch checkout when a tag shares the branch's name,
 //   - cancelRemoteOps(), which quitting during a fetch relies on,
 //   - the rebase steps: the dialog's plan runs as listed, with its
 //     rewords, squashes, fixups and edits; git's failures (a conflict,
@@ -1138,6 +1139,42 @@ private slots:
         auto left = repo->repo().tags();
         QVERIFY(left.ok());
         QVERIFY(left->empty());
+    }
+
+    // -----------------------------------------------------------------
+    // checkoutBranch is what the sidebar, the toolbar's branch combo
+    // and Commands > Checkout branch call, with a bare branch name. A
+    // tag of the same name used to supply the files while HEAD went to
+    // the branch, so the switch showed up as uncommitted changes.
+    // -----------------------------------------------------------------
+    void checkoutBranchSharingATagName() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        auto atTag = repo->repo().head();
+        QVERIFY(atTag.ok());
+        QVERIFY(repo->repo().createTag("v1", atTag.value(), "release").ok());
+        auto onBranch = repo->writeAndCommit(QStringLiteral("f0.txt"),
+                                             QByteArrayLiteral("on branch\n"),
+                                             QStringLiteral("branch tip"));
+        QVERIFY(onBranch.ok());
+        QVERIFY(repo->repo().createBranch("v1", onBranch.value()).ok());
+        QVERIFY(repo->writeAndCommit(QStringLiteral("f0.txt"),
+                                     QByteArrayLiteral("on main\n"),
+                                     QStringLiteral("main tip")).ok());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        svc.checkoutBranch(QStringLiteral("v1"));
+        QCOMPARE(failedSpy.count(), 0);
+        auto branch = repo->repo().headBranchName();
+        QVERIFY(branch.ok());
+        QCOMPARE(branch.value(), std::string("v1"));
+        QCOMPARE(tip(repo->repo(), "HEAD"), onBranch->toHex());
+        auto status = repo->repo().status();
+        QVERIFY(status.ok());
+        QCOMPARE(status->size(), size_t(0));
     }
 
     void deleteMissingTagReportsFailure() {

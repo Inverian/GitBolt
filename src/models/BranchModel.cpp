@@ -206,8 +206,16 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::ToolTipRole: {
             QString tip = QString::fromStdString(t.fullRefName);
             tip += QStringLiteral("\nTarget: ") + QString::fromStdString(t.targetId.toShortHex());
-            if (t.type == git::TagType::Annotated && !t.message.empty())
-                tip += QStringLiteral("\n") + QString::fromStdString(t.message);
+            if (t.type == git::TagType::Annotated) {
+                if (!t.tagger.name.empty())
+                    tip += QStringLiteral("\n") + tr("Tagger: %1 <%2>").arg(
+                        QString::fromStdString(t.tagger.name),
+                        QString::fromStdString(t.tagger.email));
+                // git ends a tag message with a newline.
+                const QString message = QString::fromStdString(t.message).trimmed();
+                if (!message.isEmpty())
+                    tip += QStringLiteral("\n") + message;
+            }
             return tip;
         }
         case FullRefNameRole:
@@ -370,11 +378,12 @@ QString BranchModel::branchNameAt(const QModelIndex& index) const {
 }
 
 QString BranchModel::checkoutRefAt(const QModelIndex& index) const {
-    // A short tag name resolves to the tag, but Repository::checkout
-    // then attaches HEAD to any LOCAL BRANCH of the same name — the
-    // tag's tree under the branch's HEAD. The full ref can't collide.
-    // Branches stay short: checkout only attaches HEAD for a bare
-    // local branch name, so "refs/heads/x" would detach.
+    // Repository::checkout follows git: a short name that is also a
+    // LOCAL BRANCH checks out the branch, so a tag row handing over
+    // its short name would land on a same-named branch instead. The
+    // full ref can't collide. Branches stay short: checkout only
+    // attaches HEAD for a bare local branch name, so "refs/heads/x"
+    // would detach.
     if (index.isValid() && index.internalId() == static_cast<quintptr>(RootCategory::Tags)) {
         const int row = index.row();
         if (row >= 0 && row < static_cast<int>(tags_.size()))

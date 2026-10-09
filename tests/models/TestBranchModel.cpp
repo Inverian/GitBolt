@@ -5,7 +5,8 @@
 // Pins the naming contract for tag rows: the tree shows short names
 // ("v1", not "refs/tags/v1"), while a checkout from a tag row hands
 // Repository::checkout the full ref, so a local branch that shares
-// the tag's name can't capture it.
+// the tag's name can't capture it. Also pins what an annotated tag's
+// row reports: the tagged commit, the tagger and the message.
 //
 
 #include <QTest>
@@ -69,6 +70,34 @@ private slots:
         auto head = repo.repo().head();
         QVERIFY(head.ok());
         QCOMPARE(head.value(), tagged.value());
+    }
+
+    // An annotated tag's row reports the commit it tags (not the tag
+    // object's id), who tagged it, and its message.
+    void annotatedTagRowShowsCommitTaggerAndMessage() {
+        gitbolt::test::TestRepo repo;
+        auto tagged = repo.writeAndCommit("a.txt", "a\n", "tagged");
+        QVERIFY(tagged.ok());
+        QVERIFY(repo.repo().createTag("v1", tagged.value(), "release notes").ok());
+        QVERIFY(repo.writeAndCommit("b.txt", "b\n", "tip").ok());
+
+        BranchModel model;
+        auto tags = repo.repo().tags();
+        QVERIFY(tags.ok());
+        model.setTags(std::move(tags.value()));
+
+        const QModelIndex tagsRoot = model.index(
+            static_cast<int>(BranchModel::RootCategory::Tags), 0);
+        QCOMPARE(model.rowCount(tagsRoot), 1);
+        const QModelIndex tagRow = model.index(0, 0, tagsRoot);
+        QCOMPARE(model.data(tagRow, BranchModel::ObjectIdRole).toString(),
+                 QString::fromStdString(tagged->toHex()));
+        const QString tip = model.data(tagRow, Qt::ToolTipRole).toString();
+        QVERIFY2(tip.contains(QString::fromStdString(tagged->toShortHex())),
+                 qPrintable(tip));
+        QVERIFY2(tip.contains(QStringLiteral("Test User <test@gitbolt.local>")),
+                 qPrintable(tip));
+        QVERIFY2(tip.contains(QStringLiteral("release notes")), qPrintable(tip));
     }
 };
 
