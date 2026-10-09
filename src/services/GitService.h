@@ -284,6 +284,9 @@ signals:
     void repositoryChanged();
 
     // Phase 6 signals — Rebase / Cherry-pick / Stash
+    /// After interactiveRebase, rebaseContinue and rebaseSkip. false
+    /// when git failed or stopped on a conflict, right after an
+    /// operationFailed with git's message.
     void rebaseComplete(bool success);
     void cherryPickComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
@@ -325,6 +328,12 @@ private:
                                   Qt::QueuedConnection);
         return true;
     }
+
+    /// The end of a rebase step on its worker (`step` names it in
+    /// operationFailed): reports a failure, emits rebaseComplete, and
+    /// asks for the refreshes.
+    void finishRebaseStep(const QString& step,
+                          const git::Result<git::ProcessOutput>& result);
 
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network

@@ -87,7 +87,9 @@ public:
     /// "git@host:path") is no secret and is kept.
     static std::string redactUrl(const std::string& url);
 
-    Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& editorScript) const;
+    /// `git rebase -i <onto>` with `todo` as its todo list, in git's
+    /// format and order ("pick <hash> <subject>" lines, oldest first).
+    Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& todo) const;
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
     Result<ProcessOutput> rebaseSkip() const;
@@ -109,7 +111,8 @@ public:
 private:
     /// Shared child-process environment: inherits the session env
     /// and sets GIT_TERMINAL_PROMPT=0 so a promptless child fails
-    /// fast instead of hanging until the timeout kills it.
+    /// fast instead of hanging until the timeout kills it, and
+    /// GIT_EDITOR=":" so git never waits on an editor.
     static void applyEnvironment(QProcess& process);
 
     /// run() with cancelFlag_ set.

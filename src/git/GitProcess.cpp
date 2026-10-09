@@ -8,6 +8,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QTemporaryFile>
 #include <QThread>
 #include <sstream>
 
@@ -42,6 +43,13 @@ void GitProcess::applyEnvironment(QProcess& process) {
     // libsecret, manager-core) are unaffected — only terminal
     // prompting is disabled.
     env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+    // No tty, so no editor either: `git rebase --continue` opens one
+    // for the message of the commit it makes, and so would any command
+    // that wants a message edited. vi waited on the pipe until the
+    // timeout killed git mid-operation, and a GUI core.editor popped
+    // up out of nowhere. ":" is git's own "no editor": it keeps the
+    // text git prepared.
+    env.insert(QStringLiteral("GIT_EDITOR"), QStringLiteral(":"));
 
     // When git (or ssh underneath it) does need a credential and no
     // helper supplies one, route the question to a GUI prompt: the
@@ -710,19 +718,42 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     return GitError(GitErrorCode::ProcessFailed, message);
 }
 
-Result<ProcessOutput> GitProcess::interactiveRebase(const std::string& onto, const std::string& editorScript) const {
+Result<ProcessOutput> GitProcess::interactiveRebase(const std::string& onto, const std::string& todo) const {
+    // git writes the todo list it would run to a file and hands that
+    // file to GIT_SEQUENCE_EDITOR, a command it runs through its shell
+    // (sh, also with Git for Windows) with the file's path appended.
+    // Ours copies `todo` over it. This used to put the todo text
+    // itself in GIT_SEQUENCE_EDITOR, which git then ran as a command
+    // ("pick: command not found"), so every rebase failed.
+    QTemporaryFile todoFile(QDir::tempPath() + QStringLiteral("/gitbolt-rebase-XXXXXX"));
+    const auto size = static_cast<qint64>(todo.size());
+    if (!todoFile.open() || todoFile.write(todo.data(), size) != size || !todoFile.flush())
+        return GitError(GitErrorCode::ProcessFailed,
+                        "Could not write the rebase plan: " + todoFile.errorString().toStdString());
+    todoFile.close();
+    QString todoPath = QDir::fromNativeSeparators(todoFile.fileName());
+    todoPath.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    env.insert("GIT_SEQUENCE_EDITOR", QString::fromStdString(editorScript));
-    env.insert(QStringLiteral("GIT_TERMINAL_PROMPT"), QStringLiteral("0"));
+    applyEnvironment(process);
+    QProcessEnvironment env = process.processEnvironment();
+    env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), QStringLiteral("cp '%1'").arg(todoPath));
     process.setProcessEnvironment(env);
-    process.start(QString::fromStdString(gitPath_), {"rebase", "-i", QString::fromStdString(onto)});
 
-    if (!process.waitForStarted(5000))
+    const QStringList args = {QStringLiteral("rebase"), QStringLiteral("-i"),
+                              QString::fromStdString(onto)};
+    const QString workDir = QString::fromStdString(workDir_);
+    QElapsedTimer timer;
+    timer.start();
+    process.start(QString::fromStdString(gitPath_), args);
+    if (!process.waitForStarted(5000)) {
+        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start rebase");
+    }
     if (!process.waitForFinished(300000)) {
         process.kill();
+        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Rebase timed out");
     }
 
@@ -730,6 +761,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(const std::string& onto, con
     output.exitCode = process.exitCode();
     output.stdoutData = process.readAllStandardOutput().toStdString();
     output.stderrData = process.readAllStandardError().toStdString();
+    GitProcessLog::instance().emitCommand(workDir, args, output.exitCode, timer.elapsed());
     return output;
 }
 

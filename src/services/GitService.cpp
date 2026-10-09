@@ -629,6 +629,30 @@ inline QString stderrOrFallback(const git::ProcessOutput& out, const QString& fa
     QString s = QString::fromStdString(out.stderrData).trimmed();
     return s.isEmpty() ? fallback : s;
 }
+
+// Why a rebase step failed, or an empty string if it didn't: git's
+// own words when it exited non-zero, as a terminal would show them
+// (a "Rebasing (1/2)" progress line is overwritten via '\r'), minus
+// its "hint:" lines (advice for the command line), or why git
+// couldn't run at all.
+QString rebaseFailure(const git::Result<git::ProcessOutput>& result) {
+    if (!result)
+        return QString::fromStdString(result.error().message());
+    const git::ProcessOutput& out = result.value();
+    if (out.success())
+        return {};
+    QStringList lines;
+    const QString text = stderrOrFallback(out, QString::fromStdString(out.stdoutData));
+    for (const QString& raw : text.split(QLatin1Char('\n'))) {
+        const QString line = raw.mid(raw.lastIndexOf(QLatin1Char('\r')) + 1).trimmed();
+        if (!line.isEmpty() && !line.startsWith(QLatin1String("hint:")))
+            lines.append(line);
+    }
+    const QString message = lines.join(QLatin1Char('\n'));
+    return message.isEmpty()
+        ? GitService::tr("git rebase exited with code %1").arg(out.exitCode)
+        : message;
+}
 } // namespace
 
 // push/pull/fetch shell out via GitProcess (QProcess) instead of
@@ -735,12 +759,13 @@ void GitService::fetch(const QString& remote) {
 void GitService::interactiveRebase(const git::RebasePlan& plan) {
     if (!repo_) return;
 
-    // Build a GIT_SEQUENCE_EDITOR script from the plan.
-    // Each line: <operation> <short-hash> <message>
-    std::string script;
-    for (const auto& op : plan.operations) {
+    // git's todo list runs oldest first; the plan lists newest first,
+    // as the log does. Full hashes, so no abbreviation can turn
+    // ambiguous; the subject is only there for `git status` to show.
+    std::string todo;
+    for (auto op = plan.operations.rbegin(); op != plan.operations.rend(); ++op) {
         const char* verb = "pick";
-        switch (op.type) {
+        switch (op->type) {
         case git::RebaseOperationType::Pick:    verb = "pick";   break;
         case git::RebaseOperationType::Reword:  verb = "reword"; break;
         case git::RebaseOperationType::Edit:    verb = "edit";   break;
@@ -748,12 +773,12 @@ void GitService::interactiveRebase(const git::RebasePlan& plan) {
         case git::RebaseOperationType::Fixup:   verb = "fixup";  break;
         case git::RebaseOperationType::Drop:    verb = "drop";   break;
         }
-        script += verb;
-        script += " ";
-        script += op.commitId.toShortHex();
-        script += " ";
-        script += op.message;
-        script += "\n";
+        todo += verb;
+        todo += " ";
+        todo += op->commitId.toHex();
+        todo += " ";
+        todo += op->message.substr(0, op->message.find('\n'));
+        todo += "\n";
     }
 
     git::GitProcess proc{[&]() {
@@ -761,16 +786,8 @@ void GitService::interactiveRebase(const git::RebasePlan& plan) {
         return repo_->process();
     }()};
     runner_.run([this, proc = std::move(proc),
-                 onto = plan.onto.toHex(), script]() mutable {
-        auto result = proc.interactiveRebase(onto, script);
-        if (!result) {
-            emit operationFailed(
-                QStringLiteral("rebase"),
-                QString::fromStdString(result.error().message()));
-            emit rebaseComplete(false);
-        } else {
-            emit rebaseComplete(true);
-        }
+                 onto = plan.onto.toHex(), todo]() mutable {
+        finishRebaseStep(QStringLiteral("rebase"), proc.interactiveRebase(onto, todo));
     });
 }
 
@@ -781,17 +798,7 @@ void GitService::rebaseContinue() {
         return repo_->process();
     }()};
     runner_.run([this, proc = std::move(proc)]() mutable {
-        auto result = proc.rebaseContinue();
-        if (!result) {
-            emit operationFailed(
-                QStringLiteral("rebaseContinue"),
-                QString::fromStdString(result.error().message()));
-            emit rebaseComplete(false);
-        } else {
-            emit rebaseComplete(true);
-            refreshStatus();
-            refreshLog();
-        }
+        finishRebaseStep(QStringLiteral("rebase --continue"), proc.rebaseContinue());
     });
 }
 
@@ -802,12 +809,9 @@ void GitService::rebaseAbort() {
         return repo_->process();
     }()};
     runner_.run([this, proc = std::move(proc)]() mutable {
-        auto result = proc.rebaseAbort();
-        if (!result) {
-            emit operationFailed(
-                QStringLiteral("rebaseAbort"),
-                QString::fromStdString(result.error().message()));
-        }
+        const QString failure = rebaseFailure(proc.rebaseAbort());
+        if (!failure.isEmpty())
+            emit operationFailed(QStringLiteral("rebase --abort"), failure);
         refreshStatus();
         refreshLog();
     });
@@ -820,18 +824,21 @@ void GitService::rebaseSkip() {
         return repo_->process();
     }()};
     runner_.run([this, proc = std::move(proc)]() mutable {
-        auto result = proc.rebaseSkip();
-        if (!result) {
-            emit operationFailed(
-                QStringLiteral("rebaseSkip"),
-                QString::fromStdString(result.error().message()));
-            emit rebaseComplete(false);
-        } else {
-            emit rebaseComplete(true);
-            refreshStatus();
-            refreshLog();
-        }
+        finishRebaseStep(QStringLiteral("rebase --skip"), proc.rebaseSkip());
     });
+}
+
+// These all reported success whenever git could be started: a rebase
+// that stopped on a conflict, or never began, said "Rebase complete."
+// Either way the repository may have changed, so both refresh.
+void GitService::finishRebaseStep(const QString& step,
+                                  const git::Result<git::ProcessOutput>& result) {
+    const QString failure = rebaseFailure(result);
+    if (!failure.isEmpty())
+        emit operationFailed(step, failure);
+    emit rebaseComplete(failure.isEmpty());
+    refreshStatus();
+    refreshLog();
 }
 
 // ---------------------------------------------------------------------------

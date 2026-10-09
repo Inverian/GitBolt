@@ -3877,17 +3877,20 @@ void MainWindow::setupConnections()
     // Rebase completion: status-bar note + refresh triple. Lives
     // here (not in the Commands → Rebase handler) because
     // Qt::UniqueConnection does not dedupe lambdas — re-connecting
-    // per dialog open accumulated handlers forever.
+    // per dialog open accumulated handlers forever. A failure has
+    // already put git's own message on the status bar (the
+    // operationFailed handler); it stays, and if git stopped mid-
+    // rebase on a conflict the resolver is offered, as for a
+    // cherry-pick.
     connect(gitService_, &services::GitService::rebaseComplete,
             this, [this](bool success) {
-        statusBar()->showMessage(
-            success ? tr("Rebase complete.")
-                    : tr("Rebase paused or failed — "
-                         "use Continue/Abort to resolve."),
-            4000);
+        if (success)
+            statusBar()->showMessage(tr("Rebase complete."), 4000);
         gitService_->refreshLog();
         gitService_->refreshStatus();
         gitService_->refreshBranches();
+        if (!success)
+            offerConflictResolution(tr("rebase"));
     });
 
     connect(gitService_, &services::GitService::repositoryOpenFailed,

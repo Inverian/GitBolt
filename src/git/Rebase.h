@@ -24,6 +24,8 @@ struct RebaseOperation {
 
 struct RebasePlan {
     ObjectId onto;
+    /// Newest first, as the log and the Rebase dialog list commits
+    /// (git's todo list runs the other way).
     std::vector<RebaseOperation> operations;
 };
 

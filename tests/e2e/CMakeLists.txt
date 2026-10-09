@@ -20,6 +20,7 @@ set(E2E_TESTS
     test_commit_flow
     test_instance_lock
     test_quit_during_fetch
+    test_rebase_dialog
     test_remote_branches
     test_single_instance
     test_tags
