@@ -118,7 +118,11 @@ Addressing:
   visible combo with its items.
 - **Views / editors** by `objectName` or `ClassName[:index]`, matched
   against the whole superclass chain — `QPlainTextEdit:0` resolves a
-  `CommitMessageEdit`. Active window's widgets are ordered first.
+  `CommitMessageEdit`. Indices count the open modal dialog's widgets
+  first, then the active window's, then other dialogs', so `:0` means
+  "in the dialog just opened" even while GitBolt isn't the frontmost
+  app. Prefer an `objectName` for anything destructive: select-item on
+  the toolbar's `toolbar.branchCombo` checks the branch out.
 
 Two real bugs were caught the first time the bridge drove a full
 merge→resolve→commit cycle: `Repository::conflictEntries()` read a stale

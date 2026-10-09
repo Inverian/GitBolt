@@ -9,6 +9,7 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
+#include <QDialog>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -134,21 +135,32 @@ void forEachAction(
 }
 
 // Visible item views / buttons / editors of every visible top-level
-// window, active window's children first. `Class[:index]` addressing
-// in select-row/type resolves against this ordering, so it is stable
-// for the duration of a dialog being frontmost.
+// window: the modal dialog's first, then the active window's, then
+// any other dialog's, then the rest. `Class[:index]` addressing in
+// select-row/select-item/type resolves against this ordering, so ":0"
+// means "the one in the dialog the agent just opened".
 template <typename T>
 QList<T*> visibleWidgets()
 {
     QList<T*> out;
     QWidgetList tops = QApplication::topLevelWidgets();
-    // Active window's widgets first so ":0" usually means "the one
-    // in the dialog the agent just opened".
+    // Not just isActiveWindow(): while GitBolt isn't the frontmost app
+    // (an agent driving it from a terminal) no window is active, and
+    // topLevelWidgets() has no stable order. "QComboBox:0" then
+    // sometimes meant the toolbar's branch switcher, where select-item
+    // checks the branch out, and the dialog's OK confirmed its default
+    // item instead of the one the agent asked for.
+    QWidget* const modal = QApplication::activeModalWidget();
+    const auto rank = [modal](QWidget* w) {
+        if (w == modal)
+            return 0;
+        if (w->isActiveWindow())
+            return 1;
+        return qobject_cast<QDialog*>(w) ? 2 : 3;
+    };
     std::stable_sort(tops.begin(), tops.end(),
-                     [](QWidget* a, QWidget* b) {
-                         const bool aa = a->isActiveWindow();
-                         const bool bb = b->isActiveWindow();
-                         return aa && !bb;
+                     [&rank](QWidget* a, QWidget* b) {
+                         return rank(a) < rank(b);
                      });
     for (QWidget* top : tops) {
         if (!top->isVisible())
