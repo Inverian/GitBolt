@@ -13,6 +13,7 @@ Launch the app with the bridge enabled, then send commands:
     tools/bridge.py select-item toolbar.branchCombo feature/login
     tools/bridge.py select-item QComboBox:0 '#1'
     tools/bridge.py type CommitMessageEdit:0 'subject\\n\\nbody'
+    tools/bridge.py fire-timer periodicFetchTimer
     tools/bridge.py quit
 
 The socket lives at $TMPDIR/<name> (QLocalServer's default placement

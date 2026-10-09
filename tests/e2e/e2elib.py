@@ -33,6 +33,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -87,6 +88,39 @@ def make_repo(path: str, files=("a.txt",), msg: str = "base") -> str:
 
 class Failure(Exception):
     """Raised by assertions; main() turns it into a FAIL + exit 1."""
+
+
+class SilentServer:
+    """A git:// "server" on 127.0.0.1 that accepts one connection and
+    never answers, so a fetch from it is stuck in git's first read for
+    as long as the test likes. `closed` is set once the connection has
+    ended: every process holding it is gone (or hang_up() was called).
+    """
+
+    def __init__(self) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(1)
+        self.port = self.sock.getsockname()[1]
+        self.url = f"git://127.0.0.1:{self.port}/repo.git"
+        self.conn: socket.socket | None = None
+        self.connected = threading.Event()
+        self.closed = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        conn, _ = self.sock.accept()
+        self.conn = conn
+        self.connected.set()
+        with conn:
+            while conn.recv(4096):      # git's request, never answered
+                pass
+        self.closed.set()
+
+    def hang_up(self) -> None:
+        """Drop the connection unanswered: git's fetch then fails."""
+        if self.conn is not None:
+            self.conn.shutdown(socket.SHUT_RDWR)
 
 
 class App:

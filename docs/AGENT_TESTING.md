@@ -95,13 +95,19 @@ tools/bridge.py select-row commit.unstagedList 0,2,5   # multi-row (ExtendedSele
 tools/bridge.py click "Lock/Unlock"
 tools/bridge.py select-item toolbar.branchCombo feature/login   # exact text, or '#N'
 tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ decoded
+tools/bridge.py fire-timer periodicFetchTimer # the auto-fetch tick now, not in N minutes
 tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay issues
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```
 
-`dump-state` also reports `headOid`, `theme`, and `logRows` so a
-harness can assert "HEAD moved", "Dark persisted", and "the log
-loaded" without shelling out or screenshotting.
+`dump-state` also reports `headOid`, `theme`, `logRows`, and
+`statusMessage` so a harness can assert "HEAD moved", "Dark
+persisted", "the log loaded", and "the fetch failed" without shelling
+out or screenshotting.
+
+`fire-timer` emits a running `QTimer`'s timeout (found by
+`objectName`; a stopped timer is an error, since it could never fire).
+It's how a test reaches work the app only does every few minutes.
 
 Addressing:
 - **Actions** by `objectName` (every action has one — see below), by

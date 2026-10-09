@@ -78,6 +78,7 @@
 #include <QVBoxLayout>
 
 #include <functional>
+#include <utility>
 
 namespace {
 
@@ -205,13 +206,13 @@ MainWindow::MainWindow(QWidget* parent)
     }, Qt::DirectConnection);
 }
 
-// A fetch, pull or push may still be running on a pool thread, inside
-// gitService_, which ~QObject is about to delete; the job would then
-// finish in a destroyed service. Stop its git (a stalled network would
-// otherwise hold the quit until git's 2-minute timeout) and wait for
-// the job to leave. The event loop is gone, so its finished handler
-// never runs, and the signals it emits on the way out are dropped
-// with their receivers.
+// A fetch, pull or push (a periodic fetch too) may still be running on
+// a pool thread, inside gitService_, which ~QObject is about to delete;
+// the job would then finish in a destroyed service. Stop its git (a
+// stalled network would otherwise hold the quit until git's 2-minute
+// timeout) and wait for the job to leave. The event loop is gone, so
+// its finished handler never runs, and the signals it emits on the way
+// out are dropped with their receivers.
 MainWindow::~MainWindow()
 {
     if (!remoteOp_.isFinished())
@@ -1010,6 +1011,7 @@ void MainWindow::buildRepositoryMenu()
         if (branchComboAction_) branchComboAction_->setVisible(false);
         if (remoteOpLabelAction_) remoteOpLabelAction_->setVisible(false);
         if (remoteOpLabel_) remoteOpLabel_->clear();
+        disownAutoFetch();
         // Clear the dynamic Commit (N) suffix back to plain "Commit"
         // — no count is meaningful when no repo is open.
         if (commitAction_)
@@ -1881,6 +1883,10 @@ void MainWindow::buildCommandsMenu()
     fetchAction_->setEnabled(false);
     connect(fetchAction_, &QAction::triggered, this,
             [this]() {
+        // A quiet auto-fetch is already running this very fetch: show
+        // it, rather than turn the click away as "still running".
+        if (revealAutoFetch())
+            return;
         runRemoteOp(fetchAction_,
                     tr("Fetching from origin…"),
                     tr("Fetch complete."),
@@ -3047,13 +3053,18 @@ void MainWindow::buildPluginsMenu()
     {
         // Periodic background fetch — when toggled on, runs
         // `git fetch` every N minutes (default 5) on the open
-        // repo. The interval is editable via QInputDialog when
-        // the user toggles ON. Stored as a checkable QAction
-        // whose state persists across sessions.
+        // repo (runPeriodicFetch). The interval is editable via
+        // QInputDialog when the user toggles ON. Stored as a
+        // checkable QAction whose state persists across sessions.
         auto* a = new QAction(menuIcon(QStringLiteral("submodule_update")),
                               tr("&Periodic background fetch"), this);
         a->setObjectName(QStringLiteral("plugins.periodic-background-fetch"));
         a->setCheckable(true);
+        periodicFetchTimer_ = new QTimer(this);
+        periodicFetchTimer_->setObjectName(
+            QStringLiteral("periodicFetchTimer"));
+        connect(periodicFetchTimer_, &QTimer::timeout,
+                this, &MainWindow::runPeriodicFetch);
         const bool savedOn = settingsService_
             ? settingsService_->value(
                 "plugins/periodicFetch/enabled", false).toBool()
@@ -3062,14 +3073,6 @@ void MainWindow::buildPluginsMenu()
         if (savedOn) {
             // Re-arm the timer at startup if the user had it on
             // last time.
-            if (!periodicFetchTimer_) {
-                periodicFetchTimer_ = new QTimer(this);
-                connect(periodicFetchTimer_, &QTimer::timeout, this,
-                        [this]() {
-                    if (gitService_ && gitService_->isOpen())
-                        gitService_->fetch();
-                });
-            }
             const int mins = settingsService_->value(
                 "plugins/periodicFetch/intervalMinutes", 5).toInt();
             periodicFetchTimer_->start(std::max(1, mins) * 60 * 1000);
@@ -3092,14 +3095,6 @@ void MainWindow::buildPluginsMenu()
                 if (!ok) return;  // user cancelled — leave checked
                                   // (could also un-check; either is
                                   // defensible)
-                if (!periodicFetchTimer_) {
-                    periodicFetchTimer_ = new QTimer(this);
-                    connect(periodicFetchTimer_, &QTimer::timeout,
-                            this, [this]() {
-                        if (gitService_ && gitService_->isOpen())
-                            gitService_->fetch();
-                    });
-                }
                 periodicFetchTimer_->start(mins * 60 * 1000);
                 settingsService_->setValue(
                     "plugins/periodicFetch/enabled", true);
@@ -3109,7 +3104,8 @@ void MainWindow::buildPluginsMenu()
                     tr("Periodic fetch enabled (every %1 min).")
                         .arg(mins), 4000);
             } else {
-                if (periodicFetchTimer_) periodicFetchTimer_->stop();
+                periodicFetchTimer_->stop();
+                disownAutoFetch();
                 settingsService_->setValue(
                     "plugins/periodicFetch/enabled", false);
                 statusBar()->showMessage(
@@ -3852,10 +3848,19 @@ void MainWindow::updatePeriodicFetchStatus()
     if (!periodicFetchStatus_) return;
     if (periodicFetchTimer_ && periodicFetchTimer_->isActive()) {
         const int mins = periodicFetchTimer_->interval() / 60000;
-        periodicFetchStatus_->setText(
-            tr("Auto-fetch: every %1 min").arg(mins));
+        // A failed auto-fetch is flagged here, where it stays until
+        // one succeeds; its status-bar note is gone in seconds.
+        if (autoFetchError_.isEmpty()) {
+            periodicFetchStatus_->setText(
+                tr("Auto-fetch: every %1 min").arg(mins));
+        } else {
+            periodicFetchStatus_->setText(
+                tr("Auto-fetch: every %1 min (last one failed)").arg(mins));
+        }
+        periodicFetchStatus_->setToolTip(autoFetchError_);
     } else {
         periodicFetchStatus_->clear();
+        periodicFetchStatus_->setToolTip(QString());
     }
 }
 
@@ -4018,6 +4023,29 @@ void MainWindow::setupConnections()
     // place to dump passive log messages.
     connect(gitService_, &services::GitService::operationFailed,
             this, [this](const QString& op, const QString& err) {
+                // A quiet auto-fetch failed (see runPeriodicFetch):
+                // the user didn't do anything, so no sticky failure;
+                // a passing note and the auto-fetch label's flag. A
+                // disowned one (its repo left the screen, or the
+                // feature was switched off) stays silent. The command
+                // log has git's output either way.
+                if (op == QLatin1String("fetch")
+                    && (autoFetch_ == AutoFetch::Quiet
+                        || autoFetch_ == AutoFetch::Disowned)) {
+                    lastRemoteOpFailed_ = true;
+                    if (autoFetch_ == AutoFetch::Disowned)
+                        return;
+                    // git's first line names the problem; the rest
+                    // ("Please make sure you have the correct access
+                    // rights…") is in the label's tooltip.
+                    autoFetchError_ = err.trimmed();
+                    const QString firstLine =
+                        autoFetchError_.section(QChar('\n'), 0, 0).trimmed();
+                    statusBar()->showMessage(
+                        tr("Auto-fetch failed: %1").arg(firstLine), 10000);
+                    updatePeriodicFetchStatus();
+                    return;
+                }
                 // Tell the remote-op wrapper to skip its success
                 // message. A remote op's failure stays on the status
                 // bar (timeout 0) until the next op replaces it; the
@@ -4201,6 +4229,7 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     }
     pendingOpen_.path   = path;
     pendingOpen_.awaitingInitialLog = true;
+    disownAutoFetch();
 
     const QString repoName = QDir(path).dirName();
     setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? path : repoName));
@@ -4749,12 +4778,13 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     // One remote op at a time: the ops mutate the same repo,
     // and the inline label can only narrate one of them.
     if (remoteOpRunning_) {
+        // If it's a quiet auto-fetch, nothing on screen says so;
+        // reveal it, so the user can see what they're waiting for.
+        revealAutoFetch();
         statusBar()->showMessage(
             tr("Another remote operation is still running…"), 3000);
         return;
     }
-    remoteOpRunning_ = true;
-    lastRemoteOpFailed_ = false;
 
     // start() also cancels any pending auto-clear from a
     // previous op, so a stale timer can't blank this message
@@ -4763,6 +4793,22 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
         opIndicator_->start(startMsg);
     statusBar()->showMessage(startMsg);
     if (sourceAction) sourceAction->setEnabled(false);
+
+    startRemoteOp(std::move(op),
+                  [this, sourceAction, successMsg,
+                   after = std::move(after)]() {
+        if (sourceAction) sourceAction->setEnabled(true);
+        finishRemoteOpFeedback(successMsg);
+        if (after)
+            after();
+    });
+}
+
+void MainWindow::startRemoteOp(std::function<void()> op,
+                               std::function<void()> finished)
+{
+    remoteOpRunning_ = true;
+    lastRemoteOpFailed_ = false;
 
     // The op runs on a pool thread, so the window stays live —
     // no wait cursor, and no QApplication::processEvents()
@@ -4775,17 +4821,83 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     // handler below because they're posted first.
     auto* opWatcher = new QFutureWatcher<void>(this);
     connect(opWatcher, &QFutureWatcher<void>::finished, this,
-            [this, opWatcher, sourceAction, successMsg,
-             after = std::move(after)]() {
+            [this, opWatcher, finished = std::move(finished)]() {
         opWatcher->deleteLater();
         remoteOpRunning_ = false;
-        if (sourceAction) sourceAction->setEnabled(true);
-        finishRemoteOpFeedback(successMsg);
-        if (after)
-            after();
+        finished();
     });
     remoteOp_ = QtConcurrent::run(std::move(op));
     opWatcher->setFuture(remoteOp_);
+}
+
+// ---------------------------------------------------------------------------
+// Periodic background fetch (Plugins menu)
+//
+// Each tick is a remote op like the toolbar Fetch: on a pool thread, as
+// remoteOp_, so the window stays live and quitting stops it. It used to
+// call GitService::fetch right here, on the GUI thread, which froze the
+// window for the whole fetch (minutes against a stalled server) and was
+// out of the destructor's reach.
+//
+// It runs quietly: no inline label, no status-bar narration, no Fetch
+// button disabled every few minutes. A failure is a passing status-bar
+// note plus a flag on the auto-fetch label (the operationFailed
+// handler), not the sticky red failure of something the user did. A
+// user's fetch / pull / push meanwhile reveals it (revealAutoFetch), and
+// it then reports like a toolbar Fetch. A tick that finds another remote
+// op running is skipped; the next one will try again.
+// ---------------------------------------------------------------------------
+void MainWindow::runPeriodicFetch()
+{
+    // Nothing to fetch on the home screen (Close leaves the service's
+    // repository open) or while an open is in flight (the fetch would
+    // hit the previous repository).
+    if (remoteOpRunning_ || pendingOpen_.active()
+        || centralStack_->currentWidget() != repoView_
+        || !gitService_->isOpen())
+        return;
+
+    autoFetch_ = AutoFetch::Quiet;
+    // The toolbar Fetch's own call, so a success is followed by the
+    // same refreshes: branches here, and the log once the watcher
+    // sees the updated refs.
+    startRemoteOp([this]() { gitService_->fetch(); }, [this]() {
+        const AutoFetch kind = std::exchange(autoFetch_, AutoFetch::None);
+        if (kind == AutoFetch::Disowned)
+            return;
+        if (!lastRemoteOpFailed_) {
+            autoFetchError_.clear();
+            updatePeriodicFetchStatus();
+        }
+        if (kind == AutoFetch::Shown) {
+            if (fetchAction_) fetchAction_->setEnabled(true);
+            finishRemoteOpFeedback(tr("Fetch complete."));
+        }
+    });
+}
+
+bool MainWindow::revealAutoFetch()
+{
+    // Not once its failure is in (the finished handler is next): the
+    // status bar already says so, and finishRemoteOpFeedback would
+    // repeat the "Fetching" message below as the failure.
+    if (autoFetch_ != AutoFetch::Quiet || lastRemoteOpFailed_)
+        return false;
+    autoFetch_ = AutoFetch::Shown;
+    const QString msg = tr("Fetching from origin…");
+    if (opIndicator_)
+        opIndicator_->start(msg);
+    statusBar()->showMessage(msg);
+    if (fetchAction_) fetchAction_->setEnabled(false);
+    return true;
+}
+
+void MainWindow::disownAutoFetch()
+{
+    if (autoFetch_ == AutoFetch::Quiet)
+        autoFetch_ = AutoFetch::Disowned;
+    autoFetchError_.clear();
+    updatePeriodicFetchStatus();
 }
 
 // Completion half of the toolbar fetch/pull/push wrapper: reads

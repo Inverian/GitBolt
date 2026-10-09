@@ -15,6 +15,7 @@ if(NOT Python3_FOUND)
 endif()
 
 set(E2E_TESTS
+    test_auto_fetch
     test_branch_switch
     test_clone_dialog
     test_commit_flow

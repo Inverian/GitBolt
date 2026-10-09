@@ -41,17 +41,21 @@ namespace gitbolt::app {
 ///                                    \n \t \\ escapes are decoded so
 ///                                    one protocol line can carry a
 ///                                    multi-line commit message
+///   fire-timer <objectName>          queue a running QTimer's timeout
+///                                    (periodic work without waiting
+///                                    out its interval)
 ///   dump-state                       repo path/state/branch/headOid,
 ///                                    conflict count, theme, log row
-///                                    count, windows
+///                                    count, status-bar message, windows
 ///   screenshot <path>                grab() active window to PNG
 ///   quit                             queue MainWindow::close() (runs
 ///                                    closeEvent, persists geometry —
 ///                                    clean exit for relaunch tests)
 ///
-/// trigger/click/select-item respond {"ok":true,"dispatched":true} BEFORE the
-/// action runs (queued invocation): a triggered action may open a
-/// modal dialog whose exec() would otherwise hold the reply hostage.
+/// trigger/click/select-item/fire-timer respond
+/// {"ok":true,"dispatched":true} BEFORE the action runs (queued
+/// invocation): a triggered action may open a modal dialog whose
+/// exec() would otherwise hold the reply hostage.
 /// Assert outcomes with dump-state / on-disk git, not the reply.
 class TestBridge : public QObject {
     Q_OBJECT
@@ -76,6 +80,7 @@ private:
                             const QList<int>& rows);
     QByteArray cmdSelectItem(const QString& comboSpec, const QString& item);
     QByteArray cmdType(const QString& widgetSpec, const QString& text);
+    QByteArray cmdFireTimer(const QString& name);
     QByteArray cmdDumpState();
     QByteArray cmdScreenshot(const QString& path);
     QByteArray cmdQuit();

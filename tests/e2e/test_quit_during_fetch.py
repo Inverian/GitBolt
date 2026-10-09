@@ -14,41 +14,15 @@ fetch is stuck in git's first read for as long as the test likes.
 from __future__ import annotations
 
 import os
-import socket
 import subprocess
-import threading
 
-from e2elib import App, Failure, git, make_repo, run
-
-
-class SilentServer:
-    """Listens on 127.0.0.1, accepts one connection and never answers.
-    `closed` is set once the peer has hung up: every process holding
-    the connection is gone."""
-
-    def __init__(self) -> None:
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(1)
-        self.port = self.sock.getsockname()[1]
-        self.connected = threading.Event()
-        self.closed = threading.Event()
-        threading.Thread(target=self._serve, daemon=True).start()
-
-    def _serve(self) -> None:
-        conn, _ = self.sock.accept()
-        self.connected.set()
-        with conn:
-            while conn.recv(4096):      # git's request, never answered
-                pass
-        self.closed.set()
+from e2elib import App, Failure, SilentServer, git, make_repo, run
 
 
 def test(binary: str, scratch: str, apps: list) -> None:
     server = SilentServer()
     work = make_repo(os.path.join(scratch, "work"))
-    git("remote", "add", "origin",
-        f"git://127.0.0.1:{server.port}/repo.git", cwd=work)
+    git("remote", "add", "origin", server.url, cwd=work)
 
     app = App(binary, work)
     apps.append(app)

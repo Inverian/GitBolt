@@ -77,6 +77,24 @@ private:
                      const QString& successMsg, std::function<void()> op,
                      std::function<void()> after = {});
 
+    /// The part of a remote op that every caller shares: marks it
+    /// running and runs `op` on a pool thread as remoteOp_ (which the
+    /// destructor cancels and waits for); `finished` runs on the GUI
+    /// thread afterwards. Callers check remoteOpRunning_ first.
+    void startRemoteOp(std::function<void()> op,
+                       std::function<void()> finished);
+
+    /// Periodic fetch tick: a quiet fetch through startRemoteOp().
+    void runPeriodicFetch();
+    /// Turn a quiet auto-fetch into a narrated one, for a user remote
+    /// op that has to wait for it. False when there's none to reveal.
+    bool revealAutoFetch();
+    /// Auto-fetch results stop being wanted (another repository is
+    /// opened, the repo is closed, or the feature is switched off): a
+    /// quiet auto-fetch still running reports nothing, and the failure
+    /// flag is cleared.
+    void disownAutoFetch();
+
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
     /// on its remote through runRemoteOp.
     void confirmAndDeleteRemoteBranch(const QString& remoteBranch,
@@ -274,11 +292,22 @@ private:
     struct BranchTreeToggle { QAction* action; int categoryIndex; };
     std::vector<BranchTreeToggle> branchTreeToggles_;
 
-    // Plugins → Periodic background fetch. Lazily constructed when
-    // the user enables the feature; kept alive for the window's
-    // lifetime so toggling off/on doesn't lose the connection.
+    // Plugins → Periodic background fetch. Constructed with the
+    // Plugins menu and kept for the window's lifetime; it runs only
+    // while the feature is on. Named "periodicFetchTimer" for the
+    // test bridge's fire-timer.
     QTimer* periodicFetchTimer_ = nullptr;
     QLabel* periodicFetchStatus_ = nullptr;
+    // What the running remote op is when the periodic fetch started
+    // it (see runPeriodicFetch). Quiet: reports to the status bar and
+    // the auto-fetch label only. Shown: a user's remote op revealed
+    // it, so it reports like a toolbar Fetch. Disowned: its result is
+    // no longer wanted (disownAutoFetch), so it reports nothing.
+    enum class AutoFetch { None, Quiet, Shown, Disowned };
+    AutoFetch autoFetch_ = AutoFetch::None;
+    // git's message from the last failed auto-fetch, flagged on
+    // periodicFetchStatus_ until one succeeds.
+    QString autoFetchError_;
 
     // Set true by the operationFailed handler when fetch/pull/push
     // emit a failure. Read by the toolbar action handlers right

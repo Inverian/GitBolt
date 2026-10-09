@@ -21,6 +21,8 @@
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QStatusBar>
+#include <QTimer>
 #include <QToolBar>
 #include <QWindow>
 
@@ -322,6 +324,8 @@ QByteArray TestBridge::handleLine(const QString& line)
     if (verb == QStringLiteral("type") && parts.size() >= 3)
         return cmdType(parts.at(1),
                        unescapeTypeText(line.section(QLatin1Char(' '), 2)));
+    if (verb == QStringLiteral("fire-timer") && parts.size() >= 2)
+        return cmdFireTimer(parts.at(1));
     if (verb == QStringLiteral("dump-state"))
         return cmdDumpState();
     if (verb == QStringLiteral("quit"))
@@ -623,6 +627,26 @@ QByteArray TestBridge::cmdType(const QString& widgetSpec,
                    + widgetSpec);
 }
 
+QByteArray TestBridge::cmdFireTimer(const QString& name)
+{
+    // Periodic work (Plugins → Periodic background fetch) fires every
+    // few minutes at best; a test can't wait that out, nor shorten an
+    // interval the UI only takes in whole minutes.
+    auto* timer = window_->findChild<QTimer*>(name);
+    if (!timer)
+        return errLine(QStringLiteral("no timer named: ") + name);
+    // A stopped timer never fires: firing it anyway would test a state
+    // the app can't be in (the feature switched off).
+    if (!timer->isActive())
+        return errLine(QStringLiteral("timer not running: ") + name);
+
+    // timeout() is a private signal, emitted here through the meta-
+    // object system. Queued like trigger: "ok" means dispatched.
+    QMetaObject::invokeMethod(timer, "timeout", Qt::QueuedConnection);
+    return jsonLine({{QStringLiteral("ok"), true},
+                     {QStringLiteral("dispatched"), true}});
+}
+
 QByteArray TestBridge::cmdDumpState()
 {
     QJsonObject state;
@@ -677,6 +701,9 @@ QByteArray TestBridge::cmdDumpState()
         QApplication::palette().color(QPalette::Window).name();
     if (auto* logModel = window_->findChild<models::CommitLogModel*>())
         state[QStringLiteral("logRows")] = logModel->rowCount();
+    // Where op outcomes land ("Push complete.", "fetch failed: …").
+    state[QStringLiteral("statusMessage")] =
+        window_->statusBar()->currentMessage();
 
     QJsonArray windows;
     const QWidgetList tops = QApplication::topLevelWidgets();
