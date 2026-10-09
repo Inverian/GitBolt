@@ -32,6 +32,7 @@
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
+#include "widgets/RepoOperationBar.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
@@ -2291,9 +2292,12 @@ void MainWindow::buildCommandsMenu()
         //            renders the preview and lets the user assign
         //            per-commit operations.
         //   Stage 3: on rebaseRequested(plan) we hand off to
-        //            GitService::interactiveRebase. Outcome
-        //            arrives async on rebaseComplete; the status
-        //            bar surfaces the result.
+        //            GitService::interactiveRebase and the dialog
+        //            closes. Outcome arrives async on
+        //            rebaseStepFinished; the status bar surfaces the
+        //            result, and a rebase that stops (conflict,
+        //            `edit`) is carried on from the repository view's
+        //            in-progress bar.
         auto* a = new QAction(menuIcon(QStringLiteral("rebase")),
                               tr("R&ebase..."), this);
         a->setObjectName(QStringLiteral("commands.rebase"));
@@ -2365,21 +2369,11 @@ void MainWindow::buildCommandsMenu()
 
             connect(dlg, &dialogs::RebaseDialog::rebaseRequested,
                     this, [this](const git::RebasePlan& plan) {
+                statusBar()->showMessage(tr("Rebasing…"));
                 gitService_->interactiveRebase(plan);
             });
 
-            // Conflict-resolution controls: the embedded widget
-            // enables Continue / Skip / Abort once a rebase has
-            // started, and the dialog is shown non-modally so it
-            // stays available while the rebase is paused.
-            connect(dlg, &dialogs::RebaseDialog::rebaseContinueRequested,
-                    gitService_, &services::GitService::rebaseContinue);
-            connect(dlg, &dialogs::RebaseDialog::rebaseSkipRequested,
-                    gitService_, &services::GitService::rebaseSkip);
-            connect(dlg, &dialogs::RebaseDialog::rebaseAbortRequested,
-                    gitService_, &services::GitService::rebaseAbort);
-
-            // rebaseComplete feedback is wired ONCE in
+            // rebaseStepFinished feedback is wired ONCE in
             // setupConnections() — Qt::UniqueConnection does not
             // dedupe lambda functors, so connecting here stacked a
             // fresh permanent connection per dialog open (N opens →
@@ -3874,24 +3868,86 @@ void MainWindow::setupConnections()
     connect(gitService_, &services::GitService::repositoryOpened,
             this, &MainWindow::onRepositoryOpened);
 
-    // Rebase completion: status-bar note + refresh triple. Lives
-    // here (not in the Commands → Rebase handler) because
-    // Qt::UniqueConnection does not dedupe lambdas — re-connecting
-    // per dialog open accumulated handlers forever. A failure has
-    // already put git's own message on the status bar (the
-    // operationFailed handler); it stays, and if git stopped mid-
-    // rebase on a conflict the resolver is offered, as for a
-    // cherry-pick.
-    connect(gitService_, &services::GitService::rebaseComplete,
-            this, [this](bool success) {
-        if (success)
-            statusBar()->showMessage(tr("Rebase complete."), 4000);
+    // Rebase steps: status-bar note + refresh triple. Lives here (not
+    // in the Commands → Rebase handler) because Qt::UniqueConnection
+    // does not dedupe lambdas — re-connecting per dialog open
+    // accumulated handlers forever. A failure has already put git's
+    // own message on the status bar (the operationFailed handler); it
+    // stays, and if git stopped mid-rebase on a conflict the resolver
+    // is offered, as for a cherry-pick. A step can also succeed and
+    // leave the rebase going: the plan said `edit`.
+    connect(gitService_, &services::GitService::rebaseStepFinished,
+            this, [this](const QString& step, bool success, bool rebasing) {
+        if (repoView_)
+            repoView_->operationBar()->setBusy(false);
+        if (success && rebasing)
+            statusBar()->showMessage(tr("Rebase paused. Amend the commit or make changes, "
+                                        "then click Continue."));
+        else if (success)
+            statusBar()->showMessage(step == QLatin1String("rebase --abort")
+                                         ? tr("Rebase aborted.")
+                                         : tr("Rebase complete."),
+                                     4000);
         gitService_->refreshLog();
         gitService_->refreshStatus();
         gitService_->refreshBranches();
-        if (!success)
+        if (!success && rebasing)
             offerConflictResolution(tr("rebase"));
     });
+
+    // The in-progress bar: fed by every status refresh, answered here.
+    if (repoView_) {
+        auto* bar = repoView_->operationBar();
+        connect(gitService_, &services::GitService::repoStateReady,
+                bar, &widgets::RepoOperationBar::setState);
+        connect(bar, &widgets::RepoOperationBar::resolveRequested,
+                this, &MainWindow::showConflictResolver);
+        connect(bar, &widgets::RepoOperationBar::continueRequested, this, [this, bar]() {
+            if (bar->state() != git::RepoState::Rebase) {
+                // Merge / cherry-pick / revert: the commit concludes it.
+                if (commitAction_) commitAction_->trigger();
+                return;
+            }
+            bar->setBusy(true);
+            statusBar()->showMessage(tr("Continuing the rebase…"));
+            gitService_->rebaseContinue();
+        });
+        connect(bar, &widgets::RepoOperationBar::skipRequested, this, [this, bar]() {
+            const auto answer = QMessageBox::question(
+                this, tr("Skip Commit"),
+                tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
+                   "out of the rebased branch."),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+            bar->setBusy(true);
+            statusBar()->showMessage(tr("Skipping the commit…"));
+            gitService_->rebaseSkip();
+        });
+        connect(bar, &widgets::RepoOperationBar::abortRequested, this, [this, bar]() {
+            QString operation;
+            switch (bar->state()) {
+            case git::RepoState::Rebase:     operation = tr("rebase");      break;
+            case git::RepoState::Merge:      operation = tr("merge");       break;
+            case git::RepoState::CherryPick: operation = tr("cherry-pick"); break;
+            case git::RepoState::Revert:     operation = tr("revert");      break;
+            case git::RepoState::None:
+            case git::RepoState::Other:      return;
+            }
+            const auto answer = QMessageBox::question(
+                this, tr("Abort"),
+                tr("Abort the %1?\n\nThe branch goes back to where it was before "
+                   "the %1 started, and any conflicts resolved so far are lost.")
+                    .arg(operation),
+                QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) return;
+            if (bar->state() == git::RepoState::Rebase) {
+                bar->setBusy(true);
+                gitService_->rebaseAbort();
+            } else {
+                gitService_->abortConflictState();
+            }
+        });
+    }
 
     connect(gitService_, &services::GitService::repositoryOpenFailed,
             this, &MainWindow::onRepositoryOpenFailed);
@@ -4231,6 +4287,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     if (filterInput_)
         filterInput_->clear();
     if (repoView_) {
+        repoView_->operationBar()->setState(git::RepoState::None, 0);
         repoView_->resetInspectorTabs();
         repoView_->setRepositoryPath(path);
 
@@ -4591,9 +4648,15 @@ void MainWindow::showConflictResolver()
                 contents[i]);
         }
         gitService_->resolveConflicts(resolutions);
+        // A rebase carries on with Continue; committing there would
+        // make an extra commit of the resolution.
+        const bool rebase = repoView_
+            && repoView_->operationBar()->state() == git::RepoState::Rebase;
         statusBar()->showMessage(
-            tr("Conflicts resolved and staged — commit to conclude "
-               "the operation."), 6000);
+            rebase ? tr("Conflicts resolved and staged — click Continue "
+                        "to carry on with the rebase.")
+                   : tr("Conflicts resolved and staged — commit to conclude "
+                        "the operation."), 6000);
         dlg->close();
     });
 
@@ -4612,14 +4675,18 @@ void MainWindow::offerConflictResolution(const QString& operation)
     if (!gitService_ || !gitService_->isOpen())
         return;
 
-    // Only offer when the repo is actually mid-operation — a merge
-    // can fail for plenty of non-conflict reasons (dirty tree,
-    // unknown ref) where the resolver would have nothing to show.
-    const bool inProgress = gitService_->withRepository(
+    // Only offer when the repo is actually mid-operation with files
+    // in conflict — a merge can fail for plenty of non-conflict
+    // reasons (dirty tree, unknown ref), and a rebase can stop on a
+    // failed `exec`, where the resolver would have nothing to show.
+    const bool conflicted = gitService_->withRepository(
         [](git::Repository& r) {
-            return r.state() != git::RepoState::None;
+            if (r.state() == git::RepoState::None)
+                return false;
+            auto conflicts = r.conflictEntries();
+            return conflicts.ok() && !conflicts.value().empty();
         });
-    if (!inProgress)
+    if (!conflicted)
         return;
 
     const auto answer = QMessageBox::question(

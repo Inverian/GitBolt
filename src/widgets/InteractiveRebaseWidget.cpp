@@ -3,9 +3,12 @@
 #include <QApplication>
 #include <QDrag>
 #include <QHBoxLayout>
+#include <QInputDialog>
+#include <QKeySequence>
 #include <QListView>
 #include <QMimeData>
 #include <QPainter>
+#include <QShortcut>
 #include <QVBoxLayout>
 
 namespace gitbolt::widgets {
@@ -32,19 +35,41 @@ QVariant RebaseListModel::data(const QModelIndex& index, int role) const {
 
     // row >= 0 checked above.
     const auto& op = ops_[static_cast<size_t>(row)];
+    // A reworded commit shows the subject it is getting.
+    const bool reworded = op.type == git::RebaseOperationType::Reword && !op.newMessage.empty();
+    const QString subject =
+        QString::fromStdString(reworded ? op.newMessage : op.message).section('\n', 0, 0);
 
     switch (role) {
     case Qt::DisplayRole:
         return QStringLiteral("%1 %2 %3")
             .arg(QString::fromStdString(op.commitId.toShortHex()))
             .arg(QString::fromUtf8(" "))
-            .arg(QString::fromStdString(op.message).section('\n', 0, 0));
+            .arg(subject);
+    case Qt::ToolTipRole:
+        switch (op.type) {
+        case git::RebaseOperationType::Pick:
+            return tr("Keep this commit as it is.");
+        case git::RebaseOperationType::Reword:
+            return tr("Keep the changes, with a new message:\n\n%1")
+                .arg(QString::fromStdString(op.newMessage).trimmed());
+        case git::RebaseOperationType::Edit:
+            return tr("Stop the rebase after this commit, to amend it or add commits; "
+                      "then Continue.");
+        case git::RebaseOperationType::Squash:
+            return tr("Fold into the commit below it, keeping both messages.");
+        case git::RebaseOperationType::Fixup:
+            return tr("Fold into the commit below it, keeping only that commit's message.");
+        case git::RebaseOperationType::Drop:
+            return tr("Leave this commit out.");
+        }
+        return {};
     case OperationTypeRole:
         return static_cast<int>(op.type);
     case CommitHashRole:
         return QString::fromStdString(op.commitId.toShortHex());
     case CommitMessageRole:
-        return QString::fromStdString(op.message).section('\n', 0, 0);
+        return subject;
     default:
         return {};
     }
@@ -165,6 +190,16 @@ void RebaseListModel::setOperationType(int row, git::RebaseOperationType type) {
     if (row < 0 || row >= static_cast<int>(ops_.size()))
         return;
     setData(index(row), static_cast<int>(type), OperationTypeRole);
+}
+
+void RebaseListModel::setNewMessage(int row, const std::string& message) {
+    if (row < 0 || row >= static_cast<int>(ops_.size()))
+        return;
+    auto& op = ops_[static_cast<size_t>(row)];
+    op.newMessage = message;
+    op.type = message.empty() ? git::RebaseOperationType::Pick
+                              : git::RebaseOperationType::Reword;
+    emit dataChanged(index(row), index(row));
 }
 
 // ===========================================================================
@@ -288,10 +323,8 @@ InteractiveRebaseWidget::InteractiveRebaseWidget(QWidget* parent)
     , listView_(new QListView(this))
     , delegate_(new RebaseOperationDelegate(this))
     , toolbar_(new QToolBar(this))
-    , startBtn_(new QPushButton(tr("Start Rebase"), this))
-    , abortBtn_(new QPushButton(tr("Abort"), this))
-    , continueBtn_(new QPushButton(tr("Continue"), this))
-    , skipBtn_(new QPushButton(tr("Skip"), this))
+    , upButton_(new QPushButton(tr("Move Up"), this))
+    , downButton_(new QPushButton(tr("Move Down"), this))
 {
     setupUi();
 }
@@ -301,19 +334,59 @@ void InteractiveRebaseWidget::setupUi() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    // Toolbar
+    // Toolbar: what to do with the selected commit, and where it goes.
+    // Each operation also has a key on the list, as in git's todo list.
     toolbar_->setIconSize(QSize(16, 16));
     toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-
-    toolbar_->addWidget(startBtn_);
+    using Type = git::RebaseOperationType;
+    const struct {
+        Type type;
+        QString text;
+        Qt::Key key;
+        QString tip;
+    } operations[] = {
+        {Type::Pick, tr("Pick"), Qt::Key_P, tr("Keep the commit as it is")},
+        {Type::Reword, tr("Reword…"), Qt::Key_R, tr("Keep the changes, with a new message")},
+        {Type::Edit, tr("Edit"), Qt::Key_E,
+         tr("Stop after the commit, to amend it or add commits")},
+        {Type::Squash, tr("Squash"), Qt::Key_S,
+         tr("Fold into the commit below, keeping both messages")},
+        {Type::Fixup, tr("Fixup"), Qt::Key_F,
+         tr("Fold into the commit below, keeping only its message")},
+        {Type::Drop, tr("Drop"), Qt::Key_D, tr("Leave the commit out")},
+    };
+    for (const auto& op : operations) {
+        auto* button = new QPushButton(op.text, this);
+        button->setAutoDefault(false);
+        button->setToolTip(QStringLiteral("%1 (%2)")
+                               .arg(op.tip, QKeySequence(op.key).toString(QKeySequence::NativeText)));
+        toolbar_->addWidget(button);
+        operationButtons_.emplace_back(op.type, button);
+        connect(button, &QPushButton::clicked, this,
+                [this, type = op.type] { applyToSelected(type); });
+        auto* shortcut = new QShortcut(QKeySequence(op.key), listView_);
+        shortcut->setContext(Qt::WidgetShortcut);
+        connect(shortcut, &QShortcut::activated, this,
+                [this, type = op.type] { applyToSelected(type); });
+    }
     toolbar_->addSeparator();
-    toolbar_->addWidget(continueBtn_);
-    toolbar_->addWidget(skipBtn_);
-    toolbar_->addWidget(abortBtn_);
-
-    abortBtn_->setEnabled(false);
-    continueBtn_->setEnabled(false);
-    skipBtn_->setEnabled(false);
+    const QKeySequence upKey(Qt::CTRL | Qt::Key_Up);
+    const QKeySequence downKey(Qt::CTRL | Qt::Key_Down);
+    upButton_->setToolTip(tr("Move the commit up (%1)").arg(upKey.toString(QKeySequence::NativeText)));
+    downButton_->setToolTip(
+        tr("Move the commit down (%1)").arg(downKey.toString(QKeySequence::NativeText)));
+    for (QPushButton* button : {upButton_, downButton_}) {
+        button->setAutoDefault(false);
+        toolbar_->addWidget(button);
+    }
+    connect(upButton_, &QPushButton::clicked, this, [this] { moveSelected(-1); });
+    connect(downButton_, &QPushButton::clicked, this, [this] { moveSelected(1); });
+    for (const auto& move : {std::pair{upKey, -1}, std::pair{downKey, 1}}) {
+        auto* shortcut = new QShortcut(move.first, listView_);
+        shortcut->setContext(Qt::WidgetShortcut);
+        connect(shortcut, &QShortcut::activated, this,
+                [this, delta = move.second] { moveSelected(delta); });
+    }
 
     layout->addWidget(toolbar_);
 
@@ -327,18 +400,18 @@ void InteractiveRebaseWidget::setupUi() {
     listView_->setDefaultDropAction(Qt::MoveAction);
     listView_->setSelectionMode(QAbstractItemView::SingleSelection);
     listView_->setAlternatingRowColors(false);
+    listView_->setObjectName(QStringLiteral("rebase.planList"));
+    // A double-click rewords, the one operation that needs more input.
+    connect(listView_, &QListView::doubleClicked, this,
+            [this] { applyToSelected(git::RebaseOperationType::Reword); });
 
     layout->addWidget(listView_, 1);
 
-    // Connections
-    connect(startBtn_, &QPushButton::clicked,
-            this, &InteractiveRebaseWidget::onStartRebase);
-    connect(abortBtn_, &QPushButton::clicked,
-            this, &InteractiveRebaseWidget::rebaseAbortRequested);
-    connect(continueBtn_, &QPushButton::clicked,
-            this, &InteractiveRebaseWidget::rebaseContinueRequested);
-    connect(skipBtn_, &QPushButton::clicked,
-            this, &InteractiveRebaseWidget::rebaseSkipRequested);
+    connect(listView_->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, &InteractiveRebaseWidget::updateButtons);
+    connect(model_, &QAbstractItemModel::rowsMoved, this, &InteractiveRebaseWidget::updateButtons);
+    connect(model_, &QAbstractItemModel::modelReset, this, &InteractiveRebaseWidget::updateButtons);
+    updateButtons();
 }
 
 void InteractiveRebaseWidget::setCommits(const std::vector<git::CommitData>& commits,
@@ -351,15 +424,14 @@ void InteractiveRebaseWidget::setCommits(const std::vector<git::CommitData>& com
         git::RebaseOperation op;
         op.type = git::RebaseOperationType::Pick;
         op.commitId = c.id;
-        op.message = c.summary.empty() ? c.message : c.summary;
+        // The whole message, for Reword to start from; the list shows
+        // its first line.
+        op.message = c.message.empty() ? c.summary : c.message;
         ops.push_back(std::move(op));
     }
     model_->setOperations(std::move(ops));
-
-    startBtn_->setEnabled(true);
-    abortBtn_->setEnabled(false);
-    continueBtn_->setEnabled(false);
-    skipBtn_->setEnabled(false);
+    if (model_->rowCount() > 0)
+        listView_->setCurrentIndex(model_->index(0));
 }
 
 git::RebasePlan InteractiveRebaseWidget::rebasePlan() const {
@@ -369,26 +441,82 @@ git::RebasePlan InteractiveRebaseWidget::rebasePlan() const {
     return plan;
 }
 
+QString InteractiveRebaseWidget::planProblem() const {
+    // Oldest first, as git runs them: a squash or fixup goes into the
+    // last commit kept before it.
+    const auto& ops = model_->operations();
+    bool kept = false;
+    for (auto op = ops.rbegin(); op != ops.rend(); ++op) {
+        switch (op->type) {
+        case git::RebaseOperationType::Drop:
+            break;
+        case git::RebaseOperationType::Squash:
+        case git::RebaseOperationType::Fixup:
+            if (!kept)
+                return tr("\"%1\" can't be squashed or fixed up: no commit below it is kept "
+                          "for it to go into.")
+                    .arg(QString::fromStdString(op->message).section(QLatin1Char('\n'), 0, 0));
+            break;
+        case git::RebaseOperationType::Pick:
+        case git::RebaseOperationType::Reword:
+        case git::RebaseOperationType::Edit:
+            kept = true;
+            break;
+        }
+    }
+    return {};
+}
+
 void InteractiveRebaseWidget::clear() {
     model_->setOperations({});
     onto_ = git::ObjectId();
-    startBtn_->setEnabled(false);
-    abortBtn_->setEnabled(false);
-    continueBtn_->setEnabled(false);
-    skipBtn_->setEnabled(false);
 }
 
-void InteractiveRebaseWidget::onStartRebase() {
-    auto plan = rebasePlan();
-    if (plan.operations.empty())
+void InteractiveRebaseWidget::applyToSelected(git::RebaseOperationType type) {
+    const int row = selectedRow();
+    if (row < 0)
         return;
+    if (type != git::RebaseOperationType::Reword) {
+        model_->setOperationType(row, type);
+        return;
+    }
+    const auto& op = model_->operations()[static_cast<size_t>(row)];
+    const QString original = QString::fromStdString(op.message).trimmed();
+    bool ok = false;
+    const QString text = QInputDialog::getMultiLineText(
+        this, tr("Reword Commit"),
+        tr("New message for %1:").arg(QString::fromStdString(op.commitId.toShortHex())),
+        op.newMessage.empty() ? original : QString::fromStdString(op.newMessage).trimmed(), &ok)
+                             .trimmed();
+    if (!ok || text.isEmpty())
+        return;
+    if (text != original)
+        model_->setNewMessage(row, text.toStdString() + "\n");
+    else if (op.type == git::RebaseOperationType::Reword)
+        model_->setNewMessage(row, {});
+}
 
-    startBtn_->setEnabled(false);
-    abortBtn_->setEnabled(true);
-    continueBtn_->setEnabled(true);
-    skipBtn_->setEnabled(true);
+void InteractiveRebaseWidget::moveSelected(int delta) {
+    const int row = selectedRow();
+    const int target = row + delta;
+    if (row < 0 || delta == 0 || target < 0 || target >= model_->rowCount())
+        return;
+    // moveRows wants the row to insert before, counted before the move.
+    model_->moveRows(QModelIndex(), row, 1, QModelIndex(), delta > 0 ? target + 1 : target);
+    listView_->setCurrentIndex(model_->index(target));
+}
 
-    emit rebaseRequested(plan);
+void InteractiveRebaseWidget::updateButtons() {
+    const int row = selectedRow();
+    for (const auto& [type, button] : operationButtons_)
+        button->setEnabled(row >= 0);
+    upButton_->setEnabled(row > 0);
+    downButton_->setEnabled(row >= 0 && row < model_->rowCount() - 1);
+}
+
+int InteractiveRebaseWidget::selectedRow() const {
+    const QModelIndex current = listView_->currentIndex();
+    return current.isValid() ? current.row() : -1;
 }
 
 } // namespace gitbolt::widgets

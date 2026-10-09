@@ -28,6 +28,7 @@ class BranchTreeWidget;
 class DiffViewerWidget;
 class FileTreeWidget;
 class LoadingOverlayWidget;
+class RepoOperationBar;
 class RevisionGraphWidget;
 class TerminalWidget;
 } // namespace gitbolt::widgets
@@ -66,6 +67,9 @@ public:
     widgets::RevisionGraphWidget* revisionGraph() const;
     widgets::BranchTreeWidget*    branchTree()    const;
     widgets::TerminalWidget*      terminal()      const;
+    /// Across the top while a rebase / merge / cherry-pick / revert
+    /// is in progress. MainWindow feeds and answers it.
+    widgets::RepoOperationBar*    operationBar()  const;
 
     /// Tell the embedded terminal which directory to start in
     /// (or `cd` to if it's already running). Called by MainWindow
@@ -162,6 +166,7 @@ private:
     // forks a real shell with the repository path as its initial
     // cwd, so users can run any git command directly.
     widgets::TerminalWidget*      terminalWidget_   = nullptr;
+    widgets::RepoOperationBar*    operationBar_     = nullptr;
 
     // Splitters
     QSplitter* mainHSplitter_ = nullptr;

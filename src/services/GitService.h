@@ -6,6 +6,8 @@
 #include <QStringList>
 #include <QThread>
 #include <atomic>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -27,7 +29,7 @@ namespace gitbolt::services {
 /// So a worker that wants fresh data after its operation simply calls
 /// refreshStatus() & co.; the request lands behind any completion
 /// signal the worker emitted first, so handlers see e.g.
-/// rebaseComplete before the statusReady it causes.
+/// rebaseStepFinished before the statusReady it causes.
 class GitService : public QObject {
     Q_OBJECT
 public:
@@ -198,7 +200,7 @@ public:
     /// before waiting for its remote-op thread. Thread-safe.
     void cancelRemoteOps();
 
-    // Interactive Rebase
+    // Interactive Rebase. Each step reports on rebaseStepFinished.
     void interactiveRebase(const git::RebasePlan& plan);
     void rebaseContinue();
     void rebaseAbort();
@@ -275,6 +277,10 @@ signals:
     void repositoryOpenFailed(const QString& path, const QString& error);
     void repositoryClosed();
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
+    /// Right after each statusReady (and in its place when status
+    /// couldn't be read): the operation the repository is in the
+    /// middle of, if any, and how many files are still conflicted.
+    void repoStateReady(gitbolt::git::RepoState state, int conflicts);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void branchesReady(std::vector<gitbolt::git::BranchInfo> branches);
     void blameReady(gitbolt::git::BlameResult result);
@@ -284,10 +290,13 @@ signals:
     void repositoryChanged();
 
     // Phase 6 signals — Rebase / Cherry-pick / Stash
-    /// After interactiveRebase, rebaseContinue and rebaseSkip. false
+    /// After each rebase step — "rebase" (interactiveRebase),
+    /// "rebase --continue", "--skip" or "--abort". `success` is false
     /// when git failed or stopped on a conflict, right after an
-    /// operationFailed with git's message.
-    void rebaseComplete(bool success);
+    /// operationFailed with git's message. `rebasing`: the repository
+    /// is still mid-rebase — after a conflict, or after a successful
+    /// step that stopped where the plan said `edit`.
+    void rebaseStepFinished(const QString& step, bool success, bool rebasing);
     void cherryPickComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
 
@@ -329,11 +338,12 @@ private:
         return true;
     }
 
-    /// The end of a rebase step on its worker (`step` names it in
-    /// operationFailed): reports a failure, emits rebaseComplete, and
-    /// asks for the refreshes.
-    void finishRebaseStep(const QString& step,
-                          const git::Result<git::ProcessOutput>& result);
+    /// Runs one rebase step on a worker (`step` names it in
+    /// operationFailed and rebaseStepFinished): reports a failure,
+    /// emits rebaseStepFinished, and asks for the refreshes.
+    void runRebaseStep(
+        const QString& step,
+        std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command);
 
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network

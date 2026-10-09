@@ -19,7 +19,12 @@ enum class RebaseOperationType {
 struct RebaseOperation {
     RebaseOperationType type;
     ObjectId commitId;
+    /// The commit's message, as it is now. Only its first line goes
+    /// into git's todo list.
     std::string message;
+    /// Reword only: the message the commit gets instead. Empty keeps
+    /// its own.
+    std::string newMessage = {};
 };
 
 struct RebasePlan {

@@ -12,6 +12,7 @@
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
 #include "widgets/LoadingOverlayWidget.h"
+#include "widgets/RepoOperationBar.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
 
@@ -76,8 +77,14 @@ RepositoryView::RepositoryView(QWidget* parent)
 // ---------------------------------------------------------------------------
 void RepositoryView::setupUi()
 {
-    auto* layout = new QHBoxLayout(this);
+    auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    // --- Top: the in-progress bar (hidden unless git is mid-rebase,
+    // merge, cherry-pick or revert) --------------------------------
+    operationBar_ = new widgets::RepoOperationBar(this);
+    layout->addWidget(operationBar_);
 
     // --- Left pane: branch tree --------------------------------------
     branchTreeWidget_ = new widgets::BranchTreeWidget(this);
@@ -126,7 +133,7 @@ void RepositoryView::setupUi()
     // in showEvent), so this only affects fresh installs.
     mainHSplitter_->setSizes(QList<int>{230, 1050});
 
-    layout->addWidget(mainHSplitter_);
+    layout->addWidget(mainHSplitter_, 1);
 }
 
 // Commit Info tab — three vertical sections:
@@ -597,6 +604,11 @@ widgets::BranchTreeWidget* RepositoryView::branchTree() const
 widgets::TerminalWidget* RepositoryView::terminal() const
 {
     return terminalWidget_;
+}
+
+widgets::RepoOperationBar* RepositoryView::operationBar() const
+{
+    return operationBar_;
 }
 
 // Forward the repository path to the embedded terminal. The

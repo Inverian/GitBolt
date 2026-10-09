@@ -18,6 +18,7 @@ set(SOURCES
     MaintenanceWidget.cpp
     MergeConflictWidget.cpp
     RecordTablePanel.cpp
+    RepoOperationBar.cpp
     RevisionGraphWidget.cpp
     SubmoduleWidget.cpp
     TerminalWidget.cpp
@@ -37,6 +38,7 @@ set(SOURCES
     MaintenanceWidget.h
     MergeConflictWidget.h
     RecordTablePanel.h
+    RepoOperationBar.h
     RevisionGraphWidget.h
     SubmoduleWidget.h
     TerminalWidget.h

@@ -9,6 +9,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSplitter>
 #include <QVBoxLayout>
@@ -88,24 +89,6 @@ void RebaseDialog::setupUi() {
             this, &RebaseDialog::onBranchSelected);
     connect(refEdit_, &QLineEdit::editingFinished,
             this, &RebaseDialog::onRefEdited);
-
-    // Forward the embedded widget's buttons to dialog-level
-    // signals. Without these forwards the widget's Start button
-    // emitted into the void (only the dialog's OK path worked) and
-    // Continue / Skip / Abort — enabled after Start precisely so a
-    // conflicted rebase can be resumed — were dead controls.
-    connect(rebaseWidget_,
-            &widgets::InteractiveRebaseWidget::rebaseRequested,
-            this, &RebaseDialog::rebaseRequested);
-    connect(rebaseWidget_,
-            &widgets::InteractiveRebaseWidget::rebaseContinueRequested,
-            this, &RebaseDialog::rebaseContinueRequested);
-    connect(rebaseWidget_,
-            &widgets::InteractiveRebaseWidget::rebaseSkipRequested,
-            this, &RebaseDialog::rebaseSkipRequested);
-    connect(rebaseWidget_,
-            &widgets::InteractiveRebaseWidget::rebaseAbortRequested,
-            this, &RebaseDialog::rebaseAbortRequested);
 }
 
 void RebaseDialog::setBranches(const std::vector<git::BranchInfo>& branches) {
@@ -162,6 +145,12 @@ void RebaseDialog::onAccepted() {
     if (plan.operations.empty()) {
         // Nothing to rebase
         reject();
+        return;
+    }
+    // git would stop at once on this one; say why here, with the
+    // plan still open to fix.
+    if (const QString problem = rebaseWidget_->planProblem(); !problem.isEmpty()) {
+        QMessageBox::warning(this, tr("Interactive Rebase"), problem);
         return;
     }
     emit rebaseRequested(plan);

@@ -85,6 +85,12 @@ if(WIN32)
     target_link_libraries(test_conpty_process PRIVATE gitbolt_conpty)
     target_link_libraries(test_terminal_widget PRIVATE gitbolt_widgets)
 endif()
+# The Rebase dialog's plan list and the repository view's in-progress bar
+gitbolt_add_test(test_rebase_widgets widgets/TestRebaseWidgets.cpp)
+target_link_libraries(test_rebase_widgets PRIVATE gitbolt_widgets)
+# It opens the reword prompt: off screen, so a local run doesn't flash
+# windows or steal focus (CI runs every test off screen anyway).
+set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.

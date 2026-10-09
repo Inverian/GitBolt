@@ -8,8 +8,10 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QThread>
+#include <optional>
 #include <sstream>
 
 #if defined(Q_OS_WIN)
@@ -29,6 +31,29 @@
 
 namespace gitbolt::git {
 
+namespace {
+
+// Where interactiveRebase() leaves the messages of the commits a plan
+// rewords: a folder in git's own rebase state, so that it lives exactly
+// as long as the rebase does — git deletes it when the rebase finishes
+// or is aborted. One file per commit, named by its full hash.
+const QString kRewordMessages = QStringLiteral("gitbolt-messages");
+
+// The editor every git command gets (see applyEnvironment). It leaves
+// the file alone, as ":" would, except for the commit message of a
+// commit a plan rewords: git's `done` list ends with that commit's
+// todo line ("reword <hash> <subject>") while git asks for its
+// message, the first time and again after a conflict stopped it. A
+// commit that is skipped never gets asked about, so its message can't
+// end up on another commit. git runs this through sh, with the file's
+// path appended — "$1" here.
+const QString kEditor = QStringLiteral(
+    "d=$(git rev-parse --git-path rebase-merge) && "
+    "m=\"$d/%1/$(awk 'END { print $2 }' \"$d/done\" 2>/dev/null)\" && "
+    "test -f \"$m\" && exec cp \"$m\" \"$1\"; :").arg(kRewordMessages);
+
+} // namespace
+
 GitProcess::GitProcess(const std::string& workingDirectory)
     : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
 
@@ -47,9 +72,10 @@ void GitProcess::applyEnvironment(QProcess& process) {
     // for the message of the commit it makes, and so would any command
     // that wants a message edited. vi waited on the pipe until the
     // timeout killed git mid-operation, and a GUI core.editor popped
-    // up out of nowhere. ":" is git's own "no editor": it keeps the
-    // text git prepared.
-    env.insert(QStringLiteral("GIT_EDITOR"), QStringLiteral(":"));
+    // up out of nowhere. kEditor keeps the text git prepared, as ":"
+    // (git's own "no editor") would, except where a rebase plan gave
+    // a commit a new message.
+    env.insert(QStringLiteral("GIT_EDITOR"), kEditor);
 
     // When git (or ssh underneath it) does need a credential and no
     // helper supplies one, route the question to a GUI prompt: the
@@ -718,27 +744,56 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     return GitError(GitErrorCode::ProcessFailed, message);
 }
 
-Result<ProcessOutput> GitProcess::interactiveRebase(const std::string& onto, const std::string& todo) const {
+Result<ProcessOutput> GitProcess::interactiveRebase(
+    const std::string& onto, const std::string& todo,
+    const std::map<std::string, std::string>& newMessages) const {
     // git writes the todo list it would run to a file and hands that
     // file to GIT_SEQUENCE_EDITOR, a command it runs through its shell
     // (sh, also with Git for Windows) with the file's path appended.
     // Ours copies `todo` over it. This used to put the todo text
     // itself in GIT_SEQUENCE_EDITOR, which git then ran as a command
     // ("pick: command not found"), so every rebase failed.
+    const auto writeFile = [](QFile& file, const std::string& text) {
+        const auto size = static_cast<qint64>(text.size());
+        return file.write(text.data(), size) == size && file.flush();
+    };
     QTemporaryFile todoFile(QDir::tempPath() + QStringLiteral("/gitbolt-rebase-XXXXXX"));
-    const auto size = static_cast<qint64>(todo.size());
-    if (!todoFile.open() || todoFile.write(todo.data(), size) != size || !todoFile.flush())
+    if (!todoFile.open() || !writeFile(todoFile, todo))
         return GitError(GitErrorCode::ProcessFailed,
                         "Could not write the rebase plan: " + todoFile.errorString().toStdString());
     todoFile.close();
-    QString todoPath = QDir::fromNativeSeparators(todoFile.fileName());
-    todoPath.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    const auto shellQuoted = [](const QString& path) {
+        QString quoted = QDir::fromNativeSeparators(path);
+        quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+        return QStringLiteral("'%1'").arg(quoted);
+    };
+    QString sequenceEditor = QStringLiteral("cp %1").arg(shellQuoted(todoFile.fileName()));
+
+    // The new messages go into the rebase's own state, for kEditor to
+    // find when git asks for them: the sequence editor runs once git
+    // has set that up, and before any commit is made.
+    std::optional<QTemporaryDir> messageDir;
+    if (!newMessages.empty()) {
+        messageDir.emplace(QDir::tempPath() + QStringLiteral("/gitbolt-messages-XXXXXX"));
+        if (!messageDir->isValid())
+            return GitError(GitErrorCode::ProcessFailed,
+                            "Could not write the rebase plan: " + messageDir->errorString().toStdString());
+        for (const auto& [hash, message] : newMessages) {
+            QFile file(messageDir->filePath(QString::fromStdString(hash)));
+            if (!file.open(QIODevice::WriteOnly) || !writeFile(file, message))
+                return GitError(GitErrorCode::ProcessFailed,
+                                "Could not write the rebase plan: " + file.errorString().toStdString());
+        }
+        sequenceEditor = QStringLiteral(
+            "cp %1 \"$1\" && cp -R %2 \"$(git rev-parse --git-path rebase-merge)/%3\" && :")
+            .arg(shellQuoted(todoFile.fileName()), shellQuoted(messageDir->path()), kRewordMessages);
+    }
 
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
     applyEnvironment(process);
     QProcessEnvironment env = process.processEnvironment();
-    env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), QStringLiteral("cp '%1'").arg(todoPath));
+    env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), sequenceEditor);
     process.setProcessEnvironment(env);
 
     const QStringList args = {QStringLiteral("rebase"), QStringLiteral("-i"),

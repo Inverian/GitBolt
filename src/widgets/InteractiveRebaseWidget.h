@@ -50,6 +50,8 @@ public:
     void setOperations(std::vector<git::RebaseOperation> ops);
     const std::vector<git::RebaseOperation>& operations() const { return ops_; }
     void setOperationType(int row, git::RebaseOperationType type);
+    /// Reword `row` to `message`; an empty one makes it a pick again.
+    void setNewMessage(int row, const std::string& message);
 
 private:
     std::vector<git::RebaseOperation> ops_;
@@ -74,7 +76,11 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// InteractiveRebaseWidget
+// InteractiveRebaseWidget -- the plan: commits newest first, as the log
+// lists them, each with what to do to it. The buttons (and their keys,
+// on the list) act on the selected commit:
+//   P pick   R reword…   E edit   S squash   F fixup   D drop
+//   Ctrl+Up / Ctrl+Down: move it (dragging works too)
 // ---------------------------------------------------------------------------
 class InteractiveRebaseWidget : public QWidget {
     Q_OBJECT
@@ -88,32 +94,37 @@ public:
     /// Current rebase plan built from the UI state.
     git::RebasePlan rebasePlan() const;
 
+    /// Why git would refuse the plan — a squash or fixup with nothing
+    /// under it to go into — or an empty string when it's fine.
+    QString planProblem() const;
+
     /// Clear all content.
     void clear();
 
-signals:
-    void rebaseRequested(const gitbolt::git::RebasePlan& plan);
-    void rebaseAbortRequested();
-    void rebaseContinueRequested();
-    void rebaseSkipRequested();
+    /// The selected commit's operation. Reword asks for the new
+    /// message; cancelling changes nothing, and giving the commit's
+    /// own message back undoes the reword.
+    void applyToSelected(git::RebaseOperationType type);
 
-private slots:
-    void onStartRebase();
+    /// Move the selected commit `delta` rows (negative: up), keeping it
+    /// selected.
+    void moveSelected(int delta);
 
 private:
     void setupUi();
+    void updateButtons();
+    int selectedRow() const;
 
     // Model / view
     RebaseListModel* model_ = nullptr;
     QListView* listView_ = nullptr;
     RebaseOperationDelegate* delegate_ = nullptr;
 
-    // Toolbar buttons
+    // Toolbar buttons, one per operation, then the moves
     QToolBar* toolbar_ = nullptr;
-    QPushButton* startBtn_ = nullptr;
-    QPushButton* abortBtn_ = nullptr;
-    QPushButton* continueBtn_ = nullptr;
-    QPushButton* skipBtn_ = nullptr;
+    std::vector<std::pair<git::RebaseOperationType, QPushButton*>> operationButtons_;
+    QPushButton* upButton_ = nullptr;
+    QPushButton* downButton_ = nullptr;
 
     // Onto target
     git::ObjectId onto_;

@@ -1,4 +1,6 @@
 #include "git/Repository.h"
+#include <QFile>
+#include <QString>
 #include <git2.h>
 // git_error_set_str moved from the public errors.h (which <git2.h>
 // already pulls in) to the sys/ headers in libgit2 1.8.0. 1.7 — still
@@ -651,6 +653,11 @@ Result<void> Repository::unstageFile(const std::string& path) {
         git_reference_peel(&headCommit, headRef, GIT_OBJECT_COMMIT);
         git_reference_free(headRef);
     }
+    // git_reset_default works on libgit2's copy of the index; bring
+    // it up to date first (see freshIndex).
+    git_index* index = nullptr;
+    if (freshIndex(&index, repo_) == 0)
+        git_index_free(index);
     const char* paths[] = {path.c_str()};
     git_strarray arr = {const_cast<char**>(paths), 1};
     int err = git_reset_default(repo_, headCommit, &arr);
@@ -678,7 +685,7 @@ Result<void> Repository::discardWorkdirChanges(const std::string& path) {
 
 Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
     git_index* index = nullptr;
-    int err = git_repository_index(&index, repo_);
+    int err = freshIndex(&index, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     git_oid treeOid;
@@ -760,9 +767,19 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
 
         // Clear MERGE_HEAD / MERGE_MSG (or cherry-pick state) so
         // the repository leaves the "merging" state once the
-        // concluding commit lands.
-        if (err == 0)
-            git_repository_state_cleanup(repo_);
+        // concluding commit lands — those files only, as `git
+        // commit` does. git_repository_state_cleanup() deletes a
+        // rebase's state too (and a bisect's, and the sequencer's
+        // list of cherry-picks still to come): a commit made while a
+        // rebase was stopped, as the conflict resolver advised,
+        // threw the rest of the rebase away and left HEAD detached
+        // halfway through it.
+        if (err == 0) {
+            const QString gitDir = QString::fromUtf8(git_repository_path(repo_));
+            for (const char* name : {"MERGE_HEAD", "MERGE_MODE", "MERGE_MSG", "SQUASH_MSG",
+                                     "CHERRY_PICK_HEAD", "REVERT_HEAD"})
+                QFile::remove(gitDir + QLatin1String(name));
+        }
     }
 
     git_signature_free(sig);

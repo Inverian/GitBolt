@@ -5,9 +5,20 @@
 #include <string>
 #include <vector>
 
+struct git_index;
 struct git_repository;
 
 namespace gitbolt::git {
+
+/// git_repository_index(), reloaded first if the index file changed
+/// on disk since libgit2 last read it. libgit2 keeps its copy of the
+/// index for the life of the repository, and git (the CLI: merge,
+/// rebase, cherry-pick, `git add` in a terminal) writes the file
+/// behind its back: staging into the stale copy and writing it out
+/// undid what git had staged — a conflicted merge's cleanly merged
+/// files, say — and committing it left them out of the commit.
+/// Returns a libgit2 error code; free *out with git_index_free.
+int freshIndex(git_index** out, git_repository* repo);
 
 class Index {
 public:

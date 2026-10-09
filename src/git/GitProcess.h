@@ -4,6 +4,7 @@
 #include "git/Error.h"
 
 #include <atomic>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -89,7 +90,12 @@ public:
 
     /// `git rebase -i <onto>` with `todo` as its todo list, in git's
     /// format and order ("pick <hash> <subject>" lines, oldest first).
-    Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& todo) const;
+    /// `newMessages` maps the full hash of each commit the todo
+    /// rewords to its new message; the commit gets it when git asks
+    /// for it, from this call or from a later rebaseContinue() /
+    /// rebaseSkip(). A reword without an entry keeps its message.
+    Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& todo,
+                                            const std::map<std::string, std::string>& newMessages = {}) const;
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
     Result<ProcessOutput> rebaseSkip() const;
@@ -111,8 +117,8 @@ public:
 private:
     /// Shared child-process environment: inherits the session env
     /// and sets GIT_TERMINAL_PROMPT=0 so a promptless child fails
-    /// fast instead of hanging until the timeout kills it, and
-    /// GIT_EDITOR=":" so git never waits on an editor.
+    /// fast instead of hanging until the timeout kills it, and a
+    /// GIT_EDITOR that never waits on anyone (see kEditor).
     static void applyEnvironment(QProcess& process);
 
     /// run() with cancelFlag_ set.

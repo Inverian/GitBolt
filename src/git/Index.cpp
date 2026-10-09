@@ -3,11 +3,22 @@
 
 namespace gitbolt::git {
 
+int freshIndex(git_index** out, git_repository* repo) {
+    int err = git_repository_index(out, repo);
+    if (err < 0) return err;
+    err = git_index_read(*out, /*force=*/0);
+    if (err < 0) {
+        git_index_free(*out);
+        *out = nullptr;
+    }
+    return err;
+}
+
 Index::Index(git_repository* repo) : repo_(repo) {}
 
 Result<void> Index::addPath(const std::string& path) {
     git_index* idx = nullptr;
-    int err = git_repository_index(&idx, repo_);
+    int err = freshIndex(&idx, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     err = git_index_add_bypath(idx, path.c_str());
@@ -21,7 +32,7 @@ Result<void> Index::addPath(const std::string& path) {
 
 Result<void> Index::addAll() {
     git_index* idx = nullptr;
-    int err = git_repository_index(&idx, repo_);
+    int err = freshIndex(&idx, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     const char* paths[] = {"."};
@@ -37,7 +48,7 @@ Result<void> Index::addAll() {
 
 Result<void> Index::removePath(const std::string& path) {
     git_index* idx = nullptr;
-    int err = git_repository_index(&idx, repo_);
+    int err = freshIndex(&idx, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     err = git_index_remove_bypath(idx, path.c_str());
@@ -51,7 +62,7 @@ Result<void> Index::removePath(const std::string& path) {
 
 Result<void> Index::removeAll() {
     git_index* idx = nullptr;
-    int err = git_repository_index(&idx, repo_);
+    int err = freshIndex(&idx, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     const char* paths[] = {"."};
@@ -67,7 +78,7 @@ Result<void> Index::removeAll() {
 
 Result<void> Index::write() {
     git_index* idx = nullptr;
-    int err = git_repository_index(&idx, repo_);
+    int err = freshIndex(&idx, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     err = git_index_write(idx);

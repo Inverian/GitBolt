@@ -1,6 +1,7 @@
 #include <QTest>
 #include <QTemporaryDir>
 #include "../TestRepoHelper.h"
+#include "git/GitProcess.h"
 #include "git/Repository.h"
 
 #include <algorithm>
@@ -18,6 +19,16 @@ QStringList tagNames(gitbolt::git::Repository& repo) {
         names << QString::fromStdString(t.name);
     names.sort();
     return names;
+}
+
+bool succeeded(const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
+    return r.ok() && r.value().success();
+}
+
+// Trimmed stdout, or "<failed>" when git failed.
+QString output(const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
+    return succeeded(r) ? QString::fromStdString(r.value().stdoutData).trimmed()
+                        : QStringLiteral("<failed>");
 }
 
 } // namespace
@@ -151,6 +162,64 @@ private slots:
         QVERIFY(repo.repo().deleteTag("v1").ok());
         QVERIFY(tagNames(repo.repo()).isEmpty());
         QVERIFY(repo.repo().resolveRef("refs/heads/v1").ok());
+    }
+
+    // -----------------------------------------------------------------
+    // Finishing git's own operations with GitBolt's staging and commit.
+    // git (the CLI) merges and rebases; the conflict resolver stages
+    // and the Commit dialog commits through libgit2, whose copy of the
+    // index knew nothing of what git had written, and whose state
+    // cleanup ended a rebase along with a merge.
+    // -----------------------------------------------------------------
+    void commitConcludesAMergeWithWhatGitStaged() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("a.txt", "side\n");
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "side"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("a.txt", "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main"})));
+        // a.txt conflicts; git stages side's b.txt.
+        QVERIFY(!succeeded(git.run({"merge", "side"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Merge);
+
+        repo.writeFile("a.txt", "resolved\n");
+        QVERIFY(repo.stageFile("a.txt").ok());
+        QVERIFY(repo.commit("merge side").ok());
+
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"ls-tree", "--name-only", "HEAD"})),
+                 QStringLiteral("a.txt\nb.txt"));
+        QCOMPARE(output(git.run({"rev-list", "--parents", "-1", "HEAD"})).split(' ').size(), 3);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QString());
+    }
+
+    void commitWhileARebaseIsStoppedKeepsTheRebase() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString branch = output(git.run({"branch", "--show-current"}));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "second"})));
+        // Stops once "second" is replayed, as an `edit` would.
+        QVERIFY(!succeeded(git.run({"rebase", "--exec", "false", "HEAD~1"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
+
+        repo.writeFile("c.txt", "c\n");
+        QVERIFY(repo.stageFile("c.txt").ok());
+        QVERIFY(repo.commit("added while stopped").ok());
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
+
+        QVERIFY(succeeded(git.run({"rebase", "--continue"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"branch", "--show-current"})), branch);
+        QCOMPARE(output(git.run({"log", "--format=%s"})),
+                 QStringLiteral("added while stopped\nsecond\nbase"));
     }
 };
 

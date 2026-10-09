@@ -3,6 +3,8 @@
 #include <QDir>
 #include <QFile>
 
+#include <algorithm>
+
 namespace gitbolt::services {
 
 GitService::GitService(QObject* parent)
@@ -178,7 +180,14 @@ void GitService::refreshStatus() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->status();
-        if (result) emit statusReady(std::move(*result));
+        int conflicts = 0;
+        if (result) {
+            conflicts = static_cast<int>(std::count_if(
+                result->begin(), result->end(),
+                [](const git::StatusEntry& e) { return e.isConflicted(); }));
+            emit statusReady(std::move(*result));
+        }
+        emit repoStateReady(r->state(), conflicts);
     });
 }
 
@@ -752,17 +761,16 @@ void GitService::fetch(const QString& remote) {
 // From here on, the operation workers (rebase, cherry-pick, Git Flow)
 // call refresh*() on a pool thread when they finish. Those calls queue
 // onto the GUI thread behind the completion signal emitted just before
-// them, so e.g. rebaseComplete still reaches MainWindow before the
-// statusReady it causes.
+// them, so e.g. rebaseStepFinished still reaches MainWindow before
+// the statusReady it causes.
 // ---------------------------------------------------------------------------
 
 void GitService::interactiveRebase(const git::RebasePlan& plan) {
-    if (!repo_) return;
-
     // git's todo list runs oldest first; the plan lists newest first,
     // as the log does. Full hashes, so no abbreviation can turn
     // ambiguous; the subject is only there for `git status` to show.
     std::string todo;
+    std::map<std::string, std::string> newMessages;
     for (auto op = plan.operations.rbegin(); op != plan.operations.rend(); ++op) {
         const char* verb = "pick";
         switch (op->type) {
@@ -779,66 +787,58 @@ void GitService::interactiveRebase(const git::RebasePlan& plan) {
         todo += " ";
         todo += op->message.substr(0, op->message.find('\n'));
         todo += "\n";
+        if (op->type == git::RebaseOperationType::Reword && !op->newMessage.empty())
+            newMessages[op->commitId.toHex()] = op->newMessage;
     }
 
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    runner_.run([this, proc = std::move(proc),
-                 onto = plan.onto.toHex(), todo]() mutable {
-        finishRebaseStep(QStringLiteral("rebase"), proc.interactiveRebase(onto, todo));
+    runRebaseStep(QStringLiteral("rebase"),
+                  [onto = plan.onto.toHex(), todo, newMessages](const git::GitProcess& proc) {
+        return proc.interactiveRebase(onto, todo, newMessages);
     });
 }
 
 void GitService::rebaseContinue() {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    runner_.run([this, proc = std::move(proc)]() mutable {
-        finishRebaseStep(QStringLiteral("rebase --continue"), proc.rebaseContinue());
-    });
+    runRebaseStep(QStringLiteral("rebase --continue"),
+                  [](const git::GitProcess& proc) { return proc.rebaseContinue(); });
 }
 
 void GitService::rebaseAbort() {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    runner_.run([this, proc = std::move(proc)]() mutable {
-        const QString failure = rebaseFailure(proc.rebaseAbort());
-        if (!failure.isEmpty())
-            emit operationFailed(QStringLiteral("rebase --abort"), failure);
-        refreshStatus();
-        refreshLog();
-    });
+    runRebaseStep(QStringLiteral("rebase --abort"),
+                  [](const git::GitProcess& proc) { return proc.rebaseAbort(); });
 }
 
 void GitService::rebaseSkip() {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    runner_.run([this, proc = std::move(proc)]() mutable {
-        finishRebaseStep(QStringLiteral("rebase --skip"), proc.rebaseSkip());
-    });
+    runRebaseStep(QStringLiteral("rebase --skip"),
+                  [](const git::GitProcess& proc) { return proc.rebaseSkip(); });
 }
 
 // These all reported success whenever git could be started: a rebase
 // that stopped on a conflict, or never began, said "Rebase complete."
-// Either way the repository may have changed, so both refresh.
-void GitService::finishRebaseStep(const QString& step,
-                                  const git::Result<git::ProcessOutput>& result) {
-    const QString failure = rebaseFailure(result);
-    if (!failure.isEmpty())
-        emit operationFailed(step, failure);
-    emit rebaseComplete(failure.isEmpty());
-    refreshStatus();
-    refreshLog();
+// A step that succeeds can still leave the rebase in progress — an
+// `edit` stops on purpose — so the repository's state goes with the
+// outcome. Either way the repository may have changed: both refresh.
+void GitService::runRebaseStep(
+    const QString& step,
+    std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command) {
+    if (!repo_) return;
+    std::shared_ptr<git::Repository> r = repo_;
+    git::GitProcess proc{[&]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        return r->process();
+    }()};
+    runner_.run([this, r, step, proc = std::move(proc), command = std::move(command)]() {
+        const QString failure = rebaseFailure(command(proc));
+        bool rebasing = false;
+        {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            rebasing = r->state() == git::RepoState::Rebase;
+        }
+        if (!failure.isEmpty())
+            emit operationFailed(step, failure);
+        emit rebaseStepFinished(step, failure.isEmpty(), rebasing);
+        refreshStatus();
+        refreshLog();
+    });
 }
 
 // ---------------------------------------------------------------------------
