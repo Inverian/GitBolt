@@ -12,6 +12,7 @@ Everything here is optional — the main build and run instructions in [`docs/BU
 |---|---|---|
 | [`run-dev.sh`](#run-devsh) | macOS | Kill + rebuild + launch GitBolt in one command |
 | [`click.py`](#clickpy) | macOS | Synthetic mouse click via Quartz CGEvents (bypasses overlay apps) |
+| [`check-ci-pins.py`](#check-ci-pinspy) | any | Find newer releases of the tools CI pins by hash, and bump them |
 
 ---
 
@@ -123,6 +124,25 @@ tools/click.py 1269 668
 ### Safety
 
 `click.py` injects events at the lowest level, which means it will click **whatever is under those coordinates**. There is no safety net. Always verify your coordinates against a fresh screenshot before clicking, and prefer using it on non-destructive UI (buttons, table rows) rather than directly on "Delete" confirmations.
+
+---
+
+## `check-ci-pins.py`
+
+CI downloads its packaging tools (linuxdeploy, its Qt plugin, the AppImage runtime) from tagged GitHub releases and checks each against the sha256 it had when it was pinned; it also pins `jurplel/install-qt-action` to a commit. That keeps a re-uploaded asset or a moved tag out of our installers, but nothing bumps the pins. This script finds the newest tagged release of each (never a `continuous` build, which is rebuilt in place) and works out the new hash.
+
+### Usage
+
+```bash
+tools/check-ci-pins.py            # report; exits 1 if any pin is behind
+tools/check-ci-pins.py --write    # also rewrite .github/workflows/ci.yml
+```
+
+A bumped linuxdeploy can change the AppImage, so run the workflow on the branch (Actions → CI → Run workflow builds every installer) before merging. NSIS (a SourceForge zip) and the ubuntu image digest the DEB is tested in are not followed; the script prints a reminder.
+
+### Requirements
+
+- Python 3 and network access. It calls the GitHub API without a token (60 requests an hour is plenty); set `GITHUB_TOKEN` to lift the limit.
 
 ---
 

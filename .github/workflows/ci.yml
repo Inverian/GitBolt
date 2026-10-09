@@ -56,7 +56,8 @@ jobs:
       # moves with every release. (GitHub's own actions/* stay on major
       # tags; the same vendor ships the runner image they run on.) Qt and
       # aqtinstall are exact versions, so a Qt patch release can't change
-      # what ships without a commit.
+      # what ships without a commit. tools/check-ci-pins.py follows this
+      # pin too.
       - name: Install Qt
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
@@ -547,7 +548,9 @@ jobs:
 
           # Tagged releases, each checked against its sha256 from when it
           # was pinned ('continuous' is rebuilt in place, and a release's
-          # assets can be replaced). To bump one, change tag and hash.
+          # assets can be replaced). tools/check-ci-pins.py reports newer
+          # tagged releases, and --write bumps tag and hash. The Qt plugin
+          # is at its latest tagged release; only 'continuous' is newer.
           # The runtime is the ELF stub every AppImage starts with;
           # appimagetool would otherwise download it from type2-runtime's
           # 'continuous' release on every build.
@@ -697,8 +700,9 @@ jobs:
           ls -la dist/
 
       # v7 = node24. `archive` (default true) zips dist/*, which can hold
-      # several files. Short retention: a private repo pays for artifact
-      # storage; released versions live on as release assets instead.
+      # several files. Short retention: these are for trying a build
+      # before it's released, and released versions live on as release
+      # assets.
       - name: Upload installers
         if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v7
