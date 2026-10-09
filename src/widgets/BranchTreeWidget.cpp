@@ -241,12 +241,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Checkout as local tracking branch
         auto* trackAction = menu.addAction(tr("Checkout as local branch"));
         connect(trackAction, &QAction::triggered, this, [this, branchName]() {
-            // Remote branch names are like "origin/feature" - extract just the branch part
-            QString localName = branchName;
-            qsizetype slashPos = localName.indexOf(QLatin1Char('/'));
-            if (slashPos >= 0)
-                localName = localName.mid(slashPos + 1);
-            emit checkoutRequested(localName);
+            emit checkoutRemoteRequested(branchName);
         });
 
         menu.addSeparator();

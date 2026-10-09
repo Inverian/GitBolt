@@ -664,6 +664,42 @@ QString rebaseFailure(const git::Result<git::ProcessOutput>& result) {
 }
 } // namespace
 
+void GitService::checkoutRemoteBranch(const QString& remoteBranch) {
+    if (!repo_) return;
+    // The remote is everything before the first '/', the assumption
+    // Delete remote branch makes too.
+    const qsizetype slash = remoteBranch.indexOf(QLatin1Char('/'));
+    if (slash <= 0 || slash == remoteBranch.size() - 1) return;
+    const QString local = remoteBranch.mid(slash + 1);
+
+    // This used to check out the bare local name, which only works once
+    // the local branch exists: libgit2 resolves no "feature" to
+    // refs/remotes/origin/feature, so the one case the menu entry is
+    // for failed with "revspec 'feature' not found".
+    bool exists = false;
+    git::GitProcess proc{[&]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        exists = repo_->resolveRef("refs/heads/" + local.toStdString()).ok();
+        return repo_->process();
+    }()};
+    if (exists) {
+        checkoutBranch(local);
+        return;
+    }
+    auto result = proc.run({"checkout", "-b", local.toStdString(),
+                            "--track", remoteBranch.toStdString()});
+    if (!result) {
+        emit operationFailed(QStringLiteral("checkout"),
+                             QString::fromStdString(result.error().message()));
+    } else if (!result->success()) {
+        emit operationFailed(QStringLiteral("checkout"), stderrOrFallback(*result,
+            tr("git checkout exited with code %1").arg(result->exitCode)));
+    }
+    refreshStatus();
+    refreshLog();
+    refreshBranches();
+}
+
 // push/pull/fetch shell out via GitProcess (QProcess) instead of
 // libgit2, so the actual git command is safe to run while a libgit2
 // worker is active. processIfOpen() still locks around

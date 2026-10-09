@@ -182,6 +182,11 @@ public:
     void createBranch(const QString& name);
     void deleteBranch(const QString& name);
     void checkoutBranch(const QString& name);
+    /// The sidebar's "Checkout as local branch" on `remoteBranch`
+    /// ("origin/feature/x"): the local branch named for it
+    /// ("feature/x"), created to track it unless it exists. Reports
+    /// failure as operationFailed("checkout", …).
+    void checkoutRemoteBranch(const QString& remoteBranch);
 
     /// Pushes `branch` (empty = the checked-out branch). A branch with
     /// no upstream yet is published with --set-upstream instead of

@@ -37,6 +37,8 @@ public:
 signals:
     void branchSelected(const QString& name);
     void checkoutRequested(const QString& name);
+    /// "Checkout as local branch" on a remote branch ("origin/x").
+    void checkoutRemoteRequested(const QString& remoteBranch);
     void createBranchRequested(const QString& name);
     void deleteBranchRequested(const QString& name);
     void renameBranchRequested(const QString& oldName, const QString& newName);

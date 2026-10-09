@@ -20,6 +20,7 @@
 //   - tag create / delete as the Commands menu drives them,
 //   - branch checkout when a tag shares the branch's name,
 //   - cancelRemoteOps(), which quitting during a fetch relies on,
+//   - "Checkout as local branch" on a remote branch,
 //   - the rebase steps: the dialog's plan runs as listed, with its
 //     rewords, squashes, fixups and edits; git's failures (a conflict,
 //     nothing in progress) are reported, and so is a rebase that is
@@ -518,6 +519,50 @@ private slots:
         QCOMPARE(failedSpy.at(0).at(0).toString(),
                  QStringLiteral("delete remote branch"));
         QVERIFY(!failedSpy.at(0).at(1).toString().isEmpty());
+    }
+
+    // The sidebar's "Checkout as local branch" on origin/feature asked
+    // for a checkout of plain "feature", which only exists once there's
+    // a local branch of that name: for a branch that's only on the
+    // remote, the one case the entry is for, it failed. It now creates
+    // the local branch, tracking origin/feature; an existing one is
+    // checked out as it is.
+    void checkoutRemoteBranchCreatesATrackingBranch() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        auto& work = repo->repo();
+        gitbolt::git::GitProcess git(repo->path().toStdString());
+        // feature/x is on the server only, one commit ahead of main.
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "feature/x"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "on feature"})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "feature/x"})));
+        const std::string featureTip = tip(work, "HEAD");
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(succeeded(git.run({"branch", "-q", "-D", "feature/x"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        svc.checkoutRemoteBranch(QStringLiteral("origin/feature/x"));
+        QVERIFY2(failedSpy.isEmpty(),
+                 failedSpy.isEmpty() ? "" : qPrintable(failedSpy.at(0).at(1).toString()));
+        QCOMPARE(output(git.run({"branch", "--show-current"})), QStringLiteral("feature/x"));
+        QCOMPARE(tip(work, "HEAD"), featureTip);
+        QCOMPARE(upstreamOf(work, "feature/x"), std::string("refs/remotes/origin/feature/x"));
+
+        // Already there: checked out, not recreated (nor moved).
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "local only"})));
+        const std::string localTip = tip(work, "HEAD");
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        svc.checkoutRemoteBranch(QStringLiteral("origin/feature/x"));
+        QVERIFY(failedSpy.isEmpty());
+        QCOMPARE(output(git.run({"branch", "--show-current"})), QStringLiteral("feature/x"));
+        QCOMPARE(tip(work, "HEAD"), localTip);
     }
 
     // -----------------------------------------------------------------
