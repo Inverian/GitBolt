@@ -4,13 +4,30 @@
 #include "watcher/FileWatcher.h"
 #include <QObject>
 #include <QStringList>
+#include <QThread>
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <type_traits>
+#include <utility>
 
 namespace gitbolt::services {
 
+/// Threading rule. A GitService's state belongs to the thread it lives
+/// on (the GUI thread): repo_ is swapped there, the log scope and
+/// branch selection are set there, and only that thread submits work
+/// to runner_. Any other thread may only
+///   - read repo_ while holding repoMutex_ (the refresh workers),
+///   - emit signals (receivers on the GUI thread get them queued),
+///   - call push / pull / fetch / deleteRemoteBranch, which MainWindow
+///     runs on a pool thread, and
+///   - call refresh*() and blameFile(), which queue themselves onto
+///     the service's thread before reading any state.
+/// So a worker that wants fresh data after its operation simply calls
+/// refreshStatus() & co.; the request lands behind any completion
+/// signal the worker emitted first, so handlers see e.g.
+/// rebaseComplete before the statusReady it causes.
 class GitService : public QObject {
     Q_OBJECT
 public:
@@ -289,6 +306,25 @@ private:
     /// not thread-safe). `gen` ties the apply to the open that
     /// requested it.
     void startWatchEnumeration(const QString& path, quint64 gen);
+
+    /// The threading rule's hop. Returns false on the service's own
+    /// thread. Anywhere else it queues `retry` onto that thread, with
+    /// this as the context so the retry is dropped if the service is
+    /// destroyed first, and returns true: the caller must then return
+    /// without touching any state.
+    template <typename Fn>
+    bool deferToOwnerThread(Fn&& retry) {
+        if (QThread::currentThread() == thread())
+            return false;
+        QMetaObject::invokeMethod(this, std::forward<Fn>(retry),
+                                  Qt::QueuedConnection);
+        return true;
+    }
+
+    /// A GitProcess for the open repository, or nullopt when none is
+    /// open. Checks and reads repo_ under repoMutex_, so the network
+    /// ops can use it from MainWindow's pool thread.
+    std::optional<git::GitProcess> processIfOpen() const;
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_

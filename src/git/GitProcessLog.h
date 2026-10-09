@@ -30,8 +30,9 @@ struct GitProcessLogEntry {
 /// the last N events so a dialog opened mid-session can pre-populate
 /// itself with everything that has run already (call `recent()`).
 /// Buffer access is mutex-guarded so emitCommand can be safely
-/// called from any thread that happens to host GitProcess::run in
-/// the future, even though today it's always the GUI thread.
+/// called from any thread that hosts GitProcess::run, and pool
+/// threads routinely do (remote ops, rebase, Git Flow, maintenance);
+/// GUI-thread receivers get commandLogged queued.
 class GitProcessLog : public QObject {
     Q_OBJECT
 public:

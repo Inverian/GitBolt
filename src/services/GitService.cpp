@@ -144,6 +144,12 @@ git::GitProcess GitService::process() const {
     return repo_->process();
 }
 
+std::optional<git::GitProcess> GitService::processIfOpen() const {
+    std::lock_guard<std::mutex> lock(repoMutex_);
+    if (!repo_) return std::nullopt;
+    return repo_->process();
+}
+
 // Refresh workers capture repo_ as a shared_ptr (pinning the object
 // alive across a concurrent repo swap) and re-check `r == repo_`
 // under repoMutex_ before doing any work: if the user opened a
@@ -152,7 +158,14 @@ git::GitProcess GitService::process() const {
 // the UI would misattribute to the new one. Reading repo_ from the
 // worker is safe because every mutation of repo_ happens under
 // repoMutex_ (openRepository / openRepositoryAsync / closeRepository).
+//
+// Each entry point first hops to the service's thread (the threading
+// rule in GitService.h): the operation workers, and MainWindow's pool
+// thread via pull/fetch, call these when they finish. Run there, the
+// unlocked repo_ / logScope_ / selectedBranches_ reads below raced
+// the GUI thread, and runner_ was driven from a pool thread.
 void GitService::refreshStatus() {
+    if (deferToOwnerThread([this] { refreshStatus(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -164,6 +177,8 @@ void GitService::refreshStatus() {
 }
 
 void GitService::refreshLog(int offset, int count) {
+    if (deferToOwnerThread([this, offset, count] { refreshLog(offset, count); }))
+        return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     const LogScope scope = logScope_;
@@ -248,6 +263,7 @@ void GitService::setSelectedBranches(const QStringList& branchNames) {
 }
 
 void GitService::refreshBranches() {
+    if (deferToOwnerThread([this] { refreshBranches(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -259,6 +275,7 @@ void GitService::refreshBranches() {
 }
 
 void GitService::refreshConflicts() {
+    if (deferToOwnerThread([this] { refreshConflicts(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -352,6 +369,10 @@ void GitService::abortConflictState() {
 
 void GitService::blameFile(const QString& path,
                            const QString& newestCommitSpec) {
+    if (deferToOwnerThread([this, path, newestCommitSpec] {
+            blameFile(path, newestCommitSpec);
+        }))
+        return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     const std::string p = path.toStdString();
@@ -606,16 +627,17 @@ inline QString stderrOrFallback(const git::ProcessOutput& out, const QString& fa
 
 // push/pull/fetch shell out via GitProcess (QProcess) instead of
 // libgit2, so the actual git command is safe to run while a libgit2
-// worker is active. We still lock around `repo_->process()` itself
-// because it calls libgit2's git_repository_workdir() to get the
-// path. Once GitProcess is constructed (a plain string + QProcess),
-// it's independent of repo_ and runs unlocked.
+// worker is active. processIfOpen() still locks around
+// `repo_->process()`, because that calls libgit2's
+// git_repository_workdir() to get the path, and because these run on
+// MainWindow's pool thread, where even the "is a repo open" check
+// must not read repo_ unlocked. Once GitProcess is constructed (a
+// plain string + QProcess), it's independent of repo_ and runs
+// unlocked. Their follow-up refreshes hop to the GUI thread.
 void GitService::push(const QString& remote, const QString& branch) {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    const auto snapshot = processIfOpen();
+    if (!snapshot) return;
+    const git::GitProcess& proc = *snapshot;
     // A branch that has never been pushed has no upstream, and the bare
     // `git push <remote>` then fails with "has no upstream branch" — so
     // the first push of every new branch failed. Publish it instead,
@@ -647,11 +669,9 @@ void GitService::push(const QString& remote, const QString& branch) {
 }
 
 void GitService::deleteRemoteBranch(const QString& remote, const QString& branch) {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    const auto snapshot = processIfOpen();
+    if (!snapshot) return;
+    const git::GitProcess& proc = *snapshot;
     auto result = proc.run({"push", remote.toStdString(), "--delete",
                             branch.toStdString()}, 120000);
     if (!result) {
@@ -665,11 +685,9 @@ void GitService::deleteRemoteBranch(const QString& remote, const QString& branch
 }
 
 void GitService::pull(const QString& remote, const QString& branch) {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    const auto snapshot = processIfOpen();
+    if (!snapshot) return;
+    const git::GitProcess& proc = *snapshot;
     auto result = proc.pull(remote.toStdString(), branch.toStdString());
     if (!result) {
         emit operationFailed("pull", QString::fromStdString(result.error().message()));
@@ -684,11 +702,9 @@ void GitService::pull(const QString& remote, const QString& branch) {
 }
 
 void GitService::fetch(const QString& remote) {
-    if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    const auto snapshot = processIfOpen();
+    if (!snapshot) return;
+    const git::GitProcess& proc = *snapshot;
     auto result = proc.fetch(remote.toStdString());
     if (!result) {
         emit operationFailed("fetch", QString::fromStdString(result.error().message()));
@@ -702,6 +718,12 @@ void GitService::fetch(const QString& remote) {
 
 // ---------------------------------------------------------------------------
 // Interactive Rebase
+//
+// From here on, the operation workers (rebase, cherry-pick, Git Flow)
+// call refresh*() on a pool thread when they finish. Those calls queue
+// onto the GUI thread behind the completion signal emitted just before
+// them, so e.g. rebaseComplete still reaches MainWindow before the
+// statusReady it causes.
 // ---------------------------------------------------------------------------
 
 void GitService::interactiveRebase(const git::RebasePlan& plan) {
@@ -918,6 +940,7 @@ void GitService::stashDrop(int index) {
 }
 
 void GitService::refreshStashes() {
+    if (deferToOwnerThread([this] { refreshStashes(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -933,6 +956,7 @@ void GitService::refreshStashes() {
 // ---------------------------------------------------------------------------
 
 void GitService::refreshTags() {
+    if (deferToOwnerThread([this] { refreshTags(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -1000,6 +1024,7 @@ void GitService::deleteTag(const QString& name) {
 // ---------------------------------------------------------------------------
 
 void GitService::refreshSubmodules() {
+    if (deferToOwnerThread([this] { refreshSubmodules(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {
@@ -1041,6 +1066,7 @@ void GitService::submoduleUpdate(const QString& name) {
 // ---------------------------------------------------------------------------
 
 void GitService::refreshWorktrees() {
+    if (deferToOwnerThread([this] { refreshWorktrees(); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     runner_.run([this, r]() {

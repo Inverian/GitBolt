@@ -185,6 +185,7 @@ private:
 - **Never call libgit2 from the UI thread** — all git operations run on background threads via `AsyncRunner`
 - **Never share libgit2 objects across threads** — each thread opens its own `Repository` handle
 - **Use Qt signals** for cross-thread communication (queued connections by default)
+- **Workers don't drive QObjects** — a worker emits signals or posts to the object's thread (`QMetaObject::invokeMethod(obj, fn, Qt::QueuedConnection)`); it never calls into an object's state or creates children for it. `GitService::refresh*()` make that hop themselves, and `AsyncRunner` re-posts (with a warning) a submission from another thread — see the threading rule at the top of `services/GitService.h`
 
 ### Testability — name your actions and key widgets
 

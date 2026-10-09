@@ -26,6 +26,7 @@
 //
 
 #include <QCoreApplication>
+#include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -35,6 +36,8 @@
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 
+#include <algorithm>
+#include <functional>
 #include <type_traits>
 
 using gitbolt::services::GitService;
@@ -86,6 +89,64 @@ std::unique_ptr<gitbolt::test::TestRepo> repoWithCommits(int n) {
     return repo;
 }
 
+// The order in which the main thread receives GitService's completion
+// and refresh signals, by short name. The context object lives on the
+// main thread, so a worker's emit is queued here exactly as it is to
+// MainWindow, and only the main thread touches the list. Failures are
+// recorded with their message, so a QVERIFY2 on the joined log says
+// what went wrong.
+class SignalLog : public QStringList {
+public:
+    explicit SignalLog(const GitService& svc) {
+        record(svc, &GitService::statusReady, "status");
+        record(svc, &GitService::logReady, "log");
+        record(svc, &GitService::branchesReady, "branches");
+        record(svc, &GitService::commitComplete, "commitComplete");
+        record(svc, &GitService::rebaseComplete, "rebaseComplete");
+        record(svc, &GitService::cherryPickComplete, "cherryPickComplete");
+        QObject::connect(&svc, &GitService::operationFailed, &context_,
+                         [this](const QString& op, const QString& err) {
+            append(QStringLiteral("operationFailed(%1: %2)").arg(op, err));
+        });
+    }
+
+    // Spins the event loop until every one of `names` has arrived.
+    [[nodiscard]] bool waitFor(const QStringList& names, int timeoutMs = 10000) {
+        return QTest::qWaitFor([&] {
+            return std::all_of(names.begin(), names.end(),
+                               [this](const QString& n) { return contains(n); });
+        }, timeoutMs);
+    }
+
+    // Spins the event loop until `first` has arrived and, after it,
+    // every one of `then`. Order-aware because the repository watcher
+    // can slip in a status refresh of its own at any point.
+    [[nodiscard]] bool waitForAfter(const QString& first, const QStringList& then,
+                                    int timeoutMs = 10000) {
+        return QTest::qWaitFor([&] {
+            const qsizetype at = indexOf(first);
+            return at >= 0
+                && std::all_of(then.begin(), then.end(),
+                               [&](const QString& n) { return indexOf(n, at + 1) > at; });
+        }, timeoutMs);
+    }
+
+    [[nodiscard]] bool hasFailure() const {
+        return std::any_of(begin(), end(), [](const QString& e) {
+            return e.startsWith(QLatin1String("operationFailed"));
+        });
+    }
+
+private:
+    template <typename Signal>
+    void record(const GitService& svc, Signal sig, const char* name) {
+        QObject::connect(&svc, sig, &context_,
+                         [this, name] { append(QString::fromLatin1(name)); });
+    }
+
+    QObject context_;
+};
+
 } // namespace
 
 class TestGitService : public QObject {
@@ -98,6 +159,17 @@ private slots:
     void initTestCase() {
         gitbolt::test::TestRepo touch;
         QVERIFY(!touch.path().isEmpty());
+    }
+
+    // Every test fails on Qt's cross-thread parenting warning and on
+    // any AsyncRunner warning (an off-thread submission, or a worker
+    // that threw). The first is what a pool thread driving GitService
+    // state printed: "QObject: Cannot create children for a parent
+    // that is in a different thread".
+    void init() {
+        QTest::failOnWarning(
+            QRegularExpression(QStringLiteral("Cannot create children")));
+        QTest::failOnWarning(QRegularExpression(QStringLiteral("AsyncRunner")));
     }
 
     // -----------------------------------------------------------------
@@ -428,6 +500,198 @@ private slots:
         QCOMPARE(failedSpy.at(0).at(0).toString(),
                  QStringLiteral("delete remote branch"));
         QVERIFY(!failedSpy.at(0).at(1).toString().isEmpty());
+    }
+
+    // -----------------------------------------------------------------
+    // Refreshes requested from a pool thread. The rebase and cherry-
+    // pick workers, and fetch / pull on the pool thread MainWindow's
+    // runRemoteOp uses, ask for refreshStatus() & co. when they finish.
+    // Those used to run right there: unlocked reads of repo_ and the
+    // log scope racing the GUI thread, and AsyncRunner driven off its
+    // thread ("Cannot create children for a parent that is in a
+    // different thread" from its watcher, plus an unsynchronized drain
+    // list). init() fails on that warning; these tests drive each kind
+    // of worker and check that the refreshes still arrive, after the
+    // completion signal, carrying the post-operation state.
+    // -----------------------------------------------------------------
+    void rebaseWorkersRefreshAfterCompletion() {
+        auto repo = repoWithCommits(2);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo->path()));
+        // The open's own refreshes, out of the way before log.clear().
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+
+        // An exec that fails stops the rebase; --continue finishes it.
+        QVERIFY(!succeeded(work.run({"rebase", "--exec", "false", "HEAD~1"})));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Rebase);
+        log.clear();
+        svc.rebaseContinue();
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseComplete"), {"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+
+        // --abort emits no completion signal, just the refreshes.
+        QVERIFY(!succeeded(work.run({"rebase", "--exec", "false", "HEAD~1"})));
+        log.clear();
+        svc.rebaseAbort();
+        QVERIFY2(log.waitFor({"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+    }
+
+    // The cherry-pick worker asks for its refreshes while it still
+    // holds repoMutex_; the refresh workers must queue behind it, not
+    // deadlock, and must see what it applied.
+    void cherryPickWorkerRefreshesAfterCompletion() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo->writeAndCommit(QStringLiteral("side.txt"),
+                                     QByteArrayLiteral("side\n"),
+                                     QStringLiteral("side commit")).ok());
+        auto picked = repo->repo().head();
+        QVERIFY(picked.ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        QObject receiver;
+        bool sideStaged = false;
+        QObject::connect(&svc, &GitService::statusReady, &receiver,
+                         [&](const std::vector<gitbolt::git::StatusEntry>& entries) {
+            sideStaged = std::any_of(entries.begin(), entries.end(),
+                [](const auto& e) { return e.path == "side.txt" && e.isStaged(); });
+        });
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        QVERIFY(!sideStaged);
+
+        log.clear();
+        svc.cherryPick({picked.value()});
+        QVERIFY2(log.waitForAfter(QStringLiteral("cherryPickComplete"), {"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(sideStaged, "the status refresh ran before the cherry-pick applied");
+    }
+
+    // fetch / pull / push the way MainWindow::runRemoteOp runs them: on
+    // a pool thread, against a local bare origin that is one commit
+    // ahead, so the refreshes have something new to show.
+    void remoteOpsOffThreadRefreshOnServiceThread() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        gitbolt::git::GitProcess origin(originDir.path().toStdString());
+        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
+        QVERIFY(succeeded(work.run({"remote", "add", "origin",
+                                    originDir.path().toStdString()})));
+        QVERIFY(succeeded(work.run({"push", "-q", "-u", "origin", "HEAD"})));
+        // Put "ahead" on the origin only: push it, then rewind the local
+        // branch and its remote-tracking ref to the commit before.
+        QVERIFY(repo->writeAndCommit(QStringLiteral("ahead.txt"),
+                                     QByteArrayLiteral("ahead\n"),
+                                     QStringLiteral("ahead")).ok());
+        QVERIFY(succeeded(work.run({"push", "-q", "origin", "HEAD"})));
+        const QString aheadSha = output(work.run({"rev-parse", "HEAD"}));
+        const QString tracking = output(work.run({"rev-parse", "--symbolic-full-name",
+                                                  "@{upstream}"}));
+        QVERIFY(!tracking.isEmpty());
+        QVERIFY(succeeded(work.run({"reset", "-q", "--hard", "HEAD~1"})));
+        QVERIFY(succeeded(work.run({"update-ref", tracking.toStdString(), "HEAD"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        QObject receiver;
+        QString newestLogged;
+        QString trackingTip;
+        QObject::connect(&svc, &GitService::logReady, &receiver,
+                         [&](const std::vector<gitbolt::git::CommitData>& commits,
+                             int offset) {
+            if (offset == 0 && !commits.empty())
+                newestLogged = QString::fromStdString(commits.front().summary);
+        });
+        QObject::connect(&svc, &GitService::branchesReady, &receiver,
+                         [&](const std::vector<gitbolt::git::BranchInfo>& branches) {
+            for (const auto& b : branches)
+                if (b.type == gitbolt::git::BranchType::Remote)
+                    trackingTip = QString::fromStdString(b.tipId.toHex());
+        });
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        QCOMPARE(newestLogged, QStringLiteral("commit 0"));
+
+        // Runs `op` on a pool thread and spins this thread's event loop
+        // until it has finished and `refreshes` have arrived. Polls the
+        // future rather than calling waitForFinished(), which runs a job
+        // that has not started yet on the calling thread — and the op
+        // must not run on the service's thread here.
+        const auto offThread = [&](const std::function<void()>& op,
+                                   const QStringList& refreshes) {
+            log.clear();
+            QFuture<void> done = QtConcurrent::run(op);
+            // On a timeout, still join before returning: the op holds
+            // references to this test's locals (svc, log).
+            const auto join = qScopeGuard([&done] { done.waitForFinished(); });
+            if (!QTest::qWaitFor([&] { return done.isFinished(); }, 30000))
+                return false;
+            // Deliver what the op queued before it finished: failure
+            // signals and refresh requests.
+            QCoreApplication::processEvents();
+            return log.waitFor(refreshes, 30000) && !log.hasFailure();
+        };
+
+        QVERIFY2(offThread([&] { svc.fetch(); }, {"branches"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(trackingTip, aheadSha);
+
+        QVERIFY2(offThread([&] { svc.pull(QStringLiteral("origin"), QString()); },
+                           {"status", "log", "branches"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(output(work.run({"rev-parse", "HEAD"})), aheadSha);
+        QCOMPARE(newestLogged, QStringLiteral("ahead"));
+
+        // push() asks for no refresh itself (MainWindow's completion
+        // handler does); it must still work from the pool thread.
+        QVERIFY(repo->writeAndCommit(QStringLiteral("pushed.txt"),
+                                     QByteArrayLiteral("pushed\n"),
+                                     QStringLiteral("pushed")).ok());
+        QVERIFY2(offThread([&] { svc.push(QStringLiteral("origin"), QString()); }, {}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        const QString branch = output(work.run({"symbolic-ref", "--short", "HEAD"}));
+        QVERIFY(!branch.isEmpty());
+        QCOMPARE(output(origin.run({"rev-parse", "refs/heads/" + branch.toStdString()})),
+                 output(work.run({"rev-parse", "HEAD"})));
+    }
+
+    // commitChanges runs on the GUI thread and refreshes directly; the
+    // UI (CommitDialog, MainWindow) relies on commitComplete reaching it
+    // before the refreshed status.
+    void commitCompleteArrivesBeforeItsRefresh() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+
+        repo->writeFile(QStringLiteral("staged.txt"),
+                        QByteArrayLiteral("to be committed\n"));
+        QVERIFY(repo->stageFile(QStringLiteral("staged.txt")).ok());
+        log.clear();
+        svc.commitChanges(QStringLiteral("ordered commit"));
+        QVERIFY2(log.waitForAfter(QStringLiteral("commitComplete"), {"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
     }
 
     // -----------------------------------------------------------------

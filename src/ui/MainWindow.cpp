@@ -4687,9 +4687,9 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     // right before blocking, so a queued second click ran NESTED
     // inside the first op). GitService's network ops are safe off
     // the GUI thread: they snapshot a GitProcess under the repo
-    // lock and shell out; their failure signals arrive queued, and
-    // are delivered before the finished handler below because
-    // they're posted first.
+    // lock and shell out; their failure signals and refresh
+    // requests queue onto the GUI thread, ahead of the finished
+    // handler below because they're posted first.
     auto* opWatcher = new QFutureWatcher<void>(this);
     connect(opWatcher, &QFutureWatcher<void>::finished, this,
             [this, opWatcher, sourceAction, successMsg,

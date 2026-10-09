@@ -52,6 +52,9 @@ add_dependencies(test_clone gitbolt_stall_transport)
 target_compile_definitions(test_clone PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
+# util/ tests — AsyncRunner's threading guarantees (no repository needed)
+gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+
 # models/ tests — exercise the Qt model layer (the log model from in-memory
 # data, the branch model from what a temp repo reports)
 gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
