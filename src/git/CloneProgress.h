@@ -10,12 +10,12 @@
 namespace gitbolt::git {
 
 /// Incremental progress report for a clone, emitted by
-/// `GitProcess::clone()` (parsed from `git clone --progress`) and by
-/// the older libgit2 `Repository::clone()`. A clone has two separate
-/// metric sets — the fetch/indexing phase (objects, bytes, deltas)
-/// and the checkout phase (files written) — and this struct flattens
-/// both into one shape that the caller can render into a single
-/// progress UI without caring which phase is active.
+/// `GitProcess::clone()` (parsed from `git clone --progress`). A
+/// clone has two separate metric sets — the fetch/indexing phase
+/// (objects, bytes, deltas) and the checkout phase (files written) —
+/// and this struct flattens both into one shape that the caller can
+/// render into a single progress UI without caring which phase is
+/// active.
 struct CloneProgress {
     enum class Phase {
         Receiving,   ///< downloading pack objects from the remote

@@ -11,8 +11,9 @@
 //   - Failure: git's own "fatal:" text comes back and the destination
 //     is put back the way it was (gone, or empty if it pre-existed);
 //     a non-empty destination is refused before git runs. A checkout
-//     that fails after a complete fetch keeps the repository, as git
-//     does.
+//     or a post-checkout hook that fails after a complete fetch keeps
+//     the repository, as git does; a clone that died before its fetch
+//     completed is removed even when git couldn't clean up.
 //   - Cancel: against a transport that never answers (StallTransport
 //     via ext::), returns promptly, cleans up, and leaves no process
 //     of git's tree behind — also when git's own cleanup can't
@@ -611,6 +612,7 @@ private slots:
         const QString message = QString::fromStdString(result.error().message());
         QCOMPARE(result.error().code(), gitbolt::git::GitErrorCode::CheckoutFailed);
         QVERIFY2(message.contains(QDir::toNativeSeparators(dest)), qPrintable(message));
+        QVERIFY2(message.contains(QStringLiteral("but its checkout failed")), qPrintable(message));
         QVERIFY2(message.contains(QStringLiteral("Clone succeeded, but checkout failed")),
                  qPrintable(message));
         QVERIFY2(message.contains(QStringLiteral("'git status'")), qPrintable(message));
@@ -621,6 +623,113 @@ private slots:
         auto cloneHead = repo->head();
         QVERIFY(cloneHead.ok());
         QCOMPARE(QString::fromStdString(cloneHead->toHex()), head);
+    }
+
+    // A post-checkout hook — from core.hooksPath, or copied into the
+    // new repository from init.templateDir — runs once the clone is
+    // checked out. When it fails git keeps the repository, as after a
+    // failed checkout, but says nothing of its own: it exits with the
+    // hook's status, and only the hook's output tells why.
+    void failingPostCheckoutHookKeepsTheRepository_data()
+    {
+        QTest::addColumn<QByteArray>("key");
+        QTest::addColumn<QString>("hookDir");   // in the directory `key` names
+        QTest::newRow("core.hooksPath") << QByteArray("core.hooksPath") << QString();
+        QTest::newRow("init.templateDir") << QByteArray("init.templateDir")
+                                          << QStringLiteral("hooks");
+    }
+
+    void failingPostCheckoutHookKeepsTheRepository()
+    {
+        QFETCH(QByteArray, key);
+        QFETCH(QString, hookDir);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QString head;
+        QString branch;
+        const QString bare = makeBareSource(dir, head, branch);
+        QVERIFY(!bare.isEmpty());
+        const QString dest = dir.filePath(QStringLiteral("out"));
+
+        const QString configured = dir.filePath(QStringLiteral("configured"));
+        const QString hooks = QDir(configured).filePath(hookDir);
+        QVERIFY(QDir().mkpath(hooks));
+        const QString hook = QDir(hooks).filePath(QStringLiteral("post-checkout"));
+        QFile f(hook);
+        QVERIFY(f.open(QIODevice::WriteOnly));
+        f.write("#!/bin/sh\necho 'post-checkout: refused' >&2\nexit 3\n");
+        f.close();
+        QVERIFY(QFile::setPermissions(hook, kOwnerOnly));
+
+        ScopedEnv count("GIT_CONFIG_COUNT", "1");
+        ScopedEnv key0("GIT_CONFIG_KEY_0", key);
+        ScopedEnv value0("GIT_CONFIG_VALUE_0", QFile::encodeName(configured));
+        const auto result = GitProcess::clone(fileUrl(bare).toStdString(), dest.toStdString());
+        QVERIFY(!result.ok());
+        const QString message = QString::fromStdString(result.error().message());
+        QVERIFY2(result.error().code() == gitbolt::git::GitErrorCode::CheckoutFailed,
+                 qPrintable(message));
+        QVERIFY2(message.contains(QDir::toNativeSeparators(dest)), qPrintable(message));
+        QVERIFY2(message.contains(QStringLiteral("post-checkout hook failed")),
+                 qPrintable(message));
+        QVERIFY2(message.contains(QStringLiteral("post-checkout: refused")), qPrintable(message));
+
+        // History and work tree are both complete.
+        auto repo = gitbolt::git::Repository::open(dest.toStdString());
+        QVERIFY(repo.ok());
+        auto cloneHead = repo->head();
+        QVERIFY(cloneHead.ok());
+        QCOMPARE(QString::fromStdString(cloneHead->toHex()), head);
+        QFile file(QDir(dest).filePath(QStringLiteral("f0.txt")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QVERIFY(file.readAll().endsWith("edit 3\n"));
+    }
+
+    // git can die without its cleanup — SIGKILL, a crash, the OOM
+    // killer — and leave a repository whose fetch never finished: a
+    // .git, but no commit for HEAD to name. Unlike a clone that
+    // completed, that is removed, or emptied if the folder existed
+    // before.
+    void incompleteCloneIsRemoved_data()
+    {
+        QTest::addColumn<bool>("existedBefore");
+        QTest::newRow("new destination") << false;
+        QTest::newRow("existing empty destination") << true;
+    }
+
+    void incompleteCloneIsRemoved()
+    {
+#if defined(Q_OS_WIN)
+        QSKIP("kills git's Unix process group");
+#elif !defined(GITBOLT_TEST_STALL_TRANSPORT)
+        QSKIP("StallTransport not built");
+#else
+        QFETCH(bool, existedBefore);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString dest = dir.filePath(QStringLiteral("out"));
+        if (existedBefore) {
+            QVERIFY(QDir().mkpath(dest));
+            QVERIFY(QFile::setPermissions(dest, kOwnerOnly));
+        }
+        StalledClone clone(dest, dir.filePath(QStringLiteral("stall.pid")));
+        QTRY_VERIFY_WITH_TIMEOUT(clone.stubRunning(), 15000);
+        QVERIFY(clone.gitPid() > 0 && clone.gitPid() != clone.stubPid());
+        QVERIFY(QFileInfo(QDir(dest).filePath(QStringLiteral(".git"))).isDir());
+
+        // Not a cancel: git and its transport just die.
+        QCOMPARE(::kill(static_cast<pid_t>(-clone.gitPid()), SIGKILL), 0);
+        const auto& result = clone.wait();
+        QVERIFY(!result.ok());
+        QCOMPARE(result.error().code(), gitbolt::git::GitErrorCode::ProcessFailed);
+        if (existedBefore) {
+            QVERIFY(QFileInfo(dest).isDir());
+            QVERIFY(QDir(dest).isEmpty(kAnyEntry));
+            QVERIFY(QFile::permissions(dest) == kOwnerOnly);
+        } else {
+            QVERIFY(!QFileInfo::exists(dest));
+        }
+#endif
     }
 
     void cancelStopsTheWholeProcessTree()

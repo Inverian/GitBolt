@@ -534,6 +534,26 @@ void restoreDestination(const QString& dest, bool existedBefore)
     }
 }
 
+// The clone itself completed: HEAD names a commit, which it does only
+// once the fetch is done and its refs are written. From there on git
+// keeps the repository whatever fails next — the checkout, or a
+// post-checkout hook after it. Asked of the git that cloned, not read
+// from its messages or opened with libgit2, so the answer holds
+// whatever language git speaks and whatever format (reftable,
+// SHA-256) it wrote. --git-dir, because a destination without a .git
+// of its own would otherwise have git search upwards and answer for
+// an enclosing repository.
+bool cloneCompleted(const QString& dest)
+{
+    const QString gitDir = QDir(dest).filePath(QStringLiteral(".git"));
+    if (!QFileInfo(gitDir).isDir())
+        return false;
+    const auto out = GitProcess(dest.toStdString())
+                         .run({"--git-dir=" + gitDir.toStdString(), "rev-parse", "--verify",
+                               "--quiet", "HEAD^{commit}"});
+    return out.ok() && out->success();
+}
+
 } // namespace
 
 // run() for a GitProcess with a cancel flag: git in a ProcessTree, and
@@ -731,14 +751,21 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
         message = exitCode < 0 ? std::string("git clone crashed")
                                : "git clone exited with code " + std::to_string(exitCode);
 
-    // Fetched, then the checkout failed. git keeps that repository on
-    // purpose (the download is complete, and the advice it printed
-    // says how to finish the checkout), so it isn't ours to remove.
-    if (parser.checkoutFailed() && QFileInfo(QDir(dest).filePath(QStringLiteral(".git"))).isDir())
+    // Cloned, then the checkout failed, or a post-checkout hook did
+    // (core.hooksPath, init.templateDir). git keeps that repository on
+    // purpose — the download is complete — so it isn't ours to remove.
+    if (cloneCompleted(dest)) {
+        // A failed checkout comes with git's warning and its advice on
+        // finishing the checkout. A failed hook with nothing of git's:
+        // the files are checked out, git exits with the hook's status,
+        // and what the hook printed is all there is to show.
+        const bool hookFailed = exitCode > 0 && !parser.checkoutFailed();
         return GitError(GitErrorCode::CheckoutFailed,
                         "The repository was cloned to '"
-                        + QDir::toNativeSeparators(dest).toStdString()
-                        + "', but its checkout failed:\n" + message);
+                        + QDir::toNativeSeparators(dest).toStdString() + "', but "
+                        + (hookFailed ? "a post-checkout hook failed" : "its checkout failed")
+                        + ":\n" + message);
+    }
 
     restoreDestination(dest, existedBefore);
     return GitError(GitErrorCode::ProcessFailed, message);

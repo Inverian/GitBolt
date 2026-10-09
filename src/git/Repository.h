@@ -3,7 +3,6 @@
 #include "git/Blame.h"
 #include "git/Branch.h"
 #include "git/Cherrypick.h"
-#include "git/CloneProgress.h"
 #include "git/Commit.h"
 #include "git/Config.h"
 #include "git/Diff.h"
@@ -23,27 +22,13 @@
 #include "git/Tree.h"
 #include "git/Worktree.h"
 
-#include <atomic>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <string>
 #include <vector>
 
 struct git_repository;
 
 namespace gitbolt::git {
-
-/// Invoked from the clone worker thread when the server demands
-/// credentials (HTTPS user/password or token). `username` arrives
-/// prefilled from the URL when it carried one, and both parameters
-/// return the user's answers. Implementations must marshal to the
-/// GUI thread themselves and block until answered; return false to
-/// abort the clone. SSH URLs are not routed here — those
-/// authenticate via ssh-agent.
-using CredentialPrompt = std::function<bool(const std::string& url,
-                                            std::string& username,
-                                            std::string& password)>;
 
 /// Returns the runtime libgit2 version as "MAJOR.MINOR.PATCH" (e.g.
 /// "1.9.2"). This reads from libgit2's own reported version rather
@@ -68,29 +53,6 @@ public:
 
     static Result<Repository> open(const std::string& path);
     static Result<Repository> init(const std::string& path, bool bare = false);
-
-    /// libgit2 clones. Nothing in GitBolt calls these any more: the
-    /// Clone dialog uses GitProcess::clone (the git CLI), which honors
-    /// the user's credential helpers and ssh setup and doesn't need
-    /// libgit2's network transports — prefer it for new code.
-    static Result<Repository> clone(const std::string& url, const std::string& path);
-
-    /// Overload that reports fetch / checkout progress through
-    /// `onProgress`. The callback is invoked on the libgit2 worker
-    /// thread (typically a background thread); it must not touch UI
-    /// state directly — marshal across threads first.
-    ///
-    /// `cancelFlag`, when non-null, is polled from the progress
-    /// callbacks: set it to true (from any thread) and the fetch —
-    /// or checkout — aborts at the next callback with a GIT_EUSER
-    /// error. The caller is responsible for cleaning up the
-    /// partially-cloned destination directory afterwards.
-    static Result<Repository> clone(
-        const std::string& url,
-        const std::string& path,
-        CloneProgressCallback onProgress,
-        std::shared_ptr<std::atomic<bool>> cancelFlag = nullptr,
-        CredentialPrompt onCredentials = nullptr);
 
     std::string path() const;
     std::string workdir() const;

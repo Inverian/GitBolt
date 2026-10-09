@@ -72,11 +72,13 @@ public:
     /// — so a retry to the same path works. The error message is the
     /// tail of git's stderr ("fatal: …").
     ///
-    /// The exception: when the fetch completed and only the checkout
-    /// failed, git keeps the repository on purpose, and so does this.
-    /// The error is then CheckoutFailed; its message says where the
-    /// repository is and ends with git's advice on finishing the
-    /// checkout.
+    /// The exception: once the clone itself is complete (HEAD names
+    /// the fetched commit), git keeps the repository whatever fails
+    /// next — the checkout, or a post-checkout hook after it — and so
+    /// does this. The error is then CheckoutFailed; its message says
+    /// where the repository is and which of the two failed, and ends
+    /// with git's advice on finishing the checkout or the hook's
+    /// output.
     static Result<void> clone(const std::string& url, const std::string& path,
                               const CloneProgressCallback& onProgress = nullptr,
                               const std::shared_ptr<std::atomic<bool>>& cancelFlag = nullptr);

@@ -155,9 +155,9 @@ void CloneDialog::onBrowse()
 // ---------------------------------------------------------------------------
 void CloneDialog::onCloneClicked()
 {
-    // The last clone fetched but failed to check out, and git kept
-    // it: the button reads "Open Repository", and MainWindow opens
-    // the repository as it is.
+    // The last clone fetched but its checkout or post-checkout hook
+    // failed, and git kept it: the button reads "Open Repository",
+    // and MainWindow opens the repository as it is.
     if (!keptClonePath_.isEmpty()) {
         clonedPath_ = keptClonePath_;
         accept();
@@ -238,10 +238,10 @@ void CloneDialog::onCloneClicked()
             const git::GitError& err = outcome.error();
             const QString message = QString::fromStdString(err.message());
             if (err.code() == git::GitErrorCode::CheckoutFailed) {
-                // Fetched, but the checkout failed, and git kept the
-                // repository — even when a Cancel came too late to
-                // stop it. The message says where it is and how git
-                // suggests finishing the checkout; offer to open it.
+                // Fetched, but the checkout or a post-checkout hook
+                // failed, and git kept the repository — even when a
+                // Cancel came too late to stop it. The message says
+                // where it is and what failed; offer to open it.
                 setBusy(false, message);
                 keptClonePath_ = path;
                 buttons_->button(QDialogButtonBox::Ok)->setText(tr("Open Repository"));

@@ -8,10 +8,12 @@ on disk. Then a clone from a "server" that never answers (ext:: running
 a stub that stalls), cancelled from the dialog: the partial destination
 is removed, the stub — a grandchild of git, where git-remote-https and
 ssh live in a real clone — is gone too, and the dialog stays open,
-ready for a retry. Last, a clone whose fetch completes but whose
+ready for a retry. Then a clone whose fetch completes but whose
 checkout fails: git keeps that repository, and the dialog offers to
 open it — until the destination is edited, which makes the next
-click a fresh clone again.
+click a fresh clone again. Last, a clone checked out in full whose
+post-checkout hook fails: git keeps that one too, and so does the
+dialog, with the same offer.
 """
 
 from __future__ import annotations
@@ -32,6 +34,13 @@ with open(pid_file + ".tmp", "w") as fh:
     fh.write(str(os.getpid()))
 os.rename(pid_file + ".tmp", pid_file)
 time.sleep(60)
+"""
+
+HOOK = """\
+#!/bin/sh
+case "$(pwd)" in
+*/hooked) echo "post-checkout: refused" >&2; exit 3 ;;
+esac
 """
 
 
@@ -62,15 +71,27 @@ def test(binary: str, scratch: str, apps: list) -> None:
     git("clone", "-q", "--bare", broken_src, broken_origin, cwd=scratch)
     broken_url = "file://" + broken_origin
 
-    # git keeps ext:: off unless allowed. Only the app's git sees this
-    # and the filter config.
+    # A post-checkout hook, as core.hooksPath or init.templateDir can
+    # give every clone, that fails in a clone named "hooked" and passes
+    # everywhere else.
+    hooks = os.path.join(scratch, "hooks")
+    os.makedirs(hooks)
+    hook = os.path.join(hooks, "post-checkout")
+    with open(hook, "w") as fh:
+        fh.write(HOOK)
+    os.chmod(hook, 0o755)
+
+    # git keeps ext:: off unless allowed. Only the app's git sees this,
+    # the filter config and the hooks.
     app_env = {
         "GIT_ALLOW_PROTOCOL": "file:ext",
-        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_COUNT": "3",
         "GIT_CONFIG_KEY_0": "filter.broken.smudge",
         "GIT_CONFIG_VALUE_0": "false",
         "GIT_CONFIG_KEY_1": "filter.broken.required",
         "GIT_CONFIG_VALUE_1": "true",
+        "GIT_CONFIG_KEY_2": "core.hooksPath",
+        "GIT_CONFIG_VALUE_2": hooks,
     }
     os.environ.update(app_env)
     try:
@@ -155,6 +176,27 @@ def test(binary: str, scratch: str, apps: list) -> None:
         "the kept repository to open", timeout=30)
     if "Clone Repository" in state.get("windows", []):
         raise Failure("dialog still open after opening the kept clone")
+
+    # 4. Cloned and checked out, then the post-checkout hook failed: git
+    #    keeps the repository, whole, and the dialog offers it as well.
+    hooked = os.path.join(scratch, "hooked")
+    _open_dialog(app)
+    app.ok(f"type clone.url {url}")
+    app.ok(f"type clone.path {hooked}")
+    app.ok("click Clone")
+    app.wait_until(lambda s: _button_enabled(app, "Open Repository"),
+                   "Open Repository to be offered after the hook failed",
+                   timeout=30)
+    if git("rev-parse", "HEAD", cwd=hooked) != head:
+        raise Failure("the hooked clone's HEAD differs from the source")
+    if git("status", "--porcelain", cwd=hooked):
+        raise Failure("the hooked clone's work tree is not checked out")
+    app.ok("click Open Repository")
+    state = app.wait_until(
+        lambda s: s.get("repoOpen") and _same_path(s.get("repoPath", ""), hooked),
+        "the hooked repository to open", timeout=30)
+    if "Clone Repository" in state.get("windows", []):
+        raise Failure("dialog still open after opening the hooked clone")
 
     rc = app.quit()
     if rc != 0:

@@ -23,9 +23,10 @@ namespace gitbolt::dialogs {
 /// URL/path and retry without re-entering everything.
 ///
 /// One failure leaves a repository behind: the fetch completed but
-/// the checkout failed, and git kept the clone. The dialog then says
-/// where it is, and the Clone button becomes "Open Repository" —
-/// accepted with that path — until the URL or path is edited.
+/// the checkout, or a post-checkout hook after it, failed, and git
+/// kept the clone. The dialog then says where it is, and the Clone
+/// button becomes "Open Repository" — accepted with that path —
+/// until the URL or path is edited.
 class CloneDialog : public QDialog {
     Q_OBJECT
 public:
@@ -78,9 +79,10 @@ private:
     bool    pathEditedByUser_ = false;
     QString clonedPath_;
 
-    /// Set when a clone fetched but failed to check out and git kept
-    /// the repository: the Clone button reads "Open Repository" and
-    /// opens it. Editing the URL or path clears it.
+    /// Set when a clone fetched but its checkout or post-checkout hook
+    /// failed and git kept the repository: the Clone button reads
+    /// "Open Repository" and opens it. Editing the URL or path clears
+    /// it.
     QString keptClonePath_;
 
     /// Throttles the UI-thread progress updates. git can report
