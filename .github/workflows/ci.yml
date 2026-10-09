@@ -52,13 +52,19 @@ jobs:
       # install; the `modules:` input is only for ADDON modules
       # (qtcharts, qtwebengine, ...) and rejects base-archive names
       # like 'qtbase', so we don't pass it at all.
+      # Third-party action, so pinned to a commit: its v4 is a branch that
+      # moves with every release. (GitHub's own actions/* stay on major
+      # tags; the same vendor ships the runner image they run on.) Qt and
+      # aqtinstall are exact versions, so a Qt patch release can't change
+      # what ships without a commit.
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
           # `-framework AGL`, which current macOS SDKs no longer ship.
           # Not 6.11 yet: aqtinstall 3.3.0 can't read its Windows metadata.
-          version: '6.10.*'
+          version: '6.10.3'
+          aqtversion: '==3.3.0'
           cache: true    # Cache Qt between runs (~1.5 GB save)
 
       # Ninja is preinstalled on every GitHub-hosted image in the matrix
@@ -158,11 +164,20 @@ jobs:
       # flushing its output leaves ctest nothing to show, and the code tells
       # a missing DLL (0xC0000135) from a crash (0xC0000005) from a plain
       # failure count. e2e tests (Python) already show their output above.
+      # env: the same QtTest settings tests/CMakeLists.txt gives ctest
+      # runs. QT_FORCE_STDERR_LOGGING: steps get a console without a
+      # window, and on Windows QtTest then prints to OutputDebugString,
+      # not stdout. QTEST_FUNCTION_TIMEOUT: a hung function is aborted
+      # with its name after 60 s. timeout-minutes: Start-Process -Wait
+      # has no timeout of its own.
       - name: Rerun failed tests verbosely
         if: failure() && steps.test.outcome == 'failure'
+        timeout-minutes: 10
         shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
+          QT_FORCE_STDERR_LOGGING: '1'
+          QTEST_FUNCTION_TIMEOUT: '60000'
         run: |
           $failed = Get-Content build/Testing/Temporary/LastTestsFailed.log -ErrorAction SilentlyContinue
           foreach ($line in $failed) {
@@ -289,23 +304,39 @@ jobs:
 
       # ---- Windows: NSIS ---------------------------------------------
       # NSIS is not on the windows-2025 images (actions/runner-images
-      # #11754, closed "not planned": add it at runtime). Same Chocolatey
-      # package the windows-2022 image's Install-NSIS.ps1 uses; it embeds
-      # the NSIS setup, so nothing is fetched from SourceForge. CPack finds
-      # makensis via HKLM\SOFTWARE\NSIS; the GITHUB_PATH line is a backup.
-      # Pinned so an NSIS release can't change the installer without a commit.
+      # #11754, closed "not planned": add it at runtime). The official
+      # portable zip, pinned by SHA-256 (its MD5 matches SourceForge's
+      # file listing) so an NSIS release can't change the installer
+      # without a commit, and cached so a SourceForge hiccup rarely
+      # matters. Not Chocolatey: its community feed answered 503 for
+      # hours on 2026-10-09 and failed a main build. CPack finds makensis
+      # on PATH (no registry entry for a portable NSIS).
+      - name: Cache NSIS (Windows)
+        if: github.event_name != 'pull_request' && runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/nsis-3.12
+          key: nsis-3.12-56581f90
       - name: Install NSIS (Windows)
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         timeout-minutes: 10
         shell: pwsh
+        env:
+          NSIS_SHA256: 56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f
         run: |
-          for ($i = 1; $i -le 3; $i++) {   # the community feed rate-limits now and then
-            choco install nsis --version 3.12.0 -y --no-progress
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 3) { throw "choco install nsis failed ($LASTEXITCODE)" }
-            Start-Sleep -Seconds (20 * $i)
+          $nsis = Join-Path $env:RUNNER_TEMP 'nsis-3.12'
+          if (-not (Test-Path (Join-Path $nsis 'makensis.exe'))) {
+            # curl.exe, not Invoke-WebRequest: SourceForge answers a
+            # browser-like user agent with an HTML "download starting"
+            # page instead of the redirect to a mirror.
+            $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+            curl.exe -fsSL --retry 5 --retry-all-errors -o $zip `
+              'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip'
+            if ($LASTEXITCODE) { throw "NSIS download failed ($LASTEXITCODE)" }
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+            if ($hash -ne $env:NSIS_SHA256) { throw "nsis-3.12.zip has SHA-256 $hash, expected $env:NSIS_SHA256" }
+            Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
           }
-          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS'
           & (Join-Path $nsis 'makensis.exe') /VERSION
           if ($LASTEXITCODE) { throw 'makensis.exe is not runnable' }
           Add-Content -Path $env:GITHUB_PATH -Value $nsis
@@ -448,13 +479,26 @@ jobs:
           export LINUXDEPLOY_OUTPUT_VERSION="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
           [ -n "$LINUXDEPLOY_OUTPUT_VERSION" ] || { echo "::error::no project version in CMakeCache"; exit 1; }
 
-          dl=https://github.com/linuxdeploy
-          curl -fsSL --retry 3 -o linuxdeploy-x86_64.AppImage \
-            "$dl/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
-          curl -fsSL --retry 3 -o linuxdeploy-plugin-qt-x86_64.AppImage \
-            "$dl/linuxdeploy-plugin-qt/releases/download/continuous/linuxdeploy-plugin-qt-x86_64.AppImage"
+          # Tagged releases, each checked against its sha256 from when it
+          # was pinned ('continuous' is rebuilt in place, and a release's
+          # assets can be replaced). To bump one, change tag and hash.
+          # The runtime is the ELF stub every AppImage starts with;
+          # appimagetool would otherwise download it from type2-runtime's
+          # 'continuous' release on every build.
+          fetch() {   # <url> <sha256>
+            local f=${1##*/}
+            curl -fsSL --retry 3 -o "$f" "$1"
+            echo "$2  $f" | sha256sum -c - \
+              || { echo "::error::$f does not match its pinned sha256"; exit 1; }
+          }
+          fetch https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
+                c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+          fetch https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage \
+                15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724
+          fetch https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 \
+                2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
           chmod +x linuxdeploy*.AppImage
-          sha256sum linuxdeploy*.AppImage   # 'continuous' moves; record what this build used
+          export LDAI_RUNTIME_FILE="$PWD/runtime-x86_64"
 
           # Icon file stem must equal the desktop Icon= key (gitbolt).
           for s in 16 32 48 64 128 256 512; do
@@ -464,13 +508,28 @@ jobs:
           install -Dm644 src/app/platform/linux/com.gitbolt.app.metainfo.xml \
             AppDir/usr/share/metainfo/com.gitbolt.app.metainfo.xml
 
+          # Two passes, to drop the Qt 5-era AppRun hook the Qt plugin's
+          # tag still writes (later, untagged commits skip it on Qt 6): on
+          # GNOME and XFCE it exports QT_QPA_PLATFORMTHEME=gtk2, a theme
+          # Qt 6 doesn't have, over the user's own setting. linuxdeploy
+          # wraps AppRun in a script sourcing apprun-hooks/* when it sets
+          # up the AppDir root, and skips that until a desktop file is
+          # deployed. So pass 1 deploys the binary and Qt without one, the
+          # hook goes, and pass 2 adds the desktop file, AppRun (a plain
+          # symlink to usr/bin/gitbolt) and the AppImage. Its rescan of
+          # usr/bin and usr/lib finds everything already deployed.
           # --executable: the build-tree binary (RPATH rewritten, stripped)
           # plus what it links outside the AppImage excludelist.
+          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
+            --executable build/src/app/gitbolt --plugin qt
+          # Both fail if a bumped plugin stops writing the hook (then drop
+          # the extra pass) or another hook shows up (look at it first).
+          rm AppDir/apprun-hooks/linuxdeploy-plugin-qt-hook.sh
+          rmdir AppDir/apprun-hooks
           # Exec=gitbolt must name a file in usr/bin.
           ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --executable build/src/app/gitbolt \
             --desktop-file src/app/platform/linux/gitbolt.desktop \
-            --plugin qt --output appimage
+            --output appimage
           ls -l "GitBolt-${LINUXDEPLOY_OUTPUT_VERSION}-x86_64.AppImage"
 
       - name: Smoke-test Linux packages
@@ -508,9 +567,13 @@ jobs:
             || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
           # 2) DEB on a stock Ubuntu 24.04 (no aqt LD_LIBRARY_PATH or
-          #    QT_PLUGIN_PATH to mask gaps)
+          #    QT_PLUGIN_PATH to mask gaps). The image is pinned by digest
+          #    (the multi-arch index, same as Docker Hub's ubuntu:24.04);
+          #    its apt-get still installs today's noble packages, which is
+          #    what a user's install resolves against.
           docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" \
-            public.ecr.aws/docker/library/ubuntu:24.04 bash -euo pipefail -c '
+            public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
+            bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive
               apt-get update -qq
               apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
@@ -529,6 +592,20 @@ jobs:
                   xvfb-run -a "./$appimage" --version)
           echo "AppImage: $out"
           grep -qx "GitBolt $ver" <<<"$out"
+
+          # 4) No script the AppImage runs before gitbolt (AppRun, unless
+          #    it is the symlink to usr/bin/gitbolt, and apprun-hooks/)
+          #    sets QT_QPA_PLATFORMTHEME: the Qt plugin's hook, see Build
+          #    AppImage. -r doesn't follow the AppRun symlink; -I skips
+          #    binaries. -l lists the offending files.
+          rm -rf squashfs-root
+          "./$appimage" --appimage-extract >/dev/null
+          if grep -rlIF --exclude-dir=usr QT_QPA_PLATFORMTHEME squashfs-root; then
+            echo "::error::the AppImage sets QT_QPA_PLATFORMTHEME before starting gitbolt"
+            ls -l squashfs-root/AppRun
+            exit 1
+          fi
+          rm -rf squashfs-root
 
       # ---- all: collect + upload ------------------------------------------
       # Each green leg must carry its OS's installers; a missing one fails

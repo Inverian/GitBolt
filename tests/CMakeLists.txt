@@ -19,6 +19,20 @@ function(gitbolt_add_test test_name source_file)
     )
     gitbolt_set_warnings(${test_name})
     add_test(NAME ${test_name} COMMAND ${test_name})
+    # QT_FORCE_STDERR_LOGGING: on Windows, QtTest writes its results to
+    # stdout only when the process has a console window, and sends them
+    # to OutputDebugString otherwise. A CI runner's steps have a console
+    # but no window, so a failing test printed nothing at all to ctest.
+    # Hangs: QtTest's watchdog (QTEST_FUNCTION_TIMEOUT, default 5 min)
+    # aborts a test function that runs too long, printing its name, its
+    # run time and, where it can attach gdb or lldb, a stack trace. That
+    # only happens if it fires before ctest's TIMEOUT kills the binary,
+    # so TIMEOUT leaves room for the functions before it and for the
+    # debugger; it also catches hangs outside test functions, such as
+    # teardown. These binaries take seconds, no function close to 60 s.
+    set_tests_properties(${test_name} PROPERTIES
+        ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000"
+        TIMEOUT 180)
 endfunction()
 
 # git/ core tests — exercise the libgit2 wrapper against a temporary repo

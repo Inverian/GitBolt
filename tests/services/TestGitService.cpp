@@ -19,13 +19,14 @@
 //     (regression test for the raw-pointer capture UAF),
 //   - tag create / delete as the Commands menu drives them.
 //
-// Signal delivery: workers emit from pool threads, so receipt here
-// crosses threads via queued connections — every assertion on a
-// signal goes through QSignalSpy::wait (which spins an event loop)
-// or QTRY_*.
+// Signal delivery: workers emit from pool threads, and QSignalSpy
+// records those on the emitting thread, so the tests wait for worker
+// signals through MainThreadSpy below. QSignalSpy remains for signals
+// emitted on the main thread, and for counting after the pool drained.
 //
 
 #include <QCoreApplication>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -34,9 +35,41 @@
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 
+#include <type_traits>
+
 using gitbolt::services::GitService;
 
 namespace {
+
+// QSignalSpy for signals a pool worker emits. QSignalSpy connects
+// directly, so it records a worker's emit on the worker, the moment
+// it happens; QSignalSpy::wait() only counts emits after it starts,
+// so one that lands between kicking the job and calling wait() is
+// missed, and wait() sits out its whole timeout and fails. That is
+// the likely cause of this binary's Windows CI failures, which took
+// a passing run's time plus 5 s. Here the context object lives on
+// the main thread, so the connection is queued: emits arrive only
+// while the test spins the event loop, as they do in MainWindow, and
+// no other thread touches the list.
+class MainThreadSpy : public QList<QVariantList> {
+public:
+    template <typename Sender, typename... Args>
+    MainThreadSpy(const Sender* sender, void (Sender::*signal)(Args...)) {
+        QObject::connect(sender, signal, &context_,
+                         [this](const std::decay_t<Args>&... args) {
+            append(QVariantList{QVariant::fromValue(args)...});
+        });
+    }
+
+    // Spins the event loop until at least one emit has arrived.
+    // Unlike QSignalSpy::wait(), emits from before the call count.
+    [[nodiscard]] bool waitForAny(int timeoutMs = 5000) {
+        return QTest::qWaitFor([this] { return !isEmpty(); }, timeoutMs);
+    }
+
+private:
+    QObject context_;
+};
 
 // Convenience: build a TestRepo with `n` commits on main, files
 // f0.txt..f(n-1).txt.
@@ -163,16 +196,23 @@ private slots:
         repo->writeFile(QStringLiteral("dirty.txt"),
                         QByteArrayLiteral("uncommitted\n"));
 
-        QSignalSpy statusSpy(&svc, &GitService::statusReady);
+        MainThreadSpy statusSpy(&svc, &GitService::statusReady);
         svc.refreshStatus();
-        QVERIFY(statusSpy.wait(5000));
 
-        const auto entries = statusSpy.last().at(0)
-            .value<std::vector<gitbolt::git::StatusEntry>>();
-        bool sawDirty = false;
-        for (const auto& e : entries)
-            if (e.path == "dirty.txt") sawDirty = true;
-        QVERIFY2(sawDirty, "statusReady did not include the dirty file");
+        // openRepository's own refresh can land here too, with a
+        // status taken before dirty.txt existed: look at every
+        // delivery, not just the last one.
+        const auto sawDirty = [&statusSpy] {
+            for (const auto& args : statusSpy) {
+                const auto entries = args.at(0)
+                    .value<std::vector<gitbolt::git::StatusEntry>>();
+                for (const auto& e : entries)
+                    if (e.path == "dirty.txt") return true;
+            }
+            return false;
+        };
+        QVERIFY2(QTest::qWaitFor(sawDirty, 5000),
+                 "statusReady did not include the dirty file");
     }
 
     // -----------------------------------------------------------------
@@ -185,9 +225,9 @@ private slots:
         GitService svc;
         QVERIFY(svc.openRepository(repo->path()));
 
-        QSignalSpy logSpy(&svc, &GitService::logReady);
+        MainThreadSpy logSpy(&svc, &GitService::logReady);
         svc.refreshLog();
-        QVERIFY(logSpy.wait(5000));
+        QVERIFY(logSpy.waitForAny());
 
         const auto commits = logSpy.last().at(0)
             .value<std::vector<gitbolt::git::CommitData>>();
@@ -248,11 +288,11 @@ private slots:
         repo->writeFile(QStringLiteral("loose.txt"),
                         QByteArrayLiteral("unstaged edit\n"));
 
-        QSignalSpy stashesSpy(&svc, &GitService::stashesReady);
+        MainThreadSpy stashesSpy(&svc, &GitService::stashesReady);
         QSignalSpy failSpy(&svc, &GitService::operationFailed);
         svc.stashSave(QStringLiteral("keep-index stash"),
                       /*includeUntracked=*/true, /*keepIndex=*/true);
-        QVERIFY(stashesSpy.wait(5000));
+        QVERIFY(stashesSpy.waitForAny());
         QCOMPARE(failSpy.count(), 0);
 
         // The unstaged file is gone from the working tree (stashed);
@@ -297,6 +337,10 @@ private slots:
         auto* pool = QThreadPool::globalInstance();
         const int savedThreads = pool->maxThreadCount();
         pool->setMaxThreadCount(1);
+        // A failed QVERIFY returns early; the later tests in this
+        // binary must not inherit a one-thread global pool.
+        const auto restoreThreads =
+            qScopeGuard([&] { pool->setMaxThreadCount(savedThreads); });
         QSemaphore gate;
         auto gateJob = QtConcurrent::run([&gate] { gate.acquire(); });
 
@@ -306,9 +350,10 @@ private slots:
         gateJob.waitForFinished();
 
         // Let the (now unblocked) cherry-pick job run to its
-        // staleness check and drop.
-        QTest::qWait(500);
-        pool->setMaxThreadCount(savedThreads);
+        // staleness check and drop. Waiting for the pool to drain
+        // (not a fixed sleep) guarantees the job really ran before
+        // the assertions below, however slow the runner.
+        QVERIFY(pool->waitForDone(5000));
 
         QCOMPARE(doneSpy.count(), 0);
         QVERIFY(!svc.isOpen());
@@ -329,12 +374,13 @@ private slots:
         QVERIFY(repo);
         QTemporaryDir originDir;
         QVERIFY(originDir.isValid());
-        gitbolt::git::GitProcess work(repo->path().toStdString());
-        gitbolt::git::GitProcess origin(originDir.path().toStdString());
-        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
-        QVERIFY(succeeded(work.run({"remote", "add", "origin",
-                                    originDir.path().toStdString()})));
-        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "feature"})));
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        auto& work = repo->repo();
+        auto head = work.head();
+        QVERIFY(head.ok());
+        QVERIFY(work.createBranch("feature", head.value()).ok());
+        QVERIFY(work.checkout("feature").ok());
 
         GitService svc;
         QSignalSpy failedSpy(&svc, &GitService::operationFailed);
@@ -343,11 +389,10 @@ private slots:
         // First push: publish + upstream.
         svc.push(QStringLiteral("origin"), QString());
         QCOMPARE(failedSpy.count(), 0);
-        QCOMPARE(output(origin.run({"rev-parse", "refs/heads/feature"})),
-                 output(work.run({"rev-parse", "HEAD"})));
-        QCOMPARE(output(work.run({"rev-parse", "--abbrev-ref",
-                                  "feature@{upstream}"})),
-                 QStringLiteral("origin/feature"));
+        QCOMPARE(tip(*origin, "refs/heads/feature"), tip(work, "HEAD"));
+        QCOMPARE(upstreamOf(work, "feature"),
+                 std::string("refs/remotes/origin/feature"));
+        QCOMPARE(tip(work, "refs/remotes/origin/feature"), tip(work, "HEAD"));
 
         // Tracked now: a new commit goes up with an ordinary push.
         QVERIFY(repo->writeAndCommit(QStringLiteral("more.txt"),
@@ -355,16 +400,13 @@ private slots:
                                      QStringLiteral("more")).ok());
         svc.push(QStringLiteral("origin"), QString());
         QCOMPARE(failedSpy.count(), 0);
-        QCOMPARE(output(origin.run({"rev-parse", "refs/heads/feature"})),
-                 output(work.run({"rev-parse", "HEAD"})));
+        QCOMPARE(tip(*origin, "refs/heads/feature"), tip(work, "HEAD"));
 
         // Delete on the server; the tracking ref goes with it.
         svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("feature"));
         QCOMPARE(failedSpy.count(), 0);
-        QVERIFY(!succeeded(origin.run({"rev-parse", "--verify", "-q",
-                                       "refs/heads/feature"})));
-        QVERIFY(!succeeded(work.run({"rev-parse", "--verify", "-q",
-                                     "refs/remotes/origin/feature"})));
+        QVERIFY(!origin->resolveRef("refs/heads/feature").ok());
+        QVERIFY(!work.resolveRef("refs/remotes/origin/feature").ok());
     }
 
     // A failed remote delete must surface as operationFailed under the
@@ -374,11 +416,8 @@ private slots:
         QVERIFY(repo);
         QTemporaryDir originDir;
         QVERIFY(originDir.isValid());
-        gitbolt::git::GitProcess work(repo->path().toStdString());
-        gitbolt::git::GitProcess origin(originDir.path().toStdString());
-        QVERIFY(succeeded(origin.run({"init", "--bare", "-q"})));
-        QVERIFY(succeeded(work.run({"remote", "add", "origin",
-                                    originDir.path().toStdString()})));
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
 
         GitService svc;
         QSignalSpy failedSpy(&svc, &GitService::operationFailed);
@@ -407,13 +446,12 @@ private slots:
 
         GitService svc;
         QSignalSpy failedSpy(&svc, &GitService::operationFailed);
-        QSignalSpy tagsSpy(&svc, &GitService::tagsReady);
+        MainThreadSpy tagsSpy(&svc, &GitService::tagsReady);
         QVERIFY(svc.openRepository(repo->path()));
 
         svc.deleteTag(QStringLiteral("v1.0"));
         QCOMPARE(failedSpy.count(), 0);
-        // The refresh may land before a wait() could start — poll.
-        QTRY_VERIFY_WITH_TIMEOUT(!tagsSpy.isEmpty(), 5000);
+        QVERIFY(tagsSpy.waitForAny());
         const auto tags = tagsSpy.last().at(0)
             .value<std::vector<gitbolt::git::TagInfo>>();
         QCOMPARE(tags.size(), size_t(1));
@@ -499,6 +537,47 @@ private slots:
     }
 
 private:
+    // The remote tests set up and check through libgit2, so the only
+    // git processes are the ones GitService itself runs: a process
+    // start costs ~50 ms on the Windows runners, and git CLI setup and
+    // checks were over a third of these tests' processes.
+
+    // A bare repository in `dir`, added to `repo` as its "origin".
+    static gitbolt::git::Result<gitbolt::git::Repository> addBareOrigin(
+            gitbolt::test::TestRepo& repo, const QTemporaryDir& dir) {
+        const std::string path = dir.path().toStdString();
+        auto origin = gitbolt::git::Repository::init(path, /*bare=*/true);
+        if (!origin) return origin;
+        // No receive-side `gc --auto` (`maintenance run --auto` in newer
+        // gits) after each push: one more process, nothing to collect.
+        if (auto r = origin->config().setBool("receive.autogc", false); !r)
+            return r.error();
+        if (auto r = repo.repo().addRemote("origin", path); !r)
+            return r.error();
+        return origin;
+    }
+
+    // The commit `spec` resolves to, or "<spec>: <error>", which never
+    // equals a hash, so comparing two failed lookups still fails.
+    static std::string tip(const gitbolt::git::Repository& r,
+                           const std::string& spec) {
+        auto id = r.resolveRef(spec);
+        return id ? id->toHex() : spec + ": " + id.error().message();
+    }
+
+    // The ref `branch` tracks (what `git push --set-upstream` records),
+    // or "" when it has none.
+    static std::string upstreamOf(const gitbolt::git::Repository& r,
+                                  const std::string& branch) {
+        const std::string ref = "refs/heads/" + branch;
+        git_buf buf = GIT_BUF_INIT;
+        std::string name;
+        if (git_branch_upstream_name(&buf, r.raw(), ref.c_str()) == 0)
+            name.assign(buf.ptr, buf.size);
+        git_buf_dispose(&buf);
+        return name;
+    }
+
     static bool succeeded(
         const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
         return r.ok() && r.value().success();
