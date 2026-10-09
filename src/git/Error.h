@@ -32,6 +32,7 @@ enum class GitErrorCode {
     Directory,
     MergeConflict,
     ProcessFailed,
+    CheckoutFailed,     // clone fetched, but its checkout failed; repo kept
 };
 
 class GitError {

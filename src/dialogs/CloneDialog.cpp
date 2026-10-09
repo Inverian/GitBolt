@@ -1,23 +1,23 @@
 #include "dialogs/CloneDialog.h"
 #include "conf/SettingsService.h"
-#include "git/Repository.h"
+#include "git/GitProcess.h"
 
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QtConcurrent>
-#include <optional>
 
 namespace gitbolt::dialogs {
 
@@ -87,6 +87,22 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
             this, &CloneDialog::onCloneClicked);
     connect(buttons_, &QDialogButtonBox::rejected,
             this, &QDialog::reject);
+    // A kept clone (keptClonePath_) belongs to this URL and path: a
+    // change to either makes the next click a fresh clone again.
+    connect(urlEdit_, &QLineEdit::textChanged,
+            this, &CloneDialog::forgetKeptClone);
+    connect(pathEdit_, &QLineEdit::textChanged,
+            this, &CloneDialog::forgetKeptClone);
+}
+
+CloneDialog::~CloneDialog()
+{
+    // reject()/closeEvent() keep the dialog open mid-clone, but the
+    // app can still quit under the modal loop. Stop git, so the
+    // worker — which the global thread pool waits for at exit —
+    // returns promptly instead of finishing the whole download.
+    if (cloning_ && cancelFlag_)
+        cancelFlag_->store(true);
 }
 
 // ---------------------------------------------------------------------------
@@ -126,14 +142,28 @@ void CloneDialog::onBrowse()
 }
 
 // ---------------------------------------------------------------------------
-// Run git_clone on a worker thread via QtConcurrent so the UI
+// Run `git clone` on a worker thread via QtConcurrent so the UI
 // stays responsive. Disable the buttons + inputs while the clone
 // is in flight; on success accept() the dialog (MainWindow then
 // opens the repo); on failure show the error in statusLabel_ and
 // re-enable the inputs so the user can fix the URL/path and retry.
+//
+// The git CLI — not libgit2 — so clone authenticates like push /
+// pull / fetch: the user's credential helpers (osxkeychain, Git
+// Credential Manager), ssh config / agent / known_hosts and
+// core.sshCommand, with GitBolt's askpass prompt as the fallback.
 // ---------------------------------------------------------------------------
 void CloneDialog::onCloneClicked()
 {
+    // The last clone fetched but failed to check out, and git kept
+    // it: the button reads "Open Repository", and MainWindow opens
+    // the repository as it is.
+    if (!keptClonePath_.isEmpty()) {
+        clonedPath_ = keptClonePath_;
+        accept();
+        return;
+    }
+
     const QString url  = urlEdit_->text().trimmed();
     const QString path = pathEdit_->text().trimmed();
 
@@ -145,16 +175,17 @@ void CloneDialog::onCloneClicked()
         setBusy(false, tr("Please choose a destination directory."));
         return;
     }
-    // Refuse to overwrite an existing non-empty directory — git_clone
-    // would also fail, but the error from libgit2 is opaque ("exists
-    // and is not an empty directory") so we catch it up-front with a
-    // friendlier message.
-    if (QFileInfo::exists(path)) {
-        QDir d(path);
-        if (!d.isEmpty()) {
-            setBusy(false, tr("Destination already exists and is not empty: %1").arg(path));
-            return;
-        }
+    // Refuse to overwrite an existing non-empty directory — git would
+    // also fail, but we catch it up-front with a friendlier message.
+    // Hidden entries count: git refuses a directory holding nothing
+    // but a .DS_Store, too.
+    const QFileInfo target(path);
+    if (target.exists()
+        && (!target.isDir()
+            || !QDir(path).isEmpty(QDir::AllEntries | QDir::NoDotAndDotDot
+                                   | QDir::Hidden | QDir::System))) {
+        setBusy(false, tr("Destination already exists and is not empty: %1").arg(path));
+        return;
     }
 
     setBusy(true, tr("Connecting to %1...").arg(url));
@@ -167,62 +198,61 @@ void CloneDialog::onCloneClicked()
     cancelRequested_ = false;
     cancelFlag_ = std::make_shared<std::atomic<bool>>(false);
 
-    // Whether the destination existed (as an empty dir) before we
-    // started — decides how aggressively to clean up after a
-    // cancelled/failed clone. Without cleanup, a retry to the same
-    // path would always trip the "exists and is not empty" check.
-    const bool targetExistedBefore = QFileInfo::exists(path);
-
-    // ---- Progress callback (runs on the libgit2 worker thread) ----
+    // ---- Progress callback (runs on the clone worker thread) ----
     //
-    // libgit2 fires transfer_progress MANY times per second. We
-    // marshal each update to the GUI thread via the functor form of
-    // QMetaObject::invokeMethod, which queues a lambda to run in
-    // `this` object's event loop — safe to call from any thread.
+    // GitProcess::clone parses git's progress lines on the worker and
+    // hands each update here. We marshal it to the GUI thread via the
+    // functor form of QMetaObject::invokeMethod, which queues a lambda
+    // on the application object's (GUI) thread — safe from any thread.
     //
     // Safety: while a clone is in flight reject()/closeEvent() turn
-    // into "request cancel" instead of closing, so the dialog stays
-    // alive until the worker actually finishes. That keeps the raw
-    // `this` pointer captured below valid for every callback.
-    auto progressCb = [this](const git::CloneProgress& p) {
-        // Worker thread — do NOT touch widgets here directly.
-        QMetaObject::invokeMethod(this, [this, p]() {
-            onProgressUpdate(p);
+    // into "request cancel" instead of closing, so the dialog normally
+    // outlives the worker. For the one way around that — the app
+    // quitting under the modal loop — the lambda carries a QPointer
+    // and checks it on the GUI thread, so an update landing after
+    // the dialog is gone is dropped instead of reaching a dead object.
+    const QPointer<CloneDialog> self(this);
+    auto progressCb = [self](const git::CloneProgress& p) {
+        // Worker thread — do NOT touch widgets (or `self`) here.
+        QMetaObject::invokeMethod(QCoreApplication::instance(), [self, p]() {
+            if (self)
+                self->onProgressUpdate(p);
         }, Qt::QueuedConnection);
     };
 
     // QtConcurrent::run runs the lambda on a global thread pool
     // worker. The QFutureWatcher's `finished` signal is delivered
     // back to this thread (the GUI thread), so it's safe to touch
-    // widgets from the slot. We return std::optional<QString>
-    // rather than Result<Repository> because we don't actually
-    // need the Repository handle here — MainWindow will reopen the
-    // freshly-cloned directory via the normal openRepositoryAtPath
-    // path. Empty optional = success; set optional = error message.
-    auto* watcher = new QFutureWatcher<std::optional<QString>>(this);
-    connect(watcher, &QFutureWatcher<std::optional<QString>>::finished,
-            this, [this, watcher, path, targetExistedBefore]() {
-        const auto err = watcher->result();
+    // widgets from the slot. Nothing comes back on success —
+    // MainWindow opens the freshly-cloned directory via the normal
+    // openRepositoryAtPath path.
+    auto* watcher = new QFutureWatcher<git::Result<void>>(this);
+    connect(watcher, &QFutureWatcher<git::Result<void>>::finished,
+            this, [this, watcher, path]() {
+        const git::Result<void> outcome = watcher->result();
         watcher->deleteLater();
         progressBar_->hide();
         cloning_ = false;
 
-        if (err.has_value()) {
-            // Failed or cancelled clones leave a partial destination
-            // behind (libgit2 does not clean up). Remove it so a
-            // retry — same path, fixed URL — passes the up-front
-            // empty-directory check. If the directory pre-existed
-            // (empty), restore it to empty rather than deleting it.
-            QDir target(path);
-            if (target.exists()) {
-                target.removeRecursively();
-                if (targetExistedBefore)
-                    QDir().mkpath(path);
-            }
-            if (cancelRequested_) {
+        if (!outcome.ok()) {
+            const git::GitError& err = outcome.error();
+            const QString message = QString::fromStdString(err.message());
+            if (err.code() == git::GitErrorCode::CheckoutFailed) {
+                // Fetched, but the checkout failed, and git kept the
+                // repository — even when a Cancel came too late to
+                // stop it. The message says where it is and how git
+                // suggests finishing the checkout; offer to open it.
+                setBusy(false, message);
+                keptClonePath_ = path;
+                buttons_->button(QDialogButtonBox::Ok)->setText(tr("Open Repository"));
+            } else if (cancelRequested_) {
+                // GitProcess::clone has already put the destination
+                // back the way it was (removed, or emptied if it
+                // pre-existed), so a retry — same path, fixed URL —
+                // passes the up-front empty-directory check.
                 setBusy(false, tr("Clone cancelled."));
             } else {
-                setBusy(false, tr("Clone failed: %1").arg(*err));
+                setBusy(false, tr("Clone failed: %1").arg(message));
             }
             cancelRequested_ = false;
             return;
@@ -231,69 +261,36 @@ void CloneDialog::onCloneClicked()
         accept();
     });
 
-    // Private HTTPS remotes answer the first fetch with 401; libgit2
-    // then asks this prompt for credentials. It runs on the clone
-    // worker, so the dialogs are marshaled to the GUI thread and the
-    // worker parks until the user answers (BlockingQueuedConnection).
-    // The dialog outlives the worker by design: reject() defers while
-    // cloning_ is set.
-    git::CredentialPrompt credPrompt =
-        [this](const std::string& credUrl, std::string& user,
-               std::string& pass) -> bool {
-            bool accepted = false;
-            QString qUser = QString::fromStdString(user);
-            QString qPass;
-            const QString qUrl = QString::fromStdString(credUrl);
-            QMetaObject::invokeMethod(
-                this,
-                [this, qUrl, &qUser, &qPass, &accepted]() {
-                    bool ok = false;
-                    const QString u = QInputDialog::getText(
-                        this, tr("Authentication Required"),
-                        tr("Username for %1").arg(qUrl),
-                        QLineEdit::Normal, qUser, &ok);
-                    if (!ok)
-                        return;
-                    const QString p = QInputDialog::getText(
-                        this, tr("Authentication Required"),
-                        tr("Password or access token for %1").arg(qUrl),
-                        QLineEdit::Password, QString(), &ok);
-                    if (!ok)
-                        return;
-                    qUser = u;
-                    qPass = p;
-                    accepted = true;
-                },
-                Qt::BlockingQueuedConnection);
-            if (accepted) {
-                user = qUser.toStdString();
-                pass = qPass.toStdString();
-            }
-            return accepted;
-        };
-
+    // Credentials need no wiring here: a private HTTPS remote is
+    // answered by the user's credential helper, and failing that git
+    // (or ssh, for a key passphrase / host key) runs GitBolt's askpass
+    // prompt — see GitProcess::applyEnvironment.
     watcher->setFuture(QtConcurrent::run(
         [url, path, progressCb = std::move(progressCb),
-         flag = cancelFlag_,
-         credPrompt = std::move(credPrompt)]() -> std::optional<QString> {
-            auto result = git::Repository::clone(url.toStdString(),
-                                                 path.toStdString(),
-                                                 progressCb,
-                                                 flag,
-                                                 credPrompt);
-            if (!result.ok())
-                return QString::fromStdString(result.error().message());
-            return std::nullopt;
+         flag = cancelFlag_]() -> git::Result<void> {
+            return git::GitProcess::clone(url.toStdString(),
+                                          path.toStdString(),
+                                          progressCb,
+                                          flag);
         }));
+}
+
+// Back to "Clone" once the URL or path no longer names the kept clone.
+void CloneDialog::forgetKeptClone()
+{
+    if (keptClonePath_.isEmpty())
+        return;
+    keptClonePath_.clear();
+    buttons_->button(QDialogButtonBox::Ok)->setText(tr("Clone"));
 }
 
 // ---------------------------------------------------------------------------
 // Cancellation. The Cancel button stays ENABLED during a clone (see
 // setBusy) and routes here via reject(): first activation flips the
-// shared atomic flag, which libgit2 polls from its fetch/checkout
-// callbacks — the worker then aborts with GIT_EUSER and the finished
-// handler above reports "Clone cancelled." and cleans up the partial
-// directory. The dialog itself only closes once the worker is done.
+// shared atomic flag, which the worker checks every ~50 ms while git
+// runs — it then stops git and every process git started, restores
+// the destination, and the finished handler above reports "Clone
+// cancelled.". The dialog itself only closes once the worker is done.
 // ---------------------------------------------------------------------------
 void CloneDialog::requestCancel()
 {
@@ -331,18 +328,22 @@ void CloneDialog::closeEvent(QCloseEvent* event)
 // Progress slot — called on the GUI thread via the queued lambda
 // posted from the worker-thread callback in onCloneClicked.
 //
-// libgit2 has three observable phases during a clone:
+// git reports three observable phases during a clone (parsed from
+// its --progress output by CloneProgressParser):
 //
 //   1. Receiving — objects and bytes stream in from the remote.
-//      The progress bar tracks received_objects / total_objects and
+//      The progress bar tracks receivedObjects / totalObjects and
 //      the status line shows "Receiving objects: X% (n/total), Y MB".
+//      Before the first object (connecting, or the server still
+//      counting / compressing) the bar stays indeterminate.
 //
-//   2. Resolving — after the pack is fully received, libgit2 walks
-//      the deltas to build the object index. The bar tracks
-//      indexed_deltas / total_deltas.
+//   2. Resolving — after the pack is fully received, index-pack
+//      resolves the deltas. The bar tracks indexedDeltas /
+//      totalDeltas.
 //
 //   3. CheckingOut — the working directory is populated. The bar
-//      tracks completedSteps / totalSteps (files written).
+//      tracks completedSteps / totalSteps (files written). git only
+//      reports this phase when the checkout takes more than ~2 s.
 //
 // Updates are throttled to ~50 ms so the bar animates smoothly on
 // fast clones without flooding the event loop, but every phase
@@ -374,11 +375,14 @@ void CloneDialog::onProgressUpdate(gitbolt::git::CloneProgress p)
                     .arg(humanBytes(p.receivedBytes)));
         } else {
             // Remote hasn't sent the object count yet — stay
-            // indeterminate but show the byte count so the user
-            // sees *something* moving.
+            // indeterminate. Keep the "Connecting to <url>..." line
+            // until bytes actually arrive (the server may spend a
+            // while counting / compressing first), then show the
+            // byte count so the user sees *something* moving.
             progressBar_->setRange(0, 0);
-            statusLabel_->setText(
-                tr("Connecting... %1 received").arg(humanBytes(p.receivedBytes)));
+            if (p.receivedBytes > 0)
+                statusLabel_->setText(
+                    tr("Connecting... %1 received").arg(humanBytes(p.receivedBytes)));
         }
         break;
     }
@@ -421,8 +425,7 @@ void CloneDialog::onProgressUpdate(gitbolt::git::CloneProgress p)
 // trigger (see requestCancel). reject()/closeEvent() are overridden
 // so Cancel / Esc / the window close button all request a cancel
 // instead of closing; the dialog itself only closes once the worker
-// has actually stopped, keeping the raw `this` pointer in the
-// progress callback valid for the clone's whole lifetime.
+// has actually stopped and the partial clone is cleaned up.
 // ---------------------------------------------------------------------------
 void CloneDialog::setBusy(bool busy, const QString& message)
 {

@@ -3,6 +3,7 @@
 #include "git/Blame.h"
 #include "git/Branch.h"
 #include "git/Cherrypick.h"
+#include "git/CloneProgress.h"
 #include "git/Commit.h"
 #include "git/Config.h"
 #include "git/Diff.h"
@@ -32,40 +33,6 @@
 struct git_repository;
 
 namespace gitbolt::git {
-
-/// Incremental progress report emitted by `Repository::clone()` via
-/// its optional callback. libgit2 surfaces two separate metric sets
-/// during a clone — the fetch/indexing phase (objects, bytes, deltas)
-/// and the checkout phase (files written) — and this struct flattens
-/// both into one shape that the caller can render into a single
-/// progress UI without caring which phase is active.
-struct CloneProgress {
-    enum class Phase {
-        Receiving,   ///< downloading pack objects from the remote
-        Resolving,   ///< indexing / resolving deltas after fetch
-        CheckingOut  ///< writing files to the working directory
-    };
-    Phase    phase = Phase::Receiving;
-
-    // Fetch-phase counters (valid in Receiving / Resolving phases).
-    uint32_t receivedObjects = 0;
-    uint32_t indexedObjects  = 0;
-    uint32_t totalObjects    = 0;
-    uint32_t indexedDeltas   = 0;
-    uint32_t totalDeltas     = 0;
-    uint64_t receivedBytes   = 0;
-
-    // Checkout-phase counters (valid in CheckingOut phase).
-    uint32_t completedSteps  = 0;
-    uint32_t totalSteps      = 0;
-};
-
-/// Callback type invoked from the libgit2 worker thread during
-/// `Repository::clone()`. The callback is called MANY times per
-/// second — if the receiver lives on a different thread (e.g. the
-/// GUI thread), the lambda must marshal the update safely via
-/// QMetaObject::invokeMethod or similar.
-using CloneProgressCallback = std::function<void(const CloneProgress&)>;
 
 /// Invoked from the clone worker thread when the server demands
 /// credentials (HTTPS user/password or token). `username` arrives
@@ -101,6 +68,11 @@ public:
 
     static Result<Repository> open(const std::string& path);
     static Result<Repository> init(const std::string& path, bool bare = false);
+
+    /// libgit2 clones. Nothing in GitBolt calls these any more: the
+    /// Clone dialog uses GitProcess::clone (the git CLI), which honors
+    /// the user's credential helpers and ssh setup and doesn't need
+    /// libgit2's network transports — prefer it for new code.
     static Result<Repository> clone(const std::string& url, const std::string& path);
 
     /// Overload that reports fetch / checkout progress through

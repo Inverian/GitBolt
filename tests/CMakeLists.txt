@@ -41,6 +41,17 @@ gitbolt_add_test(test_revwalk        git/TestRevWalk.cpp)
 gitbolt_add_test(test_diff           git/TestDiff.cpp)
 gitbolt_add_test(test_status         git/TestStatus.cpp)
 
+# Clone through the git CLI. The cancel test clones from a "server"
+# that never answers — StallTransport, run by git via ext:: — whose
+# path is baked into the test.
+gitbolt_add_test(test_clone          git/TestClone.cpp)
+add_executable(gitbolt_stall_transport git/StallTransport.cpp)
+target_link_libraries(gitbolt_stall_transport PRIVATE Qt6::Core)
+gitbolt_set_warnings(gitbolt_stall_transport)
+add_dependencies(test_clone gitbolt_stall_transport)
+target_compile_definitions(test_clone PRIVATE
+    GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
+
 # models/ tests — exercise the Qt model layer (the log model from in-memory
 # data, the branch model from what a temp repo reports)
 gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)

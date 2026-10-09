@@ -16,6 +16,7 @@ endif()
 
 set(E2E_TESTS
     test_branch_switch
+    test_clone_dialog
     test_commit_flow
     test_remote_branches
     test_single_instance

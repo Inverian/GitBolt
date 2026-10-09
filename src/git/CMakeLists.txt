@@ -6,6 +6,7 @@ set(SOURCES
     Blame.cpp
     Branch.cpp
     Cherrypick.cpp
+    CloneProgress.cpp
     Commit.cpp
     CommitCache.cpp
     Config.cpp
@@ -31,6 +32,7 @@ set(SOURCES
     Blame.h
     Branch.h
     Cherrypick.h
+    CloneProgress.h
     Commit.h
     CommitCache.h
     Config.h

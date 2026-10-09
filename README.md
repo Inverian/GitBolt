@@ -33,7 +33,7 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - Stash save/apply/pop/drop with diff preview
 - Branch management (create, delete, rename, checkout, merge,
   push, set-upstream — from the sidebar context menu or Commands)
-- Push, pull, fetch with credential helper integration
+- Clone, push, pull, fetch with credential helper integration
 
 ### Repository Inspection
 - Commit log with paged loading (handles 100K+ commits smoothly)
@@ -156,7 +156,7 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 | Decision | Rationale |
 |----------|-----------|
 | **Qt 6 + C++20** | Maximum native performance, mature widget system, hardware-accelerated rendering |
-| **libgit2 primary, git CLI fallback** | libgit2 for hot path (log, diff, blame, status); CLI for credentials, interactive rebase, git-flow |
+| **libgit2 primary, git CLI fallback** | libgit2 for hot path (log, diff, blame, status); CLI for every network operation (clone, fetch, pull, push — the user's credential helpers and ssh setup apply), interactive rebase, git-flow |
 | **Headers and sources together** | Qt convention; matches Gittyup, KeePassXC, FreeCAD |
 | **PascalCase filenames** | Qt convention (`QMainWindow.h` style) |
 | **Background threading via QtConcurrent** | All git ops run on worker threads with QFutureWatcher signals back to UI |

@@ -59,7 +59,6 @@ void GitService::openRepositoryAsync(const QString& path) {
         [path]() -> OpenOutcome {
             // Fresh git_repository* — no repoMutex_ needed; nothing
             // else can touch this object until we publish it below.
-            // Same pattern CloneDialog uses for git_clone.
             auto result = git::Repository::open(path.toStdString());
             if (!result)
                 return { nullptr,

@@ -4170,11 +4170,12 @@ void MainWindow::openRepositoryAtPath(const QString& path)
 }
 
 // ---------------------------------------------------------------------------
-// Clone — opens the modal CloneDialog. The dialog runs git_clone()
+// Clone — opens the modal CloneDialog. The dialog runs `git clone`
 // on a worker thread and only returns Accepted once the clone has
-// finished successfully, so by the time we read clonedPath() the
-// new working directory is on disk and ready to be opened via the
-// normal openRepositoryAtPath flow.
+// finished successfully (or fetched but failed to check out, and
+// the user chose to open what git kept), so by the time we read
+// clonedPath() the new repository is on disk and ready to be opened
+// via the normal openRepositoryAtPath flow.
 // ---------------------------------------------------------------------------
 void MainWindow::cloneRepository()
 {
