@@ -33,6 +33,7 @@
 #include <QTest>
 #include <QUrl>
 
+#include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
 #include "git/CloneProgress.h"
 #include "git/GitProcess.h"
@@ -42,19 +43,16 @@
 #include <memory>
 #include <thread>
 
-#if defined(Q_OS_WIN)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <csignal>
-#endif
-
 using gitbolt::git::CloneProgress;
 using gitbolt::git::CloneProgressParser;
 using gitbolt::git::GitProcess;
 using Phase = gitbolt::git::CloneProgress::Phase;
+using gitbolt::test::processAlive;
+using gitbolt::test::ScopedEnv;
+#ifdef GITBOLT_TEST_STALL_TRANSPORT
+using gitbolt::test::readStallPids;
+using gitbolt::test::StallTransportEnv;
+#endif
 
 namespace {
 
@@ -123,45 +121,6 @@ QString fileUrl(const QString& path)
     return QUrl::fromLocalFile(path).toString();
 }
 
-// Set an environment variable for one scope; git children inherit it
-// (GitProcess builds their environment from the live process env).
-class ScopedEnv {
-public:
-    ScopedEnv(const char* name, const QByteArray& value)
-        : name_(name), had_(qEnvironmentVariableIsSet(name)), old_(qgetenv(name))
-    {
-        qputenv(name, value);
-    }
-    ~ScopedEnv()
-    {
-        if (had_)
-            qputenv(name_, old_);
-        else
-            qunsetenv(name_);
-    }
-    ScopedEnv(const ScopedEnv&) = delete;
-    ScopedEnv& operator=(const ScopedEnv&) = delete;
-
-private:
-    const char* name_;
-    bool had_;
-    QByteArray old_;
-};
-
-bool processAlive(qint64 pid)
-{
-#if defined(Q_OS_WIN)
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
-    if (!h)
-        return false;
-    const bool alive = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
-    CloseHandle(h);
-    return alive;
-#else
-    return ::kill(static_cast<pid_t>(pid), 0) == 0;
-#endif
-}
-
 #ifdef GITBOLT_TEST_STALL_TRANSPORT
 // A clone of a "server" that never answers (StallTransport, run by git
 // via ext::), on a worker thread: it sits connected until cancelled.
@@ -170,16 +129,9 @@ bool processAlive(qint64 pid)
 class StalledClone {
 public:
     StalledClone(const QString& dest, const QString& pidFile)
-        // ext:: is off by default (protocol.ext.allow=never).
-        : allow_("GIT_ALLOW_PROTOCOL", "ext"),
-          pidEnv_("GITBOLT_TEST_STALL_PIDFILE", QFile::encodeName(pidFile)),
-          pidFile_(pidFile)
+        : env_(pidFile), pidFile_(pidFile)
     {
-        // In an ext:: command '%' escapes and a space separates arguments.
-        QString stub = QDir::toNativeSeparators(QStringLiteral(GITBOLT_TEST_STALL_TRANSPORT));
-        stub.replace(QLatin1Char('%'), QStringLiteral("%%"));
-        stub.replace(QLatin1Char(' '), QStringLiteral("% "));
-        worker_ = std::thread([this, url = "ext::" + stub.toStdString(),
+        worker_ = std::thread([this, url = StallTransportEnv::url(),
                                path = dest.toStdString()] {
             result_ = GitProcess::clone(url, path, nullptr, cancel_);
         });
@@ -197,12 +149,9 @@ public:
     /// connected (to nothing). Reads the pids the stub recorded.
     bool stubRunning()
     {
-        QFile f(pidFile_);
-        if (!f.open(QIODevice::ReadOnly))
-            return false;
-        const QList<QByteArray> lines = f.readAll().split('\n');
-        stubPid_ = lines.value(0).trimmed().toLongLong();
-        gitPid_ = lines.value(1).trimmed().toLongLong();
+        const auto pids = readStallPids(pidFile_);
+        stubPid_ = pids.stub;
+        gitPid_ = pids.group;
         return stubPid_ > 0;
     }
     /// git's grandchild, where git-remote-https and ssh live.
@@ -219,8 +168,7 @@ public:
     }
 
 private:
-    ScopedEnv allow_;
-    ScopedEnv pidEnv_;
+    StallTransportEnv env_;
     QString pidFile_;
     qint64 stubPid_ = 0;
     qint64 gitPid_ = 0;

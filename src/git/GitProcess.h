@@ -26,6 +26,14 @@ public:
 
     Result<ProcessOutput> run(const std::vector<std::string>& args, int timeoutMs = 30000) const;
 
+    /// Makes run(), and every command built on it, stoppable. Once
+    /// `flag` is set, from any thread, run() stops git and every
+    /// process git started within ~50 ms and fails with
+    /// GitErrorCode::User; later runs fail without starting git. git
+    /// then runs in a process group of its own (a job object on
+    /// Windows), as clone() does. Without a flag run() is unchanged.
+    void setCancelFlag(std::shared_ptr<std::atomic<bool>> flag) { cancelFlag_ = std::move(flag); }
+
     /// Like run(), but feeds `stdinData` to the child's stdin and
     /// closes the write channel. Needed for commands that read a
     /// payload from stdin, e.g. `git apply --cached -` with a patch
@@ -104,8 +112,12 @@ private:
     /// fast instead of hanging until the timeout kills it.
     static void applyEnvironment(QProcess& process);
 
+    /// run() with cancelFlag_ set.
+    Result<ProcessOutput> runCancellable(const std::vector<std::string>& args, int timeoutMs) const;
+
     std::string workDir_;
     std::string gitPath_;
+    std::shared_ptr<std::atomic<bool>> cancelFlag_;
 };
 
 } // namespace gitbolt::git

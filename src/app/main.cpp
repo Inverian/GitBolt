@@ -19,10 +19,12 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QLockFile>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextStream>
 #include <QThread>
+#include <QThreadPool>
 
 #include <git2.h>
 
@@ -246,8 +248,18 @@ int main(int argc, char* argv[]) {
                                    : QString());
     }
 
-    // Initialize libgit2
+    // Initialize libgit2, and shut it down only once everything that
+    // uses it is gone: locals are destroyed in reverse order, so this
+    // runs after the window below, whose GitService waits for its
+    // libgit2 workers and frees the repository; then it waits for the
+    // pool jobs left (a dashboard probe opens repositories). Shutting
+    // down at the end of main(), as before, did all that after libgit2
+    // was gone.
     git_libgit2_init();
+    const auto libgit2Shutdown = qScopeGuard([] {
+        QThreadPool::globalInstance()->waitForDone();
+        git_libgit2_shutdown();
+    });
 
     // Parse command-line arguments: gitbolt [path]. This MUST come
     // before the single-instance guard: --help, --version and a bad
@@ -459,9 +471,6 @@ int main(int argc, char* argv[]) {
     // Save window geometry on exit. Splitter state is persisted
     // separately inside MainWindow::closeEvent.
     settings.saveWindowGeometry(window.saveGeometry());
-
-    // Clean up libgit2
-    git_libgit2_shutdown();
 
     return exitCode;
 }

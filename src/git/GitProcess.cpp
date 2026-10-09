@@ -62,6 +62,9 @@ void GitProcess::applyEnvironment(QProcess& process) {
 }
 
 Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int timeoutMs) const {
+    if (cancelFlag_)
+        return runCancellable(args, timeoutMs);
+
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
     applyEnvironment(process);
@@ -230,7 +233,7 @@ Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) c
 }
 
 // ---------------------------------------------------------------------------
-// Clone
+// Clone, and run() with a cancel flag
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -242,11 +245,12 @@ constexpr int kPollMs = 50;
 // can never hang the worker (and through the thread pool, app exit).
 constexpr int kTerminateWaitMs = 2000;
 
-// The process tree of one `git clone`. git does the transfer in
-// children — git-remote-https, ssh, index-pack, upload-pack for a
-// local URL, GitBolt itself in askpass mode — so killing only git on
-// cancel orphans them: they run on, and on Windows keep files inside
-// the destination open, so it can't be removed. ProcessTree puts git
+// The process tree of one `git clone` (or of a cancellable run(): a
+// fetch, pull or push). git does the transfer in children —
+// git-remote-https, ssh, index-pack, upload-pack for a local URL,
+// GitBolt itself in askpass mode — so killing only git on cancel
+// orphans them: they run on, and on Windows keep files inside the
+// destination open, so it can't be removed. ProcessTree puts git
 // in a group that one call stops as a whole:
 //
 //   Unix:    setsid() in the child makes git the leader of a new
@@ -497,6 +501,65 @@ void restoreDestination(const QString& dest, bool existedBefore)
 }
 
 } // namespace
+
+// run() for a GitProcess with a cancel flag: git in a ProcessTree, and
+// a poll loop instead of one long waitForFinished(), so a cancel is
+// seen within kPollMs and stops the whole tree — including an ssh or
+// git-remote-https waiting on a network that stopped answering, which
+// would otherwise hold its caller until the timeout.
+Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>& args,
+                                                 int timeoutMs) const
+{
+    const QString workDir = QString::fromStdString(workDir_);
+    QStringList qargs;
+    for (const auto& arg : args)
+        qargs.append(QString::fromStdString(arg));
+    if (cancelFlag_->load())
+        return GitError(GitErrorCode::User, "Cancelled");
+
+    // Declared before the process so it outlives it, as in clone().
+    ProcessTree tree;
+    QProcess process;
+    process.setWorkingDirectory(workDir);
+    applyEnvironment(process);
+    tree.prepare(process);
+
+    QElapsedTimer timer;
+    timer.start();
+    const QString gitPath = QString::fromStdString(gitPath_);
+    process.start(gitPath, qargs);
+    bool started = process.waitForStarted(kStartTimeoutMs);
+    if (!started && tree.dropHook(process)) {
+        process.start(gitPath, qargs);
+        started = process.waitForStarted(kStartTimeoutMs);
+    }
+    if (!started) {
+        GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
+        return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
+    }
+
+    // Each wait also moves git's output into QProcess's buffers, so
+    // its pipes can't fill up and stall it between polls.
+    while (!process.waitForFinished(kPollMs) && process.state() != QProcess::NotRunning) {
+        const bool cancelled = cancelFlag_->load();
+        if (cancelled || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
+            tree.terminate(process);
+            GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
+            if (cancelled)
+                return GitError(GitErrorCode::User, "Cancelled");
+            return GitError(GitErrorCode::ProcessFailed, "Git process timed out");
+        }
+    }
+    tree.release();
+
+    ProcessOutput output;
+    output.exitCode = process.exitCode();
+    output.stdoutData = process.readAllStandardOutput().toStdString();
+    output.stderrData = process.readAllStandardError().toStdString();
+    GitProcessLog::instance().emitCommand(workDir, qargs, output.exitCode,
+                                          timer.elapsed());
+    return output;
+}
 
 // The command log is shown in the UI, and a URL can carry a password
 // or a token. Only the userinfo of a "scheme://" URL is touched: an

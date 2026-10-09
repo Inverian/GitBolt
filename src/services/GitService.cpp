@@ -147,7 +147,13 @@ git::GitProcess GitService::process() const {
 std::optional<git::GitProcess> GitService::processIfOpen() const {
     std::lock_guard<std::mutex> lock(repoMutex_);
     if (!repo_) return std::nullopt;
-    return repo_->process();
+    git::GitProcess proc = repo_->process();
+    proc.setCancelFlag(remoteOpsCancelled_);
+    return proc;
+}
+
+void GitService::cancelRemoteOps() {
+    remoteOpsCancelled_->store(true);
 }
 
 // Refresh workers capture repo_ as a shared_ptr (pinning the object

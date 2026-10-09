@@ -69,9 +69,13 @@ gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
 gitbolt_add_test(test_branch_model     models/TestBranchModel.cpp)
 
 # services/ tests — GitService orchestration against real temp repos.
-# Needs the services lib on top of the defaults the helper links.
+# Needs the services lib on top of the defaults the helper links, and
+# StallTransport for cancelling a fetch that never ends.
 gitbolt_add_test(test_git_service services/TestGitService.cpp)
 target_link_libraries(test_git_service PRIVATE gitbolt_services)
+add_dependencies(test_git_service gitbolt_stall_transport)
+target_compile_definitions(test_git_service PRIVATE
+    GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
 # widgets/ tests. The terminal's ConPTY backend only exists in Windows
 # builds; elsewhere these tests are a QSKIP each.

@@ -4,6 +4,7 @@
 #include "git/Commit.h"
 #include "git/Status.h"
 
+#include <QFuture>
 #include <QHash>
 #include <QKeySequence>
 #include <QList>
@@ -287,6 +288,9 @@ private:
     // operationFailed handler put on the status bar stays.
     bool lastRemoteOpFailed_ = false;
     bool remoteOpRunning_ = false;
+    // The running (or last) remote op's pool-thread job: the destructor
+    // waits for it, since it runs inside gitService_.
+    QFuture<void> remoteOp_;
 
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by

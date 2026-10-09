@@ -192,6 +192,11 @@ public:
     void deleteRemoteBranch(const QString& remote, const QString& branch);
     void pull(const QString& remote, const QString& branch);
     void fetch(const QString& remote = "");
+    /// Stops the git command of every running push, pull, fetch and
+    /// remote-branch delete (they fail with "Cancelled"), and makes
+    /// later ones fail at once. For shutdown: MainWindow calls it
+    /// before waiting for its remote-op thread. Thread-safe.
+    void cancelRemoteOps();
 
     // Interactive Rebase
     void interactiveRebase(const git::RebasePlan& plan);
@@ -323,8 +328,13 @@ private:
 
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network
-    /// ops can use it from MainWindow's pool thread.
+    /// ops can use it from MainWindow's pool thread. Its commands stop
+    /// on cancelRemoteOps().
     std::optional<git::GitProcess> processIfOpen() const;
+
+    /// Set by cancelRemoteOps(); shared with every processIfOpen().
+    const std::shared_ptr<std::atomic<bool>> remoteOpsCancelled_ =
+        std::make_shared<std::atomic<bool>>(false);
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_

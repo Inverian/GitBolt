@@ -204,7 +204,20 @@ MainWindow::MainWindow(QWidget* parent)
     }, Qt::DirectConnection);
 }
 
-MainWindow::~MainWindow() = default;
+// A fetch, pull or push may still be running on a pool thread, inside
+// gitService_, which ~QObject is about to delete; the job would then
+// finish in a destroyed service. Stop its git (a stalled network would
+// otherwise hold the quit until git's 2-minute timeout) and wait for
+// the job to leave. The event loop is gone, so its finished handler
+// never runs, and the signals it emits on the way out are dropped
+// with their receivers.
+MainWindow::~MainWindow()
+{
+    if (!remoteOp_.isFinished())
+        hide();
+    gitService_->cancelRemoteOps();
+    remoteOp_.waitForFinished();
+}
 
 // ---------------------------------------------------------------------------
 // Persist splitter state on window close. We intentionally do NOT
@@ -4701,7 +4714,8 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
         if (after)
             after();
     });
-    opWatcher->setFuture(QtConcurrent::run(std::move(op)));
+    remoteOp_ = QtConcurrent::run(std::move(op));
+    opWatcher->setFuture(remoteOp_);
 }
 
 // Completion half of the toolbar fetch/pull/push wrapper: reads

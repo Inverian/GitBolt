@@ -17,7 +17,8 @@
 //   - the cherry-pick close race: a queued cherry-pick must neither
 //     crash nor emit once the repository it was queued for is gone
 //     (regression test for the raw-pointer capture UAF),
-//   - tag create / delete as the Commands menu drives them.
+//   - tag create / delete as the Commands menu drives them,
+//   - cancelRemoteOps(), which quitting during a fetch relies on.
 //
 // Signal delivery: workers emit from pool threads, and QSignalSpy
 // records those on the emitting thread, so the tests wait for worker
@@ -26,12 +27,15 @@
 //
 
 #include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 
+#include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
@@ -670,6 +674,66 @@ private slots:
         QVERIFY(!branch.isEmpty());
         QCOMPARE(output(origin.run({"rev-parse", "refs/heads/" + branch.toStdString()})),
                  output(work.run({"rev-parse", "HEAD"})));
+    }
+
+    // Quitting while a fetch, pull or push runs: MainWindow cancels the
+    // remote ops, then waits for its pool thread, which runs inside
+    // this service, before the service is destroyed. Against a server
+    // that never answers, that wait used to last until git's 2-minute
+    // timeout. The cancel must end the op promptly, take down git's
+    // whole process tree, and make a later op fail without starting git.
+    void cancelRemoteOpsStopsAStalledFetch() {
+#ifndef GITBOLT_TEST_STALL_TRANSPORT
+        QSKIP("StallTransport not built");
+#else
+        using gitbolt::test::processAlive;
+        using gitbolt::test::readStallPids;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"remote", "add", "origin",
+                                    gitbolt::test::StallTransportEnv::url()})));
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString pidFile = dir.filePath(QStringLiteral("stall.pid"));
+        gitbolt::test::StallTransportEnv env(pidFile);
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+
+        // On a pool thread, as MainWindow runs it. Joined on every exit
+        // path: the job references svc.
+        QFuture<void> fetch = QtConcurrent::run([&svc] { svc.fetch(); });
+        const auto join = qScopeGuard([&] {
+            svc.cancelRemoteOps();
+            fetch.waitForFinished();
+        });
+        QTRY_VERIFY_WITH_TIMEOUT(readStallPids(pidFile).stub > 0, 15000);
+        const qint64 stub = readStallPids(pidFile).stub;
+        QVERIFY(processAlive(stub));
+        QVERIFY(!fetch.isFinished());
+
+        QElapsedTimer timer;
+        timer.start();
+        svc.cancelRemoteOps();
+        QVERIFY(QTest::qWaitFor([&] { return fetch.isFinished(); }, 10000));
+        QVERIFY2(timer.elapsed() < 5000, qPrintable(QString::number(timer.elapsed())));
+        const QString cancelled = QStringLiteral("operationFailed(fetch: Cancelled)");
+        QVERIFY2(log.waitFor({cancelled}), qPrintable(log.join(QStringLiteral(", "))));
+        // git's grandchild, where ssh and git-remote-https live, went
+        // down with it.
+        QTRY_VERIFY_WITH_TIMEOUT(!processAlive(stub), 5000);
+
+        QVERIFY(QFile::remove(pidFile));
+        log.clear();
+        svc.fetch();
+        QVERIFY2(log.waitFor({cancelled}), qPrintable(log.join(QStringLiteral(", "))));
+        QTest::qWait(500);
+        QVERIFY(!QFileInfo::exists(pidFile));
+#endif
     }
 
     // commitChanges runs on the GUI thread and refreshes directly; the
