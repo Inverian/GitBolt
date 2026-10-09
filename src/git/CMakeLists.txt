@@ -62,14 +62,10 @@ add_library(gitbolt_git STATIC ${SOURCES})
 
 target_include_directories(gitbolt_git PUBLIC ${CMAKE_SOURCE_DIR}/src)
 
-# Link libgit2
-if(TARGET PkgConfig::LIBGIT2)
-    target_link_libraries(gitbolt_git PUBLIC PkgConfig::LIBGIT2)
-elseif(TARGET libgit2::git2)
-    target_link_libraries(gitbolt_git PUBLIC libgit2::git2)
-elseif(TARGET git2)
-    target_link_libraries(gitbolt_git PUBLIC git2)
-endif()
+# libgit2, system or bundled (cmake/Libgit2.cmake). First, so its
+# headers precede any other <git2.h> that later dependencies' include
+# dirs could bring (see src/app/CMakeLists.txt).
+target_link_libraries(gitbolt_git PUBLIC gitbolt_libgit2)
 
 target_link_libraries(gitbolt_git PUBLIC gitbolt_util)
 target_link_libraries(gitbolt_git PRIVATE Qt6::Core)

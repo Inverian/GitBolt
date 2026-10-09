@@ -7,13 +7,38 @@ cmake_minimum_required(VERSION 3.21)
 if(POLICY CMP0156)
     cmake_policy(SET CMP0156 NEW)
 endif()
+# The bundled libgit2 is a URL download: give extracted files the
+# extraction time, so a re-download always rebuilds what changed.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
+
+# Oldest macOS the app runs on. Unset, the binary targets the build
+# machine's SDK (macOS 26 on CI), whatever Info.plist says. 13.0 is the
+# minos of the Qt 6.10 frameworks CI ships (aqt), so nothing in the
+# bundle needs more; LSMinimumSystemVersion is generated from this same
+# variable (src/app/platform/macos/Info.plist.in). Must precede
+# project(), whose compiler checks use it. CMAKE_HOST_APPLE because
+# APPLE is only settled by project(). Empty counts as unset: it is what
+# build directories configured before this default have cached. A
+# MACOSX_DEPLOYMENT_TARGET environment variable still wins, as it does
+# for CMake's own default.
+if(CMAKE_HOST_APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(_gitbolt_macos_min "$ENV{MACOSX_DEPLOYMENT_TARGET}")
+    if(NOT _gitbolt_macos_min)
+        set(_gitbolt_macos_min 13.0)
+    endif()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET ${_gitbolt_macos_min} CACHE STRING
+        "Minimum macOS version (also the bundle's LSMinimumSystemVersion)" FORCE)
+endif()
 
 # vcpkg (Windows): also copy the DLLs our vcpkg deps need (git2.dll,
-# pcre.dll, z.dll today) next to the INSTALLED GitBolt.exe, i.e. into
-# CPack's NSIS staging tree; windeployqt deploys only Qt's own DLLs.
-# No effect without the vcpkg toolchain file. Must precede project(),
-# where the toolchain is loaded. An existing build dir keeps a cached
-# OFF from before until it is configured fresh.
+# pcre.dll, z.dll with vcpkg's libgit2) next to the INSTALLED
+# GitBolt.exe, i.e. into CPack's NSIS staging tree; windeployqt deploys
+# only Qt's own DLLs. No effect without the vcpkg toolchain file, and
+# nothing to copy with GITBOLT_BUNDLED_LIBGIT2 (static). Must precede
+# project(), where the toolchain is loaded. An existing build dir keeps
+# a cached OFF from before until it is configured fresh.
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
 project(GitBolt VERSION 0.9.0 LANGUAGES CXX)
@@ -42,6 +67,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(GITBOLT_BUILD_TESTS "Build tests" ON)
 option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
+option(GITBOLT_BUNDLED_LIBGIT2
+    "Build the pinned libgit2 from source and link it statically instead of using a system copy"
+    OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
@@ -55,27 +83,9 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg Network)
 qt_standard_project_setup()
 
-# Find libgit2
-find_package(PkgConfig QUIET)
-if(PkgConfig_FOUND)
-    pkg_check_modules(LIBGIT2 IMPORTED_TARGET libgit2)
-endif()
-
-if(NOT LIBGIT2_FOUND)
-    find_package(libgit2 QUIET)
-    if(NOT libgit2_FOUND)
-        include(FetchContent)
-        message(STATUS "libgit2 not found, fetching from source...")
-        FetchContent_Declare(libgit2
-            GIT_REPOSITORY https://github.com/libgit2/libgit2.git
-            GIT_TAG v1.8.4
-        )
-        set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-        set(BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(BUILD_CLI OFF CACHE BOOL "" FORCE)
-        FetchContent_MakeAvailable(libgit2)
-    endif()
-endif()
+# libgit2 -> the gitbolt_libgit2 target: a system copy, or the pinned
+# static build (GITBOLT_BUNDLED_LIBGIT2, or when there is no system one)
+include(Libgit2)
 
 # Source modules
 add_subdirectory(src)

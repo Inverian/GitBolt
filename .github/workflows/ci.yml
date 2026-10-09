@@ -100,8 +100,8 @@ jobs:
           $before = @{}
           Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
 
-          # -Arch/-HostArch default to x86; Qt (msvc2022_64) and vcpkg's
-          # x64-windows libgit2 need the x64-hosted, x64-targeting tools.
+          # -Arch/-HostArch default to x86; Qt (msvc2022_64) and the
+          # libgit2 we build need the x64-hosted, x64-targeting tools.
           & (Join-Path $vs 'Common7\Tools\Launch-VsDevShell.ps1') `
               -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           $cl = (Get-Command cl.exe -CommandType Application -TotalCount 1 -ErrorAction SilentlyContinue).Source
@@ -113,16 +113,13 @@ jobs:
           # replaces the job's Path); the runner re-prepends earlier
           # GITHUB_PATH entries (Qt) on every later step. VCPKG_ROOT is
           # skipped: the dev shell points it at VS's bundled vcpkg, not
-          # the image's C:\vcpkg that `vcpkg install` and the toolchain use.
+          # the image's C:\vcpkg (unused now; libgit2 is built from source).
           Get-ChildItem env: |
             Where-Object { $_.Name -ne 'VCPKG_ROOT' -and $before[$_.Name] -cne $_.Value } |
             ForEach-Object { "$($_.Name)=$($_.Value)" } |
             Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
-      - name: Install libgit2 (macOS)
-        if: runner.os == 'macOS'
-        run: brew install libgit2 pkg-config
-
+      # Linux only: macOS and Windows build libgit2 from source (below).
       # libgl1-mesa-dev: Qt6::Gui links OpenGL on Linux, and the aqt
       # Qt binaries expect the system GL headers/libs at link time.
       - name: Install libgit2 (Ubuntu)
@@ -130,23 +127,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libgit2-dev pkg-config libgl1-mesa-dev
-      - name: Install libgit2 (Windows)
-        if: runner.os == 'Windows'
-        run: vcpkg install libgit2:x64-windows pkgconf:x64-windows
 
       # ------------------------------------------------------------------
-      # Configure, build, test. Ninja on every platform; on Windows the
-      # vcpkg toolchain file lets CMake find libgit2.
+      # Configure, build, test. Ninja on every platform. macOS and Windows
+      # use GITBOLT_BUNDLED_LIBGIT2: the pinned libgit2 release
+      # (cmake/Libgit2.cmake), linked statically. Homebrew's bottles need
+      # the runner's macOS (26), and vcpkg's would add DLLs to the
+      # installer. Linux keeps Ubuntu's libgit2-dev, which the DEB then
+      # depends on.
       # ------------------------------------------------------------------
-      - name: Configure (Unix)
-        if: runner.os != 'Windows'
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
-
-      - name: Configure (Windows)
-        if: runner.os == 'Windows'
-        # Quoted: PowerShell passes `$env:...` through literally in an
-        # unquoted argument that starts with `-`.
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=${{ runner.os == 'Linux' && 'OFF' || 'ON' }}
 
       - name: Build
         run: cmake --build build --parallel
@@ -204,10 +195,12 @@ jobs:
 
       # ---- macOS: DMG ------------------------------------------------
       # During CPack's staging install, qt_generate_deploy_app_script runs
-      # macdeployqt (Qt plus Homebrew's libgit2 & co into the bundle), then
-      # an install(CODE) rule in src/app/CMakeLists.txt re-signs the bundle
-      # ad-hoc and verifies it: Qt 6.10's macdeployqt strips and renames
-      # without re-signing, which Gatekeeper reports as "damaged".
+      # macdeployqt (Qt into the bundle; libgit2 is linked statically),
+      # then src/app/platform/macos/FinalizeBundle.cmake deletes LC_RPATHs
+      # that point outside the bundle, fails on libraries that aren't in
+      # it, and re-signs ad hoc and verifies: Qt 6.10's macdeployqt strips
+      # and renames without re-signing, which Gatekeeper reports as
+      # "damaged".
       # hdiutil fails intermittently with "Resource busy" on hosted macOS
       # runners (actions/runner-images#7522), so retry the whole cpack run,
       # which re-stages from scratch.
@@ -260,37 +253,92 @@ jobs:
           #    is what Gatekeeper shows as "GitBolt is damaged".
           codesign --verify --deep --strict "$app" || err "codesign --verify failed"
 
-          # 2) No dependency/LC_RPATH load command may point at the build
-          #    host (Homebrew, the aqt Qt under /Users/runner, /usr/local).
-          #    Warn (not fail) when an image needs a newer macOS than
-          #    Info.plist claims: Homebrew bottles target the runner's macOS.
+          # 2) Every Mach-O: no dependency or LC_RPATH naming the build host
+          #    (Homebrew, the aqt Qt under /Users/runner, /usr/local), no
+          #    LC_RPATH resolving outside the bundle (dyld would search it
+          #    for @rpath libraries, e.g. a Homebrew prefix), every (non-
+          #    weak) @rpath/@loader_path/@executable_path dependency found
+          #    in the bundle as dyld would (@rpath: the image's LC_RPATHs,
+          #    then GitBolt's), and no image needing a newer macOS than
+          #    LSMinimumSystemVersion. GitBolt's own minos must equal it:
+          #    both are CMAKE_OSX_DEPLOYMENT_TARGET.
           min=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
+          echo "LSMinimumSystemVersion $min"
+          # $1 with @loader_path (the directory of $2) and @executable_path
+          # expanded, normalized
+          expand_path() {
+            local p
+            case $1 in
+              @loader_path*)     p=$(dirname "$2")${1#@loader_path} ;;
+              @executable_path*) p=$app/Contents/MacOS${1#@executable_path} ;;
+              *)                 p=$1 ;;
+            esac
+            python3 -c 'import os, sys; print(os.path.normpath(sys.argv[1]))' "$p"
+          }
+          rpaths_of() { awk '/cmd LC_RPATH$/ {r=1} r && $1=="path" {print $2; r=0}'; }
+          exe_dirs=$(otool -l "$app/Contents/MacOS/GitBolt" | rpaths_of |
+                     while IFS= read -r rp; do expand_path "$rp" "$app/Contents/MacOS/GitBolt"; done)
           newer=()
           while IFS= read -r -d '' f; do
             file -b "$f" | grep -q '^Mach-O' || continue
             rel=${f#"$mnt"/}
             lc=$(otool -l "$f")
+            rpaths=$(rpaths_of <<<"$lc")
             refs=$(awk '/cmd LC_(LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/ {d=1}
-                        d && $1=="name" {print $2; d=0}
-                        /cmd LC_RPATH$/ {r=1}
-                        r && $1=="path" {print $2; r=0}' <<<"$lc")
-            if bad=$(grep -E '^/(opt/homebrew|usr/local|Users)/' <<<"$refs"); then
+                        d && $1=="name" {print $2; d=0}' <<<"$lc")
+            strong=$(awk '/cmd LC_(LOAD|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/ {d=1}
+                          d && $1=="name" {print $2; d=0}' <<<"$lc" | sort -u)
+            if bad=$(printf '%s\n%s\n' "$refs" "$rpaths" | grep -E '^/(opt/homebrew|usr/local|Users)/'); then
               err "$rel references build-host path(s): $(tr '\n' ' ' <<<"$bad")"
             fi
+            dirs=$exe_dirs
+            while IFS= read -r rp; do
+              [ -n "$rp" ] || continue
+              abs=$(expand_path "$rp" "$f")
+              case $abs/ in
+                "$app"/*) dirs=$abs$'\n'$dirs ;;
+                *) err "$rel: LC_RPATH $rp resolves outside the bundle" ;;
+              esac
+            done <<<"$(sort -u <<<"$rpaths")"
+            while IFS= read -r ref; do
+              case $ref in   # absolute ones: the OS's, or reported above
+                @rpath/*)
+                  found=
+                  while IFS= read -r d; do
+                    if [ -n "$d" ] && [ -e "$d/${ref#@rpath/}" ]; then found=1; break; fi
+                  done <<<"$dirs"
+                  [ -n "$found" ] || err "$rel: $ref is not in the bundle" ;;
+                @loader_path/*|@executable_path/*)
+                  [ -e "$(expand_path "$ref" "$f")" ] || err "$rel: $ref is not in the bundle" ;;
+              esac
+            done <<<"$strong"
             m=$(awk '/cmd LC_BUILD_VERSION$/ {b=1} b && $1=="minos" {print $2; exit}' <<<"$lc")
             if [ -n "$m" ] && [ "$(printf '%s\n%s\n' "$min" "$m" | sort -V | tail -n1)" != "$min" ]; then
               newer+=("$m  $rel")
             fi
           done < <(find "$app/Contents" -type f -print0)
           if [ ${#newer[@]} -gt 0 ]; then
-            echo "::warning::${#newer[@]} Mach-O files need a newer macOS than LSMinimumSystemVersion $min (highest: $(printf '%s\n' "${newer[@]}" | sort -V | tail -n1))"
+            err "${#newer[@]} Mach-O files need a newer macOS than LSMinimumSystemVersion $min"
             printf '  minos %s\n' "${newer[@]}" | sort -V
           fi
-          deps=$(otool -L "$app/Contents/MacOS/GitBolt")
-          grep -Eq '(@executable_path/\.\./Frameworks|@rpath)/libgit2\.' <<<"$deps" \
-            || err "libgit2 is not loaded from inside the bundle"
+          own=$(otool -l "$app/Contents/MacOS/GitBolt" | awk '/cmd LC_BUILD_VERSION$/ {b=1} b && $1=="minos" {print $2; exit}')
+          [ "$own" = "$min" ] || err "GitBolt's minos is '$own' but LSMinimumSystemVersion is '$min'"
 
-          # 3) Exec from the mounted image. --version exits 0 only after dyld
+          # 3) libgit2 is linked in statically (GITBOLT_BUNDLED_LIBGIT2): no
+          #    libgit2 or libssh2 dylib loaded or shipped, and GitBolt itself
+          #    loads Security.framework, which only the static libgit2's
+          #    SecureTransport backend needs (with a libgit2 dylib it
+          #    doesn't). test_libgit2_features checked its version and
+          #    backends.
+          deps=$(otool -L "$app/Contents/MacOS/GitBolt" | tail -n +2)   # line 1: the file itself
+          if grep -Eq '/lib(git2|ssh2)[.]' <<<"$deps"; then err "GitBolt loads a libgit2/libssh2 dylib"; fi
+          if shipped=$(find "$app" \( -name 'libgit2*' -o -name 'libssh2*' \) | grep .); then
+            err "the bundle ships $(tr '\n' ' ' <<<"$shipped")"
+          fi
+          grep -q '/Security\.framework/' <<<"$deps" \
+            || err "GitBolt doesn't load Security.framework: no static libgit2 with SecureTransport?"
+
+          # 4) Exec from the mounted image. --version exits 0 only after dyld
           #    loaded every linked image, git_libgit2_init() ran and
           #    QApplication loaded the bundled cocoa plugin.
           if out=$(GITBOLT_INSTANCE_NAME="ci-smoke-$$" "$app/Contents/MacOS/GitBolt" --version 2>&1); then
@@ -343,10 +391,9 @@ jobs:
           Add-Content -Path $env:GITHUB_PATH -Value $nsis
 
       # Qt DLLs/plugins reach the payload via windeployqt (install-time
-      # deploy script), vcpkg's git2/pcre/z DLLs via
-      # X_VCPKG_APPLOCAL_DEPS_INSTALL, the MSVC runtime via
-      # InstallRequiredSystemLibraries -- all inside cpack's own staging
-      # install. cmake/cpack printed so an image change is visible.
+      # deploy script), the MSVC runtime via InstallRequiredSystemLibraries
+      # -- both inside cpack's own staging install; libgit2 is linked into
+      # GitBolt.exe. cmake/cpack printed so an image change is visible.
       - name: Package NSIS (Windows)
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         working-directory: build
@@ -407,12 +454,30 @@ jobs:
               $bad += "$($pe.FullName.Substring($dest.Length + 1)) imports $dep, which is not in bin\"
             }
           }
+
+          # 3) libgit2 is linked in statically (GITBOLT_BUNDLED_LIBGIT2): no
+          #    DLL of a libgit2 build (git2, libssh2, pcre, zlib, http_parser,
+          #    as vcpkg's put in bin\), and GitBolt.exe itself imports
+          #    WINHTTP.dll, which only the static libgit2's HTTPS backend uses
+          #    (with git2.dll, that DLL imports it instead).
+          #    test_libgit2_features checked its version and backends.
+          $exeDeps = dumpbin /nologo /dependents (Join-Path $bin 'GitBolt.exe') |
+                     Select-String '^\s+(\S+\.dll)\s*$' |
+                     ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($exeDeps -notcontains 'WINHTTP.dll') {
+            $bad += 'GitBolt.exe does not import WINHTTP.dll: no static libgit2 with WinHTTP?'
+          }
+          foreach ($dll in Get-ChildItem $bin -Filter *.dll) {
+            if ($dll.Name -match '^(lib)?(git2|ssh2|pcre2?|zlib1?|z|http_parser)(-\d+)?\.dll$') {
+              $bad += "bin\$($dll.Name) belongs to a libgit2 DLL build, not the static one"
+            }
+          }
           if ($bad) {
             Get-ChildItem $dest -Recurse -File | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }
-            throw "NSIS payload is incomplete:`n$($bad -join "`n")"
+            throw "NSIS payload check failed:`n$($bad -join "`n")"
           }
 
-          # 3) Launch the INSTALLED exe with PATH = System32 only and no Qt
+          # 4) Launch the INSTALLED exe with PATH = System32 only and no Qt
           #    env vars (install-qt-action put Qt\bin on PATH and exported
           #    QT_PLUGIN_PATH/QML2_IMPORT_PATH). --version exits after
           #    QApplication (loads qwindows.dll) and git_libgit2_init,

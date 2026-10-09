@@ -62,14 +62,16 @@ target_link_libraries(gitbolt PRIVATE
     Qt6::Network
 )
 
-# libgit2 for git_libgit2_init / git_libgit2_shutdown in main
-if(TARGET PkgConfig::LIBGIT2)
-    target_link_libraries(gitbolt PRIVATE PkgConfig::LIBGIT2)
-elseif(TARGET libgit2::git2)
-    target_link_libraries(gitbolt PRIVATE libgit2::git2)
-elseif(TARGET git2)
-    target_link_libraries(gitbolt PRIVATE git2)
-endif()
+# libgit2 for git_libgit2_init / git_libgit2_shutdown in main, with its
+# headers first on the include path: qt_add_executable() linked
+# Qt6::Core before everything above, and Homebrew Qt's include dirs
+# contain /opt/homebrew/include, where an installed Homebrew libgit2 has
+# its own <git2.h>. A bundled build must not compile main.cpp against
+# that one. (gitbolt_git and the tests list libgit2 first, which is
+# enough there.)
+target_link_libraries(gitbolt PRIVATE gitbolt_libgit2)
+target_include_directories(gitbolt SYSTEM BEFORE PRIVATE
+    $<TARGET_PROPERTY:gitbolt_libgit2,INTERFACE_INCLUDE_DIRECTORIES>)
 
 set_target_properties(gitbolt PROPERTIES
     MACOSX_BUNDLE TRUE
@@ -86,6 +88,8 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(APPLE)
+    # Info.plist.in fills in LSMinimumSystemVersion from
+    # CMAKE_OSX_DEPLOYMENT_TARGET (see the root CMakeLists.txt).
     set_target_properties(gitbolt PROPERTIES
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.gitbolt.app"
         MACOSX_BUNDLE_BUNDLE_NAME "GitBolt"
@@ -165,24 +169,17 @@ qt_deploy_runtime_dependencies(
             DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME gitbolt)
 endif()
 
-# macdeployqt strips every framework and dylib it copies into the bundle
-# (Qt, plus Homebrew's libgit2 and its deps) and rewrites their install
-# names, which invalidates their signatures. Qt 6.10's macdeployqt does
-# not re-sign (ad-hoc signing became its default only in 6.11,
-# QTBUG-138019), so the bundle fails `codesign --verify` and Gatekeeper
-# calls a downloaded copy "damaged". Re-sign ad-hoc after the deploy
-# script; this also runs inside CPack's staging install, so it is what
-# the DMG ships. Fail the install if the result doesn't verify.
+# After the deploy script: delete LC_RPATHs that point outside the
+# bundle, fail on libraries that dyld wouldn't find inside it, warn
+# about images newer than the deployment target, then re-sign ad hoc
+# and verify
+# (platform/macos/FinalizeBundle.cmake says why each is needed). Also
+# runs inside CPack's staging install, so it is what the DMG ships.
 # "GitBolt.app" = OUTPUT_NAME above, installed to BUNDLE DESTINATION ".".
 if(APPLE)
-    install(CODE [[
-        set(_gitbolt_app "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/GitBolt.app")
-        message(STATUS "Ad-hoc signing ${_gitbolt_app}")
-        execute_process(
-            COMMAND codesign --force --deep --sign - "${_gitbolt_app}"
-            COMMAND_ERROR_IS_FATAL ANY)
-        execute_process(
-            COMMAND codesign --verify --deep --strict "${_gitbolt_app}"
-            COMMAND_ERROR_IS_FATAL ANY)
-    ]])
+    install(CODE "
+        set(GITBOLT_APP \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/GitBolt.app\")
+        set(GITBOLT_MIN_MACOS \"${CMAKE_OSX_DEPLOYMENT_TARGET}\")
+    ")
+    install(SCRIPT platform/macos/FinalizeBundle.cmake)
 endif()

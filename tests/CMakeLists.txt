@@ -52,6 +52,14 @@ add_dependencies(test_clone gitbolt_stall_transport)
 target_compile_definitions(test_clone PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
+# The linked libgit2 is thread-safe (and logs its version and backends);
+# the bundled build is also checked against its pin (cmake/Libgit2.cmake)
+gitbolt_add_test(test_libgit2_features git/TestLibgit2Features.cpp)
+if(GITBOLT_LIBGIT2_PROVIDER STREQUAL "bundled")
+    target_compile_definitions(test_libgit2_features PRIVATE
+        GITBOLT_BUNDLED_LIBGIT2_VERSION="${GITBOLT_LIBGIT2_VERSION}")
+endif()
+
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
 

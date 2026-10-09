@@ -156,7 +156,7 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 | Decision | Rationale |
 |----------|-----------|
 | **Qt 6 + C++20** | Maximum native performance, mature widget system, hardware-accelerated rendering |
-| **libgit2 primary, git CLI fallback** | libgit2 for hot path (log, diff, blame, status); CLI for every network operation (clone, fetch, pull, push — the user's credential helpers and ssh setup apply), interactive rebase, git-flow |
+| **libgit2 primary, git CLI fallback** | libgit2 for local repository access, including the hot path (log, diff, blame, status); the CLI for network operations (clone, fetch, pull, push, with git's own SSH and credential setup), interactive rebase, git-flow |
 | **Headers and sources together** | Qt convention; matches Gittyup, KeePassXC, FreeCAD |
 | **PascalCase filenames** | Qt convention (`QMainWindow.h` style) |
 | **Background threading via QtConcurrent** | All git ops run on worker threads with QFutureWatcher signals back to UI |
@@ -185,11 +185,16 @@ Required tools at a glance:
 | C++ compiler | C++20 (Apple Clang 14+, GCC 11+, MSVC 19.30+) |
 | CMake | 3.21 |
 | Qt | 6.5 (6.9.2 on macOS) |
-| libgit2 | 1.7 |
+| libgit2 | 1.7, or none: `-DGITBOLT_BUNDLED_LIBGIT2=ON` builds the pinned 1.9.7 |
 
 On macOS with a current Xcode SDK, Qt before 6.9.2 fails to link: its CMake
 package still requests the AGL framework, which the SDK no longer ships.
-CI builds with Qt 6.10 on all three platforms and libgit2 1.7 on Linux.
+CI builds with Qt 6.10 on all three platforms and libgit2 1.7 on Linux; on
+macOS and Windows it builds libgit2 1.9.7 from source and links it
+statically. libgit2 only accesses local repositories: network operations
+run the `git` CLI, with git's own SSH and credential configuration. The
+macOS app runs on macOS 13 (Ventura) or later, the oldest release Qt 6.10
+supports.
 
 See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on your platform, configure CMake, run the tests, build installers, and troubleshoot common issues.
 

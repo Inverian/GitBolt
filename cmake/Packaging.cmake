@@ -50,9 +50,10 @@ elseif(WIN32)
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\GitBolt.exe")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/ThePieMonster/GitBolt")
     set(CPACK_NSIS_HELP_LINK "https://github.com/ThePieMonster/GitBolt/issues")
-    # Not ON: bin\ holds Qt6*.dll, z.dll, pcre.dll and the MSVC runtime,
-    # which on the system PATH could shadow other programs' DLLs, and a
-    # GUI app gains nothing from being on PATH.
+    # Not ON: bin\ holds Qt6*.dll and the MSVC runtime (plus vcpkg's
+    # git2/pcre/z DLLs in a build against vcpkg's libgit2), which on the
+    # system PATH could shadow other programs' DLLs, and a GUI app gains
+    # nothing from being on PATH.
     set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
 

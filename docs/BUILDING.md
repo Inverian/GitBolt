@@ -30,8 +30,8 @@ The Mac and Windows instructions are intentionally kept as parallel as possible.
 | C++ compiler | C++20 (Apple Clang 14+ / MSVC 19.30+) | Xcode Command Line Tools | Visual Studio 2022 |
 | CMake | 3.21 | Homebrew | Visual Studio installer or [cmake.org](https://cmake.org/download/) |
 | Qt | 6.5 (6.9.2 on macOS; see note) | Homebrew (`qt`) | [Qt Online Installer](https://www.qt.io/download-qt-installer) |
-| libgit2 | 1.7 | Homebrew | vcpkg |
-| pkg-config / pkgconf | any recent | Homebrew | vcpkg |
+| libgit2 | 1.7 (optional: [bundled libgit2](#bundled-libgit2)) | Homebrew | vcpkg |
+| pkg-config / pkgconf | any recent (only to find a system libgit2) | Homebrew | vcpkg |
 
 > **Qt on macOS:** with a current Xcode SDK, Qt before 6.9.2 fails to link
 > (`ld: framework 'AGL' not found`) because its CMake package still requests
@@ -49,6 +49,8 @@ A working install on either platform takes **10–20 minutes** including downloa
 ## macOS — Step by step
 
 These instructions are tested on **macOS 14 (Sonoma) and macOS 15 (Sequoia)** on both Apple Silicon and Intel.
+
+What you build targets **macOS 13 (Ventura)** or later: `CMAKE_OSX_DEPLOYMENT_TARGET` defaults to `13.0`, the oldest macOS supported by the Qt 6.10 that release builds ship with, and the app's `LSMinimumSystemVersion` is generated from it. Homebrew's own bottles (Qt, libgit2) are built for newer macOS releases, so a DMG you package against them only runs on macOS versions as new as theirs; `cpack` warns when that happens (see [Build options](#build-options)).
 
 ### 1. Install Xcode Command Line Tools
 
@@ -220,6 +222,8 @@ Verify:
 .\vcpkg list libgit2  REM Should show libgit2:x64-windows installed
 ```
 
+> **Or skip this step:** configure with `-DGITBOLT_BUNDLED_LIBGIT2=ON` instead, which builds the pinned libgit2 from source and links it statically, as CI and the installers do (see [Bundled libgit2](#bundled-libgit2)). Then neither vcpkg nor pkgconf is needed.
+
 ### 4. Configure environment variables
 
 So CMake can find both Qt and vcpkg, set these environment variables. Open **Settings → System → About → Advanced system settings → Environment Variables**, and add user variables:
@@ -276,6 +280,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja
 CMake will print a summary of what it found. Look for:
 
 - `Checking for module 'libgit2'` followed by `Found libgit2, version 1.x.x` — libgit2 was discovered via pkg-config
+- `libgit2: system (pkg-config)` — or `libgit2: bundled 1.9.7 (static)` with [the bundled libgit2](#bundled-libgit2), whose own configure output is prefixed `[libgit2]`
 - `Configuring done`
 - `Generating done`
 - `Build files have been written to: <path>/build`
@@ -351,10 +356,13 @@ ctest --test-dir build --output-on-failure
 ```
 
 Each suite is its own executable (`test_repository`, `test_revwalk`,
-`test_diff`, `test_status`, `test_commit_log_model`,
-`test_git_service`, `test_changelog`, and the Windows terminal's
-`test_conpty_process` and `test_terminal_widget`, which skip on other
-platforms). To run one directly with verbose output:
+`test_diff`, `test_status`, `test_clone`, `test_libgit2_features`,
+`test_commit_log_model`, `test_branch_model`, `test_git_service`,
+`test_changelog`, and the Windows terminal's `test_conpty_process` and
+`test_terminal_widget`, which skip on other platforms).
+`test_libgit2_features` checks that the linked libgit2 is thread-safe,
+the one feature GitBolt needs from it, and prints its version and
+backends. To run one directly with verbose output:
 
 ```bash
 ./build/tests/test_git_service
@@ -370,13 +378,41 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 |---|---|---|
 | `GITBOLT_BUILD_TESTS` | `ON` | Build the unit test executables |
 | `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
+| `GITBOLT_BUNDLED_LIBGIT2` | `OFF` | Build the pinned libgit2 from source and link it statically instead of using a system copy (see below). Used automatically when no system libgit2 is found |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
+| `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
 
 Example — debug build with sanitizers:
 
 ```bash
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_SANITIZERS=ON -G Ninja
 cmake --build build-asan --parallel
+```
+
+### Bundled libgit2
+
+With `-DGITBOLT_BUNDLED_LIBGIT2=ON`, CMake downloads the libgit2 release
+pinned in [`cmake/Libgit2.cmake`](../cmake/Libgit2.cmake) (1.9.7, checked
+against its SHA-256) at configure time, builds it as part of the project
+and links it statically into GitBolt, so there is no libgit2 library to
+install or ship. It is what CI and the macOS and Windows installers use;
+the Linux packages keep the distribution's libgit2.
+
+- GitBolt uses libgit2 only for local repository access. Clone, fetch,
+  pull and push run the `git` CLI, so git's own SSH and credential
+  configuration applies to them (`~/.ssh/config`, `core.sshCommand`,
+  credential helpers). The bundled libgit2 is therefore built without
+  an SSH transport; HTTPS stays, on the operating system's TLS stack
+  (SecureTransport on macOS, WinHTTP on Windows), so there is no
+  OpenSSL to build or ship.
+- Configuring needs network access once per build directory. Offline,
+  unpack the release elsewhere and pass
+  `-DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<that directory>`.
+- On Windows it needs neither vcpkg nor pkgconf.
+
+```bash
+cmake -B build-bundled -DCMAKE_BUILD_TYPE=Release -DGITBOLT_BUNDLED_LIBGIT2=ON -G Ninja
+cmake --build build-bundled --parallel
 ```
 
 ---
@@ -412,9 +448,9 @@ CMake can't locate the Qt installation.
 - **macOS:** Make sure `CMAKE_PREFIX_PATH=/opt/homebrew/opt/qt` is set (or `/usr/local/opt/qt` on Intel). Run `brew --prefix qt` to find the exact path on your system.
 - **Windows:** Make sure `CMAKE_PREFIX_PATH` points to the directory containing `Qt6Config.cmake`, typically `C:\Qt\<version>\msvc2019_64`.
 
-### "Could NOT find PkgConfig" or "libgit2 not found"
+### "No system libgit2 found; using the bundled one"
 
-CMake can't locate libgit2.
+CMake found no libgit2 of your own, so it builds [the bundled one](#bundled-libgit2), which needs network access at configure time. That works fine; if you meant to use an installed libgit2:
 
 - **macOS:** Confirm `brew list libgit2` lists the package. Reinstall with `brew reinstall libgit2 pkg-config` if needed. Note that on recent Homebrew versions the package is `pkgconf` (a drop-in replacement for `pkg-config`); both work.
 - **Windows:** Confirm `vcpkg list libgit2` shows it installed. Make sure `-DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake` was passed at configure time, or that `VCPKG_ROOT` is set as an environment variable.
