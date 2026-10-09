@@ -4,6 +4,67 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.1] — 2026-10-09
+
+Fixes from the first weeks after 0.9.0: rebasing, tags, cloning,
+starting and quitting, a thread race, the Windows terminal, and
+installers that run on the macOS versions they claim.
+
+### Added
+
+- **Windows terminal**: the built-in terminal (Tools → Git bash, the
+  Console tab) now runs cmd.exe under ConPTY instead of showing "not
+  available yet". Multi-line paste runs each line, and a flood of
+  output stays responsive.
+- **Open a clone whose checkout failed**: when git fetches everything
+  but can't check the files out, the repository is kept and the Clone
+  dialog offers to open it.
+
+### Fixed
+
+- **Rebase** (Commands → Rebase) never rebased: git rejected every
+  plan, and GitBolt said "Rebase complete." It now runs the plan in
+  the order the dialog shows, keeps git's error on the status bar
+  when a step fails, and offers the conflict resolver when a commit
+  conflicts. Continue, Skip and Abort report failures too, and
+  Continue no longer waits on a text editor GitBolt can't show.
+- **Quitting during a fetch, pull or push** stops git and exits.
+  GitBolt used to stay running without a window until the operation
+  ended (up to two minutes on a stalled network) and could then
+  crash.
+- **Delete tag** failed for every tag, and the picker and sidebar
+  showed `refs/tags/…` names.
+- **Create tag** failed for its default (branch) target, and "push
+  after create" failed when a branch had the same name as the tag.
+- **Clone** now runs the git CLI, like push, pull and fetch: SSH
+  clones work on Windows, credential helpers (Keychain, Git Credential
+  Manager) and your SSH config apply, and errors show git's own
+  message. Cancel stops git and everything it started.
+- **Clone into a folder holding only hidden files** (e.g. `.env`) no
+  longer deletes the folder when the clone fails.
+- **Launching GitBolt** no longer fails with "another instance is
+  running" after a crash or many `--version` runs. A second launch
+  while GitBolt is busy now hands over quietly instead of claiming it
+  is not responding.
+- **Background refreshes** after fetch, pull, push, rebase and
+  cherry-pick ran on the wrong thread, a data race that could crash.
+- **macOS**: the app claimed macOS 12 while its binaries were built
+  for macOS 26. It now targets macOS 13, the minimum of the Qt it
+  ships, and the binaries and the declared minimum always agree.
+- **Help → Changelog** showed an old copy; it now shows this file.
+
+### Changed
+
+- libgit2 1.9.7 is built into the macOS and Windows apps (static), so
+  the installers carry no libgit2, pcre or zlib libraries. GitBolt
+  uses libgit2 only for local repository access; every network
+  operation goes through the git CLI.
+- GitBolt never opens a text editor for git: a git command that
+  would ask for one keeps the message git prepared.
+- CI: the build inputs are pinned (Qt, the Qt installer action, the
+  AppImage tools and runtime, NSIS, the test image), Windows test
+  output is no longer lost, and a flaky Windows test is fixed.
+
 ## [0.9.0] — 2026-09-24
 
 First published release, a beta: the June 2026 feature batch, a

@@ -202,7 +202,7 @@ See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on you
 
 ## Project Status
 
-GitBolt **0.9.0** is a beta: every planned module is implemented and
+GitBolt **0.9.1** is a beta: every planned module is implemented and
 wired into the UI, and CI builds and tests it on macOS, Linux, and Windows.
 See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
 
