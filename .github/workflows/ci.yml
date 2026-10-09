@@ -176,7 +176,7 @@ jobs:
             $exe = Get-ChildItem build/tests -File |
                    Where-Object { $_.BaseName -eq $name -and $_.Extension -in '.exe', '' } |
                    Select-Object -First 1
-            if (-not $exe) { Write-Host "== $name: not a test binary (see ctest output above)"; continue }
+            if (-not $exe) { Write-Host "== ${name}: not a test binary (see ctest output above)"; continue }
             Write-Host "== $name -v2"
             $out = Join-Path $env:RUNNER_TEMP "$name.out"; $err = Join-Path $env:RUNNER_TEMP "$name.err"
             $p = Start-Process -FilePath $exe.FullName -ArgumentList '-v2' -WorkingDirectory $exe.DirectoryName `
