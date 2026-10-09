@@ -63,9 +63,10 @@ char** hostEnviron() { return environ; }
 
 constexpr int kMaxScrollback = 5000;
 
-// Text <-> the bytes the shell's terminal speaks. ConPTY speaks UTF-8
+// Text -> the bytes the shell's terminal speaks. ConPTY speaks UTF-8
 // whatever the ANSI code page, and the ANSI code page is what Qt's
-// "local 8-bit" means on Windows; on Unix it means UTF-8 already.
+// "local 8-bit" means on Windows; on Unix it means UTF-8 already. (The
+// other way is decoder_, UTF-8 on both.)
 QByteArray toTerminalBytes(const QString& text)
 {
 #ifdef Q_OS_WIN
@@ -75,13 +76,24 @@ QByteArray toTerminalBytes(const QString& text)
 #endif
 }
 
-QString fromTerminalBytes(const QByteArray& bytes)
+// What appendOutput draws as text: everything but the C0 controls,
+// though a tab is text too.
+bool isText(QChar c)
 {
-#ifdef Q_OS_WIN
-    return QString::fromUtf8(bytes);
-#else
-    return QString::fromLocal8Bit(bytes);
-#endif
+    return c.unicode() >= 0x20 || c == QLatin1Char('\t');
+}
+
+// Write `run` at the cursor the way a terminal does: it replaces a
+// character under the cursor for each of its own, a whole one (a
+// surrogate pair, a letter with its combining marks), and past the
+// end of the line it extends it. One insertion however long the run,
+// where a deleteChar() and an insertText() per character made big
+// outputs crawl.
+void overwrite(QTextCursor& cur, QStringView run)
+{
+    for (qsizetype k = 0; k < run.size() && !cur.atBlockEnd(); ++k)
+        cur.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+    cur.insertText(run.toString());
 }
 
 #ifdef Q_OS_WIN
@@ -354,6 +366,7 @@ void TerminalWidget::stopShell()
     }
     writeQueue_.clear();
     pendingOutput_.clear();
+    decoder_.resetState();
 #ifdef Q_OS_WIN
     if (conpty_) {
         // Returns at once: ConPtyProcess finishes the hang-up on its
@@ -547,7 +560,8 @@ void TerminalWidget::onPtyReadable()
 //     replaces the char that was at column N; it does NOT push
 //     it right). Without this, ZLE's in-place redraws would
 //     continually grow the document instead of updating a single
-//     line in place.
+//     line in place. A run of them, up to the next control
+//     character, is written in one go (see overwrite()).
 //
 // Everything else we don't understand (SGR colors, cursor
 // position queries, application-mode escapes, DEC private mode
@@ -557,16 +571,15 @@ void TerminalWidget::onPtyReadable()
 // and fullscreen-TUI support (vim/htop) remain follow-up work.
 void TerminalWidget::appendOutput(const QByteArray& bytes)
 {
-    // Re-attach the tail of any escape sequence the previous read
-    // chopped mid-sequence (see pendingOutput_).
-    QByteArray chunk;
+    // Decode (the decoder keeps a character the read cut in two for
+    // the next call, see decoder_), then re-attach the tail of any
+    // escape sequence the previous read chopped mid-sequence (see
+    // pendingOutput_).
+    QString text = decoder_.decode(bytes);
     if (!pendingOutput_.isEmpty()) {
-        chunk = pendingOutput_ + bytes;
+        text.prepend(pendingOutput_);
         pendingOutput_.clear();
-    } else {
-        chunk = bytes;
     }
-    QString text = fromTerminalBytes(chunk);
 
     // Pre-strip OSC (terminal title / OSC-8 hyperlinks) and BEL —
     // neither affects visible layout and they have well-defined
@@ -610,6 +623,12 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
     cur.movePosition(QTextCursor::End);
 #endif
 
+    // The whole read is one edit: the document lays out the lines it
+    // changed and trims the scrollback once, at the end, rather than
+    // after every run of text and every line feed.
+    QTextCursor edit(document());
+    edit.beginEditBlock();
+
     const int n = static_cast<int>(text.length());
     int i = 0;
     while (i < n) {
@@ -644,7 +663,7 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 // Chunk ended ON the ESC — hold it for the next
                 // read instead of dropping it (the rest of the
                 // sequence is in flight).
-                pendingOutput_ = text.mid(i).toUtf8();
+                pendingOutput_ = text.mid(i);
                 break;
             }
             const ushort next = text[i + 1].unicode();
@@ -680,10 +699,8 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 if (!handled) {
                     // Unterminated CSI — its final byte is in the
                     // next chunk. Park everything from the ESC and
-                    // resume when it arrives. (Params/intermediates
-                    // are pure ASCII, so the UTF-8 round-trip is
-                    // lossless.)
-                    pendingOutput_ = text.mid(i).toUtf8();
+                    // resume when it arrives.
+                    pendingOutput_ = text.mid(i);
                     i = n;
                 }
                 continue;
@@ -694,7 +711,7 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 // terminator is in the next chunk: conhost retitles the
                 // window on every command, so this does happen. Park
                 // it like an unterminated CSI.
-                pendingOutput_ = text.mid(i).toUtf8();
+                pendingOutput_ = text.mid(i);
                 break;
             }
 #endif
@@ -702,31 +719,39 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
             i += 2;
             continue;
         }
-        if (u < 0x20 && u != '\t') {
+        if (!isText(text[i])) {
             // Other C0 control chars — drop silently.
             ++i;
             continue;
         }
 
-        // Printable char: OVERWRITE the character at the cursor
-        // (terminal semantics), unless we're already past the end
-        // of the current line, in which case a normal insert is
-        // equivalent. deleteChar() removes one char to the right
-        // of the cursor without moving it, and insertText then
-        // inserts and advances — together that's an overwrite.
+        // Printable text, as far as the next control character:
+        // OVERWRITE what is under the cursor (terminal semantics),
+        // and extend the line past its end.
+        int end = i + 1;
+        while (end < n && isText(text[end]))
+            ++end;
 #ifdef Q_OS_WIN
         // Past the last column: wrap, as the terminal ConPTY paints for
         // would (it goes on at the next row without sending a newline).
-        if (cur.positionInBlock() >= screenColumns_) {
-            cur.movePosition(QTextCursor::StartOfBlock);
-            screenLineFeed(cur);
+        // So the run goes in a row's worth at a time.
+        while (i < end) {
+            if (cur.positionInBlock() >= screenColumns_) {
+                cur.movePosition(QTextCursor::StartOfBlock);
+                screenLineFeed(cur);
+            }
+            // At least one: a row with no room left was wrapped above.
+            const int take =
+                qMax(1, qMin(end - i, screenColumns_ - cur.positionInBlock()));
+            overwrite(cur, QStringView(text).mid(i, take));
+            i += take;
         }
+#else
+        overwrite(cur, QStringView(text).mid(i, end - i));
+        i = end;
 #endif
-        if (!cur.atBlockEnd())
-            cur.deleteChar();
-        cur.insertText(QString(text[i]));
-        ++i;
     }
+    edit.endEditBlock();
 
     // Sync the visible blinking caret with where we just finished
     // writing so the user can see where the shell's cursor is.

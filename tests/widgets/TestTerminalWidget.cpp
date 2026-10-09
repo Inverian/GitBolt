@@ -1,6 +1,21 @@
 //
-// TestTerminalWidget — the built-in terminal end to end on Windows:
-// the widget over a real ConPTY and cmd.exe, driven by key events.
+// TestTerminalWidget — the built-in terminal.
+//
+// Its output path on every platform, fed directly (no shell, no PTY):
+//
+//   - text overwrites what is under the cursor, as on a terminal;
+//   - the control characters and escape sequences it knows keep their
+//     meaning, and the rest are dropped;
+//   - a read can end partway through an escape sequence or a UTF-8
+//     character, and the rest is picked up from the next read. A
+//     character cut in two used to come out as two U+FFFDs;
+//   - overwriting replaces whole characters, surrogate pairs and
+//     combining marks included;
+//   - a read goes in as one edit, its plain text a run at a time: an
+//     edit per character made a big output take seconds to draw.
+//
+// And end to end on Windows: the widget over a real ConPTY and cmd.exe,
+// driven by key events.
 //
 //   - start() on a hidden widget waits for the show;
 //   - typed keystrokes run a command, and its output lands on a row of
@@ -17,15 +32,17 @@
 //   - Ctrl+C stops a flood at once, rather than once a backlog has
 //     been drawn, and the shell takes commands again.
 //
-// ConPTY only exists on Windows; elsewhere the test is a QSKIP (the
-// Unix PTY side has no automated test yet).
+// ConPTY only exists on Windows; elsewhere those tests are a QSKIP (the
+// Unix PTY side has no end-to-end test yet).
 //
 
 #include <QTest>
+#include <QTextBlock>
+#include <QTextDocument>
 
-#ifdef Q_OS_WIN
 #include "widgets/TerminalWidget.h"
 
+#ifdef Q_OS_WIN
 #include <QApplication>
 #include <QClipboard>
 #include <QDir>
@@ -35,9 +52,22 @@
 #include <QStringList>
 #include <QTemporaryDir>
 #include <QTimer>
+#endif
 
 using gitbolt::widgets::TerminalWidget;
 
+namespace {
+
+// The widget with its output path in reach: appendOutput() takes what
+// a read of the PTY (or a batch from ConPTY) would hand it.
+class FedTerminal : public TerminalWidget {
+public:
+    using TerminalWidget::appendOutput;
+};
+
+} // namespace
+
+#ifdef Q_OS_WIN
 namespace {
 
 constexpr int kTimeoutMs = 30000;
@@ -124,6 +154,134 @@ class TestTerminalWidget : public QObject {
     Q_OBJECT
 
 private slots:
+    // zsh's line editor redraws the line it edits in place: a CR, then
+    // the new text over the old.
+    void textOverwritesInPlace()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("hello world");
+        terminal.appendOutput("\rJ");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("Jello world"));
+        terminal.appendOutput("\rgoodbye, cruel world");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("goodbye, cruel world"));
+        terminal.appendOutput("\r\nsecond\rS");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("goodbye, cruel world\nSecond"));
+    }
+
+    void controlsAndEscapes_data()
+    {
+        QTest::addColumn<QByteArray>("output");
+        QTest::addColumn<QString>("shown");
+
+        // (A hex escape takes every hex digit after it, hence the
+        // literals split after some of them.)
+        QTest::newRow("CR returns to column 0")
+            << QByteArray("hello\rJ") << QStringLiteral("Jello");
+        QTest::newRow("CRLF starts a line")
+            << QByteArray("one\r\ntwo") << QStringLiteral("one\ntwo");
+        QTest::newRow("BS moves left without erasing")
+            << QByteArray("abc\b\bX") << QStringLiteral("aXc");
+        QTest::newRow("BS stops at column 0")
+            << QByteArray("a\b\b\bX") << QStringLiteral("X");
+        QTest::newRow("EL erases to the end of the line")
+            << QByteArray("abcdef\b\b\b\x1b[Kxy") << QStringLiteral("abcxy");
+        QTest::newRow("SGR is dropped")
+            << QByteArray("\x1b[1;31mred\x1b[0m!") << QStringLiteral("red!");
+        QTest::newRow("DEC private modes are dropped")
+            << QByteArray("\x1b[?2004hon\x1b[?2004l") << QStringLiteral("on");
+        QTest::newRow("OSC and BEL are dropped")
+            << QByteArray("\x1b]0;title\x07" "ab\x07" "c") << QStringLiteral("abc");
+        QTest::newRow("other C0 controls are dropped")
+            << QByteArray("a\x01" "b\x0e" "c") << QStringLiteral("abc");
+        QTest::newRow("an unhandled ESC pair is dropped")
+            << QByteArray("a\x1b=b") << QStringLiteral("ab");
+        QTest::newRow("tab is kept")
+            << QByteArray("a\tb") << QStringLiteral("a\tb");
+        // PROMPT_SP: a reverse-video '%' and a row of spaces, which a
+        // CR and the prompt then write over.
+        QTest::newRow("zsh prompt")
+            << QByteArray("\x1b[1m\x1b[7m%\x1b[27m\x1b[1m\x1b[0m          \r \r"
+                          "\ruser@host repo % \x1b[K\x1b[?2004h")
+            << QStringLiteral("user@host repo % ");
+    }
+
+    void controlsAndEscapes()
+    {
+        QFETCH(QByteArray, output);
+        QFETCH(QString, shown);
+        FedTerminal terminal;
+        terminal.appendOutput(output);
+        QCOMPARE(terminal.toPlainText(), shown);
+    }
+
+    // A read can end anywhere in an escape sequence, ESC included; the
+    // rest arrives with the next one.
+    void escapeSplitAcrossReads()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("ab\x1b[3");
+        terminal.appendOutput("1mc\x1b");
+        terminal.appendOutput("[0md\x1b");
+        terminal.appendOutput("[K\rX");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("Xbcd"));
+    }
+
+    // Or partway through a UTF-8 character, inside an escape sequence's
+    // tail or not.
+    void utf8SplitAcrossReads()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("caf\xc3");
+        terminal.appendOutput("\xa9 \xe2");
+        terminal.appendOutput("\x82");
+        terminal.appendOutput("\xac \xf0\x9f");
+        terminal.appendOutput("\x98\x80 \x1b[1");
+        terminal.appendOutput("m\xc3");
+        terminal.appendOutput("\xb1!");
+        QCOMPARE(terminal.toPlainText(),
+                 QString::fromUtf16(u"caf\u00e9 \u20ac \U0001F600 \u00f1!"));
+    }
+
+    // A character written over another replaces all of it: both halves
+    // of a surrogate pair, or a letter with its combining accent.
+    void overwriteReplacesWholeCharacters()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("\xf0\x9f\x98\x80" "b\rX");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("Xb"));
+        terminal.appendOutput("\r\ne\xcc\x81" "x\rY");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("Xb\nYx"));
+    }
+
+    // A read goes in as one edit, its plain text a run at a time. An
+    // edit per character (two to write over one) made a big output, a
+    // long `git log` or a `cat`, take seconds to draw.
+    void aReadIsDrawnInOneEdit()
+    {
+        // Colored rows, shorter than the 80 columns Windows wraps at.
+        constexpr int kRows = 40;
+        const QByteArray row(60, 'x');
+        QByteArray output;
+        for (int k = 0; k < kRows; ++k)
+            output += "\x1b[33m" + QByteArray::number(k) + "\x1b[m " + row + "\r\n";
+
+        FedTerminal terminal;
+        int edits = 0;
+        connect(terminal.document(), &QTextDocument::contentsChange,
+                this, [&edits] { ++edits; });
+        terminal.appendOutput(output);
+        QCOMPARE(terminal.document()->blockCount(), kRows + 1);
+        QCOMPARE(edits, 1);
+
+        // Written over, too: a CR, then a shorter row over the last one.
+        terminal.appendOutput(row + "\r" + QByteArray(30, 'y'));
+        edits = 0;
+        terminal.appendOutput("\r" + QByteArray(40, 'z'));
+        QCOMPARE(terminal.document()->lastBlock().text(),
+                 QString(40, QLatin1Char('z')) + QString(20, QLatin1Char('x')));
+        QCOMPARE(edits, 1);
+    }
+
     void runsCmdUnderConPty()
     {
 #ifndef Q_OS_WIN

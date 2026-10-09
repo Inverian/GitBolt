@@ -3,6 +3,7 @@
 #include <QPlainTextEdit>
 #include <QSize>
 #include <QString>
+#include <QStringDecoder>
 
 #ifdef Q_OS_WIN
 #include <QTextCursor>
@@ -78,6 +79,10 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void showEvent(QShowEvent* event) override;
 
+    /// Draw a read's worth of the shell's output. Protected rather
+    /// than private so tests can feed it without a PTY.
+    void appendOutput(const QByteArray& bytes);
+
 private slots:
     void onPtyReadable();
     void onPtyWritable();
@@ -91,7 +96,6 @@ private:
     /// Write as much as the master fd accepts right now; returns the
     /// byte count written (stops at EAGAIN without dropping).
     int writeRaw(const QByteArray& bytes);
-    void appendOutput(const QByteArray& bytes);
     void updatePtySize();
 #ifdef Q_OS_WIN
     /// Draw the output ConPtyProcess has read since the last call.
@@ -129,11 +133,17 @@ private:
     /// easily. Drained via writeNotifier_ as the fd becomes
     /// writable again (the old code silently dropped the tail).
     QByteArray writeQueue_;
+    /// The shell's output is UTF-8, and a read() boundary can cut a
+    /// character in two. The decoder keeps state across reads: it
+    /// holds a character's first bytes back until the rest arrives,
+    /// where decoding each read on its own turned both halves into
+    /// U+FFFD.
+    QStringDecoder   decoder_{QStringDecoder::Utf8};
     /// Tail of an escape sequence split across a 4096-byte read()
     /// boundary, re-prepended to the next chunk. Colored output
     /// splits like this constantly; without the carry the tail
     /// ("[0m", "[K", …) printed as literal text.
-    QByteArray pendingOutput_;
+    QString          pendingOutput_;
 
     // The directory the shell should cd into the next time it
     // starts. Cached so RepositoryView can call setInitialPath
