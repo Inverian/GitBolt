@@ -55,6 +55,10 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - Non-blocking repository open — the repo view appears instantly with
   a loading spinner while commits, branches, and status stream in from
   worker threads (no UI freeze even on huge working trees)
+- Built-in terminal (Console tab, Tools → Git bash) opened in the
+  repository: your login shell under a PTY on macOS and Linux, cmd.exe
+  under ConPTY on Windows (10 1809 or later). Plain text for now, no
+  colors or full-screen programs
 - Light, Dark, and System theme modes
 - Customizable code font and tab size
 - Configurable keyboard shortcuts

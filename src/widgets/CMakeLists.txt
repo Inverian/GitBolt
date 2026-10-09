@@ -58,3 +58,20 @@ gitbolt_set_warnings(gitbolt_widgets)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(gitbolt_widgets PRIVATE util)
 endif()
+
+# TerminalWidget's Windows backend (ConPTY). Its own target, with no Qt
+# on its include path, keeps the Win32 code Qt-free: it compiles and is
+# tested (tests/widgets/TestConPtyProcess.cpp) without a widget.
+if(WIN32)
+    add_library(gitbolt_conpty STATIC
+        ConPtyProcess.cpp
+        ConPtyProcess.h
+    )
+    # Nothing for moc/uic/rcc here, but the project-wide AUTOMOC would
+    # still run moc over it and compile an empty mocs_compilation.cpp.
+    set_target_properties(gitbolt_conpty PROPERTIES
+        AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
+    target_include_directories(gitbolt_conpty PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    gitbolt_set_warnings(gitbolt_conpty)
+    target_link_libraries(gitbolt_widgets PRIVATE gitbolt_conpty)
+endif()

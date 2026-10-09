@@ -51,6 +51,15 @@ gitbolt_add_test(test_branch_model     models/TestBranchModel.cpp)
 gitbolt_add_test(test_git_service services/TestGitService.cpp)
 target_link_libraries(test_git_service PRIVATE gitbolt_services)
 
+# widgets/ tests. The terminal's ConPTY backend only exists in Windows
+# builds; elsewhere these tests are a QSKIP each.
+gitbolt_add_test(test_conpty_process widgets/TestConPtyProcess.cpp)
+gitbolt_add_test(test_terminal_widget widgets/TestTerminalWidget.cpp)
+if(WIN32)
+    target_link_libraries(test_conpty_process PRIVATE gitbolt_conpty)
+    target_link_libraries(test_terminal_widget PRIVATE gitbolt_widgets)
+endif()
+
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.
 gitbolt_add_test(test_changelog app/TestChangelog.cpp)

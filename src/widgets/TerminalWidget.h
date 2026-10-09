@@ -1,15 +1,24 @@
 #pragma once
 
 #include <QPlainTextEdit>
+#include <QSize>
 #include <QString>
 
-#ifndef Q_OS_WIN
+#ifdef Q_OS_WIN
+#include <QTextCursor>
+
+#include <memory>
+#else
 #include <sys/types.h>  // pid_t
 #endif
 
 class QSocketNotifier;
 
 namespace gitbolt::widgets {
+
+#ifdef Q_OS_WIN
+class ConPtyProcess;
+#endif
 
 /// Interactive terminal panel — forks a real shell under a PTY
 /// (pseudo-terminal) and pipes its I/O through Qt so the user
@@ -30,8 +39,19 @@ namespace gitbolt::widgets {
 ///     shell so the cwd updates without restarting it.
 ///   - The destructor SIGHUPs the child and closes the PTY.
 ///
-/// POSIX only for now: on Windows there is no PTY backend (ConPTY is
-/// the follow-up), so start() shows a notice and no child ever runs.
+/// Windows: the same widget over a ConPTY pseudo console (Windows 10
+/// 1809+, see ConPtyProcess) running %COMSPEC% (cmd.exe), which
+/// changeDirectory() addresses with `cd /d`. Closing the pseudo console
+/// is the hang-up. ConPTY paints a screen with absolute cursor moves
+/// rather than streaming lines, so there the walker also keeps a
+/// screen model (cursor addressing, erase, wrap, scroll; still no
+/// colors). Output is drawn in batches as the GUI thread gets to it,
+/// and ConPtyProcess stops reading while a full batch waits, so a
+/// flood holds the shell back instead of queueing up without bound.
+/// Pasted line breaks go in as CR, the Enter key. A start() while
+/// hidden waits for the next show, since ConPTY lays its screen out
+/// at the size it is created with. Ctrl+C copies only a selection;
+/// otherwise it interrupts.
 class TerminalWidget : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -64,16 +84,41 @@ private slots:
 
 private:
     void stopShell();
+    /// The character grid the viewport fits; invalid until the font
+    /// has metrics.
+    QSize gridSize() const;
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
     /// byte count written (stops at EAGAIN without dropping).
     int writeRaw(const QByteArray& bytes);
     void appendOutput(const QByteArray& bytes);
     void updatePtySize();
-
-    int              masterFd_     = -1;
 #ifdef Q_OS_WIN
-    qint64           childPid_     = -1;   // never set — see class doc
+    /// Draw the output ConPtyProcess has read since the last call.
+    void takeConPtyOutput();
+    // The screen ConPTY paints (see appendOutput).
+    void startScreen();
+    void trimBlankRows();
+    void screenMoveTo(QTextCursor& cur, int row, int column);
+    void screenLineFeed(QTextCursor& cur);
+    void screenCsi(QTextCursor& cur, ushort finalByte, QStringView params);
+    void resizeScreen(const QSize& grid);
+#endif
+
+    int              masterFd_     = -1;   // stays -1 on Windows
+#ifdef Q_OS_WIN
+    /// The running shell's session; null when none runs.
+    std::unique_ptr<ConPtyProcess> conpty_;
+    /// Bumped whenever a session starts or stops: output cues and exit
+    /// notices a stopped shell had already queued are then dropped.
+    quint64          conptyGeneration_ = 0;
+    /// ConPTY's screen: its rows are the blocks from screenTop_ down
+    /// (anything above is scrollback), ConPTY's cursor is at
+    /// screenCursor_, and the size is the one ConPTY was last given.
+    QTextCursor      screenTop_;
+    QTextCursor      screenCursor_;
+    int              screenColumns_ = 80;
+    int              screenRows_    = 25;
 #else
     pid_t            childPid_     = -1;
 #endif
