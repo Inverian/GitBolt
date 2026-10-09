@@ -28,6 +28,11 @@ set(E2E_TESTS
     test_theme_persistence
     test_watcher_external_commit
 )
+# Needs macOS's small unix-socket buffers to hold a hand-off line up
+# the way Windows' unbuffered pipes hold up every one (see the test).
+if(APPLE)
+    list(APPEND E2E_TESTS test_instance_busy_owner)
+endif()
 
 foreach(t IN LISTS E2E_TESTS)
     add_test(NAME e2e_${t}

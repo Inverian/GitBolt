@@ -80,6 +80,15 @@ def _on(name: str):
     return lambda s: s.get("repoPath", "").rstrip("/").endswith(name)
 
 
+def _leave_settings_lock(app: App) -> None:
+    """What a SIGKILL inside a settings write leaves behind: QSettings'
+    lock file created, the PID not yet in it."""
+    ini_dir = os.path.join(app.env["XDG_CONFIG_HOME"], "GitBolt")
+    os.makedirs(ini_dir, exist_ok=True)
+    with open(os.path.join(ini_dir, "GitBolt.ini.lock"), "w"):
+        pass
+
+
 def test(binary: str, scratch: str, apps: list) -> None:
     _early_exits(binary, scratch)
 
@@ -111,6 +120,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
     # No PID to test in an empty lock, so only the check that nothing
     # still holds it can clear it.
     second.crash()
+    # The kill comes right after the switch to repo B saved the recent
+    # list, so it can leave QSettings' own lock just as empty — and
+    # whoever saves a setting next waits that out for 30 s on its GUI
+    # thread, bridge silent. Each App has settings of its own (e2elib);
+    # this makes sure the relaunch's never are these.
+    _leave_settings_lock(second)
     with open(second.lock_path, "w"):
         pass
     hour_ago = time.time() - 3600

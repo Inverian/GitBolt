@@ -15,7 +15,8 @@ test run can coexist with a real GitBolt session and with other tests:
   bridge socket, the log — and kill() removes it, so even a SIGKILLed
   app leaves nothing behind.
 - XDG_CONFIG_HOME: a private dir unless the test passes config_home,
-  so GitBolt.ini reads/writes never touch the user's real settings.
+  so GitBolt.ini reads/writes never touch the user's real settings —
+  one per App even where Apps share a runtime dir (see App).
 - QT_QPA_PLATFORM=offscreen: no focus stealing, same behavior on
   headless CI. An exported QT_QPA_PLATFORM wins for the apps a test
   drives, so a developer can watch them; never for a second launch,
@@ -141,6 +142,13 @@ class App:
         # created the dir removes it.
         self._owns_runtime_dir = runtime_dir is None
         self.runtime_dir = runtime_dir or make_runtime_dir()
+        # Settings of its own all the same. A SIGKILL can land inside
+        # a settings write and leave QSettings' GitBolt.ini.lock empty:
+        # no PID for QLockFile to prove it stale, so the next app to
+        # save a setting would sit on its GUI thread (bridge silent)
+        # until the lock is 30 s old.
+        if config_home is None and not self._owns_runtime_dir:
+            config_home = os.path.join(self.runtime_dir, f"config-{tag}")
         self.log_path = os.path.join(self.runtime_dir,
                                      f"{self.bridge_name}.log")
         self.env = app_env(self.runtime_dir, self.instance_name,
@@ -163,10 +171,10 @@ class App:
         return [n for n in names
                 if os.path.exists(os.path.join(self.runtime_dir, n))]
 
-    def launch_second(self, *args: str,
-                      timeout: float = 30) -> subprocess.CompletedProcess:
-        """Run another GitBolt in this app's single-instance namespace
-        to completion — it should hand `args` over to this app."""
+    def start_second(self, *args: str) -> subprocess.Popen:
+        """Start another GitBolt in this app's single-instance
+        namespace — it should hand `args` over to this app. The caller
+        reaps it (communicate) or kills it."""
         env = dict(self.env)
         # Its own bridge name: a window it wrongly opened must not take
         # over this app's bridge socket.
@@ -174,15 +182,26 @@ class App:
         # Offscreen whatever the developer exported: a launch that gives
         # up shows its "not responding" modal on any real platform
         # (wayland, xcb, cocoa), and nobody would dismiss it — the run
-        # would hang to the timeout below instead of seeing exit 1.
+        # would hang to its timeout instead of seeing exit 1.
         env["QT_QPA_PLATFORM"] = "offscreen"
+        return subprocess.Popen([self.binary, *args], env=env,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE)
+
+    def launch_second(self, *args: str,
+                      timeout: float = 30) -> subprocess.CompletedProcess:
+        """Run start_second(*args) to completion."""
+        proc = self.start_second(*args)
         try:
-            return subprocess.run([self.binary, *args], env=env,
-                                  capture_output=True, timeout=timeout)
+            out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
             raise Failure(f"second launch {list(args)} never exited — "
                           "it opened its own window or hung on a "
                           "dialog") from None
+        return subprocess.CompletedProcess(proc.args, proc.returncode,
+                                           out, err)
 
     # ---- bridge protocol -------------------------------------------------
 

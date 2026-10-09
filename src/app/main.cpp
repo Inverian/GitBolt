@@ -128,7 +128,7 @@ bool removeUnprovableStaleLock(QLockFile& lock)
     return removal.tryLock(0) && settled() && lock.removeStaleLockFile();
 }
 
-enum class Handoff { Delivered, Queued, NoListener, Unsent };
+enum class Handoff { Delivered, Queued, HungUp, NoListener };
 
 // Sends this launch's repo path (empty: just raise the window) to the
 // instance listening on `serverName`, as one line, and waits for the
@@ -138,13 +138,18 @@ enum class Handoff { Delivered, Queued, NoListener, Unsent };
 //   The owner is alive but busy — submodule commands, sparse checkout
 //   and Find Large Files run git synchronously on its GUI thread, for
 //   minutes at worst — and acts on the line once it is free.
-// - NoListener: nothing took the connection, or the owner hung up
-//   unanswered: an instance on its way out, whose lock is about to
-//   come free. The caller retries.
-// - Unsent: connected, but the line never left. Windows only: Qt's
-//   pipes have no buffer, so a write completes only once the owner's
-//   event loop has accepted the connection, and is cancelled when
-//   this process exits. A Unix socket buffers it at once.
+// - HungUp: the owner took the connection but closed it unanswered:
+//   an instance on its way out (or killed while this waited), whose
+//   lock is about to come free. The caller retries.
+// - NoListener: nothing took the connection. The caller retries.
+//
+// Until the line has left, this waits for as long as the connection
+// lasts: it proves the owner alive, as its end dies with it. Only
+// Windows waits here — Qt's pipes have no buffer, so a write
+// completes only once the owner's event loop has accepted the
+// connection, and is cancelled if this process exits first; a Unix
+// socket buffers the line at once. A deadline here used to turn an
+// owner that was merely busy for longer into "not responding".
 Handoff handOffToRunningInstance(const QString& serverName,
                                  const QString& path)
 {
@@ -154,19 +159,16 @@ Handoff handOffToRunningInstance(const QString& serverName,
         return Handoff::NoListener;
 
     sock.write(path.toUtf8() + '\n');
-    const QDeadlineTimer sending(30000);
     while (sock.bytesToWrite() > 0) {
         if (sock.state() != QLocalSocket::ConnectedState)
-            return Handoff::NoListener;
-        if (sending.hasExpired())
-            return Handoff::Unsent;
-        sock.waitForBytesWritten(int(sending.remainingTime()));
+            return Handoff::HungUp;
+        sock.waitForBytesWritten(1000);
     }
 
     const QDeadlineTimer receipt(10000);
     while (!sock.canReadLine()) {
         if (sock.state() != QLocalSocket::ConnectedState)
-            return Handoff::NoListener;
+            return Handoff::HungUp;
         if (receipt.hasExpired())
             return Handoff::Queued;
         sock.waitForReadyRead(int(receipt.remainingTime()));
@@ -307,7 +309,8 @@ int main(int argc, char* argv[]) {
     QLockFile instanceLock(
         runtimeDir.filePath(instanceName + QStringLiteral(".lock")));
     instanceLock.setStaleLockTime(0);
-    const QDeadlineTimer patience(10000);
+    QDeadlineTimer patience(10000);
+    int hangUps = 0;
     while (!instanceLock.tryLock(0)) {
         if (instanceLock.error() != QLockFile::LockFailedError) {
             // Can't create the lock at all (unwritable directory, full
@@ -330,7 +333,14 @@ int main(int argc, char* argv[]) {
             reportBusyInstance(initialRepoPath);
             return 0;
         }
-        if (handoff == Handoff::Unsent || patience.hasExpired()) {
+        // The owner hung up: alive a moment ago, however long this
+        // waited on it, and on its way out now. Its lock gets the full
+        // patience to come free — a few times only: an owner that keeps
+        // taking the line and hanging up isn't on its way out, and
+        // waiting on it would never end.
+        if (handoff == Handoff::HungUp && ++hangUps <= 3) {
+            patience = QDeadlineTimer(10000);
+        } else if (patience.hasExpired()) {
             reportUnresponsiveInstance();
             return 1;
         }
