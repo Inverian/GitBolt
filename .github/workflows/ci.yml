@@ -227,8 +227,9 @@ jobs:
 
       # The launch check uses the cocoa QPA (macdeployqt bundles no
       # offscreen plugin); hosted macOS images auto-login a GUI session.
-      # timeout-minutes: if the single-instance guard ever fell through to
-      # its QMessageBox, the step would otherwise block until the job limit.
+      # timeout-minutes: --version exits before the single-instance guard
+      # and its QMessageBox, but anything modal would otherwise block the
+      # step until the job limit.
       - name: Smoke-test DMG (macOS)
         if: github.event_name != 'pull_request' && runner.os == 'macOS'
         timeout-minutes: 10
@@ -414,9 +415,9 @@ jobs:
           # 3) Launch the INSTALLED exe with PATH = System32 only and no Qt
           #    env vars (install-qt-action put Qt\bin on PATH and exported
           #    QT_PLUGIN_PATH/QML2_IMPORT_PATH). --version exits after
-          #    QApplication (loads qwindows.dll), the single-instance guard
-          #    and git_libgit2_init. Redirected handles + the env var stop
-          #    QCommandLineParser from using a MessageBox.
+          #    QApplication (loads qwindows.dll) and git_libgit2_init,
+          #    before the single-instance guard. Redirected handles + the
+          #    env var stop QCommandLineParser from using a MessageBox.
           $psi = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'GitBolt.exe'), '--version')
           $psi.UseShellExecute = $false
           $psi.RedirectStandardOutput = $true

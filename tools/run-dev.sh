@@ -16,10 +16,10 @@
 #
 # What it does (in order):
 #   1. Make sure Homebrew's tools are on PATH (so this works from any shell)
-#   2. Kill any running GitBolt instance (including orphaned ones)
-#   3. Detach any orphaned QSharedMemory segment (defensive; the app
-#      already does this itself, but killing -9 during development can
-#      still leave occasional stragglers)
+#   2. Kill any running GitBolt instance (including orphaned ones). The
+#      single-instance lock that `kill -9` leaves behind names a dead
+#      PID, so the next launch reclaims it by itself.
+#   3. Configure CMake on first use
 #   4. Incrementally build the Debug target with ninja
 #   5. Launch GitBolt via `open -n --args` so it goes through Launch
 #      Services (gets a Dock icon, shows up in Cmd-Tab, etc.)

@@ -8,15 +8,21 @@
 
 #include <QApplication>
 #include <QCommandLineParser>
+#include <QCryptographicHash>
+#include <QDateTime>
+#include <QDeadlineTimer>
+#include <QDir>
 #include <QFileInfo>
 #include <QIcon>
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QLocalServer>
 #include <QLocalSocket>
-#include <QSharedMemory>
+#include <QLockFile>
+#include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextStream>
+#include <QThread>
 
 #include <git2.h>
 
@@ -53,6 +59,145 @@ int runAskpass(const QString& prompt)
 
     QTextStream(stdout) << dialog.textValue() << "\n";
     return 0;
+}
+
+// Per-user directory for the single-instance lock and forwarding
+// socket. Linux/BSD: $XDG_RUNTIME_DIR, private to the user and never
+// aged out by tmp cleaners — in a shared /tmp, one user's lock (and
+// socket) would turn every other user's launch away. macOS's $TMPDIR
+// and Windows' %TEMP% are per-user already.
+QString instanceRuntimeDir()
+{
+#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)
+    const QString runtime =
+        QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (!runtime.isEmpty())
+        return runtime;
+#endif
+    return QDir::tempPath();
+}
+
+// Name of the forwarding socket that the lock holder listens on.
+// Unix: a socket file beside the lock, in the same per-user directory.
+// Windows: a pipe name. Pipes share one machine-wide namespace, so a
+// fixed name would let one user's instance hold the pipe (its
+// UserAccessOption DACL shutting everyone else out) while a second
+// user's own instance, holding that user's lock, could never listen
+// — every later launch by that user would find no listener. A hash of
+// the lock's directory gives the pipe exactly the lock's scope: per
+// user, or per session where %TEMP% is (Remote Desktop hosts). Pipes
+// die with their owner, so there is never a stale one to clear.
+QString instanceServerName(const QDir& runtimeDir,
+                           const QString& instanceName)
+{
+#ifdef Q_OS_WIN
+    const QByteArray scope = QCryptographicHash::hash(
+        runtimeDir.absolutePath().toLower().toUtf8(),
+        QCryptographicHash::Sha256);
+    return instanceName + QLatin1Char('-')
+           + QString::fromLatin1(scope.toHex().left(16));
+#else
+    return runtimeDir.filePath(instanceName);
+#endif
+}
+
+// Clears a leftover lock file that QLockFile's own PID check can never
+// prove stale: one truncated by a crash mid-write, or naming another
+// machine ID. Safe against a live owner: its flock (Unix) or open
+// handle (Windows) dies with it, and removeStaleLockFile() fails while
+// one is held. The age check stays clear of the instant between a new
+// owner creating the file and locking it. Serialised through
+// "<lock>.rmlock" exactly as QLockFile serialises its own stale
+// removal: two launchers removing at once could otherwise each unlink
+// a lock the other had just re-created, and both would run as the
+// single instance.
+bool removeUnprovableStaleLock(QLockFile& lock)
+{
+    const auto settled = [&lock]() {
+        const QDateTime written = QFileInfo(lock.fileName()).lastModified();
+        return written.isValid()
+               && qAbs(written.secsTo(QDateTime::currentDateTime())) >= 2;
+    };
+    if (!settled())
+        return false;
+    QLockFile removal(lock.fileName() + QStringLiteral(".rmlock"));
+    // Re-checked under the removal lock: another launcher may have
+    // just removed the file and re-created it as a live lock.
+    return removal.tryLock(0) && settled() && lock.removeStaleLockFile();
+}
+
+enum class Handoff { Delivered, Queued, NoListener, Unsent };
+
+// Sends this launch's repo path (empty: just raise the window) to the
+// instance listening on `serverName`, as one line, and waits for the
+// line it answers with:
+// - Delivered: it answered.
+// - Queued: the line left this process but no answer came in time.
+//   The owner is alive but busy — submodule commands, sparse checkout
+//   and Find Large Files run git synchronously on its GUI thread, for
+//   minutes at worst — and acts on the line once it is free.
+// - NoListener: nothing took the connection, or the owner hung up
+//   unanswered: an instance on its way out, whose lock is about to
+//   come free. The caller retries.
+// - Unsent: connected, but the line never left. Windows only: Qt's
+//   pipes have no buffer, so a write completes only once the owner's
+//   event loop has accepted the connection, and is cancelled when
+//   this process exits. A Unix socket buffers it at once.
+Handoff handOffToRunningInstance(const QString& serverName,
+                                 const QString& path)
+{
+    QLocalSocket sock;
+    sock.connectToServer(serverName);
+    if (!sock.waitForConnected(1000))
+        return Handoff::NoListener;
+
+    sock.write(path.toUtf8() + '\n');
+    const QDeadlineTimer sending(30000);
+    while (sock.bytesToWrite() > 0) {
+        if (sock.state() != QLocalSocket::ConnectedState)
+            return Handoff::NoListener;
+        if (sending.hasExpired())
+            return Handoff::Unsent;
+        sock.waitForBytesWritten(int(sending.remainingTime()));
+    }
+
+    const QDeadlineTimer receipt(10000);
+    while (!sock.canReadLine()) {
+        if (sock.state() != QLocalSocket::ConnectedState)
+            return Handoff::NoListener;
+        if (receipt.hasExpired())
+            return Handoff::Queued;
+        sock.waitForReadyRead(int(receipt.remainingTime()));
+    }
+    return Handoff::Delivered;
+}
+
+// The hand-off is with a busy owner, which acts on it once it is free.
+// Nothing for the user to do, so no dialog — just a note for whoever
+// started this from a terminal.
+void reportBusyInstance(const QString& path)
+{
+    if (path.isEmpty())
+        qWarning("GitBolt is already running but busy; its window "
+                 "comes to the front once it is free.");
+    else
+        qWarning("GitBolt is already running but busy; it opens %s "
+                 "once it is free.", qPrintable(path));
+}
+
+// The lock's owner is alive (it still holds the lock) but never took
+// the hand-off. Tell the user, who can close or kill it — except on a
+// headless platform (offscreen/minimal: CI, the e2e harness), where a
+// modal has nobody to dismiss it and would hang this process for good.
+void reportUnresponsiveInstance()
+{
+    const QString text = QObject::tr(
+        "Another instance of GitBolt is already running but is not responding.");
+    qWarning("%s", qPrintable(text));
+    const QString platform = QGuiApplication::platformName();
+    if (platform != QStringLiteral("offscreen")
+        && platform != QStringLiteral("minimal"))
+        QMessageBox::warning(nullptr, QStringLiteral("GitBolt"), text);
 }
 
 } // namespace
@@ -101,70 +246,13 @@ int main(int argc, char* argv[]) {
                                    : QString());
     }
 
-    // Single-instance guard via shared memory.
-    //
-    // QSharedMemory does NOT auto-clean on Unix when a process is killed
-    // with SIGKILL or crashes — the segment leaks and would falsely block
-    // future launches forever. The standard idiom is: try to attach first;
-    // if we can attach to an existing segment, detach immediately to release
-    // the orphan, then proceed to create our own.
-    //
-    // This still races against a *real* second instance starting at the
-    // same time, but for a desktop app that's acceptable. The behavior
-    // matches what most QSharedMemory tutorials recommend.
-    // GITBOLT_INSTANCE_NAME keys both the guard segment and the
-    // forwarding socket into a private namespace. Without it, an e2e
-    // harness launching GitBolt while the user has a real session
-    // open would forward its test repo into the user's window.
-    const QString instanceOverride =
-        qEnvironmentVariable("GITBOLT_INSTANCE_NAME");
-    QSharedMemory singleInstanceGuard(
-        instanceOverride.isEmpty()
-            ? QStringLiteral("GitBolt-SingleInstance")
-            : instanceOverride + QStringLiteral("-guard"));
-    if (singleInstanceGuard.attach()) {
-        // Either there's a real running instance, or we attached to an
-        // orphaned segment from a previous crashed run. Either way,
-        // detach to release our handle.
-        singleInstanceGuard.detach();
-    }
-    const QString instanceServerName =
-        instanceOverride.isEmpty() ? QStringLiteral("gitbolt-instance")
-                                   : instanceOverride;
-    if (!singleInstanceGuard.create(1)) {
-        // A real instance is running (or a foreign-user orphan holds
-        // the segment). Forward our repo argument to it — this is
-        // how "Open in GitBolt" from Finder/Nautilus reaches an
-        // already-open window; both shell extensions spawn a fresh
-        // process that used to die here with a modal warning,
-        // dropping the path on the floor.
-        QLocalSocket forwarder;
-        forwarder.connectToServer(instanceServerName);
-        if (forwarder.waitForConnected(1000)) {
-            // argv[1] is the repo path when present; an empty
-            // payload still raises the running window.
-            QString fwd;
-            if (app.arguments().size() > 1) {
-                const QFileInfo fi(app.arguments().at(1));
-                fwd = fi.absoluteFilePath();
-            }
-            forwarder.write(fwd.toUtf8());
-            forwarder.flush();
-            forwarder.waitForBytesWritten(1000);
-            return 0;
-        }
-        // No listener (e.g. the other instance is still starting up,
-        // or the segment is a foreign-user orphan): fall back to the
-        // old clear, dismissable warning.
-        QMessageBox::warning(nullptr, QStringLiteral("GitBolt"),
-                             QObject::tr("Another instance of GitBolt is already running."));
-        return 1;
-    }
-
     // Initialize libgit2
     git_libgit2_init();
 
-    // Parse command-line arguments: gitbolt [path]
+    // Parse command-line arguments: gitbolt [path]. This MUST come
+    // before the single-instance guard: --help, --version and a bad
+    // option exit() from inside process(), skipping every destructor,
+    // so a guard taken first was left behind by each such run.
     QCommandLineParser parser;
     parser.setApplicationDescription(QStringLiteral("GitBolt - A modern Git GUI"));
     parser.addHelpOption();
@@ -181,6 +269,66 @@ int main(int argc, char* argv[]) {
         // the full path, not stay as the literal ".".
         const QFileInfo fi(positionalArgs.first());
         initialRepoPath = fi.absoluteFilePath();
+    }
+
+    // Single-instance guard: a lock file in a per-user directory.
+    //
+    // It used to be QSharedMemory, i.e. a System V segment on macOS,
+    // which nothing reclaims when its owner is SIGKILLed or crashes.
+    // Leaked segments piled up until macOS's limit of 32 was reached,
+    // after which every launch failed to create one and was turned
+    // away as "already running". QLockFile records our PID (plus host
+    // and boot IDs), and tryLock() itself clears a lock whose owner is
+    // gone. Stale time 0: a live owner's lock never expires by age.
+    //
+    // GITBOLT_INSTANCE_NAME keys both the lock and the forwarding
+    // socket into a private namespace. Without it, an e2e harness
+    // launching GitBolt while the user has a real session open would
+    // forward its test repo into the user's window.
+    const QString instanceOverride =
+        qEnvironmentVariable("GITBOLT_INSTANCE_NAME");
+    const QString instanceName =
+        instanceOverride.isEmpty() ? QStringLiteral("gitbolt-instance")
+                                   : instanceOverride;
+    const QDir runtimeDir(instanceRuntimeDir());
+    const QString serverName = instanceServerName(runtimeDir, instanceName);
+    QLockFile instanceLock(
+        runtimeDir.filePath(instanceName + QStringLiteral(".lock")));
+    instanceLock.setStaleLockTime(0);
+    const QDeadlineTimer patience(10000);
+    while (!instanceLock.tryLock(0)) {
+        if (instanceLock.error() != QLockFile::LockFailedError) {
+            // Can't create the lock at all (unwritable directory, full
+            // disk). Nothing the user could fix from a dialog, and no
+            // reason to refuse to start: run unguarded.
+            qWarning("Cannot create %s; starting without the "
+                     "single-instance guard",
+                     qPrintable(instanceLock.fileName()));
+            break;
+        }
+        // Another instance holds the lock. Hand it our repo argument —
+        // this is how "Open in GitBolt" from Finder/Nautilus reaches
+        // an already-open window: both shell extensions spawn a fresh
+        // process.
+        const Handoff handoff =
+            handOffToRunningInstance(serverName, initialRepoPath);
+        if (handoff == Handoff::Delivered)
+            return 0;
+        if (handoff == Handoff::Queued) {
+            reportBusyInstance(initialRepoPath);
+            return 0;
+        }
+        if (handoff == Handoff::Unsent || patience.hasExpired()) {
+            reportUnresponsiveInstance();
+            return 1;
+        }
+        // Nobody listening, or the owner hung up unanswered. Usually it
+        // is still starting up (it locks well before its server below
+        // exists) or shutting down, so retry — unless the lock is stale
+        // in a way its contents can't prove, which removal settles.
+        if (removeUnprovableStaleLock(instanceLock))
+            continue;
+        QThread::msleep(100);
     }
 
     // Settings service — constructed before the theme so the saved
@@ -252,34 +400,50 @@ int main(int argc, char* argv[]) {
         testBridge = std::make_unique<gitbolt::app::TestBridge>(&window);
 
     // Second-instance handshake: a later `gitbolt <path>` (the shell
-    // extensions, a plain CLI launch) forwards its path here instead
-    // of dying on the single-instance guard. UserAccessOption keeps
-    // other local users from driving our window.
+    // extensions, a plain CLI launch) hands its path over here — one
+    // line, empty for a bare relaunch, answered with one — instead of
+    // opening a second window. Only the lock holder listens, so
+    // clearing a socket left by a killed instance can never take a
+    // live one's.
+    // UserAccessOption keeps other local users from driving our window.
     QLocalServer instanceServer;
-    QLocalServer::removeServer(instanceServerName);  // stale socket
-    instanceServer.setSocketOptions(QLocalServer::UserAccessOption);
-    if (instanceServer.listen(instanceServerName)) {
-        QObject::connect(
-            &instanceServer, &QLocalServer::newConnection,
-            &window, [&instanceServer, &window]() {
-                while (QLocalSocket* sock =
-                           instanceServer.nextPendingConnection()) {
-                    QObject::connect(
-                        sock, &QLocalSocket::readyRead, &window,
-                        [sock, &window]() {
-                            const QString path = QString::fromUtf8(
-                                sock->readAll()).trimmed();
-                            window.show();
-                            window.raise();
-                            window.activateWindow();
-                            if (!path.isEmpty())
-                                window.openRepositoryAtPath(path);
-                            sock->disconnectFromServer();
-                        });
-                    QObject::connect(sock, &QLocalSocket::disconnected,
-                                     sock, &QObject::deleteLater);
-                }
-            });
+    if (instanceLock.isLocked()) {
+        QLocalServer::removeServer(serverName);  // stale socket
+        instanceServer.setSocketOptions(QLocalServer::UserAccessOption);
+        if (instanceServer.listen(serverName)) {
+            QObject::connect(
+                &instanceServer, &QLocalServer::newConnection,
+                &window, [&instanceServer, &window]() {
+                    while (QLocalSocket* sock =
+                               instanceServer.nextPendingConnection()) {
+                        QObject::connect(
+                            sock, &QLocalSocket::readyRead, &window,
+                            [sock, &window]() {
+                                if (!sock->canReadLine())
+                                    return;  // rest of the path in flight
+                                const QString path = QString::fromUtf8(
+                                    sock->readLine()).trimmed();
+                                // The sender's receipt, flushed now:
+                                // opening the repo below may sit in a
+                                // dialog for a while.
+                                sock->write("ok\n");
+                                sock->flush();
+                                sock->disconnectFromServer();
+                                window.show();
+                                window.raise();
+                                window.activateWindow();
+                                if (!path.isEmpty())
+                                    window.openRepositoryAtPath(path);
+                            });
+                        QObject::connect(sock, &QLocalSocket::disconnected,
+                                         sock, &QObject::deleteLater);
+                    }
+                });
+        } else {
+            qWarning("Single-instance server: listen(%s) failed: %s",
+                     qPrintable(serverName),
+                     qPrintable(instanceServer.errorString()));
+        }
     }
 
     // Open repository from command line if provided. We queue the call so
