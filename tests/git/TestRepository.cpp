@@ -71,7 +71,11 @@ QString addFeatureBranch(gitbolt::test::TestRepo& repo) {
         || !repo.writeAndCommit("c.txt", "shared\n", "c").ok())
         return {};
     gitbolt::git::GitProcess git(repo.path().toStdString());
-    if (!succeeded(git.run({"checkout", "-q", "-b", "feature"})))
+    // The tests compare file bytes, and Git for Windows' system config
+    // has core.autocrlf on: the CLI checkouts here and the worktree
+    // they add would write "main\r\n" where libgit2 wrote "main\n".
+    if (!succeeded(git.run({"config", "core.autocrlf", "false"}))
+        || !succeeded(git.run({"checkout", "-q", "-b", "feature"})))
         return {};
     repo.writeFile("a.txt", "feature\n");
     repo.writeFile("b.txt", "feature only\n");
