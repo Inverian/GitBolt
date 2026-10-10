@@ -82,7 +82,6 @@ void AboutDialog::setupUi()
 {
     setWindowTitle(tr("About GitBolt"));
     setModal(true);
-    setMinimumWidth(520);
 
     // ----- Icon column ----------------------------------------------------
     iconLabel_ = new QLabel(this);
@@ -179,6 +178,8 @@ void AboutDialog::setupUi()
     linksLabel_->setOpenExternalLinks(true);
     linksLabel_->setText(tr(
         "<p style='font-size:9pt;'>"
+        "<a href='https://www.gitbolt.com'>Website</a>"
+        " &nbsp;·&nbsp; "
         "<a href='https://github.com/ThePieMonster/GitBolt'>Project repository</a>"
         " &nbsp;·&nbsp; "
         "<a href='https://github.com/ThePieMonster/GitBolt/issues'>Report a bug</a>"
@@ -219,6 +220,12 @@ void AboutDialog::setupUi()
     rootLayout->setSpacing(12);
     rootLayout->addLayout(topRow);
     rootLayout->addWidget(buttons);
+
+    // At least 520, and wider when the text column needs it (a long
+    // OS name in the build info, the links row in a wide font at 96
+    // DPI): an explicit minimum overrides the layout's own, so a
+    // fixed 520 let dragging the dialog narrower cut lines short.
+    setMinimumWidth(qMax(520, minimumSizeHint().width()));
 }
 
 } // namespace gitbolt::dialogs

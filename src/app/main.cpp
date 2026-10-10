@@ -228,7 +228,7 @@ int main(int argc, char* argv[]) {
     // also stamps into package names. A literal here once drifted.
     app.setApplicationVersion(QStringLiteral(GITBOLT_VERSION));
     app.setOrganizationName(QStringLiteral("GitBolt"));
-    app.setOrganizationDomain(QStringLiteral("gitbolt.dev"));
+    app.setOrganizationDomain(QStringLiteral("gitbolt.com"));
 
     // App-level window icon. Resolves via the Qt resource system
     // (":/icons/*") which the .qrc at src/app/resources/gitbolt.qrc

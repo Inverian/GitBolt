@@ -283,6 +283,20 @@ QString ThemeService::darkStyleSheet() const
             spacing: 4px;
             padding: 2px;
         }
+        /* Commit and Stash, which show their text (MainWindow marks
+           them). Qt sizes such a button with a space's width either
+           side of the text and draws the text left-aligned, so that
+           slack all lands after the text; without this they sat 25pt
+           apart against the icon buttons' 16 to 18.5. A padding sizes
+           them by the stylesheet (5px plus the padding) instead of by
+           Fusion (8px wide, 7px tall), which still draws them, so this
+           makes them 8px narrower and keeps their height. The negative
+           padding stays within those two spaces, so it never cuts
+           into the text; a negative margin instead would clip the
+           right edge of the hover frame. */
+        QToolBar QToolButton[labeled="true"] {
+            padding: 1px -5px 1px 0px;
+        }
         QSplitter::handle {
             background: #3c3c3c;
         }

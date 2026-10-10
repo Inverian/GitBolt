@@ -9,8 +9,8 @@ set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGE_VENDOR "GitBolt")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Fast cross-platform Git GUI client")
 set(CPACK_PACKAGE_DESCRIPTION "GitBolt is a high-performance Git GUI client built with Qt 6 and libgit2.")
-set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/ThePieMonster/GitBolt")
-set(CPACK_PACKAGE_CONTACT "GitBolt Team <team@gitbolt.dev>")
+set(CPACK_PACKAGE_HOMEPAGE_URL "https://www.gitbolt.com")
+set(CPACK_PACKAGE_CONTACT "GitBolt Team <support@gitbolt.com>")
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGE_INSTALL_DIRECTORY "GitBolt")
 
@@ -48,7 +48,7 @@ elseif(WIN32)
     set(CPACK_NSIS_DISPLAY_NAME "GitBolt")
     set(CPACK_NSIS_PACKAGE_NAME "GitBolt")
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\GitBolt.exe")
-    set(CPACK_NSIS_URL_INFO_ABOUT "https://github.com/ThePieMonster/GitBolt")
+    set(CPACK_NSIS_URL_INFO_ABOUT "https://www.gitbolt.com")
     set(CPACK_NSIS_HELP_LINK "https://github.com/ThePieMonster/GitBolt/issues")
     # Not ON: bin\ holds Qt6*.dll and the MSVC runtime (plus vcpkg's
     # git2/pcre/z DLLs in a build against vcpkg's libgit2), which on the
@@ -92,7 +92,7 @@ else()
     set(CPACK_GENERATOR "DEB;TGZ")
 
     # DEB package settings
-    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "GitBolt Team <team@gitbolt.dev>")
+    set(CPACK_DEBIAN_PACKAGE_MAINTAINER "GitBolt Team <support@gitbolt.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
     # Let dpkg-shlibdeps compute the real shared-library dependencies:
@@ -101,7 +101,7 @@ else()
     # instead of hand-pinning a list that drifts. The bundled Qt itself
     # (/usr/lib/gitbolt, see src/app/CMakeLists.txt) has no package.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
-    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://github.com/ThePieMonster/GitBolt")
+    set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://www.gitbolt.com")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 
     # Install Linux desktop integration files

@@ -3786,8 +3786,8 @@ void MainWindow::createToolBar()
     // the toolbar at one consistent size.
     //
     // The "labeled" property gives them narrower padding than the
-    // icon-only buttons (ThemeService's light stylesheet), as Qt
-    // already leaves room around their text.
+    // icon-only buttons (ThemeService's stylesheets), as Qt already
+    // leaves room around their text.
     const QFont labeledToolButtonFont = QApplication::font();
     auto showLabel = [&](QToolButton* btn) {
         btn->setProperty("labeled", true);

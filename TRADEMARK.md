@@ -4,6 +4,8 @@
 
 The name **"GitBolt"**, the **GitBolt logo**, and any associated visual identity elements (collectively, the "Marks") are trademarks of the GitBolt project and its copyright holders. This policy explains how the Marks may and may not be used.
 
+The official GitBolt project is published at [www.gitbolt.com](https://www.gitbolt.com) and [github.com/ThePieMonster/GitBolt](https://github.com/ThePieMonster/GitBolt).
+
 GitBolt's source code is licensed under the **GNU General Public License v3.0** (see [LICENSE](LICENSE)). The GPL grants you broad rights to use, modify, and redistribute the source code. **However, the GPL does not grant any rights to use the Marks.** Trademark law is separate from copyright law, and the Marks are protected independently of the source code license.
 
 This dual approach — open source code with protected branding — is the same model used by:
@@ -71,10 +73,10 @@ The GitBolt project reserves the right to enforce its trademark rights through l
 
 ## Updates to This Policy
 
-This trademark policy may be updated from time to time. Material changes will be announced on the GitBolt project repository and website. Continued use of the GitBolt name or logo after such updates constitutes acceptance of the revised policy.
+This trademark policy may be updated from time to time. Material changes will be announced on the GitBolt project repository and website ([www.gitbolt.com](https://www.gitbolt.com)). Continued use of the GitBolt name or logo after such updates constitutes acceptance of the revised policy.
 
 ---
 
-**Last updated:** April 2026
+**Last updated:** October 2026
 
 **Questions?** Contact the GitBolt project maintainers via the official GitHub repository.

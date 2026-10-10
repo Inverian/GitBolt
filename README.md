@@ -1,10 +1,39 @@
-# GitBolt
+<p align="center">
+  <a href="https://www.gitbolt.com">
+    <img src="docs/images/banner.png" alt="GitBolt: a Git client that feels as fast as git itself. Native on macOS, Linux and Windows." width="100%">
+  </a>
+</p>
 
-**Fast, cross-platform Git GUI client built with Qt 6, C++, and libgit2.**
+<p align="center">
+  <a href="https://github.com/ThePieMonster/GitBolt/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/ThePieMonster/GitBolt/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white"></a>
+  <a href="https://github.com/ThePieMonster/GitBolt/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/ThePieMonster/GitBolt?include_prereleases&sort=semver&label=release&color=ffb020"></a>
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/ThePieMonster/GitBolt?color=blue"></a>
+  <a href="#download"><img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6b7280"></a>
+  <a href="https://www.gitbolt.com"><img alt="Website: gitbolt.com" src="https://img.shields.io/badge/website-gitbolt.com-ffb020?labelColor=0b0d10"></a>
+  <br>
+  <a href="https://www.qt.io"><img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white"></a>
+  <a href="docs/BUILDING.md"><img alt="C++20" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white"></a>
+  <a href="https://libgit2.org"><img alt="libgit2 1.7 or later" src="https://img.shields.io/badge/libgit2-1.7%2B-f34f29?logo=git&logoColor=white"></a>
+  <a href="https://github.com/ThePieMonster/GitBolt/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/ThePieMonster/GitBolt/main?color=5ac8ff"></a>
+</p>
+
+<p align="center">
+  <strong>Fast, cross-platform Git GUI client built with Qt 6, C++, and libgit2.</strong>
+</p>
+
+<p align="center">
+  <a href="https://www.gitbolt.com"><b>Website</b></a> &nbsp;·&nbsp;
+  <a href="#download"><b>Download</b></a> &nbsp;·&nbsp;
+  <a href="docs/BUILDING.md"><b>Build from source</b></a> &nbsp;·&nbsp;
+  <a href="CHANGELOG.md"><b>Changelog</b></a> &nbsp;·&nbsp;
+  <a href="CONTRIBUTING.md"><b>Contributing</b></a>
+</p>
+
+<p align="center">
+  <img src="docs/images/screenshot.png" alt="GitBolt showing a repository's revision graph with several branches, and the diff of the selected commit below" width="100%">
+</p>
 
 GitBolt is a high-performance, feature-complete Git client for macOS, Linux, and Windows. Built natively in C++ with Qt 6 for maximum rendering performance and minimal resource usage.
-
-> **License:** GitBolt is licensed under the **GNU General Public License v3.0**. See [LICENSE](LICENSE) for the full text. The "GitBolt" name and logo are protected trademarks — see [TRADEMARK.md](TRADEMARK.md) for the trademark policy. Forks are welcome under the GPL but must be rebranded.
 
 ---
 
@@ -18,6 +47,22 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 - **Cross-platform** — Identical experience on macOS, Linux, and Windows
 - **Scriptable** — env-gated test/automation bridge drives the full UI
   from scripts and AI agents (see docs/AGENT_TESTING.md)
+
+---
+
+## Download
+
+Installers for every release are on the
+[Releases page](https://github.com/ThePieMonster/GitBolt/releases), newest first.
+
+| Platform | Download | Notes |
+|---|---|---|
+| macOS | `GitBolt-<version>-Darwin-arm64.dmg` | Apple Silicon, macOS 13 (Ventura) or later |
+| Windows | `GitBolt-<version>-Windows-AMD64.exe` | 64-bit installer |
+| Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, portable: make it executable and run it |
+| Debian, Ubuntu | `gitbolt_<version>_amd64.deb` | x86-64 |
+
+Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 
 ---
 
@@ -253,3 +298,13 @@ See [TRADEMARK.md](TRADEMARK.md) for the full trademark policy.
 ### Contributing
 
 Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on reporting bugs, suggesting features, and submitting pull requests.
+
+---
+
+<p align="center">
+  <sub>
+    <a href="https://www.gitbolt.com">gitbolt.com</a> &nbsp;·&nbsp;
+    Licensed under the <a href="LICENSE">GPL-3.0</a> &nbsp;·&nbsp;
+    “GitBolt” and its logo are <a href="TRADEMARK.md">trademarks</a>
+  </sub>
+</p>
