@@ -4,6 +4,115 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.2] — 2026-10-09
+
+Rebases you can plan commit by commit and carry on however they were
+started, a background fetch that no longer freezes the window, a
+faster terminal, and fixes to committing mid-merge or mid-rebase,
+tags, checkout, cloning and launching.
+
+### Added
+
+- **In-progress bar**: while git is in the middle of a rebase, merge,
+  cherry-pick or revert, started from GitBolt or from a terminal, a
+  bar across the repository view says so. It offers Resolve
+  Conflicts… while files are conflicted, Continue once none are
+  (Commit… for a merge, or for a cherry-pick or revert of a single
+  commit), Skip for a rebase, and Abort; Skip and Abort ask first. A
+  stopped rebase could be carried on only from the Interactive Rebase
+  dialog, and only if it had been started with the dialog's Start
+  Rebase button and the dialog was still open: its Rebase button
+  closed it and left nothing to carry on with. The dialog is now just
+  the plan.
+- **Rebase plans** (Commands → Rebase): each commit can be picked,
+  reworded, edited, squashed, fixed up or dropped (buttons, or the
+  keys P, R, E, S, F and D), and commits move with Move Up and Move
+  Down (Ctrl+Up and Ctrl+Down, Cmd on macOS) as well as by dragging.
+  Reword, or a double-click, asks for the new message, which the
+  commit gets even if the rebase stops on a conflict first and is
+  carried on from GitBolt. Edit stops the rebase after that commit and
+  says so, and Continue on the bar carries on. A squash or fixup with
+  no kept commit below it is caught before git starts. Merge commits
+  in the range are left out, as git leaves them out, and a plan made
+  before HEAD moved, or before another branch was checked out, is
+  refused while the dialog is still open.
+
+### Fixed
+
+- **Committing while a rebase was stopped**, as the conflict resolver
+  advised, threw away the rest of the rebase and left HEAD detached
+  partway through it. A commit now clears only a merge's,
+  cherry-pick's or revert's state, as `git commit` does, and during a
+  rebase the resolver points to Continue. When a merge, rebase or
+  cherry-pick stops, GitBolt now offers the resolver only if files
+  are actually conflicted.
+- **Staging, unstaging and committing right after git changed the
+  index** (a merge or rebase, or a cherry-pick or `git add` run in a
+  terminal) could work from an old copy of it and undo what git had
+  staged, for example leaving a merge's cleanly merged files out of
+  the merge commit.
+- **Periodic background fetch** (Plugins → Periodic background fetch)
+  froze the window for the whole fetch, every few minutes, went on
+  fetching a repository after it was closed, and made quitting wait
+  for it. It now runs in the background and quietly: a failure is a
+  passing note and a flag on the auto-fetch label rather than a
+  sticky error, clicking Fetch during an auto-fetch shows that fetch
+  as running ("Fetching from origin…") and then its result, as for a
+  toolbar Fetch, and closing the repository or opening another stops
+  it.
+- **Annotated tags**: the sidebar tooltip showed the tag object's
+  hash, which is in no log, and never the tagger or the message. It
+  now shows the tagged commit, the tagger and the message.
+- **Checking out a name that is both a branch and a tag** took the
+  tag's files but put HEAD on the branch, which then showed phantom
+  changes. As in git, the branch now wins. This affected the sidebar,
+  the toolbar branch switcher, Commands → Checkout branch and
+  Commands → Checkout revision.
+- **Checking out a branch that another worktree has checked out**
+  wrote that branch's files and index before the switch was refused,
+  which left them staged on the current branch; from a detached HEAD
+  it wasn't refused at all, so two worktrees ended up on the same
+  branch. It is now refused before anything changes, and the error
+  says where the branch is checked out.
+- **Cherry-picked commits** were credited to you instead of their
+  author: GitBolt applies a pick and leaves the commit to the Commit
+  dialog, which used your name and date. The picked commit's author
+  and author date are now kept, with you as the committer.
+- **A checkout, cherry-pick or stash apply that failed partway** (a
+  file that couldn't be written, or another git holding the index
+  lock) could leave files listed as staged that weren't, and the next
+  commit included them. GitBolt now rereads the index after such a
+  failure and before staging or committing.
+- **Checkout as local branch** (sidebar, on a remote branch) failed
+  whenever no local branch of that name existed yet. It now creates
+  one that tracks the remote branch.
+- **A clone whose post-checkout hook fails** (from `core.hooksPath` or
+  `init.templateDir`) was deleted, although git keeps it. It is now
+  kept and offered for opening, like a clone whose checkout failed.
+- **Terminal**: large outputs draw several times faster (in one
+  measurement, `seq 1 100000` in zsh took 2.7 s instead of 22.5 s).
+  On macOS and Linux, a command that prints without stopping (`yes`,
+  a huge `cat`) no longer freezes GitBolt, so Ctrl+C can stop it, and
+  a character split between two reads no longer comes out as
+  replacement characters (`�`, one per byte). On Linux, Ctrl+C copied
+  instead of interrupting when nothing was selected.
+- **Launching GitBolt while it is busy** (Windows): a second launch
+  now waits for the busy window instead of saying it is not
+  responding after 30 seconds, and takes over if that window quits or
+  is ended. A launch waiting on a window that has truly hung shows
+  nothing and waits until that window is ended (End task, say), then
+  opens in its place.
+
+### Changed
+
+- Development: `tools/check-ci-pins.py` reports newer releases of
+  linuxdeploy, its Qt plugin, the AppImage runtime and
+  install-qt-action, which CI pins by hash, and can bump them (NSIS
+  and the test image are still checked by hand); a flaky
+  single-instance test is fixed; the test bridge gains `fire-timer`
+  and reports the status-bar message in `dump-state`; unused libgit2
+  clone code is gone.
+
 ## [0.9.1] — 2026-10-09
 
 Fixes from the first weeks after 0.9.0: rebasing, tags, cloning,
