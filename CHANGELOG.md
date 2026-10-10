@@ -4,6 +4,40 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.3] — 2026-10-10
+
+A fix for Settings crashing GitBolt, and less padding around the
+toolbar's Commit and Stash buttons in light mode.
+
+### Fixed
+
+- **Settings could crash GitBolt** once a repository had been opened,
+  in every release since 0.9.0; on macOS it crashed every time. Tools →
+  Settings, Plugins → Plugin Manager and the Preferences shortcut
+  (Cmd+, on macOS) all open that dialog. Settings lists the menu
+  commands for its Shortcuts page, and that list, taken at startup,
+  included the entries of File → Recent Repositories. Opening a
+  repository rebuilds that menu, deleting those entries, and Settings
+  then read the deleted entries. Recent Repositories is now left out of
+  the list (its entries are folders, not commands), and a menu entry
+  deleted later is skipped.
+
+### Changed
+
+- **Toolbar**: in light mode (the Light theme, or System with a light
+  appearance), Commit and Stash, the two toolbar buttons that show
+  their text, had more padding than the icon buttons. On macOS they
+  sat 34pt apart, against 25 to 27pt between the icon buttons; they are
+  now 25pt apart. The dark theme is unchanged.
+- **Contributing**: contributors now agree once to a contributor
+  license agreement (`CLA.md`) by ticking its box in the pull
+  request template. They keep their copyright, and the project can
+  publish their contributions under the GPL-3.0 or a license it
+  chooses later.
+- Development: a new end-to-end test opens Settings after a
+  repository opens. It runs GitBolt with a scratch home folder, so a
+  crash leaves no crash report behind for the next real launch.
+
 ## [0.9.2] — 2026-10-09
 
 Rebases you can plan commit by commit and carry on however they were

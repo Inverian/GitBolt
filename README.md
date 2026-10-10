@@ -202,27 +202,9 @@ See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on you
 
 ## Project Status
 
-GitBolt **0.9.2** is a beta: every planned module is implemented and
+GitBolt **0.9.3** is a beta: every planned module is implemented and
 wired into the UI, and CI builds and tests it on macOS, Linux, and Windows.
 See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
-
-| Phase | Status |
-|-------|--------|
-| Phase 0 — Project Scaffolding | Complete |
-| Phase 1 — Core Git Layer (libgit2 wrappers) | Complete |
-| Phase 2 — Commit History + Revision Graph | Complete |
-| Phase 3 — Staging, Diffing, Committing | Complete |
-| Phase 4 — Branch Management, Merge, Push/Pull | Complete |
-| Phase 5 — Blame, File History, Search | Complete |
-| Phase 6 — Interactive Rebase, Cherry-Pick, Stash | Complete |
-| Phase 7 — Tags, Submodules, Worktrees, Reflog | Complete |
-| Phase 8 — Settings, Themes, Dashboard | Complete |
-| Phase 9 — Built-in Tools (Plugins menu) | Complete |
-| Phase 10 — Shell Integration & Packaging | Complete |
-| Phase 11 — Git Flow & Maintenance | Complete |
-| Phase 12 — Performance & Hardening | Complete |
-
-**~30,900 lines of C++ across 170 source files.**
 
 ### Roadmap
 

@@ -41,7 +41,7 @@ endif()
 # a cached OFF from before until it is configured fresh.
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
-project(GitBolt VERSION 0.9.2 LANGUAGES CXX)
+project(GitBolt VERSION 0.9.3 LANGUAGES CXX)
 
 # An empty build type builds with NO optimization and no debug info —
 # the worst of both worlds, and exactly what `cmake -B build` with no

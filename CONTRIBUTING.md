@@ -97,7 +97,7 @@ We welcome pull requests! To make the review process smooth:
 5. **Build and test** your changes locally
 6. **Commit** with clear, descriptive commit messages
 7. **Push** to your fork
-8. **Open a pull request** against the `main` branch of the upstream repository
+8. **Open a pull request** against the `main` branch of the upstream repository, and tick the [Contributor License Agreement](CLA.md) box in its description
 
 ### Pull Request Guidelines
 
@@ -112,7 +112,7 @@ We welcome pull requests! To make the review process smooth:
 
 1. A maintainer will review your PR, usually within a few days
 2. We may request changes, ask questions, or suggest improvements
-3. Once approved, a maintainer will merge your PR
+3. Once approved, and once you have agreed to the [Contributor License Agreement](CLA.md), a maintainer will merge your PR
 4. Your contribution will be credited in the commit history and release notes
 
 ---
@@ -235,16 +235,16 @@ ctest --test-dir build --output-on-failure
 
 GitBolt is licensed under the **GNU General Public License v3.0** (see [LICENSE](LICENSE)).
 
-By submitting a contribution to GitBolt, you agree that your contribution will be licensed under the GPL-3.0. You retain copyright of your contribution, but grant the GitBolt project and its users the rights provided by the GPL-3.0 license.
+Before your first contribution can be merged, you need to agree to the [GitBolt Contributor License Agreement](CLA.md) (CLA). Tick its box in your pull request's description; the pull request template includes it. You agree once, and it covers your later contributions too.
 
-Please make sure that:
+In short, the CLA:
 
-- Your contribution is your own original work, or you have the legal right to submit it
-- You have the right to license your contribution under the GPL-3.0
-- You understand that contributions to GitBolt become part of a GPL-licensed work
-- You agree to follow the project's [trademark policy](TRADEMARK.md)
+- lets the project distribute your contribution under the GPL-3.0, and under another license if GitBolt ever changes its license, without having to track down every past contributor
+- includes a patent license for your contribution
+- leaves you the copyright: you can still use your own work however you like
+- asks you to confirm the contribution is yours to give: your own work, or work you have the right to submit (including your employer's permission, if they have rights in it)
 
-You do **not** need to sign a Contributor License Agreement (CLA). Submitting a pull request is sufficient agreement to the above terms.
+The CLA is the binding text; this summary is not. Please also follow the project's [trademark policy](TRADEMARK.md).
 
 ---
 
