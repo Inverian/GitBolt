@@ -358,6 +358,15 @@ QString ThemeService::lightStyleSheet() const
             border-radius: 3px;
             padding: 3px 6px;
         }
+        /* Commit and Stash, which show their text (MainWindow marks
+           them). Qt already sizes such a button with a space's width
+           either side of the text and draws the text left-aligned, so
+           that slack all lands after the text; without this they sat
+           34pt apart against the icon buttons' 26. */
+        QToolBar QToolButton[labeled="true"] {
+            padding-left: 3px;
+            padding-right: 0px;
+        }
         QToolBar QToolButton:hover {
             color: #111;
             background: rgba(0, 0, 0, 0.08);

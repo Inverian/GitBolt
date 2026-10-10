@@ -3780,16 +3780,20 @@ void MainWindow::createToolBar()
     // buttons read as visually demoted next to the inline labels.
     // Using the application default font puts every text element on
     // the toolbar at one consistent size.
+    //
+    // The "labeled" property gives them narrower padding than the
+    // icon-only buttons (ThemeService's light stylesheet), as Qt
+    // already leaves room around their text.
     const QFont labeledToolButtonFont = QApplication::font();
-    auto matchToolButtonFont = [&](QToolButton* btn) {
-        if (btn) btn->setFont(labeledToolButtonFont);
+    auto showLabel = [&](QToolButton* btn) {
+        btn->setProperty("labeled", true);
+        btn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        btn->setFont(labeledToolButtonFont);
     };
 
     if (auto* btn = qobject_cast<QToolButton*>(
-            toolbar->widgetForAction(commitAction_))) {
-        btn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        matchToolButtonFont(btn);
-    }
+            toolbar->widgetForAction(commitAction_)))
+        showLabel(btn);
 
     // Stash button shares its QAction with the Commands menu's
     // "Manage stashes…" entry, so a single setEnabled() call (handled
@@ -3799,10 +3803,8 @@ void MainWindow::createToolBar()
     if (stashAction_) {
         toolbar->addAction(stashAction_);
         if (auto* btn = qobject_cast<QToolButton*>(
-                toolbar->widgetForAction(stashAction_))) {
-            btn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-            matchToolButtonFont(btn);
-        }
+                toolbar->widgetForAction(stashAction_)))
+            showLabel(btn);
     }
 
     // Settings used to live here as a toolbar button too, but it
