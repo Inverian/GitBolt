@@ -9,7 +9,10 @@
 #include <QKeySequence>
 #include <QList>
 #include <QMainWindow>
+#include <atomic>
 #include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 class QStackedWidget;
@@ -91,9 +94,21 @@ private:
     bool revealAutoFetch();
     /// Auto-fetch results stop being wanted (another repository is
     /// opened, the repo is closed, or the feature is switched off): a
-    /// quiet auto-fetch still running reports nothing, and the failure
-    /// flag is cleared.
+    /// quiet auto-fetch still running is stopped and reports nothing,
+    /// and the failure flag is cleared.
     void disownAutoFetch();
+    /// The repository a Fetch click revealed an auto-fetch on has gone
+    /// (closed, or replaced by another one): that fetch is stopped too,
+    /// with "Fetch cancelled." where it was narrated.
+    void cancelRevealedAutoFetch();
+    /// A remote op held for a disowned auto-fetch won't be wanted when
+    /// that one ends (the repo is closed, or another one is opening):
+    /// it is dropped before it starts.
+    void dropHeldRemoteOp();
+    /// The end of a remote op that disabled `action`: enables it again
+    /// if the repo actions are on (setRepoActionsEnabled); if they are
+    /// off, whatever turns them on brings it back.
+    void reenableAfterRemoteOp(QAction* action);
 
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
     /// on its remote through runRemoteOp.
@@ -302,9 +317,19 @@ private:
     // it (see runPeriodicFetch). Quiet: reports to the status bar and
     // the auto-fetch label only. Shown: a user's remote op revealed
     // it, so it reports like a toolbar Fetch. Disowned: its result is
-    // no longer wanted (disownAutoFetch), so it reports nothing.
+    // no longer wanted (disownAutoFetch, cancelRevealedAutoFetch), so
+    // its git is stopped and it reports nothing.
     enum class AutoFetch { None, Quiet, Shown, Disowned };
     AutoFetch autoFetch_ = AutoFetch::None;
+    // The running auto-fetch's own stop flag (GitService::fetch's
+    // `cancel`), which disowning it sets.
+    std::shared_ptr<std::atomic<bool>> autoFetchCancel_;
+    // The git dir of the repository the running auto-fetch fetches,
+    // for onRepositoryOpened to tell whether a revealed one's is gone.
+    std::string autoFetchRepo_;
+    // A remote op clicked while a disowned auto-fetch wound down
+    // (runRemoteOp); that fetch's finished handler starts it.
+    std::function<void()> heldRemoteOp_;
     // git's message from the last failed auto-fetch, flagged on
     // periodicFetchStatus_ until one succeeds.
     QString autoFetchError_;
@@ -317,6 +342,11 @@ private:
     // operationFailed handler put on the status bar stays.
     bool lastRemoteOpFailed_ = false;
     bool remoteOpRunning_ = false;
+    // What setRepoActionsEnabled last set: whether there's a repository
+    // for the repo actions (and the repo-only menus, which go with
+    // them) to act on. A remote op's end re-enables its action only
+    // then (reenableAfterRemoteOp).
+    bool repoActionsEnabled_ = false;
     // The running (or last) remote op's pool-thread job: the destructor
     // waits for it, since it runs inside gitService_.
     QFuture<void> remoteOp_;

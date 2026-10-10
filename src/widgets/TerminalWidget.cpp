@@ -10,6 +10,7 @@
 #include <QScrollBar>
 #include <QShowEvent>
 #include <QSocketNotifier>
+#include <QTextBoundaryFinder>
 #include <QTextCursor>
 
 #include <errno.h>
@@ -62,6 +63,14 @@ char** hostEnviron() { return environ; }
 #endif
 
 constexpr int kMaxScrollback = 5000;
+
+#ifndef Q_OS_WIN
+// The most onPtyReadable() reads, and draws in one appendOutput(), before
+// it goes back to the event loop. Drawing costs by the line, not the
+// byte: tens of milliseconds for ordinary lines, a few hundred for a
+// slice of `yes`'s two-byte ones.
+constexpr qsizetype kMaxReadPerWake = 64 * 1024;
+#endif
 
 // Text -> the bytes the shell's terminal speaks. ConPTY speaks UTF-8
 // whatever the ANSI code page, and the ANSI code page is what Qt's
@@ -339,7 +348,7 @@ void TerminalWidget::start(const QString& workingDirectory)
     childPid_ = pid;
 
     // Non-blocking reads so we never deadlock the GUI thread when
-    // we drain the master fd inside the read notifier.
+    // we read the master fd a slice at a time inside the read notifier.
     int flags = fcntl(masterFd_, F_GETFL, 0);
     fcntl(masterFd_, F_SETFL, flags | O_NONBLOCK);
 
@@ -521,27 +530,39 @@ void TerminalWidget::onPtyReadable()
     if (masterFd_ < 0)
         return;
 #ifndef Q_OS_WIN
-    char buf[4096];
-    while (true) {
-        const ssize_t n = ::read(masterFd_, buf, sizeof(buf));
+    // Read up to kMaxReadPerWake, draw it in one go, then go back to the
+    // event loop: the notifier fires again at once while there is more.
+    // A shell that writes faster than the widget draws (`yes`, a `cat`
+    // of a big file) keeps the PTY full, and reading it until it ran dry
+    // kept the GUI thread here for as long as the flood lasted, with
+    // nothing repainted and Ctrl+C stuck behind it. In between, the full
+    // PTY holds the shell back, as ConPtyProcess's cap does on Windows.
+    QByteArray slice(kMaxReadPerWake, Qt::Uninitialized);
+    qsizetype got = 0;
+    bool exited = false;
+    while (got < slice.size()) {
+        const ssize_t n = ::read(masterFd_, slice.data() + got,
+                                 static_cast<size_t>(slice.size() - got));
         if (n > 0) {
-            appendOutput(QByteArray(buf, static_cast<int>(n)));
+            got += n;
             continue;
         }
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-                break;
-            // Unrecoverable read error — child probably exited.
-            stopShell();
-            appendPlainText(tr("\n[gitbolt] shell exited"));
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
             break;
-        }
-        // n == 0 — EOF on the master means the slave was closed.
+        // EOF on the master (the slave was closed) or a read error:
+        // the child has probably exited. What came before it is
+        // drawn first.
+        exited = true;
+        break;
+    }
+    slice.truncate(got);
+    if (!slice.isEmpty())
+        appendOutput(slice);
+    if (exited) {
         stopShell();
         appendPlainText(tr("\n[gitbolt] shell exited"));
-        break;
     }
 #endif
 }
@@ -734,15 +755,15 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 #ifdef Q_OS_WIN
         // Past the last column: wrap, as the terminal ConPTY paints for
         // would (it goes on at the next row without sending a newline).
-        // So the run goes in a row's worth at a time.
+        // So the run goes in a row's worth at a time (see rowChunk).
         while (i < end) {
             if (cur.positionInBlock() >= screenColumns_) {
                 cur.movePosition(QTextCursor::StartOfBlock);
                 screenLineFeed(cur);
             }
-            // At least one: a row with no room left was wrapped above.
-            const int take =
-                qMax(1, qMin(end - i, screenColumns_ - cur.positionInBlock()));
+            const auto take = static_cast<int>(
+                rowChunk(QStringView(text).mid(i, end - i),
+                         screenColumns_ - cur.positionInBlock()));
             overwrite(cur, QStringView(text).mid(i, take));
             i += take;
         }
@@ -765,6 +786,30 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
     }
 }
 
+// A character that starts in the room goes in whole, the row a unit or
+// more over. In the terminal conhost paints for, that character is in
+// the row's last cell: conhost doesn't start a wide character where it
+// won't fit, so only a narrow one can be there (an astral one such as
+// U+1D400, or a letter with combining marks), and the extra units are
+// only the model's. Cutting it put half a surrogate pair, or a mark
+// without its letter, at the start of the next row. (Only within a
+// read: see the screen model's approximations below.)
+qsizetype TerminalWidget::rowChunk(QStringView run, qsizetype room)
+{
+    // At least one: a row with no room left is wrapped before this.
+    const qsizetype take = qMax(room, qsizetype(1));
+    if (take >= run.size())
+        return run.size();
+    // Only the character at the cut is in question, and it is a few
+    // units long (a Zalgo pile of marks is cut after these): no need
+    // to look at the rest of a long run for each row.
+    constexpr qsizetype kLookahead = 64;
+    QTextBoundaryFinder characters(QTextBoundaryFinder::Grapheme,
+                                   run.left(qMin(run.size(), take + kLookahead)));
+    characters.setPosition(take);
+    return characters.isAtBoundary() ? take : characters.toNextBoundary();
+}
+
 #ifdef Q_OS_WIN
 // ---------------------------------------------------------------------------
 // ConPTY screen model. ConPTY renders the console as a screen of
@@ -772,6 +817,22 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 // screenTop_ down, everything above is scrollback, and rows below the
 // last block are blank until something is painted there. Coordinates
 // in escape sequences are 1-based.
+//
+// Approximations:
+//   - A column is a UTF-16 unit of the row's text, not a cell. A wide
+//     character in the BMP (CJK) is one unit over two cells and a
+//     narrow astral one (U+1D400) two units in one, so a row with them
+//     wraps late or early, and a cursor move into it lands off by as
+//     much.
+//   - rowChunk keeps a character whole only within one run of text in
+//     one read. One that a read boundary, or an escape sequence, cuts
+//     between its parts (a letter and the combining
+//     mark after it, an emoji ZWJ sequence, a flag's two regional
+//     indicators) can still wrap apart: if the first part ends a row,
+//     the next read's rest starts the row below. (A surrogate pair is
+//     never cut: it is one UTF-8 character, which the decoder holds
+//     back until it is whole.) Rare, and only drawn wrong, so left as
+//     it is.
 // ---------------------------------------------------------------------------
 
 // A fresh screen below the output so far. conhost clears the screen
@@ -939,14 +1000,14 @@ void TerminalWidget::resizeScreen(const QSize& grid)
 
 void TerminalWidget::keyPressEvent(QKeyEvent* event)
 {
-    // Cmd+C / Cmd+V handling first — these always mean copy/paste
-    // in a GUI app. event->matches() handles the platform-correct
-    // modifier (Cmd on macOS, Ctrl elsewhere).
+    // Copy and paste first. event->matches() handles the platform-
+    // correct modifier (Cmd on macOS, Ctrl elsewhere).
     if (event->matches(QKeySequence::Copy)) {
-#ifdef Q_OS_WIN
-        // Copy is Ctrl+C here, which is also the only interrupt cmd.exe
-        // knows: copy a selection, otherwise send ^C below (Windows
-        // Terminal's rule).
+#ifndef Q_OS_MACOS
+        // Copy is Ctrl+C here, which is also the interrupt (and the
+        // only one cmd.exe knows): copy a selection, otherwise send ^C
+        // below (Windows Terminal's rule). On macOS copy is Cmd+C, and
+        // the Control key's Ctrl+C never matches it.
         if (textCursor().hasSelection()) {
             QPlainTextEdit::keyPressEvent(event);
             return;

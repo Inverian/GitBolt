@@ -87,9 +87,12 @@ class InteractiveRebaseWidget : public QWidget {
 public:
     explicit InteractiveRebaseWidget(QWidget* parent = nullptr);
 
-    /// Populate the widget with commits to rebase onto a target.
+    /// Populate the widget with commits to rebase onto a target, from
+    /// HEAD at `head` on `branch` (empty: detached), newest first.
+    /// Merge commits are left out of the plan: git doesn't replay them.
     void setCommits(const std::vector<git::CommitData>& commits,
-                    const git::ObjectId& onto);
+                    const git::ObjectId& onto, const git::ObjectId& head,
+                    const std::string& branch);
 
     /// Current rebase plan built from the UI state.
     git::RebasePlan rebasePlan() const;
@@ -102,8 +105,8 @@ public:
     void clear();
 
     /// The selected commit's operation. Reword asks for the new
-    /// message; cancelling changes nothing, and giving the commit's
-    /// own message back undoes the reword.
+    /// message, which can't be empty; cancelling changes nothing, and
+    /// giving the commit's own message back undoes the reword.
     void applyToSelected(git::RebaseOperationType type);
 
     /// Move the selected commit `delta` rows (negative: up), keeping it
@@ -126,8 +129,10 @@ private:
     QPushButton* upButton_ = nullptr;
     QPushButton* downButton_ = nullptr;
 
-    // Onto target
+    // Onto target, and the HEAD the commits were listed from
     git::ObjectId onto_;
+    git::ObjectId head_;
+    std::string branch_;
 };
 
 } // namespace gitbolt::widgets

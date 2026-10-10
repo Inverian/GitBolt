@@ -40,6 +40,14 @@ class ConPtyProcess;
 ///     shell so the cwd updates without restarting it.
 ///   - The destructor SIGHUPs the child and closes the PTY.
 ///
+/// A flood of output (`yes`, a `cat` of a big file) is drawn a slice
+/// at a time with the event loop turning in between, so the window
+/// keeps repainting and Ctrl+C gets through. Meanwhile the full PTY
+/// holds the shell back.
+///
+/// Ctrl+C interrupts. Outside macOS it is also the copy key, so there
+/// it copies a selection instead, if there is one.
+///
 /// Windows: the same widget over a ConPTY pseudo console (Windows 10
 /// 1809+, see ConPtyProcess) running %COMSPEC% (cmd.exe), which
 /// changeDirectory() addresses with `cd /d`. Closing the pseudo console
@@ -51,8 +59,7 @@ class ConPtyProcess;
 /// flood holds the shell back instead of queueing up without bound.
 /// Pasted line breaks go in as CR, the Enter key. A start() while
 /// hidden waits for the next show, since ConPTY lays its screen out
-/// at the size it is created with. Ctrl+C copies only a selection;
-/// otherwise it interrupts.
+/// at the size it is created with.
 class TerminalWidget : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -82,6 +89,15 @@ protected:
     /// Draw a read's worth of the shell's output. Protected rather
     /// than private so tests can feed it without a PTY.
     void appendOutput(const QByteArray& bytes);
+
+    /// How much of `run` (text that starts where a character does) goes
+    /// on a screen row with `room` columns left, in UTF-16 units, which
+    /// is how the Windows screen model counts columns: as much as fits
+    /// and at least one unit, but never part of a character. A surrogate
+    /// pair, or a letter and its combining marks, that starts in the
+    /// room goes in whole. Only Windows wraps rows; this is built
+    /// everywhere so the tests can reach it.
+    static qsizetype rowChunk(QStringView run, qsizetype room);
 
 private slots:
     void onPtyReadable();
@@ -139,10 +155,10 @@ private:
     /// where decoding each read on its own turned both halves into
     /// U+FFFD.
     QStringDecoder   decoder_{QStringDecoder::Utf8};
-    /// Tail of an escape sequence split across a 4096-byte read()
-    /// boundary, re-prepended to the next chunk. Colored output
-    /// splits like this constantly; without the carry the tail
-    /// ("[0m", "[K", …) printed as literal text.
+    /// Tail of an escape sequence split across a read() boundary,
+    /// re-prepended to the next chunk. Colored output splits like
+    /// this constantly; without the carry the tail ("[0m", "[K", …)
+    /// printed as literal text.
     QString          pendingOutput_;
 
     // The directory the shell should cd into the next time it

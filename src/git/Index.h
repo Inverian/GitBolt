@@ -10,13 +10,19 @@ struct git_repository;
 
 namespace gitbolt::git {
 
-/// git_repository_index(), reloaded first if the index file changed
-/// on disk since libgit2 last read it. libgit2 keeps its copy of the
-/// index for the life of the repository, and git (the CLI: merge,
-/// rebase, cherry-pick, `git add` in a terminal) writes the file
-/// behind its back: staging into the stale copy and writing it out
-/// undid what git had staged — a conflicted merge's cleanly merged
-/// files, say — and committing it left them out of the commit.
+/// git_repository_index(), reloaded from the index file first. libgit2
+/// keeps its copy of the index for the life of the repository, and
+/// git (the CLI: merge, rebase, cherry-pick, `git add` in a terminal)
+/// writes the file behind its back: staging into the stale copy and
+/// writing it out undid what git had staged — a conflicted merge's
+/// cleanly merged files, say — and committing it left them out of the
+/// commit. The reload is unconditional: a libgit2 checkout updates
+/// the copy file by file and writes it only if it gets to the end,
+/// and one that failed halfway left the copy holding the files it had
+/// written. The file hadn't changed, so a reload only on change kept
+/// them, and the next commit took them along although nobody had
+/// staged them. GitBolt writes every change it makes to the index at
+/// once, so the file is all there is to keep.
 /// Returns a libgit2 error code; free *out with git_index_free.
 int freshIndex(git_index** out, git_repository* repo);
 

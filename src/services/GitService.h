@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -130,14 +132,19 @@ public:
     /// status refresh. The caller then concludes the merge with a
     /// normal commit — Repository::commit picks up MERGE_HEAD as a
     /// second parent automatically.
-    void resolveConflicts(
+    /// Returns false, having written nothing, while a rebase step runs
+    /// on the repository (see rebaseStepRunning()), reported as an
+    /// operationFailed.
+    bool resolveConflicts(
         const std::vector<std::pair<QString, QString>>& resolutions);
 
     /// Abort whatever conflicted operation is in progress, using
     /// the command that matches the repository state: merge /
     /// cherry-pick / rebase / revert --abort. No-op when the
     /// repository is in a normal state.
-    void abortConflictState();
+    /// Returns false, running nothing, while a rebase step runs on the
+    /// repository, reported as an operationFailed.
+    bool abortConflictState();
 
     /// Choose which refs the log walk starts from. Default is
     /// `Head` (just the current branch and its ancestors).
@@ -198,7 +205,11 @@ public:
     /// the GUI thread.
     void deleteRemoteBranch(const QString& remote, const QString& branch);
     void pull(const QString& remote, const QString& branch);
-    void fetch(const QString& remote = "");
+    /// `cancel`, when given, stops this fetch alone: set from any
+    /// thread, it ends git the way cancelRemoteOps() does (which stops
+    /// this fetch as well). MainWindow drops an auto-fetch with it.
+    void fetch(const QString& remote = "",
+               std::shared_ptr<std::atomic<bool>> cancel = nullptr);
     /// Stops the git command of every running push, pull, fetch and
     /// remote-branch delete (they fail with "Cancelled"), and makes
     /// later ones fail at once. For shutdown: MainWindow calls it
@@ -206,10 +217,25 @@ public:
     void cancelRemoteOps();
 
     // Interactive Rebase. Each step reports on rebaseStepFinished.
+    // One step at a time per repository: another asked for while one
+    // runs is refused, with an operationFailed and no
+    // rebaseStepFinished (the running one's still comes).
     void interactiveRebase(const git::RebasePlan& plan);
     void rebaseContinue();
     void rebaseAbort();
     void rebaseSkip();
+
+    /// Why `plan` can't run on the open repository as it is now, or an
+    /// empty string when it can: HEAD has moved, or another branch is
+    /// checked out, since the plan was made (or no repository is
+    /// open). interactiveRebase() refuses such a plan; asking first
+    /// lets the Rebase dialog stay open with it.
+    QString rebasePlanProblem(const git::RebasePlan& plan) const;
+
+    /// Whether a rebase step is still running on the open repository —
+    /// started on it, or on an earlier open of it (Recent, a hand-off
+    /// of the same path), whose outcome still comes.
+    bool rebaseStepRunning() const;
 
     // Cherry-pick
     void cherryPick(const std::vector<git::ObjectId>& commits);
@@ -285,6 +311,8 @@ signals:
     /// Right after each statusReady (and in its place when status
     /// couldn't be read): the operation the repository is in the
     /// middle of, if any, and how many files are still conflicted.
+    /// Also just before each rebaseStepFinished, with the state the
+    /// step left behind.
     void repoStateReady(gitbolt::git::RepoState state, int conflicts);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void branchesReady(std::vector<gitbolt::git::BranchInfo> branches);
@@ -300,7 +328,10 @@ signals:
     /// when git failed or stopped on a conflict, right after an
     /// operationFailed with git's message. `rebasing`: the repository
     /// is still mid-rebase — after a conflict, or after a successful
-    /// step that stopped where the plan said `edit`.
+    /// step that stopped where the plan said `edit`. Not emitted for a
+    /// step whose repository was closed or swapped for another while
+    /// git ran: the result would land on another one. (Opened again,
+    /// the same repository still gets it.)
     void rebaseStepFinished(const QString& step, bool success, bool rebasing);
     void cherryPickComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
@@ -345,16 +376,22 @@ private:
 
     /// Runs one rebase step on a worker (`step` names it in
     /// operationFailed and rebaseStepFinished): reports a failure,
-    /// emits rebaseStepFinished, and asks for the refreshes.
+    /// emits repoStateReady and rebaseStepFinished, and asks for the
+    /// refreshes. `refusal`, run first under repoMutex_, says why the
+    /// step must not run, if it mustn't; the step then fails with that
+    /// and git never starts. Refused at once, with operationFailed
+    /// alone, while another step runs on the repository.
     void runRebaseStep(
         const QString& step,
-        std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command);
+        std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command,
+        std::function<QString(const git::Repository&)> refusal = {});
 
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network
     /// ops can use it from MainWindow's pool thread. Its commands stop
-    /// on cancelRemoteOps().
-    std::optional<git::GitProcess> processIfOpen() const;
+    /// on cancelRemoteOps(), and once `cancel` is set when given.
+    std::optional<git::GitProcess> processIfOpen(
+        std::shared_ptr<std::atomic<bool>> cancel = nullptr) const;
 
     /// Set by cancelRemoteOps(); shared with every processIfOpen().
     const std::shared_ptr<std::atomic<bool>> remoteOpsCancelled_ =
@@ -384,6 +421,12 @@ private:
     // destroy the object under their feet (they finish against the
     // old repo, then notice it's stale and drop their result).
     std::shared_ptr<git::Repository> repo_;
+
+    // The repositories a rebase step is running on, by git dir
+    // (Repository::path(): the same for every open of one). Under
+    // repoMutex_: a step's worker takes its own out when git is done.
+    std::set<std::string> rebaseSteps_;
+
     LogScope logScope_ = LogScope::Head;
     QStringList selectedBranches_;
 

@@ -77,20 +77,22 @@ add_dependencies(test_git_service gitbolt_stall_transport)
 target_compile_definitions(test_git_service PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
-# widgets/ tests. The terminal's ConPTY backend only exists in Windows
-# builds; elsewhere those tests are a QSKIP each, and the terminal's
-# output path is tested on its own.
+# widgets/ tests. The terminal runs its shell under ConPTY on Windows
+# and under a PTY elsewhere. Each backend's end-to-end tests are a QSKIP
+# on the other platforms (so all of TestConPtyProcess is, off Windows),
+# and the terminal's output path is tested on its own everywhere.
 gitbolt_add_test(test_conpty_process widgets/TestConPtyProcess.cpp)
 gitbolt_add_test(test_terminal_widget widgets/TestTerminalWidget.cpp)
 target_link_libraries(test_terminal_widget PRIVATE gitbolt_widgets)
 if(WIN32)
     target_link_libraries(test_conpty_process PRIVATE gitbolt_conpty)
 endif()
-# The Rebase dialog's plan list and the repository view's in-progress bar
+# The Rebase dialog, its plan list and the repository view's in-progress bar
 gitbolt_add_test(test_rebase_widgets widgets/TestRebaseWidgets.cpp)
-target_link_libraries(test_rebase_widgets PRIVATE gitbolt_widgets)
-# It opens the reword prompt: off screen, so a local run doesn't flash
-# windows or steal focus (CI runs every test off screen anyway).
+target_link_libraries(test_rebase_widgets PRIVATE gitbolt_dialogs)
+# It opens the dialog, its target list and the reword prompt: off screen,
+# so a local run doesn't flash windows or steal focus (CI runs every test
+# off screen anyway).
 set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the

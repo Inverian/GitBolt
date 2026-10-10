@@ -39,6 +39,9 @@ public:
     /// previous op's timer can't blank the fresh message mid-run).
     void cancelPendingClear();
 
+    /// Blank the label now, for an op dropped before it finished.
+    void clear();
+
 private:
     /// Set the label, elided to a bounded width; an elided message
     /// keeps its full text in the tooltip (or `tooltip` when given).

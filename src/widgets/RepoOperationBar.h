@@ -39,6 +39,7 @@ public:
     /// While a step runs, every button is off, so that a second click
     /// can't start another git command on top of it.
     void setBusy(bool busy);
+    bool isBusy() const { return busy_; }
 
 signals:
     void resolveRequested();
@@ -59,6 +60,7 @@ private:
     git::RepoState state_ = git::RepoState::None;
     int conflicts_ = 0;
     bool busy_ = false;
+    bool applyingColors_ = false;
     QColor border_;
 
     QLabel* message_ = nullptr;

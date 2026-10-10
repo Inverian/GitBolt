@@ -1011,7 +1011,12 @@ void MainWindow::buildRepositoryMenu()
         if (branchComboAction_) branchComboAction_->setVisible(false);
         if (remoteOpLabelAction_) remoteOpLabelAction_->setVisible(false);
         if (remoteOpLabel_) remoteOpLabel_->clear();
+        // No remote op is wanted for a repository off the screen: a
+        // quiet auto-fetch stops, an op held for a stopped one never
+        // starts, and a fetch a Fetch click revealed is cancelled.
         disownAutoFetch();
+        dropHeldRemoteOp();
+        cancelRevealedAutoFetch();
         // Clear the dynamic Commit (N) suffix back to plain "Commit"
         // — no count is meaningful when no repo is open.
         if (commitAction_)
@@ -2294,16 +2299,19 @@ void MainWindow::buildCommandsMenu()
         //            the commits reachable from HEAD but not from
         //            the target (this is the set that would be
         //            replayed onto the target), and feed that list
-        //            back via setCommitsToRebase. The dialog
+        //            back via setCommitsToRebase, with the HEAD
+        //            (commit and branch) it starts at. The dialog
         //            renders the preview and lets the user assign
         //            per-commit operations.
         //   Stage 3: on rebaseRequested(plan) we hand off to
         //            GitService::interactiveRebase and the dialog
-        //            closes. Outcome arrives async on
-        //            rebaseStepFinished; the status bar surfaces the
-        //            result, and a rebase that stops (conflict,
-        //            `edit`) is carried on from the repository view's
-        //            in-progress bar.
+        //            closes — or, while a rebase step still runs or
+        //            once HEAD has moved since the plan was made, it
+        //            stays open, plan and all, and says why. Outcome
+        //            arrives async on rebaseStepFinished; the status
+        //            bar surfaces the result, and a rebase that stops
+        //            (conflict, `edit`) is carried on from the
+        //            repository view's in-progress bar.
         auto* a = new QAction(menuIcon(QStringLiteral("rebase")),
                               tr("R&ebase..."), this);
         a->setObjectName(QStringLiteral("commands.rebase"));
@@ -2340,6 +2348,8 @@ void MainWindow::buildCommandsMenu()
                 struct RebasePreview {
                     std::vector<git::CommitData> commits;
                     git::ObjectId onto;
+                    git::ObjectId head;
+                    std::string branch;
                     bool valid = false;
                 };
                 const auto preview = svc->withRepository(
@@ -2348,6 +2358,15 @@ void MainWindow::buildCommandsMenu()
                         // Resolve the user-entered target → ObjectId.
                         auto onto = repo.resolveRef(ref.toStdString());
                         if (!onto.ok()) return p;
+                        // The HEAD the plan is for, commit and
+                        // branch: GitService won't run it on another.
+                        auto head = repo.head();
+                        if (!head.ok()) return p;
+                        if (!repo.isHeadDetached()) {
+                            auto branch = repo.headBranchName();
+                            if (!branch.ok()) return p;
+                            p.branch = std::move(branch).value();
+                        }
 
                         // Walk commits reachable from HEAD but not
                         // from the target — the canonical "what
@@ -2365,16 +2384,38 @@ void MainWindow::buildCommandsMenu()
                         if (!commitsRes.ok()) return p;
                         p.commits = std::move(commitsRes).value();
                         p.onto = onto.value();
+                        p.head = head.value();
                         p.valid = true;
                         return p;
                     });
                 if (preview.valid)
-                    dlg->setCommitsToRebase(preview.commits,
-                                            preview.onto);
+                    dlg->setCommitsToRebase(preview.commits, preview.onto,
+                                            preview.head, preview.branch);
             });
 
             connect(dlg, &dialogs::RebaseDialog::rebaseRequested,
-                    this, [this](const git::RebasePlan& plan) {
+                    this, [this, dlg](const git::RebasePlan& plan) {
+                // Turned down here, not by GitService once the dialog
+                // has closed: it stays open, with the plan, to try
+                // again. The dialog is modeless, so it can be confirmed
+                // while a rebase step runs, or after a commit or a
+                // checkout moved HEAD away from what the plan lists.
+                auto* bar = repoView_ ? repoView_->operationBar() : nullptr;
+                if (bar && bar->isBusy()) {
+                    dlg->refuse(tr("A rebase step is still running; try again when it's done."));
+                    return;
+                }
+                if (const QString problem = gitService_->rebasePlanProblem(plan);
+                    !problem.isEmpty()) {
+                    dlg->refuse(problem);
+                    return;
+                }
+                // Busy until rebaseStepFinished, as for the bar's own
+                // steps. Left live, the bar came up mid-rebase (on the
+                // watcher's refresh) offering Continue, Skip and Abort,
+                // each a second git on top of the running one.
+                if (bar)
+                    bar->setBusy(true);
                 statusBar()->showMessage(tr("Rebasing…"));
                 gitService_->interactiveRebase(plan);
             });
@@ -3489,16 +3530,18 @@ void MainWindow::buildHelpMenu()
 
 // Walk the Navigate / View / Commands menus and enable or disable
 // every child action. Repo-shared QActions (refreshAction_, fetchAction_,
-// pullAction_, pushAction_, commitAction_) are toggled independently
-// in onRepositoryOpened() and the close-action lambda, so skipping
-// them here does not lose correctness — it just avoids a redundant
-// write from two places.
+// pullAction_, pushAction_, commitAction_) are setRepoActionsEnabled's,
+// called alongside this one everywhere, so they're skipped here. That
+// is more than a saved write: setRepoActionsEnabled keeps Fetch off
+// while a revealed auto-fetch runs, and this used to turn it back on.
 void MainWindow::setRepoOnlyMenusEnabled(bool on)
 {
-    auto toggleChildren = [on](QMenu* m) {
+    const QList<QAction*> shared{refreshAction_, fetchAction_, pullAction_,
+                                 pushAction_, commitAction_};
+    auto toggleChildren = [on, &shared](QMenu* m) {
         if (!m) return;
         for (QAction* a : m->actions()) {
-            if (a->isSeparator()) continue;
+            if (a->isSeparator() || shared.contains(a)) continue;
             a->setEnabled(on);
         }
     };
@@ -3515,8 +3558,13 @@ void MainWindow::setRepoActionsEnabled(bool on)
     // MainWindow.h). Used by onRepositoryOpened (true), the Close
     // action (false), the optimistic phase of an async open (false
     // — ops would hit the previous repo), and the failure revert.
+    repoActionsEnabled_ = on;
     if (refreshAction_) refreshAction_->setEnabled(on);
-    if (fetchAction_)   fetchAction_->setEnabled(on);
+    // Except Fetch while a revealed auto-fetch runs (an open that
+    // failed, or opened its repository again, leaves it running):
+    // that is the user's fetch, and it gives Fetch back as it ends.
+    if (fetchAction_)
+        fetchAction_->setEnabled(on && autoFetch_ != AutoFetch::Shown);
     if (pullAction_)    pullAction_->setEnabled(on);
     if (pushAction_)    pushAction_->setEnabled(on);
     if (commitAction_)  commitAction_->setEnabled(on);
@@ -3900,7 +3948,9 @@ void MainWindow::setupConnections()
             offerConflictResolution(tr("rebase"));
     });
 
-    // The in-progress bar: fed by every status refresh, answered here.
+    // The in-progress bar: fed by every status refresh and by each
+    // rebase step's outcome (its repoStateReady comes just ahead of
+    // rebaseStepFinished), answered here.
     if (repoView_) {
         auto* bar = repoView_->operationBar();
         connect(gitService_, &services::GitService::repoStateReady,
@@ -4231,7 +4281,13 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     }
     pendingOpen_.path   = path;
     pendingOpen_.awaitingInitialLog = true;
+    // A quiet auto-fetch stops, and an op held for a stopped one is
+    // dropped: by the time it could start, the service may have either
+    // repository. A fetch a Fetch click revealed runs on until the
+    // open's outcome says whether its repository is gone
+    // (onRepositoryOpened).
     disownAutoFetch();
+    dropHeldRemoteOp();
 
     const QString repoName = QDir(path).dirName();
     setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? path : repoName));
@@ -4318,7 +4374,14 @@ void MainWindow::onRepositoryOpened(const QString& path)
     if (filterInput_)
         filterInput_->clear();
     if (repoView_) {
+        // Busy only while a rebase step runs on this repository. The
+        // same one opened again (Recent, the dashboard, a second
+        // launch handing its path over) is still waiting for its step,
+        // whose outcome comes here; a step still running on the
+        // previous one reports nothing here (GitService drops it), so
+        // nothing would ever turn this repository's buttons back on.
         repoView_->operationBar()->setState(git::RepoState::None, 0);
+        repoView_->operationBar()->setBusy(gitService_->rebaseStepRunning());
         repoView_->resetInspectorTabs();
         repoView_->setRepositoryPath(path);
 
@@ -4387,6 +4450,15 @@ void MainWindow::onRepositoryOpened(const QString& path)
     gitService_->refreshTags();
 
     statusBar()->showMessage(tr("Opened: %1").arg(path), 3000);
+
+    // A fetch a Fetch click revealed is cancelled once its repository
+    // has been replaced; not when the open began, since an open that
+    // fails, or opens the same repository again, leaves it on screen.
+    if (autoFetch_ == AutoFetch::Shown
+        && gitService_->withRepository([](git::Repository& r) {
+               return r.path();
+           }) != autoFetchRepo_)
+        cancelRevealedAutoFetch();
 }
 
 void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int offset)
@@ -4678,7 +4750,10 @@ void MainWindow::showConflictResolver()
                 QString::fromStdString(conflicts[i].path),
                 contents[i]);
         }
-        gitService_->resolveConflicts(resolutions);
+        // Turned down while a rebase step runs (git is at the index):
+        // the dialog stays, resolutions and all.
+        if (!gitService_->resolveConflicts(resolutions))
+            return;
         // A rebase carries on with Continue; committing there would
         // make an extra commit of the resolution.
         const bool rebase = repoView_
@@ -4693,9 +4768,10 @@ void MainWindow::showConflictResolver()
 
     connect(widget, &widgets::MergeConflictWidget::mergeAborted,
             dlg, [this, dlg]() {
-        // The widget has already confirmed with the user.
-        gitService_->abortConflictState();
-        dlg->close();
+        // The widget has already confirmed with the user. Turned down
+        // while a rebase step runs, the dialog stays.
+        if (gitService_->abortConflictState())
+            dlg->close();
     });
 
     dlg->show();
@@ -4778,8 +4854,13 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
                              std::function<void()> after)
 {
     // One remote op at a time: the ops mutate the same repo,
-    // and the inline label can only narrate one of them.
-    if (remoteOpRunning_) {
+    // and the inline label can only narrate one of them. Except
+    // that a disowned auto-fetch is only winding down (its git was
+    // stopped), so one op is held for that moment instead of being
+    // turned away for something no longer on screen.
+    const bool hold = remoteOpRunning_
+        && autoFetch_ == AutoFetch::Disowned && !heldRemoteOp_;
+    if (remoteOpRunning_ && !hold) {
         // If it's a quiet auto-fetch, nothing on screen says so;
         // reveal it, so the user can see what they're waiting for.
         revealAutoFetch();
@@ -4796,10 +4877,20 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     statusBar()->showMessage(startMsg);
     if (sourceAction) sourceAction->setEnabled(false);
 
+    if (hold) {
+        heldRemoteOp_ = [this, sourceAction, startMsg, successMsg,
+                         op = std::move(op),
+                         after = std::move(after)]() mutable {
+            runRemoteOp(sourceAction, startMsg, successMsg,
+                        std::move(op), std::move(after));
+        };
+        return;
+    }
+
     startRemoteOp(std::move(op),
                   [this, sourceAction, successMsg,
                    after = std::move(after)]() {
-        if (sourceAction) sourceAction->setEnabled(true);
+        reenableAfterRemoteOp(sourceAction);
         finishRemoteOpFeedback(successMsg);
         if (after)
             after();
@@ -4848,6 +4939,10 @@ void MainWindow::startRemoteOp(std::function<void()> op,
 // user's fetch / pull / push meanwhile reveals it (revealAutoFetch), and
 // it then reports like a toolbar Fetch. A tick that finds another remote
 // op running is skipped; the next one will try again.
+//
+// Once its result isn't wanted (disownAutoFetch) it is stopped, not left
+// to run: against a stalled server it held every Fetch, Pull and Push
+// back until git's 2-minute timeout, with nothing on screen to say why.
 // ---------------------------------------------------------------------------
 void MainWindow::runPeriodicFetch()
 {
@@ -4860,19 +4955,31 @@ void MainWindow::runPeriodicFetch()
         return;
 
     autoFetch_ = AutoFetch::Quiet;
+    autoFetchCancel_ = std::make_shared<std::atomic<bool>>(false);
+    // By git dir: a bare repository has no work tree to tell it apart.
+    autoFetchRepo_ = gitService_->withRepository(
+        [](git::Repository& r) { return r.path(); });
     // The toolbar Fetch's own call, so a success is followed by the
     // same refreshes: branches here, and the log once the watcher
-    // sees the updated refs.
-    startRemoteOp([this]() { gitService_->fetch(); }, [this]() {
+    // sees the updated refs. The flag is passed in now, on this
+    // thread, so a disown can't come before the job has taken it.
+    startRemoteOp([this, cancel = autoFetchCancel_]() {
+        gitService_->fetch(QString(), cancel);
+    }, [this]() {
         const AutoFetch kind = std::exchange(autoFetch_, AutoFetch::None);
-        if (kind == AutoFetch::Disowned)
+        autoFetchCancel_.reset();
+        if (kind == AutoFetch::Disowned) {
+            // A remote op clicked while this one wound down.
+            if (auto held = std::exchange(heldRemoteOp_, nullptr))
+                held();
             return;
+        }
         if (!lastRemoteOpFailed_) {
             autoFetchError_.clear();
             updatePeriodicFetchStatus();
         }
         if (kind == AutoFetch::Shown) {
-            if (fetchAction_) fetchAction_->setEnabled(true);
+            reenableAfterRemoteOp(fetchAction_);
             finishRemoteOpFeedback(tr("Fetch complete."));
         }
     });
@@ -4896,10 +5003,52 @@ bool MainWindow::revealAutoFetch()
 
 void MainWindow::disownAutoFetch()
 {
-    if (autoFetch_ == AutoFetch::Quiet)
+    // A quiet one is stopped (see the top of this section).
+    if (autoFetch_ == AutoFetch::Quiet) {
         autoFetch_ = AutoFetch::Disowned;
+        autoFetchCancel_->store(true);
+    }
     autoFetchError_.clear();
     updatePeriodicFetchStatus();
+}
+
+void MainWindow::cancelRevealedAutoFetch()
+{
+    // A revealed one is the user's fetch now, but of the repository it
+    // was revealed on: left to finish, it reported over the home screen
+    // or the next repository. It is stopped as a quiet one is, and
+    // since the user was watching it, the narration says so.
+    if (autoFetch_ != AutoFetch::Shown)
+        return;
+    autoFetch_ = AutoFetch::Disowned;
+    autoFetchCancel_->store(true);
+    const QString msg = tr("Fetch cancelled.");
+    if (opIndicator_)
+        opIndicator_->flash(msg, 4000);
+    statusBar()->showMessage(msg, 4000);
+    reenableAfterRemoteOp(fetchAction_);
+}
+
+void MainWindow::dropHeldRemoteOp()
+{
+    // It never started, so its narration just goes.
+    if (!heldRemoteOp_)
+        return;
+    heldRemoteOp_ = nullptr;
+    if (opIndicator_)
+        opIndicator_->clear();
+    statusBar()->clearMessage();
+}
+
+void MainWindow::reenableAfterRemoteOp(QAction* action)
+{
+    // Only along with the other repo actions. Close and an open in
+    // flight turn those off (GitService still has the op's repository,
+    // so the action would act on the one left behind), and whatever
+    // turns them back on brings this one too. File > Home leaves them
+    // on: the repository stays open.
+    if (action && repoActionsEnabled_)
+        action->setEnabled(true);
 }
 
 // Completion half of the toolbar fetch/pull/push wrapper: reads

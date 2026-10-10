@@ -1,6 +1,7 @@
 #include "widgets/InteractiveRebaseWidget.h"
 
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QDrag>
 #include <QHBoxLayout>
 #include <QInputDialog>
@@ -415,12 +416,22 @@ void InteractiveRebaseWidget::setupUi() {
 }
 
 void InteractiveRebaseWidget::setCommits(const std::vector<git::CommitData>& commits,
-                                          const git::ObjectId& onto) {
+                                          const git::ObjectId& onto, const git::ObjectId& head,
+                                          const std::string& branch) {
     onto_ = onto;
+    head_ = head;
+    branch_ = branch;
 
     std::vector<git::RebaseOperation> ops;
     ops.reserve(commits.size());
     for (const auto& c : commits) {
+        // Merges stay out, as they do of git's own todo list: git can't
+        // pick one ("is a merge but no -m option was given"), and puts
+        // it back at the top of the list each time, so Continue and
+        // Skip both failed on it and only Abort got out. The commits
+        // under it are replayed in a line.
+        if (c.isMerge())
+            continue;
         git::RebaseOperation op;
         op.type = git::RebaseOperationType::Pick;
         op.commitId = c.id;
@@ -437,6 +448,8 @@ void InteractiveRebaseWidget::setCommits(const std::vector<git::CommitData>& com
 git::RebasePlan InteractiveRebaseWidget::rebasePlan() const {
     git::RebasePlan plan;
     plan.onto = onto_;
+    plan.head = head_;
+    plan.branch = branch_;
     plan.operations = model_->operations();
     return plan;
 }
@@ -470,6 +483,8 @@ QString InteractiveRebaseWidget::planProblem() const {
 void InteractiveRebaseWidget::clear() {
     model_->setOperations({});
     onto_ = git::ObjectId();
+    head_ = git::ObjectId();
+    branch_.clear();
 }
 
 void InteractiveRebaseWidget::applyToSelected(git::RebaseOperationType type) {
@@ -482,17 +497,30 @@ void InteractiveRebaseWidget::applyToSelected(git::RebaseOperationType type) {
     }
     const auto& op = model_->operations()[static_cast<size_t>(row)];
     const QString original = QString::fromStdString(op.message).trimmed();
-    bool ok = false;
-    const QString text = QInputDialog::getMultiLineText(
-        this, tr("Reword Commit"),
-        tr("New message for %1:").arg(QString::fromStdString(op.commitId.toShortHex())),
-        op.newMessage.empty() ? original : QString::fromStdString(op.newMessage).trimmed(), &ok)
-                             .trimmed();
-    if (!ok || text.isEmpty())
+    const bool reworded = op.type == git::RebaseOperationType::Reword;
+
+    QInputDialog prompt(this);
+    prompt.setWindowTitle(tr("Reword Commit"));
+    prompt.setLabelText(
+        tr("New message for %1:").arg(QString::fromStdString(op.commitId.toShortHex())));
+    prompt.setOption(QInputDialog::UsePlainTextEditForTextInput);
+    prompt.setTextValue(op.newMessage.empty() ? original
+                                              : QString::fromStdString(op.newMessage).trimmed());
+    // git makes no commit with an empty message: it stops the rebase
+    // instead. So OK waits for some text. (The prompt builds its
+    // buttons when it is shown, before anyone can type.)
+    connect(&prompt, &QInputDialog::textValueChanged, &prompt, [&prompt](const QString& text) {
+        if (auto* buttons = prompt.findChild<QDialogButtonBox*>())
+            buttons->button(QDialogButtonBox::Ok)->setEnabled(!text.trimmed().isEmpty());
+    });
+    if (prompt.exec() != QDialog::Accepted)
+        return;
+    const QString text = prompt.textValue().trimmed();
+    if (text.isEmpty())
         return;
     if (text != original)
         model_->setNewMessage(row, text.toStdString() + "\n");
-    else if (op.type == git::RebaseOperationType::Reword)
+    else if (reworded)
         model_->setNewMessage(row, {});
 }
 

@@ -83,6 +83,12 @@ void InlineOpIndicator::cancelPendingClear()
         timer_->stop();
 }
 
+void InlineOpIndicator::clear()
+{
+    cancelPendingClear();
+    clearNow();
+}
+
 void InlineOpIndicator::scheduleClear(int ms)
 {
     if (!timer_) {

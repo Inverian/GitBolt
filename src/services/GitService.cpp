@@ -2,10 +2,20 @@
 
 #include <QDir>
 #include <QFile>
+#include <QScopeGuard>
 
 #include <algorithm>
 
 namespace gitbolt::services {
+
+namespace {
+// Why a git command that would work on the index or the rebase's
+// state isn't run: a rebase step is at them already (see
+// rebaseStepRunning()).
+QString rebaseStepStillRunning() {
+    return GitService::tr("A rebase step is still running; try again when it's done.");
+}
+} // namespace
 
 GitService::GitService(QObject* parent)
     : QObject(parent), watcher_(this), runner_(this) {
@@ -146,11 +156,13 @@ git::GitProcess GitService::process() const {
     return repo_->process();
 }
 
-std::optional<git::GitProcess> GitService::processIfOpen() const {
+std::optional<git::GitProcess> GitService::processIfOpen(
+    std::shared_ptr<std::atomic<bool>> cancel) const {
     std::lock_guard<std::mutex> lock(repoMutex_);
     if (!repo_) return std::nullopt;
     git::GitProcess proc = repo_->process();
-    proc.setCancelFlag(remoteOpsCancelled_);
+    proc.addCancelFlag(remoteOpsCancelled_);
+    proc.addCancelFlag(std::move(cancel));
     return proc;
 }
 
@@ -305,9 +317,15 @@ void GitService::refreshConflicts() {
     });
 }
 
-void GitService::resolveConflicts(
+bool GitService::resolveConflicts(
         const std::vector<std::pair<QString, QString>>& resolutions) {
-    if (!repo_) return;
+    if (!repo_) return true;
+    // A resolver left open from an earlier stop, while Continue runs:
+    // staged now, its files went into whatever git was committing.
+    if (rebaseStepRunning()) {
+        emit operationFailed(QStringLiteral("resolve conflicts"), rebaseStepStillRunning());
+        return false;
+    }
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
         const QString workdir =
@@ -335,10 +353,17 @@ void GitService::resolveConflicts(
         }
     }
     refreshStatus();
+    return true;
 }
 
-void GitService::abortConflictState() {
-    if (!repo_) return;
+bool GitService::abortConflictState() {
+    if (!repo_) return true;
+    // `git rebase --abort` under a running step reset the branch while
+    // the step went on picking onto it.
+    if (rebaseStepRunning()) {
+        emit operationFailed(QStringLiteral("abort"), rebaseStepStillRunning());
+        return false;
+    }
 
     git::RepoState state = git::RepoState::None;
     git::GitProcess proc{[&]() {
@@ -363,7 +388,7 @@ void GitService::abortConflictState() {
         break;
     case git::RepoState::None:
     case git::RepoState::Other:
-        return;   // nothing in progress to abort
+        return true;   // nothing in progress to abort
     }
 
     auto result = proc.run(args);
@@ -380,6 +405,7 @@ void GitService::abortConflictState() {
     refreshStatus();
     refreshLog();
     refreshBranches();
+    return true;
 }
 
 void GitService::blameFile(const QString& path,
@@ -617,7 +643,10 @@ void GitService::checkoutBranch(const QString& name) {
         emit operationFailed(QStringLiteral("checkout"), err);
         // Still kick a refresh so the UI matches reality (branchesReady
         // will fire with the unchanged list, which is fine — the combo
-        // is already showing the correct current branch).
+        // is already showing the correct current branch). Status too:
+        // a checkout that failed partway has written some of the
+        // target's files, and those show up as changes.
+        refreshStatus();
         refreshBranches();
         return;
     }
@@ -637,6 +666,18 @@ namespace {
 inline QString stderrOrFallback(const git::ProcessOutput& out, const QString& fallback) {
     QString s = QString::fromStdString(out.stderrData).trimmed();
     return s.isEmpty() ? fallback : s;
+}
+
+// Which repository a rebase step runs on: its git dir, which libgit2
+// resolves however the path was typed. Windows paths ignore case, and
+// libgit2 keeps the case a path was typed in there, so "c:\repo" and
+// "C:\repo" must not count as two repositories.
+std::string rebaseStepKey(const git::Repository& repo) {
+#ifdef Q_OS_WIN
+    return QString::fromStdString(repo.path()).toLower().toStdString();
+#else
+    return repo.path();
+#endif
 }
 
 // Why a rebase step failed, or an empty string if it didn't: git's
@@ -662,6 +703,34 @@ QString rebaseFailure(const git::Result<git::ProcessOutput>& result) {
         ? GitService::tr("git rebase exited with code %1").arg(out.exitCode)
         : message;
 }
+
+// See GitService::rebasePlanProblem().
+QString outdatedPlan(const git::Repository& repo, const git::RebasePlan& plan) {
+    const auto head = repo.head();
+    if (!head)
+        return QString::fromStdString(head.error().message());
+    std::string branch;
+    if (!repo.isHeadDetached()) {
+        auto name = repo.headBranchName();
+        if (!name)
+            return QString::fromStdString(name.error().message());
+        branch = std::move(*name);
+    }
+    const auto where = [](const std::string& b) {
+        return b.empty() ? GitService::tr("a detached HEAD") : QString::fromStdString(b);
+    };
+    // Even at the same commit: git would rewrite the branch checked
+    // out now, which the plan wasn't made for.
+    if (branch != plan.branch)
+        return GitService::tr("The rebase was planned on %1, but %2 is checked out now. "
+                              "Pick the target again.")
+            .arg(where(plan.branch), where(branch));
+    if (*head != plan.head)
+        return GitService::tr("%1 has moved since the rebase was planned. "
+                              "Pick the target again.")
+            .arg(branch.empty() ? QStringLiteral("HEAD") : QString::fromStdString(branch));
+    return {};
+}
 } // namespace
 
 void GitService::checkoutRemoteBranch(const QString& remoteBranch) {
@@ -686,8 +755,16 @@ void GitService::checkoutRemoteBranch(const QString& remoteBranch) {
         checkoutBranch(local);
         return;
     }
+    // Five minutes, as for git's other long local work (gc, fsck, an
+    // interactive rebase), not run()'s default 30 s. Checking out a
+    // branch nobody has checked out here yet can take minutes: LFS
+    // files downloaded on the way, a slow post-checkout hook, a big
+    // tree on a slow disk. Killed at 30 s, git left the working tree
+    // half switched and its index.lock behind, which every later
+    // stage, commit and checkout then tripped over.
     auto result = proc.run({"checkout", "-b", local.toStdString(),
-                            "--track", remoteBranch.toStdString()});
+                            "--track", remoteBranch.toStdString()},
+                           /*timeoutMs=*/300000);
     if (!result) {
         emit operationFailed(QStringLiteral("checkout"),
                              QString::fromStdString(result.error().message()));
@@ -776,8 +853,9 @@ void GitService::pull(const QString& remote, const QString& branch) {
     }
 }
 
-void GitService::fetch(const QString& remote) {
-    const auto snapshot = processIfOpen();
+void GitService::fetch(const QString& remote,
+                       std::shared_ptr<std::atomic<bool>> cancel) {
+    const auto snapshot = processIfOpen(std::move(cancel));
     if (!snapshot) return;
     const git::GitProcess& proc = *snapshot;
     auto result = proc.fetch(remote.toStdString());
@@ -807,6 +885,7 @@ void GitService::interactiveRebase(const git::RebasePlan& plan) {
     // ambiguous; the subject is only there for `git status` to show.
     std::string todo;
     std::map<std::string, std::string> newMessages;
+    std::vector<std::string> messages;
     for (auto op = plan.operations.rbegin(); op != plan.operations.rend(); ++op) {
         const char* verb = "pick";
         switch (op->type) {
@@ -823,14 +902,33 @@ void GitService::interactiveRebase(const git::RebasePlan& plan) {
         todo += " ";
         todo += op->message.substr(0, op->message.find('\n'));
         todo += "\n";
+        messages.push_back(op->message);
         if (op->type == git::RebaseOperationType::Reword && !op->newMessage.empty())
             newMessages[op->commitId.toHex()] = op->newMessage;
     }
 
+    // The Rebase dialog stays open while the repository goes on: a
+    // commit made meanwhile, or another branch checked out, and git
+    // would rebase that HEAD with this todo list, dropping every
+    // commit the list doesn't name. The dialog asks first; this is
+    // for whatever moved HEAD since.
     runRebaseStep(QStringLiteral("rebase"),
-                  [onto = plan.onto.toHex(), todo, newMessages](const git::GitProcess& proc) {
-        return proc.interactiveRebase(onto, todo, newMessages);
-    });
+                  [onto = plan.onto.toHex(), todo, newMessages, messages](
+                      const git::GitProcess& proc) {
+        return proc.interactiveRebase(onto, todo, newMessages, messages);
+    }, [plan](const git::Repository& repo) { return outdatedPlan(repo, plan); });
+}
+
+QString GitService::rebasePlanProblem(const git::RebasePlan& plan) const {
+    std::lock_guard<std::mutex> lock(repoMutex_);
+    if (!repo_)
+        return tr("No repository is open.");
+    return outdatedPlan(*repo_, plan);
+}
+
+bool GitService::rebaseStepRunning() const {
+    std::lock_guard<std::mutex> lock(repoMutex_);
+    return repo_ && rebaseSteps_.contains(rebaseStepKey(*repo_));
 }
 
 void GitService::rebaseContinue() {
@@ -853,25 +951,85 @@ void GitService::rebaseSkip() {
 // A step that succeeds can still leave the rebase in progress — an
 // `edit` stops on purpose — so the repository's state goes with the
 // outcome. Either way the repository may have changed: both refresh.
+//
+// The state also goes out as repoStateReady, ahead of the outcome. The
+// in-progress bar comes back to life on rebaseStepFinished, and until
+// the status refresh came in (seconds, on a big tree) it offered
+// Continue for a rebase that had just finished, or with the conflict
+// count from before the step.
+//
+// One step at a time per repository. A second git on top of a running
+// one — an abort resetting the branch while the first still picked
+// onto it, two sequencers on one todo list — left the branch half
+// rebased. The in-progress bar holds its buttons back while a step
+// runs; this refuses whatever gets past it. The step that runs still
+// reports, so a refused one doesn't: its rebaseStepFinished would
+// bring the bar back to life under the running one.
 void GitService::runRebaseStep(
     const QString& step,
-    std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command) {
+    std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command,
+    std::function<QString(const git::Repository&)> refusal) {
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
-    git::GitProcess proc{[&]() {
+    std::string gitDir;
+    std::optional<git::GitProcess> process;
+    {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        return r->process();
-    }()};
-    runner_.run([this, r, step, proc = std::move(proc), command = std::move(command)]() {
-        const QString failure = rebaseFailure(command(proc));
-        bool rebasing = false;
+        gitDir = rebaseStepKey(*r);
+        if (rebaseSteps_.insert(gitDir).second)
+            process = r->process();
+    }
+    if (!process) {
+        emit operationFailed(step, rebaseStepStillRunning());
+        return;
+    }
+    runner_.run([this, r, gitDir, step, proc = std::move(*process), command = std::move(command),
+                 refusal = std::move(refusal)]() {
+        // Whatever happens, the repository mustn't stay marked busy:
+        // every later step on it would be refused until a restart.
+        // The normal path clears the mark itself, under the same lock
+        // as the state it reports, so that a step started on the
+        // strength of that report is never refused.
+        bool cleared = false;
+        const auto clearMark = qScopeGuard([&] {
+            if (cleared) return;
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            rebaseSteps_.erase(gitDir);
+        });
+        QString failure;
+        if (refusal) {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            failure = refusal(*r);
+        }
+        if (failure.isEmpty())
+            failure = rebaseFailure(command(proc));
+        git::RepoState state = git::RepoState::None;
+        int conflicts = 0;
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
-            rebasing = r->state() == git::RepoState::Rebase;
+            rebaseSteps_.erase(gitDir);
+            cleared = true;
+            // Another repository was opened while git ran. What the
+            // step did, it did to this one; reported now, it would read
+            // as the open one's ("Rebase complete.", or an offer to
+            // resolve its conflicts). The same repository opened again
+            // (from Recent, or handed over by a second launch) is still
+            // this one, a new Repository for it or not: the outcome is
+            // its own, and its bar waits for it.
+            if (!repo_ || rebaseStepKey(*repo_) != gitDir)
+                return;
+            state = r->state();
+            // Counted from the index alone: the resolver reads the
+            // blobs, if it's asked to.
+            if (state != git::RepoState::None) {
+                if (auto count = r->conflictCount())
+                    conflicts = *count;
+            }
         }
         if (!failure.isEmpty())
             emit operationFailed(step, failure);
-        emit rebaseStepFinished(step, failure.isEmpty(), rebasing);
+        emit repoStateReady(state, conflicts);
+        emit rebaseStepFinished(step, failure.isEmpty(), state == git::RepoState::Rebase);
         refreshStatus();
         refreshLog();
     });

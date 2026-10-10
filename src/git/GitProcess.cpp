@@ -12,7 +12,9 @@
 #include <QTemporaryFile>
 #include <QThread>
 #include <optional>
+#include <algorithm>
 #include <sstream>
+#include <string_view>
 
 #if defined(Q_OS_WIN)
 #ifndef NOMINMAX
@@ -36,7 +38,8 @@ namespace {
 // Where interactiveRebase() leaves the messages of the commits a plan
 // rewords: a folder in git's own rebase state, so that it lives exactly
 // as long as the rebase does — git deletes it when the rebase finishes
-// or is aborted. One file per commit, named by its full hash.
+// or is aborted. One file per commit, named by its full hash, and the
+// rebase's comment character (kCommentChar).
 const QString kRewordMessages = QStringLiteral("gitbolt-messages");
 
 // The editor every git command gets (see applyEnvironment). It leaves
@@ -51,6 +54,44 @@ const QString kEditor = QStringLiteral(
     "d=$(git rev-parse --git-path rebase-merge) && "
     "m=\"$d/%1/$(awk 'END { print $2 }' \"$d/done\" 2>/dev/null)\" && "
     "test -f \"$m\" && exec cp \"$m\" \"$1\"; :").arg(kRewordMessages);
+
+// The file in kRewordMessages that holds the comment character a rebase
+// runs with (see commentCharFor). No commit hash can be called that.
+const QString kCommentChar = QStringLiteral("comment-char");
+
+// Every step of a rebase may replay the rest of the plan in one go, and
+// each reword in it runs the commit hooks. 30 s, run()'s default, cut
+// a Continue off mid-plan, git killed and its index.lock left behind.
+constexpr int kRebaseTimeoutMs = 300000;
+
+// git strips the lines that start with core.commentChar from every
+// message it has had edited: a reword's, which kEditor writes, and a
+// squash's, which git puts together from the messages it combines.
+// With the default '#', a reworded "#123 Fix login" came out empty, so
+// git stopped and the commit kept its old message, and a body's
+// "# Notes" or Markdown heading went missing without a word. So a
+// rebase runs with a comment character that starts no line of any
+// message it could put in a commit: the first of the characters git
+// itself picks from for core.commentChar=auto that is free, or '\0'
+// when none is.
+char commentCharFor(const std::vector<std::string>& messages) {
+    const auto startsALine = [](const std::string& text, char c) {
+        for (size_t at = 0; at < text.size(); ++at) {
+            if (text[at] == c)
+                return true;
+            at = text.find('\n', at);
+            if (at == std::string::npos)
+                break;
+        }
+        return false;
+    };
+    for (const char c : std::string_view("#;@!$%^&|:")) {
+        if (std::none_of(messages.begin(), messages.end(),
+                         [&](const std::string& m) { return startsALine(m, c); }))
+            return c;
+    }
+    return '\0';
+}
 
 } // namespace
 
@@ -95,8 +136,16 @@ void GitProcess::applyEnvironment(QProcess& process) {
     process.setProcessEnvironment(env);
 }
 
-Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int timeoutMs) const {
-    if (cancelFlag_)
+int GitProcess::defaultTimeoutMs() {
+    bool ok = false;
+    const int fromEnv = qEnvironmentVariableIntValue("GITBOLT_GIT_TIMEOUT_MS", &ok);
+    return ok && fromEnv > 0 ? fromEnv : 30000;
+}
+
+Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args,
+                                      std::optional<int> timeout) const {
+    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
+    if (!cancelFlags_.empty())
         return runCancellable(args, timeoutMs);
 
     QProcess process;
@@ -148,8 +197,9 @@ Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args, int 
 Result<ProcessOutput> GitProcess::runWithInput(
     const std::vector<std::string>& args,
     const std::string& stdinData,
-    int timeoutMs) const
+    std::optional<int> timeout) const
 {
+    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
     applyEnvironment(process);
@@ -556,6 +606,12 @@ bool cloneCompleted(const QString& dest)
 
 } // namespace
 
+bool GitProcess::cancelled() const
+{
+    return std::any_of(cancelFlags_.begin(), cancelFlags_.end(),
+                       [](const auto& flag) { return flag->load(); });
+}
+
 // run() for a GitProcess with a cancel flag: git in a ProcessTree, and
 // a poll loop instead of one long waitForFinished(), so a cancel is
 // seen within kPollMs and stops the whole tree — including an ssh or
@@ -568,7 +624,7 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
     QStringList qargs;
     for (const auto& arg : args)
         qargs.append(QString::fromStdString(arg));
-    if (cancelFlag_->load())
+    if (cancelled())
         return GitError(GitErrorCode::User, "Cancelled");
 
     // Declared before the process so it outlives it, as in clone().
@@ -595,11 +651,11 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
     // Each wait also moves git's output into QProcess's buffers, so
     // its pipes can't fill up and stall it between polls.
     while (!process.waitForFinished(kPollMs) && process.state() != QProcess::NotRunning) {
-        const bool cancelled = cancelFlag_->load();
-        if (cancelled || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
+        const bool stop = cancelled();
+        if (stop || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
             tree.terminate(process);
             GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
-            if (cancelled)
+            if (stop)
                 return GitError(GitErrorCode::User, "Cancelled");
             return GitError(GitErrorCode::ProcessFailed, "Git process timed out");
         }
@@ -773,7 +829,17 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
 
 Result<ProcessOutput> GitProcess::interactiveRebase(
     const std::string& onto, const std::string& todo,
-    const std::map<std::string, std::string>& newMessages) const {
+    const std::map<std::string, std::string>& newMessages,
+    const std::vector<std::string>& messages) const {
+    std::vector<std::string> allMessages = messages;
+    for (const auto& [hash, message] : newMessages)
+        allMessages.push_back(message);
+    const char commentChar = commentCharFor(allMessages);
+    if (commentChar == '\0')
+        return GitError(GitErrorCode::ProcessFailed,
+                        "Lines of these commit messages start with every character git can "
+                        "take for a comment (#;@!$%^&|:), so git would cut some of them out.");
+
     // git writes the todo list it would run to a file and hands that
     // file to GIT_SEQUENCE_EDITOR, a command it runs through its shell
     // (sh, also with Git for Windows) with the file's path appended.
@@ -794,27 +860,26 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
         return QStringLiteral("'%1'").arg(quoted);
     };
-    QString sequenceEditor = QStringLiteral("cp %1").arg(shellQuoted(todoFile.fileName()));
-
-    // The new messages go into the rebase's own state, for kEditor to
-    // find when git asks for them: the sequence editor runs once git
-    // has set that up, and before any commit is made.
-    std::optional<QTemporaryDir> messageDir;
-    if (!newMessages.empty()) {
-        messageDir.emplace(QDir::tempPath() + QStringLiteral("/gitbolt-messages-XXXXXX"));
-        if (!messageDir->isValid())
+    // The new messages, and the comment character, go into the rebase's
+    // own state, for kEditor and rebaseCommentConfig() to find: the
+    // sequence editor runs once git has set that up, and before any
+    // commit is made.
+    QTemporaryDir messageDir(QDir::tempPath() + QStringLiteral("/gitbolt-messages-XXXXXX"));
+    if (!messageDir.isValid())
+        return GitError(GitErrorCode::ProcessFailed,
+                        "Could not write the rebase plan: " + messageDir.errorString().toStdString());
+    std::map<QString, std::string> stateFiles = {{kCommentChar, std::string(1, commentChar)}};
+    for (const auto& [hash, message] : newMessages)
+        stateFiles[QString::fromStdString(hash)] = message;
+    for (const auto& [name, text] : stateFiles) {
+        QFile file(messageDir.filePath(name));
+        if (!file.open(QIODevice::WriteOnly) || !writeFile(file, text))
             return GitError(GitErrorCode::ProcessFailed,
-                            "Could not write the rebase plan: " + messageDir->errorString().toStdString());
-        for (const auto& [hash, message] : newMessages) {
-            QFile file(messageDir->filePath(QString::fromStdString(hash)));
-            if (!file.open(QIODevice::WriteOnly) || !writeFile(file, message))
-                return GitError(GitErrorCode::ProcessFailed,
-                                "Could not write the rebase plan: " + file.errorString().toStdString());
-        }
-        sequenceEditor = QStringLiteral(
-            "cp %1 \"$1\" && cp -R %2 \"$(git rev-parse --git-path rebase-merge)/%3\" && :")
-            .arg(shellQuoted(todoFile.fileName()), shellQuoted(messageDir->path()), kRewordMessages);
+                            "Could not write the rebase plan: " + file.errorString().toStdString());
     }
+    const QString sequenceEditor = QStringLiteral(
+        "cp %1 \"$1\" && cp -R %2 \"$(git rev-parse --git-path rebase-merge)/%3\" && :")
+        .arg(shellQuoted(todoFile.fileName()), shellQuoted(messageDir.path()), kRewordMessages);
 
     QProcess process;
     process.setWorkingDirectory(QString::fromStdString(workDir_));
@@ -823,7 +888,11 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
     env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), sequenceEditor);
     process.setProcessEnvironment(env);
 
-    const QStringList args = {QStringLiteral("rebase"), QStringLiteral("-i"),
+    // The git commands the rebase runs (`git commit` for a reword or a
+    // squash) inherit the -c.
+    const QStringList args = {QStringLiteral("-c"),
+                              QStringLiteral("core.commentChar=") + QLatin1Char(commentChar),
+                              QStringLiteral("rebase"), QStringLiteral("-i"),
                               QString::fromStdString(onto)};
     const QString workDir = QString::fromStdString(workDir_);
     QElapsedTimer timer;
@@ -833,7 +902,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start rebase");
     }
-    if (!process.waitForFinished(300000)) {
+    if (!process.waitForFinished(kRebaseTimeoutMs)) {
         process.kill();
         GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Rebase timed out");
@@ -847,9 +916,37 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
     return output;
 }
 
-Result<ProcessOutput> GitProcess::rebaseContinue() const { return run({"rebase", "--continue"}); }
-Result<ProcessOutput> GitProcess::rebaseAbort() const { return run({"rebase", "--abort"}); }
-Result<ProcessOutput> GitProcess::rebaseSkip() const { return run({"rebase", "--skip"}); }
+std::vector<std::string> GitProcess::rebaseCommentConfig() const {
+    const auto path = run({"rev-parse", "--git-path",
+                           QStringLiteral("rebase-merge/%1/%2")
+                               .arg(kRewordMessages, kCommentChar).toStdString()});
+    if (!path || !path->success())
+        return {};
+    QFile file(QDir(QString::fromStdString(workDir_))
+                   .absoluteFilePath(QString::fromStdString(path->stdoutData).trimmed()));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    const QByteArray commentChar = file.read(2);
+    if (commentChar.size() != 1)
+        return {};
+    return {"-c", "core.commentChar=" + commentChar.toStdString()};
+}
+
+Result<ProcessOutput> GitProcess::rebaseContinue() const {
+    std::vector<std::string> args = rebaseCommentConfig();
+    args.insert(args.end(), {"rebase", "--continue"});
+    return run(args, kRebaseTimeoutMs);
+}
+
+Result<ProcessOutput> GitProcess::rebaseAbort() const {
+    return run({"rebase", "--abort"}, kRebaseTimeoutMs);
+}
+
+Result<ProcessOutput> GitProcess::rebaseSkip() const {
+    std::vector<std::string> args = rebaseCommentConfig();
+    args.insert(args.end(), {"rebase", "--skip"});
+    return run(args, kRebaseTimeoutMs);
+}
 
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }
 Result<ProcessOutput> GitProcess::gitFlowFeatureStart(const std::string& n) const { return run({"flow", "feature", "start", n}); }

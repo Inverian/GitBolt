@@ -6,7 +6,7 @@ namespace gitbolt::git {
 int freshIndex(git_index** out, git_repository* repo) {
     int err = git_repository_index(out, repo);
     if (err < 0) return err;
-    err = git_index_read(*out, /*force=*/0);
+    err = git_index_read(*out, /*force=*/1);
     if (err < 0) {
         git_index_free(*out);
         *out = nullptr;

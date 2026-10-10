@@ -85,7 +85,10 @@ void RebaseDialog::setupUi() {
     mainLayout->addWidget(buttons);
 
     // Connections
-    connect(branchCombo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+    // A pick, not an index change: picking the branch that is picked
+    // already lists its commits again, as a refusal for a moved HEAD
+    // asks ("Pick the target again").
+    connect(branchCombo_, &QComboBox::activated,
             this, &RebaseDialog::onBranchSelected);
     connect(refEdit_, &QLineEdit::editingFinished,
             this, &RebaseDialog::onRefEdited);
@@ -101,25 +104,40 @@ void RebaseDialog::setBranches(const std::vector<git::BranchInfo>& branches) {
 }
 
 void RebaseDialog::setCommitsToRebase(const std::vector<git::CommitData>& commits,
-                                       const git::ObjectId& onto) {
+                                       const git::ObjectId& onto, const git::ObjectId& head,
+                                       const std::string& branch) {
     // Fill preview list
     previewList_->clear();
+    int replayed = 0;
     for (const auto& c : commits) {
         QString entry = QStringLiteral("%1  %2")
                             .arg(QString::fromStdString(c.id.toShortHex()))
                             .arg(QString::fromStdString(
                                 c.summary.empty() ? c.message : c.summary));
-        previewList_->addItem(entry);
+        if (!c.isMerge()) {
+            previewList_->addItem(entry);
+            ++replayed;
+            continue;
+        }
+        // Listed, so the history still reads as it is, but not in the
+        // plan below: git leaves merges out of a rebase.
+        auto* item = new QListWidgetItem(tr("%1  (merge, not replayed)").arg(entry), previewList_);
+        item->setForeground(palette().brush(QPalette::Disabled, QPalette::Text));
+        item->setToolTip(tr("A rebase leaves merge commits out: the commits under the merge "
+                            "are replayed in a line instead."));
     }
-    previewLabel_->setText(
-        tr("Commits to rebase (%1):").arg(static_cast<int>(commits.size())));
+    previewLabel_->setText(tr("Commits to rebase (%1):").arg(replayed));
 
     // Feed into the interactive rebase widget
-    rebaseWidget_->setCommits(commits, onto);
+    rebaseWidget_->setCommits(commits, onto, head, branch);
 }
 
 git::RebasePlan RebaseDialog::rebasePlan() const {
     return rebaseWidget_->rebasePlan();
+}
+
+void RebaseDialog::refuse(const QString& reason) {
+    refusal_ = reason;
 }
 
 void RebaseDialog::onBranchSelected(int index) {
@@ -153,7 +171,15 @@ void RebaseDialog::onAccepted() {
         QMessageBox::warning(this, tr("Interactive Rebase"), problem);
         return;
     }
+    // Turned down (a rebase step still running, HEAD moved since the
+    // plan was made): said here, and the plan stays, to try again. It
+    // used to close first, the reason coming after, the plan gone.
+    refusal_.clear();
     emit rebaseRequested(plan);
+    if (!refusal_.isEmpty()) {
+        QMessageBox::warning(this, tr("Interactive Rebase"), refusal_);
+        return;
+    }
     accept();
 }
 

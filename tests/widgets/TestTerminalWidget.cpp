@@ -12,7 +12,24 @@
 //   - overwriting replaces whole characters, surrogate pairs and
 //     combining marks included;
 //   - a read goes in as one edit, its plain text a run at a time: an
-//     edit per character made a big output take seconds to draw.
+//     edit per character made a big output take seconds to draw;
+//   - where Windows wraps a run at the last column, a character that
+//     starts on the row ends there too: neither half of a surrogate
+//     pair nor a combining mark goes on to the next row alone. (Only
+//     the cut itself is tested off Windows.)
+//
+// End to end on macOS and Linux: the widget over a real PTY and
+// /bin/sh, driven by key events.
+//
+//   - a flood of output (awk printing numbered lines) arrives whole
+//     and in order while the event loop keeps turning. The read
+//     handler used to read on until the PTY ran dry, which a shell
+//     writing faster than the widget draws never lets happen; it now
+//     reads a slice per call, and draws it in one edit;
+//   - Ctrl+C typed during the flood gets through at once and stops it,
+//     and the shell takes commands again. On Linux, as on Windows,
+//     Ctrl+C is also the copy key, and with nothing selected it used
+//     to copy nothing rather than interrupt.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -32,26 +49,26 @@
 //   - Ctrl+C stops a flood at once, rather than once a backlog has
 //     been drawn, and the shell takes commands again.
 //
-// ConPTY only exists on Windows; elsewhere those tests are a QSKIP (the
-// Unix PTY side has no end-to-end test yet).
+// Each platform's end-to-end tests are a QSKIP on the others.
 //
 
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QRegularExpression>
+#include <QSocketNotifier>
+#include <QStringList>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTimer>
 
 #include "widgets/TerminalWidget.h"
 
 #ifdef Q_OS_WIN
 #include <QApplication>
 #include <QClipboard>
-#include <QDir>
-#include <QElapsedTimer>
-#include <QFile>
-#include <QRegularExpression>
-#include <QStringList>
-#include <QTemporaryDir>
-#include <QTimer>
 #endif
 
 using gitbolt::widgets::TerminalWidget;
@@ -63,11 +80,13 @@ namespace {
 class FedTerminal : public TerminalWidget {
 public:
     using TerminalWidget::appendOutput;
+    using TerminalWidget::rowChunk;
 };
 
 } // namespace
 
-#ifdef Q_OS_WIN
+// The end-to-end tests: a real shell, its output read back off the
+// widget.
 namespace {
 
 constexpr int kTimeoutMs = 30000;
@@ -83,15 +102,6 @@ QStringList rows(const TerminalWidget& terminal)
     return result;
 }
 
-// cmd's prompts ("C:\...>") shown so far.
-qsizetype prompts(const TerminalWidget& terminal)
-{
-    qsizetype count = 0;
-    for (const QString& row : rows(terminal))
-        count += row.contains(QLatin1Char('>')) ? 1 : 0;
-    return count;
-}
-
 // The last row with anything on it: the screen's bottom rows are blank.
 QString lastRow(const TerminalWidget& terminal)
 {
@@ -101,12 +111,6 @@ QString lastRow(const TerminalWidget& terminal)
             return all.at(i);
     }
     return {};
-}
-
-// A fresh prompt is the last thing shown: the command before it is done.
-bool atPrompt(const TerminalWidget& terminal)
-{
-    return lastRow(terminal).endsWith(QLatin1Char('>'));
 }
 
 // The numbers of the rows that are exactly "<prefix><number>", top down.
@@ -133,6 +137,26 @@ bool consecutive(const QList<int>& numbers)
     return true;
 }
 
+} // namespace
+
+#ifdef Q_OS_WIN
+namespace {
+
+// cmd's prompts ("C:\...>") shown so far.
+qsizetype prompts(const TerminalWidget& terminal)
+{
+    qsizetype count = 0;
+    for (const QString& row : rows(terminal))
+        count += row.contains(QLatin1Char('>')) ? 1 : 0;
+    return count;
+}
+
+// A fresh prompt is the last thing shown: the command before it is done.
+bool atPrompt(const TerminalWidget& terminal)
+{
+    return lastRow(terminal).endsWith(QLatin1Char('>'));
+}
+
 // A shown terminal with cmd's first prompt up. The vertical scroll bar
 // is there from the start: one appearing mid-flood would resize the
 // pseudo console, and conhost's repaint at the new size is not what
@@ -146,6 +170,139 @@ void showAtPrompt(TerminalWidget& terminal)
     QTRY_VERIFY2_WITH_TIMEOUT(prompts(terminal) >= 1,
                               qPrintable(terminal.toPlainText()), kTimeoutMs);
 }
+
+} // namespace
+#else
+namespace {
+
+const QString kShPrompt = QStringLiteral("gbprompt>");
+
+// The physical Control key, which Qt calls Meta on macOS (see
+// TerminalWidget::keyPressEvent).
+#ifdef Q_OS_MACOS
+constexpr Qt::KeyboardModifier kTerminalCtrl = Qt::MetaModifier;
+#else
+constexpr Qt::KeyboardModifier kTerminalCtrl = Qt::ControlModifier;
+#endif
+
+// A shell the tests can rely on, whoever runs them: /bin/sh rather than
+// the user's $SHELL, with a prompt the tests know, no rc file, and HOME
+// a throwaway directory for any history it saves. start() hands the
+// shell this process's environment, so that is where it goes; the
+// destructor puts it back.
+class PlainShell {
+public:
+    PlainShell()
+    {
+        set("SHELL", "/bin/sh");
+        set("PS1", kShPrompt.toLatin1() + ' ');
+        set("HOME", QFile::encodeName(home_.path()));
+        set("ENV", {});
+        set("BASH_ENV", {});
+        set("HISTFILE", {});
+    }
+
+    ~PlainShell()
+    {
+        for (const Saved& saved : std::as_const(saved_)) {
+            if (saved.wasSet)
+                qputenv(saved.name.constData(), saved.value);
+            else
+                qunsetenv(saved.name.constData());
+        }
+    }
+
+    bool isValid() const { return home_.isValid(); }
+
+private:
+    struct Saved {
+        QByteArray name;
+        bool       wasSet;
+        QByteArray value;
+    };
+
+    // An empty value unsets it.
+    void set(const char* name, const QByteArray& value)
+    {
+        saved_.append({name, qEnvironmentVariableIsSet(name), qgetenv(name)});
+        if (value.isEmpty())
+            qunsetenv(name);
+        else
+            qputenv(name, value);
+    }
+
+    QTemporaryDir home_;
+    QList<Saved>  saved_;
+};
+
+// The shell has printed a fresh prompt and is waiting for a command.
+bool atShPrompt(const TerminalWidget& terminal)
+{
+    return lastRow(terminal) == kShPrompt;
+}
+
+// A running terminal with the first prompt up. Not shown: nothing here
+// needs a window, and none pops up.
+void startAtPrompt(TerminalWidget& terminal)
+{
+    terminal.resize(800, 400);
+    terminal.start(QDir::tempPath());
+    QVERIFY(terminal.isRunning());
+    QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal),
+                              qPrintable(terminal.toPlainText()), kTimeoutMs);
+}
+
+// Prints "gbflood1" to "gbflood<lines>", one per line, as fast as the
+// PTY takes them.
+QString floodCommand(int lines)
+{
+    return QStringLiteral("awk 'BEGIN { for (i = 1; i <= %1; i++) print \"gbflood\" i }'")
+        .arg(lines);
+}
+
+// About 2 MB: seconds of drawing, where the read handler takes a few
+// tens of milliseconds a call.
+constexpr int kPtyFloodLines = 150000;
+
+// The times the PTY wakes the terminal (its read notifier going off),
+// and the most edits its document took in any one of them.
+class WakeCounter : public QObject {
+public:
+    explicit WakeCounter(const TerminalWidget& terminal)
+    {
+        for (QSocketNotifier* notifier : terminal.findChildren<QSocketNotifier*>()) {
+            if (notifier->type() == QSocketNotifier::Read)
+                notifier->installEventFilter(this);
+        }
+        connect(terminal.document(), &QTextDocument::contentsChange, this,
+                [this](int from, int /*removed*/, int added) {
+                    // Not the trim that keeps the scrollback to its cap:
+                    // the document makes that a change of its own after
+                    // the edit, rows off the top and nothing added.
+                    if (from == 0 && added == 0)
+                        return;
+                    mostEdits_ = qMax(mostEdits_, ++edits_);
+                });
+    }
+
+    int wakes() const { return wakes_; }
+    int mostEditsInAWake() const { return mostEdits_; }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::SockAct) {
+            ++wakes_;
+            edits_ = 0;
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    int wakes_     = 0;
+    int edits_     = 0;
+    int mostEdits_ = 0;
+};
 
 } // namespace
 #endif // Q_OS_WIN
@@ -280,6 +437,66 @@ private slots:
         QCOMPARE(terminal.document()->lastBlock().text(),
                  QString(40, QLatin1Char('z')) + QString(20, QLatin1Char('x')));
         QCOMPARE(edits, 1);
+    }
+
+    // Windows wraps a long run a row at a time, a UTF-16 unit to a
+    // column. The cut used to fall wherever the units ran out, so a
+    // character at the edge could lose half its surrogate pair, or its
+    // combining marks, to the next row.
+    void rowChunkKeepsCharactersWhole_data()
+    {
+        QTest::addColumn<QString>("run");
+        QTest::addColumn<int>("room");
+        QTest::addColumn<int>("chunk");
+
+        QTest::newRow("all of it fits") << QStringLiteral("abc") << 5 << 3;
+        QTest::newRow("as much as fits") << QStringLiteral("abcdef") << 4 << 4;
+        QTest::newRow("at least one") << QStringLiteral("abc") << 0 << 1;
+        QTest::newRow("a surrogate pair in the last column")
+            << QString::fromUtf16(u"\U0001D400y") << 1 << 2;
+        QTest::newRow("a surrogate pair across the edge")
+            << QString::fromUtf16(u"abc\U0001D400y") << 4 << 5;
+        QTest::newRow("a surrogate pair past the edge")
+            << QString::fromUtf16(u"abcd\U0001D400") << 4 << 4;
+        QTest::newRow("a letter and its combining marks")
+            << QString::fromUtf16(u"abe\u0301\u0302x") << 3 << 5;
+        QTest::newRow("a flag, two regional indicators")
+            << QString::fromUtf16(u"a\U0001F1FA\U0001F1F8\U0001F1EC\U0001F1E7") << 3 << 5;
+        QTest::newRow("an emoji ZWJ sequence")
+            << QString::fromUtf16(u"a\U0001F469\u200D\U0001F4BBb") << 2 << 6;
+    }
+
+    void rowChunkKeepsCharactersWhole()
+    {
+        QFETCH(QString, run);
+        QFETCH(int, room);
+        QFETCH(int, chunk);
+        QCOMPARE(FedTerminal::rowChunk(run, room), qsizetype(chunk));
+    }
+
+    // The same through the screen ConPTY paints (80 columns until it is
+    // resized), with the character at the edge in the row's read or in
+    // the next one.
+    void wrapKeepsCharactersWhole()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Only ConPTY's screen wraps rows");
+#else
+        const QString row(79, QLatin1Char('x'));
+        for (const QString& character : {QString::fromUtf16(u"\U0001D400"),
+                                         QString::fromUtf16(u"e\u0301")}) {
+            const QString shown = row + character + QStringLiteral("\ny");
+
+            FedTerminal oneRead;
+            oneRead.appendOutput((row + character + QStringLiteral("y")).toUtf8());
+            QCOMPARE(oneRead.toPlainText(), shown);
+
+            FedTerminal twoReads;
+            twoReads.appendOutput(row.toUtf8());
+            twoReads.appendOutput((character + QStringLiteral("y")).toUtf8());
+            QCOMPARE(twoReads.toPlainText(), shown);
+        }
+#endif
     }
 
     void runsCmdUnderConPty()
@@ -425,6 +642,123 @@ private slots:
         QVERIFY2(!shown.isEmpty() && consecutive(shown) && shown.last() < 1000000,
                  qPrintable(QStringLiteral("%1 rows, last %2").arg(shown.size())
                                 .arg(shown.value(shown.size() - 1))));
+
+        QTest::keyClicks(&terminal, QStringLiteral("echo gitbolt-after-flood"));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gitbolt-after-flood")),
+                                  qPrintable(lastRow(terminal)), kTimeoutMs);
+#endif
+    }
+
+    // The same two on Unix, over a real PTY and /bin/sh. A shell that
+    // writes faster than the widget draws keeps the PTY full, and the
+    // read handler used to read on until it ran dry: the GUI thread
+    // stayed in it for as long as the flood lasted.
+    void ptyFloodArrivesInOrderAndStaysResponsive()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+
+        // The longest the event loop goes without getting round to a
+        // 10 ms timer while the flood is drawn.
+        QElapsedTimer clock;
+        clock.start();
+        qint64 lastTick = 0;
+        qint64 longestGap = 0;
+        QTimer ticker;
+        ticker.setInterval(10);
+        connect(&ticker, &QTimer::timeout, this, [&] {
+            const qint64 now = clock.elapsed();
+            longestGap = qMax(longestGap, now - lastTick);
+            lastTick = now;
+        });
+        ticker.start();
+        WakeCounter wakes(terminal);
+
+        QTest::keyClicks(&terminal, floodCommand(kPtyFloodLines));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        // The flood's last line with the prompt after it. Just the last
+        // two rows: reading back all 5000 each time this is asked would
+        // add to the gaps measured.
+        const auto done = [&] {
+            const QTextBlock prompt = terminal.document()->lastBlock();
+            return prompt.text().trimmed() == kShPrompt
+                   && prompt.previous().text()
+                          == QStringLiteral("gbflood%1").arg(kPtyFloodLines);
+        };
+        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kFloodTimeoutMs);
+        ticker.stop();
+        longestGap = qMax(longestGap, clock.elapsed() - lastTick);  // and since the last turn
+
+        // The scrollback keeps the last 5000 rows: those must be the
+        // flood's last lines, every one, in order.
+        const QList<int> shown = numberedRows(terminal, QStringLiteral("gbflood"));
+        QVERIFY2(shown.size() > 1000 && consecutive(shown),
+                 qPrintable(QStringLiteral("%1 rows, from %2 to %3").arg(shown.size())
+                                .arg(shown.value(0)).arg(shown.value(shown.size() - 1))));
+        qInfo("%d lines in %lld ms, %d wakes; the event loop went %lld ms at most "
+              "between turns", kPtyFloodLines, clock.elapsed(), wakes.wakes(), longestGap);
+        QVERIFY2(longestGap < 1000, qPrintable(QStringLiteral("%1 ms").arg(longestGap)));
+
+        // And each wake's slice went in as one edit (see
+        // aReadIsDrawnInOneEdit), where an edit per read() laid out and
+        // trimmed the document dozens of times a wake: a PTY hands over
+        // as little as a kilobyte a read.
+        QCOMPARE(wakes.mostEditsInAWake(), 1);
+#endif
+    }
+
+    void ctrlCStopsAPtyFlood()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+
+        // A flood with an end, so a widget that keeps the event loop
+        // waiting fails the test rather than hanging it: the Ctrl+C
+        // then gets through only once the flood is over.
+        QTest::keyClicks(&terminal, floodCommand(kPtyFloodLines));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(numberedRows(terminal, QStringLiteral("gbflood")).size() >= 100,
+                                  qPrintable(lastRow(terminal)), kTimeoutMs);
+        // Everything drawn so far, in order, but for the last row: a read
+        // can end partway through a line. (Not checked after the
+        // interrupt: the line discipline throws away the output it
+        // holds, so a line can be cut short there.)
+        QList<int> before = numberedRows(terminal, QStringLiteral("gbflood"));
+        before.removeLast();
+        QVERIFY2(consecutive(before),
+                 qPrintable(QStringLiteral("%1 rows, from %2 to %3").arg(before.size())
+                                .arg(before.value(0)).arg(before.value(before.size() - 1))));
+
+        // No selection, so Ctrl+C interrupts (outside macOS it is the
+        // copy key too, and would copy one).
+        QVERIFY(!terminal.textCursor().hasSelection());
+        QElapsedTimer clock;
+        clock.start();
+        QTest::keyClick(&terminal, Qt::Key_C, kTerminalCtrl);
+        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal), qPrintable(lastRow(terminal)), 10000);
+        const qint64 stoppedIn = clock.elapsed();
+        const QList<int> shown = numberedRows(terminal, QStringLiteral("gbflood"));
+        QVERIFY2(!shown.isEmpty() && shown.last() < kPtyFloodLines,
+                 qPrintable(QStringLiteral("%1 rows, last %2").arg(shown.size())
+                                .arg(shown.value(shown.size() - 1))));
+        qInfo("Ctrl+C stopped the flood after %d lines, in %lld ms",
+              shown.last(), stoppedIn);
+        QVERIFY2(stoppedIn < 3000, qPrintable(QStringLiteral("%1 ms").arg(stoppedIn)));
 
         QTest::keyClicks(&terminal, QStringLiteral("echo gitbolt-after-flood"));
         QTest::keyClick(&terminal, Qt::Key_Return);

@@ -474,6 +474,19 @@ Result<std::vector<char>> Repository::readBlob(const ObjectId& blobId) const
     return bytes;
 }
 
+namespace {
+// Rereads libgit2's copy of the index from the index file (see
+// freshIndex), dropping whatever a libgit2 operation that failed
+// partway left in it: a checkout (a merge's, a cherry-pick's and a
+// stash's too) updates the copy file by file and writes it only once
+// every file is written.
+void reloadIndex(git_repository* repo) {
+    git_index* index = nullptr;
+    if (freshIndex(&index, repo) == 0)
+        git_index_free(index);
+}
+} // namespace
+
 Result<void> Repository::stageFile(const std::string& path) {
     Index idx(repo_);
     return idx.addPath(path);
@@ -488,9 +501,7 @@ Result<void> Repository::unstageFile(const std::string& path) {
     }
     // git_reset_default works on libgit2's copy of the index; bring
     // it up to date first (see freshIndex).
-    git_index* index = nullptr;
-    if (freshIndex(&index, repo_) == 0)
-        git_index_free(index);
+    reloadIndex(repo_);
     const char* paths[] = {path.c_str()};
     git_strarray arr = {const_cast<char**>(paths), 1};
     int err = git_reset_default(repo_, headCommit, &arr);
@@ -512,7 +523,11 @@ Result<void> Repository::discardWorkdirChanges(const std::string& path) {
     opts.paths.strings = const_cast<char**>(paths);
     opts.paths.count = 1;
     int err = git_checkout_head(repo_, &opts);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return Result<void>::success();
 }
 
@@ -588,13 +603,27 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
                 parents.push_back(mergeParent);
         }
 
+        // Concluding a cherry-pick: the commit is still the picked
+        // commit's work, so it keeps that commit's author (name,
+        // email and date), as `git commit` does; the user is the
+        // committer. libgit2's cherry-pick never commits, so every
+        // cherry-pick made in GitBolt ends here, and each one went
+        // into the history as the user's own. A merge and a revert
+        // are the user's work and keep the user as author.
+        git_commit* picked = nullptr;
+        git_oid pickedId;
+        if (git_reference_name_to_id(&pickedId, repo_, "CHERRY_PICK_HEAD") == 0)
+            git_commit_lookup(&picked, repo_, &pickedId);
+        const git_signature* author = picked ? git_commit_author(picked) : sig;
+
         std::vector<const git_commit*> parentPtrs(parents.begin(),
                                                   parents.end());
-        err = git_commit_create(&commitOid, repo_, "HEAD", sig, sig,
+        err = git_commit_create(&commitOid, repo_, "HEAD", author, sig,
                                 nullptr, message.c_str(), tree,
                                 parentPtrs.size(),
                                 parentPtrs.empty() ? nullptr
                                                    : parentPtrs.data());
+        git_commit_free(picked);
         for (auto* p : parents)
             git_commit_free(p);
 
@@ -699,6 +728,51 @@ Result<void> Repository::renameBranch(const std::string& oldName, const std::str
     return Result<void>::success();
 }
 
+namespace {
+// The working tree of a worktree whose HEAD is the branch `branchRef`
+// ("refs/heads/..."), or "" if no worktree that opens has it, for
+// saying where a branch is checked out. Walks them as
+// git_branch_is_checked_out does: the main worktree, then the linked
+// ones. The caller rules out `repo` itself.
+std::string worktreeOnBranch(git_repository* repo, const char* branchRef) {
+    const auto workdirIfOnBranch = [branchRef](git_repository* wt) {
+        std::string workdir;
+        git_reference* head = nullptr;
+        if (!git_repository_is_bare(wt)
+            && git_reference_lookup(&head, wt, "HEAD") == 0
+            && git_reference_type(head) == GIT_REFERENCE_SYMBOLIC
+            && std::strcmp(git_reference_symbolic_target(head), branchRef) == 0)
+            workdir = git_repository_workdir(wt);
+        git_reference_free(head);
+        // libgit2 ends it with a '/', which git's messages don't.
+        if (workdir.size() > 1 && workdir.back() == '/')
+            workdir.pop_back();
+        return workdir;
+    };
+
+    std::string found;
+    git_repository* mainRepo = nullptr;
+    if (git_repository_open(&mainRepo, git_repository_commondir(repo)) == 0) {
+        found = workdirIfOnBranch(mainRepo);
+        git_repository_free(mainRepo);
+    }
+    git_strarray names = {nullptr, 0};
+    if (found.empty() && git_worktree_list(&names, repo) == 0) {
+        for (size_t i = 0; i < names.count && found.empty(); ++i) {
+            git_worktree* wt = nullptr;
+            git_repository* wtRepo = nullptr;
+            if (git_worktree_lookup(&wt, repo, names.strings[i]) == 0
+                && git_repository_open_from_worktree(&wtRepo, wt) == 0)
+                found = workdirIfOnBranch(wtRepo);
+            git_repository_free(wtRepo);
+            git_worktree_free(wt);
+        }
+        git_strarray_dispose(&names);
+    }
+    return found;
+}
+} // namespace
+
 Result<void> Repository::checkout(const std::string& branchOrRef) {
     // git's rule for `git checkout <name>`: a LOCAL BRANCH name means
     // that branch, even when a tag (or anything else) has the same
@@ -731,10 +805,41 @@ Result<void> Repository::checkout(const std::string& branchOrRef) {
         return GitError::fromLibgit2(err);
     }
 
+    // git won't check out a branch that another worktree has checked
+    // out. git_repository_set_head won't either, but it refuses only
+    // once git_checkout_tree has written the branch's files and
+    // index: HEAD stayed on the old branch under the new one's files,
+    // all of them staged for the next commit. And from a detached
+    // HEAD it doesn't check at all, so HEAD went onto another
+    // worktree's branch. So ask first, before anything is touched.
+    if (branchRef && git_branch_is_head(branchRef) == 0
+        && git_branch_is_checked_out(branchRef) == 1) {
+        const std::string where = worktreeOnBranch(repo_, git_reference_name(branchRef));
+        git_reference_free(branchRef);
+        git_object_free(peeled);
+        return GitError(GitErrorCode::GenericError,
+                        "'" + branchOrRef + "' is already checked out "
+                            + (where.empty() ? std::string("in another worktree")
+                                             : "at '" + where + "'"));
+    }
+
     git_checkout_options opts;
     git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_SAFE;
     err = git_checkout_tree(repo_, peeled, &opts);
+    if (err < 0) {
+        // A checkout that failed partway (another program has a file
+        // open, another git holds the index's lock) has written some
+        // of the files, and libgit2's copy of the index has them
+        // while the index file doesn't. Status listed them as staged;
+        // after the reload they are changes in the working tree, as
+        // git leaves them.
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        git_reference_free(branchRef);
+        git_object_free(peeled);
+        return error;
+    }
 
     // HEAD update: only an actual LOCAL BRANCH name gets a symbolic
     // HEAD; tags, remote-tracking refs, full refs, raw SHAs and
@@ -742,14 +847,37 @@ Result<void> Repository::checkout(const std::string& branchOrRef) {
     // "refs/heads/<input>" for all of them, leaving HEAD as a broken
     // symbolic ref to a branch that doesn't exist while the working
     // tree showed the checkout.
-    if (err == 0) {
-        err = branchRef
-            ? git_repository_set_head(repo_, git_reference_name(branchRef))
-            : git_repository_set_head_detached(repo_, git_object_id(peeled));
+    err = branchRef
+        ? git_repository_set_head(repo_, git_reference_name(branchRef))
+        : git_repository_set_head_detached(repo_, git_object_id(peeled));
+    if (err < 0) {
+        // HEAD stays where it was (another git holds its lock, say),
+        // but the files and the index are the target's already. Put
+        // HEAD's back, or the switch shows up as staged changes on the
+        // old branch. The baseline is the target's tree, so files still
+        // as the checkout left them count as its work to undo, not as
+        // changes of the user's to keep. An unborn HEAD has no tree to
+        // put back.
+        const GitError error = GitError::fromLibgit2(err);
+        git_object* headTree = nullptr;
+        git_object* targetTree = nullptr;
+        if (git_revparse_single(&headTree, repo_, "HEAD^{tree}") == 0
+            && git_object_peel(&targetTree, peeled, GIT_OBJECT_TREE) == 0) {
+            git_checkout_options undo;
+            git_checkout_options_init(&undo, GIT_CHECKOUT_OPTIONS_VERSION);
+            undo.checkout_strategy = GIT_CHECKOUT_SAFE;
+            undo.baseline = reinterpret_cast<git_tree*>(targetTree);
+            if (git_checkout_tree(repo_, headTree, &undo) < 0)
+                reloadIndex(repo_);
+        }
+        git_object_free(targetTree);
+        git_object_free(headTree);
+        git_reference_free(branchRef);
+        git_object_free(peeled);
+        return error;
     }
     git_reference_free(branchRef);
     git_object_free(peeled);
-    if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
 }
 
@@ -791,7 +919,18 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
     const git_annotated_commit* heads[] = {annotated};
     err = git_merge(repo_, heads, 1, &merge_opts, &checkout_opts);
     git_annotated_commit_free(annotated);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // As with checkout(): a merge whose checkout failed partway
+        // (a file another program has open, one that can't be
+        // written) has written some of the merged files, and
+        // libgit2's copy of the index has them while the index file
+        // doesn't. libgit2 removes MERGE_HEAD and the rest of the
+        // merge's state but leaves the copy as it is, and status
+        // listed those files as staged.
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
 
     git_index* index = nullptr;
     err = git_repository_index(&index, repo_);
@@ -880,6 +1019,30 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
     git_index_conflict_iterator_free(it);
     git_index_free(index);
     return result;
+}
+
+Result<int> Repository::conflictCount() const {
+    git_index* index = nullptr;
+    int err = git_repository_index(&index, repo_);
+    if (err < 0) return GitError::fromLibgit2(err);
+    // Fresh from disk, as in conflictEntries(): git wrote it.
+    git_index_read(index, /*force=*/1);
+
+    git_index_conflict_iterator* it = nullptr;
+    err = git_index_conflict_iterator_new(&it, index);
+    if (err < 0) {
+        git_index_free(index);
+        return GitError::fromLibgit2(err);
+    }
+    int count = 0;
+    const git_index_entry* ancestor = nullptr;
+    const git_index_entry* ours = nullptr;
+    const git_index_entry* theirs = nullptr;
+    while (git_index_conflict_next(&ancestor, &ours, &theirs, it) == 0)
+        ++count;
+    git_index_conflict_iterator_free(it);
+    git_index_free(index);
+    return count;
 }
 
 Result<std::vector<RemoteInfo>> Repository::remotes() const {
@@ -1159,19 +1322,41 @@ Result<ObjectId> Repository::stashSave(const std::string& message, bool includeU
     git_oid oid;
     err = git_stash_save(&oid, repo_, sig, message.empty() ? nullptr : message.c_str(), flags);
     git_signature_free(sig);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // The stash commits can be made and the work tree reset before
+        // the index write fails (a held index.lock): don't let status
+        // read libgit2's copy as if it were the file.
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return ObjectId(&oid);
 }
 
 Result<void> Repository::stashApply(size_t index) {
     int err = git_stash_apply(repo_, index, nullptr);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // libgit2 writes the stash's files, stages the ones the stash
+        // added in its copy of the index, and writes the index file
+        // last. When that write failed (another git holds index.lock),
+        // the copy kept them staged while the index file didn't, and
+        // status listed them as staged. After the reload they are new
+        // files in the work tree.
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return Result<void>::success();
 }
 
 Result<void> Repository::stashPop(size_t index) {
     int err = git_stash_pop(repo_, index, nullptr);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // As in stashApply(); a stash that wasn't applied isn't dropped.
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return Result<void>::success();
 }
 
@@ -1196,8 +1381,14 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     // "needs resolution" outcome and returns 0. The old code
     // collapsed both into hasConflicts, so genuine failures
     // surfaced as "produced conflicts" with the message discarded.
-    if (err < 0)
-        return GitError::fromLibgit2(err);
+    // A failure can come partway through the checkout, too: as with
+    // merge(), libgit2 drops CHERRY_PICK_HEAD and MERGE_MSG but not
+    // the files its copy of the index had picked up by then.
+    if (err < 0) {
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
 
     git_index* index = nullptr;
     err = git_repository_index(&index, repo_);

@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QPainter>
 #include <QPushButton>
+#include <QScopedValueRollback>
 
 namespace gitbolt::widgets {
 
@@ -75,13 +76,18 @@ void RepoOperationBar::setBusy(bool busy) {
 
 void RepoOperationBar::changeEvent(QEvent* event) {
     QFrame::changeEvent(event);
-    // A theme switch sets the application palette. (Not PaletteChange:
-    // applyColors() sets this widget's own palette, which sends one.)
-    if (event->type() == QEvent::ApplicationPaletteChange)
+    // A theme switch sets the application palette. This used to wait
+    // for ApplicationPaletteChange here, which Qt sends only to
+    // top-level widgets, and never to changeEvent(): the bar kept the
+    // old theme's colours until a restart. What reaches it is the
+    // PaletteChange its window passes down. (applyColors() sends one
+    // too, setting this widget's own palette; that one is let go.)
+    if (event->type() == QEvent::PaletteChange && !applyingColors_)
         applyColors();
 }
 
 void RepoOperationBar::applyColors() {
+    const QScopedValueRollback<bool> applying(applyingColors_, true);
     const BarColors colors = colorsFor(QApplication::palette());
     QPalette palette = this->palette();
     palette.setColor(QPalette::Window, colors.background);

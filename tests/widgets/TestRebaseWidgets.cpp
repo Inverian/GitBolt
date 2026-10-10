@@ -1,31 +1,42 @@
 //
-// TestRebaseWidgets — the Rebase dialog's plan list and the repository
-// view's in-progress bar, without a repository:
+// TestRebaseWidgets — the Rebase dialog, its plan list and the
+// repository view's in-progress bar, without a repository:
 //
 //   - the plan lists commits newest first, all picks, each keeping its
-//     whole message;
+//     whole message, and leaves merges out, as git does;
 //   - every operation can be chosen for the selected commit, a reword
 //     takes its new message from the prompt (and the commit's own
-//     message undoes it), and commits move up and down;
+//     message undoes it; an empty one isn't taken), and commits move up
+//     and down;
 //   - planProblem() names a squash or fixup with no kept commit below
 //     it, which git would refuse;
+//   - a rebase turned down keeps the dialog open with its plan, and
+//     picking the same target again lists its commits again;
 //   - the bar shows only while a rebase / merge / cherry-pick / revert
 //     is in progress, offers Resolve while files are conflicted, holds
-//     Continue / Commit back until they're not, and goes quiet while a
-//     step runs.
+//     Continue / Commit back until they're not, goes quiet while a step
+//     runs, and follows a theme switch.
 //
 
 #include <QApplication>
+#include <QComboBox>
+#include <QDialogButtonBox>
 #include <QInputDialog>
 #include <QListView>
+#include <QMessageBox>
 #include <QPushButton>
+#include <QScopeGuard>
+#include <QSettings>
 #include <QSignalSpy>
+#include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 
+#include "dialogs/RebaseDialog.h"
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/RepoOperationBar.h"
 
+using gitbolt::dialogs::RebaseDialog;
 using gitbolt::git::RebaseOperationType;
 using gitbolt::widgets::InteractiveRebaseWidget;
 using gitbolt::widgets::RepoOperationBar;
@@ -93,18 +104,41 @@ class TestRebaseWidgets : public QObject {
     Q_OBJECT
 
 private slots:
+    // The Rebase dialog keeps its size in GitBolt's settings: here, in
+    // a folder of the test's own, not the user's.
+    void initTestCase() {
+        QVERIFY(settings_.isValid());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_.path());
+    }
+
     void planListsCommitsNewestFirstAsPicks() {
         InteractiveRebaseWidget widget;
-        widget.setCommits(commits(3), gitbolt::git::ObjectId());
+        widget.setCommits(commits(3), gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
         QCOMPARE(plan(widget), (QStringList{"pick c3", "pick c2", "pick c1"}));
         // The whole message, for Reword to start from.
         QCOMPARE(widget.rebasePlan().operations.front().message, std::string("c3\n\nbody of c3\n"));
         QVERIFY(widget.planProblem().isEmpty());
     }
 
+    // git can't pick a merge ("is a merge but no -m option was given")
+    // and puts it back at the top of its list each time, so Continue
+    // and Skip both failed on it and only Abort got out. The plan
+    // leaves merges out, as git's own todo list does. It also keeps the
+    // HEAD it was made for, commit and branch.
+    void planLeavesMergesOut() {
+        auto list = commits(3);
+        list[1].parentIds = {list[2].id, gitbolt::git::ObjectId::fromHex(std::string(40, 'a'))};
+        QVERIFY(list[1].isMerge());
+        InteractiveRebaseWidget widget;
+        widget.setCommits(list, gitbolt::git::ObjectId(), list.front().id, "feature");
+        QCOMPARE(plan(widget), (QStringList{"pick c3", "pick c1"}));
+        QCOMPARE(widget.rebasePlan().head, list.front().id);
+        QCOMPARE(widget.rebasePlan().branch, std::string("feature"));
+    }
+
     void operationsApplyToTheSelectedCommit() {
         InteractiveRebaseWidget widget;
-        widget.setCommits(commits(4), gitbolt::git::ObjectId());
+        widget.setCommits(commits(4), gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
         // The newest commit starts out selected.
         widget.applyToSelected(RebaseOperationType::Squash);
         select(widget, 1);
@@ -127,7 +161,7 @@ private slots:
 
     void rewordTakesTheMessageFromThePrompt() {
         InteractiveRebaseWidget widget;
-        widget.setCommits(commits(2), gitbolt::git::ObjectId());
+        widget.setCommits(commits(2), gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
 
         answerRewordPrompt(QStringLiteral("new c2\n\nnew body"));
         widget.applyToSelected(RebaseOperationType::Reword);
@@ -144,9 +178,35 @@ private slots:
         QCOMPARE(plan(widget).at(0), QStringLiteral("pick c2"));
     }
 
+    // git makes no commit with an empty message; it stops the rebase.
+    // The prompt holds OK back while the message is blank, and a blank
+    // one changes nothing.
+    void rewordWantsAMessage() {
+        InteractiveRebaseWidget widget;
+        widget.setCommits(commits(1), gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
+        bool okWhenBlank = true;
+        bool okWithText = false;
+        QTimer::singleShot(0, [&] {
+            auto* prompt = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            QVERIFY(prompt);
+            auto* buttons = prompt->findChild<QDialogButtonBox*>();
+            QVERIFY(buttons);
+            prompt->setTextValue(QStringLiteral(" \n\n  "));
+            okWhenBlank = buttons->button(QDialogButtonBox::Ok)->isEnabled();
+            prompt->setTextValue(QStringLiteral("x"));
+            okWithText = buttons->button(QDialogButtonBox::Ok)->isEnabled();
+            prompt->setTextValue(QStringLiteral(" \n\n  "));
+            prompt->accept();
+        });
+        widget.applyToSelected(RebaseOperationType::Reword);
+        QVERIFY(!okWhenBlank);
+        QVERIFY(okWithText);
+        QCOMPARE(plan(widget), (QStringList{"pick c1"}));
+    }
+
     void squashNeedsAKeptCommitBelow() {
         InteractiveRebaseWidget widget;
-        widget.setCommits(commits(3), gitbolt::git::ObjectId());
+        widget.setCommits(commits(3), gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
         select(widget, 2);
         widget.applyToSelected(RebaseOperationType::Fixup);
         QVERIFY(widget.planProblem().contains(QLatin1String("c1")));   // the oldest
@@ -214,6 +274,123 @@ private slots:
         QVERIFY(button(bar, label("Continue"))->isEnabled());
     }
 
+    // A rebaseRequested handler that can't start the rebase (a step
+    // still running, HEAD moved since the plan was made) turned it down
+    // after the dialog had closed: the reason came with the plan gone.
+    // It now says why with the dialog still open, the plan as it was.
+    void refusedRebaseKeepsTheDialogAndItsPlan() {
+        RebaseDialog dialog;
+        dialog.setCommitsToRebase(commits(2), gitbolt::git::ObjectId(), commits(2).front().id,
+                                  "feature");
+        auto* widget = dialog.findChild<InteractiveRebaseWidget*>();
+        QVERIFY(widget);
+        widget->applyToSelected(RebaseOperationType::Drop);
+        const QStringList edited{"drop c2", "pick c1"};
+        QCOMPARE(plan(*widget), edited);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+        const QString reason = QStringLiteral("feature has moved since the rebase was planned.");
+        bool refuse = true;
+        int requests = 0;
+        connect(&dialog, &RebaseDialog::rebaseRequested, &dialog,
+                [&](const gitbolt::git::RebasePlan& requested) {
+            ++requests;
+            QCOMPARE(requested.branch, std::string("feature"));
+            if (refuse)
+                dialog.refuse(reason);
+        });
+        auto* buttons = dialog.findChild<QDialogButtonBox*>();
+        QVERIFY(buttons);
+        QString shown;
+        QTimer::singleShot(0, &dialog, [&] {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            QVERIFY(box);
+            shown = box->text();
+            box->accept();
+        });
+        buttons->button(QDialogButtonBox::Ok)->click();
+        QCOMPARE(requests, 1);
+        QCOMPARE(shown, reason);
+        QVERIFY(dialog.isVisible());
+        QCOMPARE(plan(*widget), edited);
+
+        // Then it goes, and the dialog closes.
+        refuse = false;
+        buttons->button(QDialogButtonBox::Ok)->click();
+        QCOMPARE(requests, 2);
+        QVERIFY(!dialog.isVisible());
+        QCOMPARE(dialog.result(), int(QDialog::Accepted));
+    }
+
+    // A refusal for a moved HEAD asks for the target to be picked
+    // again; the branch picked already is the likely one. The combo
+    // listed commits on an index change only, so picking it again did
+    // nothing.
+    void pickingTheSameTargetAgainListsItsCommitsAgain() {
+        RebaseDialog dialog;
+        gitbolt::git::BranchInfo main;
+        main.name = "main";
+        gitbolt::git::BranchInfo dev;
+        dev.name = "dev";
+        dialog.setBranches({main, dev});
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* combo = dialog.findChild<QComboBox*>();
+        QVERIFY(combo);
+        QSignalSpy targets(&dialog, &RebaseDialog::targetRefChanged);
+
+        // A pick from the list: the popup, an entry, Return.
+        const auto pick = [combo](int index) {
+            combo->showPopup();
+            QTRY_VERIFY(combo->view()->isVisible());
+            combo->view()->setCurrentIndex(combo->model()->index(index, 0));
+            QTest::keyClick(combo->view(), Qt::Key_Return);
+            QTRY_VERIFY(!combo->view()->isVisible());
+        };
+        pick(1);
+        QCOMPARE(targets.size(), 1);
+        pick(1);
+        QCOMPARE(targets.size(), 2);
+        QCOMPARE(targets.at(1).at(0).toString(), QStringLiteral("main"));
+    }
+
+    // A theme switch sets the application palette. The bar waited for
+    // ApplicationPaletteChange in changeEvent(), where Qt never delivers
+    // it, and kept the old theme's amber until GitBolt was restarted.
+    void barFollowsTheTheme() {
+        const QPalette before = QApplication::palette();
+        const auto restore = qScopeGuard([&] { QApplication::setPalette(before); });
+        // A whole theme's worth, as ThemeService sets them.
+        const auto palette = [](const QColor& background, const QColor& text) {
+            QPalette p;
+            for (const auto role : {QPalette::Window, QPalette::Base, QPalette::Button})
+                p.setColor(role, background);
+            for (const auto role : {QPalette::WindowText, QPalette::Text, QPalette::ButtonText})
+                p.setColor(role, text);
+            return p;
+        };
+        // In a window on screen, as in the repository view: Qt tells
+        // the window, which passes the change down.
+        QWidget window;
+        auto* bar = new RepoOperationBar(&window);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        const auto barIsDark = [bar] {
+            const QPalette p = bar->palette();
+            return p.color(QPalette::Window).lightness() < p.color(QPalette::WindowText).lightness();
+        };
+
+        QApplication::setPalette(palette(Qt::white, Qt::black));
+        QTRY_VERIFY(!barIsDark());
+        QApplication::setPalette(palette(QColor(0x20, 0x20, 0x20), Qt::white));
+        QTRY_VERIFY(barIsDark());
+        QApplication::setPalette(palette(Qt::white, Qt::black));
+        QTRY_VERIFY(!barIsDark());
+    }
+
+private:
+    QTemporaryDir settings_;
 };
 
 QTEST_MAIN(TestRebaseWidgets)

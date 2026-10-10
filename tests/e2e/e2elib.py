@@ -121,7 +121,10 @@ class SilentServer:
     def hang_up(self) -> None:
         """Drop the connection unanswered: git's fetch then fails."""
         if self.conn is not None:
-            self.conn.shutdown(socket.SHUT_RDWR)
+            try:
+                self.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass    # git has closed it already
 
 
 class App:
@@ -266,6 +269,12 @@ class App:
         raise Failure(f"no enabled action matching {prefix}; have: "
                       + ", ".join(a["slug"] for a in actions[:40]))
 
+    def action_enabled(self, object_name: str) -> bool:
+        for a in self.cmd("list-actions")["actions"]:
+            if a.get("objectName") == object_name:
+                return a["enabled"]
+        raise Failure(f"no action named {object_name}")
+
     def view_rows(self, object_name: str) -> int:
         for v in self.cmd("list-widgets")["views"]:
             if v.get("objectName") == object_name:
@@ -299,6 +308,31 @@ class App:
         if not resp.get("ok"):
             raise Failure(f"`{line}` -> {json.dumps(resp)}")
         return resp
+
+    def batch(self, *lines: str, timeout: float = 10.0) -> list[dict]:
+        """ok() for several commands sent in one write. The bridge
+        handles every line it has before going back to the event loop,
+        so the actions they trigger are queued back to back: all of
+        them run before anything the first one sets off on a worker
+        (that worker's finished signal, say) can get in between."""
+        path = os.path.join(self.runtime_dir, self.bridge_name)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            sock.connect(path)
+            sock.sendall("".join(line + "\n" for line in lines).encode())
+            buf = b""
+            while buf.count(b"\n") < len(lines):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+        replies = [json.loads(r) for r in buf.decode().splitlines()]
+        if len(replies) != len(lines):
+            raise Failure(f"{lines} -> {len(replies)} replies: {replies}")
+        for line, resp in zip(lines, replies):
+            if not resp.get("ok"):
+                raise Failure(f"`{line}` -> {json.dumps(resp)}")
+        return replies
 
     # ---- teardown ----------------------------------------------------------
 
@@ -337,6 +371,71 @@ class App:
                 return "\n" + "".join(fh.readlines()[-lines:])
         except OSError:
             return "(no log)"
+
+
+# ---- what the window shows -------------------------------------------------
+
+def on_screen(name: str):
+    """Predicate on dump-state: repository `name` is open and its title
+    is up. After Close the service still has it open; the title tells
+    them apart."""
+    def pred(s: dict) -> bool:
+        return (any(t.startswith(name) for t in s["windows"])
+                and s.get("repoPath", "").rstrip("/").endswith(name))
+    return pred
+
+
+def home_screen(s: dict) -> bool:
+    """Predicate on dump-state: the home screen Close leaves (File →
+    Home keeps the repository's title)."""
+    return "GitBolt" in s["windows"]
+
+
+def check_for(seconds: float, what: str, bad) -> None:
+    """Fail if bad() names a problem at any point in the next `seconds`:
+    for what must not happen once queued work has run (an op's failure
+    and its finished handler land a moment after its git exits)."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        problem = bad()
+        if problem:
+            raise Failure(f"{what}: {problem}")
+        time.sleep(0.2)
+
+
+# ---- periodic background fetch ---------------------------------------------
+
+AUTO_FETCH_TIMER = "periodicFetchTimer"
+
+
+def auto_fetch_config(scratch: str) -> str:
+    """A config_home with Plugins → Periodic background fetch on, as the
+    menu saves it. The hour-long interval keeps the real timer out of
+    the way: tests fire it through the bridge (stall_auto_fetch)."""
+    config_home = os.path.join(scratch, "config")
+    ini_dir = os.path.join(config_home, "GitBolt")
+    os.makedirs(ini_dir)
+    with open(os.path.join(ini_dir, "GitBolt.ini"), "w") as fh:
+        fh.write("[plugins]\n"
+                 "periodicFetch\\enabled=true\n"
+                 "periodicFetch\\intervalMinutes=60\n")
+    return config_home
+
+
+def stall_auto_fetch(app: App, work: str) -> SilentServer:
+    """Point origin at a fresh silent server and fire an auto-fetch at
+    it; returns once git is connected and waiting. Fires again while
+    ticks are skipped: the last remote op's finished handler may still
+    be queued behind whatever the test waited for."""
+    server = SilentServer()
+    git("remote", "set-url", "origin", server.url, cwd=work)
+    deadline = time.monotonic() + 20
+    while not server.connected.is_set():
+        if time.monotonic() > deadline:
+            raise Failure("the auto-fetch never reached the server")
+        app.ok(f"fire-timer {AUTO_FETCH_TIMER}")
+        server.connected.wait(1)
+    return server
 
 
 def run(test_fn) -> None:

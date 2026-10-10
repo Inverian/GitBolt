@@ -6,6 +6,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,7 +26,15 @@ class GitProcess {
 public:
     explicit GitProcess(const std::string& workingDirectory);
 
-    Result<ProcessOutput> run(const std::vector<std::string>& args, int timeoutMs = 30000) const;
+    /// Without `timeoutMs`, git gets defaultTimeoutMs().
+    Result<ProcessOutput> run(const std::vector<std::string>& args,
+                              std::optional<int> timeoutMs = std::nullopt) const;
+
+    /// How long run() lets git take when the caller names no limit:
+    /// 30 s, or GITBOLT_GIT_TIMEOUT_MS when that is set. Tests shorten
+    /// it to show, in seconds rather than minutes, that a command
+    /// which may run longer names a limit of its own.
+    static int defaultTimeoutMs();
 
     /// Makes run(), and every command built on it, stoppable. Once
     /// `flag` is set, from any thread, run() stops git and every
@@ -33,7 +42,14 @@ public:
     /// GitErrorCode::User; later runs fail without starting git. git
     /// then runs in a process group of its own (a job object on
     /// Windows), as clone() does. Without a flag run() is unchanged.
-    void setCancelFlag(std::shared_ptr<std::atomic<bool>> flag) { cancelFlag_ = std::move(flag); }
+    /// Flags add up, and any one of them stops it: every remote op
+    /// GitService runs has the flag that quitting sets, and an
+    /// auto-fetch one of its own as well, so it can be dropped alone.
+    /// A null flag is ignored, so an optional one can be passed on.
+    void addCancelFlag(std::shared_ptr<std::atomic<bool>> flag) {
+        if (flag)
+            cancelFlags_.push_back(std::move(flag));
+    }
 
     /// Like run(), but feeds `stdinData` to the child's stdin and
     /// closes the write channel. Needed for commands that read a
@@ -42,7 +58,7 @@ public:
     /// files just to hand git a few hundred bytes would be noise).
     Result<ProcessOutput> runWithInput(const std::vector<std::string>& args,
                                        const std::string& stdinData,
-                                       int timeoutMs = 30000) const;
+                                       std::optional<int> timeoutMs = std::nullopt) const;
 
     Result<std::vector<std::string>> logOneline(const std::string& range = "", int maxCount = -1) const;
     Result<std::string> diffRaw(const std::string& from, const std::string& to) const;
@@ -96,8 +112,14 @@ public:
     /// rewords to its new message; the commit gets it when git asks
     /// for it, from this call or from a later rebaseContinue() /
     /// rebaseSkip(). A reword without an entry keeps its message.
+    /// `messages` are the messages the todo's commits have now, which
+    /// git can put in a commit too (a squash keeps them): git runs the
+    /// rebase with a core.commentChar that starts no line of them or
+    /// of a new one, so it strips nothing they say. rebaseContinue()
+    /// and rebaseSkip() carry on with the same one.
     Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& todo,
-                                            const std::map<std::string, std::string>& newMessages = {}) const;
+                                            const std::map<std::string, std::string>& newMessages = {},
+                                            const std::vector<std::string>& messages = {}) const;
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
     Result<ProcessOutput> rebaseSkip() const;
@@ -123,12 +145,21 @@ private:
     /// GIT_EDITOR that never waits on anyone (see kEditor).
     static void applyEnvironment(QProcess& process);
 
-    /// run() with cancelFlag_ set.
+    /// run() with a cancel flag added.
     Result<ProcessOutput> runCancellable(const std::vector<std::string>& args, int timeoutMs) const;
+    /// Whether any of cancelFlags_ is set.
+    bool cancelled() const;
+
+    /// "-c core.commentChar=<c>" with the comment character that
+    /// interactiveRebase() started the rebase in progress with, for
+    /// the git that carries it on: a reword that stopped on a conflict
+    /// is committed then. Empty for a rebase started some other way,
+    /// which keeps the user's own setting.
+    std::vector<std::string> rebaseCommentConfig() const;
 
     std::string workDir_;
     std::string gitPath_;
-    std::shared_ptr<std::atomic<bool>> cancelFlag_;
+    std::vector<std::shared_ptr<std::atomic<bool>>> cancelFlags_;
 };
 
 } // namespace gitbolt::git

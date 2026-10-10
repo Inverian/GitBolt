@@ -16,13 +16,16 @@ endif()
 
 set(E2E_TESTS
     test_auto_fetch
+    test_auto_fetch_disowned
     test_branch_switch
     test_clone_dialog
     test_commit_flow
     test_instance_lock
     test_quit_during_fetch
     test_rebase_dialog
+    test_rebase_progress
     test_remote_branches
+    test_remote_op_leave_repo
     test_single_instance
     test_tags
     test_theme_persistence

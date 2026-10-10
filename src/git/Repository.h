@@ -123,6 +123,10 @@ public:
     /// conflict source — merge, cherry-pick, rebase, revert.
     Result<std::vector<MergeConflictEntry>> conflictEntries() const;
 
+    /// How many paths conflictEntries() would return, from the index
+    /// alone: no blob is read.
+    Result<int> conflictCount() const;
+
     // Remotes
     Result<std::vector<RemoteInfo>> remotes() const;
     Result<void> addRemote(const std::string& name, const std::string& url);

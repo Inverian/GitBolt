@@ -21,16 +21,8 @@ import os
 import subprocess
 import time
 
-from e2elib import App, Failure, SilentServer, git, make_repo, run
-
-TIMER = "periodicFetchTimer"
-
-
-def action_enabled(app: App, object_name: str) -> bool:
-    for a in app.cmd("list-actions")["actions"]:
-        if a.get("objectName") == object_name:
-            return a["enabled"]
-    raise Failure(f"no action named {object_name}")
+from e2elib import (AUTO_FETCH_TIMER, App, Failure, auto_fetch_config, git,
+                    make_repo, run, stall_auto_fetch)
 
 
 def status(state: dict) -> str:
@@ -42,26 +34,10 @@ def wait_action_enabled(app: App, object_name: str,
     """Poll: an op's failure reaches the status bar a moment before its
     finished handler re-enables actions (both are queued)."""
     deadline = time.monotonic() + timeout
-    while not action_enabled(app, object_name):
+    while not app.action_enabled(object_name):
         if time.monotonic() > deadline:
             raise Failure(f"{object_name} stayed disabled")
         time.sleep(0.2)
-
-
-def stall_on(app: App, work: str) -> SilentServer:
-    """Point origin at a fresh silent server and fire an auto-fetch at
-    it; returns once git is connected and waiting. Fires again while
-    ticks are skipped: the last auto-fetch's finished handler may still
-    be queued behind the failure note the test waited for."""
-    server = SilentServer()
-    git("remote", "set-url", "origin", server.url, cwd=work)
-    deadline = time.monotonic() + 20
-    while not server.connected.is_set():
-        if time.monotonic() > deadline:
-            raise Failure("the auto-fetch never reached the server")
-        app.ok(f"fire-timer {TIMER}")
-        server.connected.wait(1)
-    return server
 
 
 def test(binary: str, scratch: str, apps: list) -> None:
@@ -69,23 +45,13 @@ def test(binary: str, scratch: str, apps: list) -> None:
     git("remote", "add", "origin", os.path.join(scratch, "missing.git"),
         cwd=work)
 
-    # Periodic fetch on, as the Plugins menu saves it. The hour-long
-    # interval keeps the real timer out of the way.
-    config_home = os.path.join(scratch, "config")
-    ini_dir = os.path.join(config_home, "GitBolt")
-    os.makedirs(ini_dir)
-    with open(os.path.join(ini_dir, "GitBolt.ini"), "w") as fh:
-        fh.write("[plugins]\n"
-                 "periodicFetch\\enabled=true\n"
-                 "periodicFetch\\intervalMinutes=60\n")
-
-    app = App(binary, work, config_home=config_home)
+    app = App(binary, work, config_home=auto_fetch_config(scratch))
     apps.append(app)
     app.wait_bridge()
     app.wait_until(lambda s: s.get("repoOpen"), "repo open")
 
     # 1. A stalled auto-fetch leaves the window live, and quiet.
-    server = stall_on(app, work)
+    server = stall_auto_fetch(app, work)
     try:
         state = app.cmd("dump-state", timeout=5)
     except OSError:
@@ -93,14 +59,14 @@ def test(binary: str, scratch: str, apps: list) -> None:
                       "to dump-state within 5 s") from None
     if status(state).startswith("Fetching"):
         raise Failure(f"the auto-fetch narrated itself: {status(state)!r}")
-    if not action_enabled(app, "act.fetch"):
+    if not app.action_enabled("act.fetch"):
         raise Failure("the auto-fetch disabled the Fetch button")
 
     # 2. A Fetch click meanwhile shows the running fetch; a Pull waits.
     app.ok("trigger act.fetch")
     app.wait_until(lambda s: status(s) == "Fetching from origin…",
                    "the auto-fetch shown as a fetch")
-    if action_enabled(app, "act.fetch"):
+    if app.action_enabled("act.fetch"):
         raise Failure("Fetch still enabled while the shown fetch runs")
     app.ok("trigger act.pull")
     app.wait_until(
@@ -116,12 +82,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
     # 3. A failing auto-fetch is a passing note, not the sticky failure.
     git("remote", "set-url", "origin", os.path.join(scratch, "missing.git"),
         cwd=work)
-    app.ok(f"fire-timer {TIMER}")
+    app.ok(f"fire-timer {AUTO_FETCH_TIMER}")
     app.wait_until(lambda s: status(s).startswith("Auto-fetch failed:"),
                    "the auto-fetch failure note")
 
     # 4. Quitting during an auto-fetch stops git and exits at once.
-    server = stall_on(app, work)
+    server = stall_auto_fetch(app, work)
     try:
         rc = app.quit(timeout=15)
     except subprocess.TimeoutExpired:
