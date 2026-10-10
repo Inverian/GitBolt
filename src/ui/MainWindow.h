@@ -9,6 +9,7 @@
 #include <QKeySequence>
 #include <QList>
 #include <QMainWindow>
+#include <QPointer>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -354,7 +355,9 @@ private:
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by
     // collectAndApplyShortcuts(); consumed by the Settings dialog.
-    QList<QAction*> shortcutActions_;
+    // Guarded: an action deleted after startup must drop out, not
+    // reach the dialog as a dangling pointer.
+    QList<QPointer<QAction>> shortcutActions_;
     QHash<QString, QKeySequence> defaultShortcuts_;
 
     // Inline activity indicator that lives on the toolbar between the

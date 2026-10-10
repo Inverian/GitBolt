@@ -26,6 +26,7 @@ set(E2E_TESTS
     test_rebase_progress
     test_remote_branches
     test_remote_op_leave_repo
+    test_settings_after_open
     test_single_instance
     test_tags
     test_theme_persistence

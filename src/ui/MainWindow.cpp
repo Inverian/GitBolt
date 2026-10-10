@@ -3584,7 +3584,11 @@ void MainWindow::collectAndApplyShortcuts()
                 if (!a || a->isSeparator())
                     continue;
                 if (QMenu* sub = a->menu()) {
-                    walk(sub->actions());
+                    // Recent Repositories is rebuilt (its actions
+                    // deleted) on every open, and a path is no
+                    // command to bind a key to.
+                    if (sub != recentMenu_)
+                        walk(sub->actions());
                     continue;
                 }
                 const QString name = a->objectName();
@@ -4599,7 +4603,12 @@ void MainWindow::showAbout()
 void MainWindow::showSettingsDialog()
 {
     dialogs::SettingsDialog dlg(settingsService_, themeService_, this);
-    dlg.setShortcutActions(shortcutActions_, defaultShortcuts_);
+    QList<QAction*> actions;
+    for (const QPointer<QAction>& a : std::as_const(shortcutActions_)) {
+        if (a)
+            actions.append(a);
+    }
+    dlg.setShortcutActions(actions, defaultShortcuts_);
     dlg.exec();
 }
 
