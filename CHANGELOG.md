@@ -4,6 +4,46 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.4] — 2026-10-10
+
+Tighter spacing around the toolbar's Commit and Stash buttons in dark
+mode, the project's website in the app and its packages, and a
+refreshed README.
+
+### Changed
+
+- **Toolbar**: in dark mode (the Dark theme, or System with a dark
+  appearance), Commit and Stash, the two toolbar buttons that show
+  their text, had more space after their text than the icon buttons
+  have around theirs, as light mode did before 0.9.3. On macOS the gap
+  from Commit's text to the Stash icon was 25.5pt, against 16 to 18.5pt
+  between the icon buttons; it is now 17.5pt. Light mode is unchanged.
+- **Website**: GitBolt's website, [www.gitbolt.com](https://www.gitbolt.com),
+  is linked from the About GitBolt dialog, and is now the homepage the
+  Windows installer registers and the .deb and Linux AppStream metadata
+  list, in place of the GitHub repository. The AppStream metadata also
+  lists the GitHub issue tracker and repository.
+- **Packaging**: the .deb package's maintainer is now
+  `GitBolt Team <support@gitbolt.com>`, replacing team@gitbolt.dev,
+  an address at a domain the project does not own. GitBolt's Qt
+  organization domain also changed from gitbolt.dev to gitbolt.com,
+  and its AppStream developer ID from dev.gitbolt to com.gitbolt;
+  settings stay where they are.
+- **Documentation**: the README opens with a banner, status badges, a
+  screenshot and links to the website, downloads, build guide,
+  changelog and contributing guide, and gains a Download section
+  listing each platform's installer and what it runs on.
+  TRADEMARK.md names the website and the GitHub repository as the
+  official project.
+
+### Fixed
+
+- **About GitBolt**, on Windows and Linux, could cut off the end of the
+  OS line in its build details when dragged narrower than it opened;
+  Windows 11 and most Linux distributions report a name long enough to
+  hit this. Its minimum width now fits its contents, and is still at
+  least 520 pixels.
+
 ## [0.9.3] — 2026-10-10
 
 A fix for Settings crashing GitBolt, and less padding around the

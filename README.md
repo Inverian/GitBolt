@@ -59,8 +59,8 @@ Installers for every release are on the
 |---|---|---|
 | macOS | `GitBolt-<version>-Darwin-arm64.dmg` | Apple Silicon, macOS 13 (Ventura) or later |
 | Windows | `GitBolt-<version>-Windows-AMD64.exe` | 64-bit installer |
-| Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, portable: make it executable and run it |
-| Debian, Ubuntu | `gitbolt_<version>_amd64.deb` | x86-64 |
+| Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, on distributions with GCC 13's C++ runtime or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later); make it executable and run it |
+| Ubuntu 24.04 | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 LTS and distributions based on it, such as Linux Mint 22 (it depends on that release's libgit2 1.7) |
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 
@@ -247,7 +247,7 @@ See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on you
 
 ## Project Status
 
-GitBolt **0.9.3** is a beta: every planned module is implemented and
+GitBolt **0.9.4** is a beta: every planned module is implemented and
 wired into the UI, and CI builds and tests it on macOS, Linux, and Windows.
 See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
 
