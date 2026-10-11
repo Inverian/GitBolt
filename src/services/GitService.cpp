@@ -269,6 +269,14 @@ void GitService::refreshLog(int offset, int count) {
         } else {
             walk->pushHead();
         }
+        // Each page is a fresh walk from the tips, so step over the
+        // rows the model already has; without this every page after
+        // the first repeated it. A walk that ends inside the skip
+        // yields an empty page, which tells the model there's no more.
+        if (offset > 0) {
+            auto skipped = walk->skip(static_cast<size_t>(offset));
+            if (!skipped) return;
+        }
         auto commits = walk->next(static_cast<size_t>(count));
         if (commits)
             emit logReady(std::move(*commits), offset);

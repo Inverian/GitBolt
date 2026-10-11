@@ -56,6 +56,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <type_traits>
 
 using gitbolt::services::GitService;
@@ -334,6 +335,41 @@ private slots:
         QCOMPARE(commits.size(), size_t(3));
         QCOMPARE(commits.front().summary, std::string("commit 2"));
         QCOMPARE(commits.back().summary, std::string("commit 0"));
+    }
+
+    // -----------------------------------------------------------------
+    // refreshLog(offset, count): a later page continues where the
+    // previous one stopped instead of repeating the newest commits,
+    // and a page past the end arrives empty, which ends paging.
+    // -----------------------------------------------------------------
+    void refreshLogPagesFromOffset() {
+        auto repo = repoWithCommits(5);
+        QVERIFY(repo);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+
+        // openRepository's own offset-0 refresh can land in the spy
+        // too, so wait for the page with the offset asked for.
+        MainThreadSpy logSpy(&svc, &GitService::logReady);
+        const auto pageAt = [&logSpy](int offset)
+            -> std::optional<std::vector<gitbolt::git::CommitData>> {
+            for (const auto& args : logSpy)
+                if (args.at(1).toInt() == offset)
+                    return args.at(0).value<std::vector<gitbolt::git::CommitData>>();
+            return std::nullopt;
+        };
+
+        svc.refreshLog(2, 2);
+        QVERIFY(QTest::qWaitFor([&] { return pageAt(2).has_value(); }, 5000));
+        const auto page = *pageAt(2);
+        QCOMPARE(page.size(), size_t(2));
+        QCOMPARE(page.front().summary, std::string("commit 2"));
+        QCOMPARE(page.back().summary, std::string("commit 1"));
+
+        svc.refreshLog(5, 2);
+        QVERIFY(QTest::qWaitFor([&] { return pageAt(5).has_value(); }, 5000));
+        QVERIFY(pageAt(5)->empty());
     }
 
     // -----------------------------------------------------------------

@@ -40,6 +40,10 @@ public:
 
     Result<std::vector<CommitData>> next(size_t count);
     Result<std::vector<CommitData>> all();
+    /// Advance past up to `count` commits without loading them, so a
+    /// later page can start at an offset. Returns how many were
+    /// skipped: fewer than `count` means the walk ran out.
+    Result<size_t> skip(size_t count);
 
     using WalkCallback = std::function<bool(const CommitData&)>;
     Result<void> walk(WalkCallback callback);
