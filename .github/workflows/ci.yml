@@ -155,13 +155,18 @@ jobs:
       # they can only send events, not read any. The host is public.
       # Step env, never the command line; cmake reads each from the
       # environment on the first configure.
+      #
+      # GITBOLT_REQUIRE_ENGLISH_PLURALS: fail here, not quietly show
+      # "1 file(s)", if the Qt above ever lacks LinguistTools (aqt's
+      # default desktop install has it on all three: the qttools
+      # archive).
       - name: Configure
         env:
           GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON
 
       # Only an official build may carry endpoints: a PR, dry-run or
       # fork build that has them fails here, before it can be tested,
@@ -189,6 +194,26 @@ jobs:
 
       - name: Build
         run: cmake --build build --parallel
+
+      # Every %n text needs its English singular and plural in
+      # translations/gitbolt_en.ts (util::installEnglishPlurals), or the
+      # app shows "1 file(s)". update_translations re-reads the sources
+      # with lupdate: a %n text added or changed without its forms
+      # leaves the file changed or unfinished. One leg is enough:
+      # lupdate reads whole files, #ifdef branches included, and every
+      # platform's targets list the same C++ sources.
+      - name: Check English plural forms (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --target update_translations
+          if ! git diff --exit-code -- translations/; then
+            echo "::error::translations/gitbolt_en.ts is stale: run 'cmake --build build --target update_translations', fill in the new forms and commit it"
+            exit 1
+          fi
+          if grep -n 'type="unfinished"' translations/gitbolt_en.ts; then
+            echo "::error::translations/gitbolt_en.ts has %n texts without their English forms"
+            exit 1
+          fi
 
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
       # platform, and the Linux runners have no display server.

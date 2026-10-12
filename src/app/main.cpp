@@ -12,6 +12,7 @@
 #include "util/CrashHandler.h"
 #include "util/LockFiles.h"
 #include "util/TestSession.h"
+#include "util/Translations.h"
 
 #include <memory>
 #include <string_view>
@@ -236,6 +237,10 @@ int main(int argc, char* argv[]) {
     QApplication::setAttribute(Qt::AA_DontShowIconsInMenus, false);
 
     QApplication app(argc, argv);
+
+    // English plural forms for every %n text ("1 file", "2 files"),
+    // whatever the locale; a build without them shows "(s)".
+    gitbolt::util::installEnglishPlurals();
 
     // Use Fusion style on macOS so QMenu honors our per-action icons
     // (the native QMacStyle ignores iconVisibleInMenu/AA_DontShowIconsInMenus).

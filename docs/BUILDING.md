@@ -382,6 +382,7 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | `GITBOLT_BUILD_TESTS` | `ON` | Build the unit test executables |
 | `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
 | `GITBOLT_BUNDLED_LIBGIT2` | `OFF` | Build the pinned libgit2 from source and link it statically instead of using a system copy (see below). Used automatically when no system libgit2 is found |
+| `GITBOLT_REQUIRE_ENGLISH_PLURALS` | `OFF` | Fail the configure when the [English plural forms](#english-plural-forms) can't be built (no Qt LinguistTools, or Qt before 6.7). CI sets it |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
 | `GITBOLT_TELEMETRY_HOST` | empty | Usage statistics ingest origin, `https://<host>`; empty compiles telemetry out (see below) |
@@ -395,6 +396,19 @@ Example — debug build with sanitizers:
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_SANITIZERS=ON -G Ninja
 cmake --build build-asan --parallel
 ```
+
+### English plural forms
+
+Texts with a count, such as "Merge stopped on conflicts in %n file(s)", get their English singular and plural ("1 file", "2 files") from `translations/gitbolt_en.ts`, which the build compiles into the app. That needs Qt's LinguistTools and Qt 6.7 or later. Homebrew's `qt`, the Qt Online Installer's default desktop install and CI's Qt include LinguistTools; on Linux install `qt6-tools-dev` and `qt6-l10n-tools` (Debian, Ubuntu), `qt6-qttools-devel` (Fedora) or `qt6-tools` (Arch). Without them GitBolt still builds, CMake prints `English plural forms: off`, and those texts read "1 file(s)".
+
+After adding or changing a text with `%n`, refresh the file and fill in both forms of each new entry:
+
+```bash
+cmake --build build --target update_translations
+# edit translations/gitbolt_en.ts: both <numerusform>s, and drop type="unfinished"
+```
+
+Commit the `.ts` file with the change. CI runs the same target on Linux and fails while the file is out of date or a form is missing.
 
 ### Usage statistics endpoints
 
@@ -577,6 +591,8 @@ sudo dnf install cmake ninja-build pkgconf-pkg-config gcc-c++ \
 ```bash
 sudo pacman -S cmake ninja pkgconf gcc qt6-base qt6-svg libgit2 git
 ```
+
+Optionally add Qt's LinguistTools for the [English plural forms](#english-plural-forms) ("1 file" rather than "1 file(s)"; Qt 6.7 or later): `qt6-tools-dev qt6-l10n-tools` on Debian and Ubuntu, `qt6-qttools-devel` on Fedora, `qt6-tools` on Arch.
 
 After installing dependencies, the configure and build commands are identical to macOS.
 

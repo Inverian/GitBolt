@@ -69,6 +69,12 @@ endif()
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+# English plural forms (util::installEnglishPlurals): "1 file", "2
+# files", and both forms of every %n text in the .ts file, as the .qm
+# built into gitbolt_util gives them.
+gitbolt_add_test(test_english_plurals util/TestEnglishPlurals.cpp)
+target_compile_definitions(test_english_plurals PRIVATE
+    GITBOLT_PLURALS_TS="${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts")
 
 # telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
 # Never a real endpoint: test binaries don't link src/app, where the
@@ -102,6 +108,8 @@ endif()
 # data, the branch model from what a temp repo reports)
 gitbolt_add_test(test_commit_log_model models/TestCommitLogModel.cpp)
 gitbolt_add_test(test_branch_model     models/TestBranchModel.cpp)
+# The log's and the blame view's relative dates: "1 day ago", "2 days ago"
+gitbolt_add_test(test_relative_dates   models/TestRelativeDates.cpp)
 
 # services/ tests — GitService orchestration against real temp repos.
 # Needs the services lib on top of the defaults the helper links, and

@@ -17,13 +17,16 @@
 //     Continue / Commit back until they're not, offers Continue and
 //     Skip for a cherry-pick or revert of several commits paused
 //     between two, goes quiet while a step runs, and follows a theme
-//     switch.
+//     switch;
+//   - the bar counts conflicted files in English: "1 file", "3 files"
+//     (util::installEnglishPlurals), not "1 file(s)".
 //
 
 #include <QApplication>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QInputDialog>
+#include <QLabel>
 #include <QListView>
 #include <QMessageBox>
 #include <QPushButton>
@@ -35,6 +38,7 @@
 #include <QTimer>
 
 #include "dialogs/RebaseDialog.h"
+#include "util/Translations.h"
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/RepoOperationBar.h"
 
@@ -111,6 +115,8 @@ private slots:
     void initTestCase() {
         QVERIFY(settings_.isValid());
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_.path());
+        // The app's English plural forms, as main.cpp installs them.
+        QCOMPARE(gitbolt::util::installEnglishPlurals(), gitbolt::util::hasEnglishPlurals());
     }
 
     void planListsCommitsNewestFirstAsPicks() {
@@ -251,6 +257,26 @@ private slots:
 
         bar.setState(gitbolt::git::RepoState::None, 0);
         QVERIFY(bar.isHidden());
+    }
+
+    // "%n file(s)" read "1 file(s)": Qt picks a plural form only from a
+    // loaded translation, and GitBolt loaded none.
+    void barCountsConflictedFiles() {
+        if (!gitbolt::util::hasEnglishPlurals())
+            QSKIP("built without Qt LinguistTools (or with Qt before 6.7): no English plural forms");
+        RepoOperationBar bar;
+        auto* message = bar.findChild<QLabel*>();
+        QVERIFY(message);
+        bar.setState(gitbolt::git::RepoState::Merge, 1);
+        QCOMPARE(message->text(),
+                 QStringLiteral("Merge stopped on conflicts in 1 file. Resolve them, then commit."));
+        bar.setState(gitbolt::git::RepoState::Rebase, 3);
+        QCOMPARE(message->text(),
+                 QStringLiteral("Rebase stopped on conflicts in 3 files. Resolve them, then Continue."));
+        bar.setState(gitbolt::git::RepoState::CherryPick, 2);
+        QVERIFY2(message->text().contains(QLatin1String(" in 2 files.")), qPrintable(message->text()));
+        bar.setState(gitbolt::git::RepoState::Revert, 1);
+        QVERIFY2(message->text().contains(QLatin1String(" in 1 file.")), qPrintable(message->text()));
     }
 
     // A cherry-pick or revert of several commits, paused between two of

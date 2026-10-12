@@ -359,8 +359,10 @@ void FileTreeWidget::rebuildTree()
     // Header summary mirrors GitExtensions' "(N) Tree at <hex>:
     // <files>, <dirs>, <total size>" line.
     previewHeader_->setText(
-        tr("%1 files, %2 directories — %3 total")
-            .arg(fileCount).arg(dirCount).arg(formatSize(totalBytes)));
+        tr("%1, %2 — %3 total")
+            .arg(tr("%n file(s)", nullptr, fileCount),
+                 tr("%n directories", nullptr, dirCount),
+                 formatSize(totalBytes)));
 
     // Auto-expand the root level so users see top-level structure
     // immediately without having to click. Don't recurse — large

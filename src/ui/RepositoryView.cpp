@@ -351,7 +351,7 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
     tree->header()->resizeSection(1, 90);
     tree->header()->resizeSection(2, 140);
     layout->addWidget(new QLabel(
-        tr("%1 revision(s) touch this file:").arg(tree->topLevelItemCount()),
+        tr("%n revision(s) touch this file:", nullptr, tree->topLevelItemCount()),
         dlg));
     layout->addWidget(tree, 1);
 

@@ -70,6 +70,9 @@ option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
 option(GITBOLT_BUNDLED_LIBGIT2
     "Build the pinned libgit2 from source and link it statically instead of using a system copy"
     OFF)
+option(GITBOLT_REQUIRE_ENGLISH_PLURALS
+    "Fail the configure when the English plural forms can't be built (no Qt LinguistTools, or Qt before 6.7)"
+    OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
@@ -93,6 +96,65 @@ include(Libgit2)
 
 # Source modules
 add_subdirectory(src)
+
+# English plural forms. Qt picks the form of tr("%n file(s)", nullptr,
+# n) only from a loaded translation, so GitBolt ships an English one
+# holding nothing but the singular and plural of each %n string:
+# translations/gitbolt_en.ts, compiled into gitbolt_util (which the app
+# and every test link) as :/i18n/gitbolt_en.qm, and loaded by
+# util::installEnglishPlurals() (src/util/Translations.h). Optional: it
+# needs Qt LinguistTools (in aqt's and Homebrew's Qt; see
+# docs/BUILDING.md for distro packages) and Qt 6.7 for PLURALS_TS_FILE.
+# Without them the build works and the texts keep their "(s)". CI
+# configures with GITBOLT_REQUIRE_ENGLISH_PLURALS=ON, so no installer
+# ships without them.
+#
+# After adding or changing a %n string:
+#   cmake --build build --target update_translations
+# then fill in both forms of each new <message numerus="yes"> in
+# translations/gitbolt_en.ts, drop its type="unfinished", and commit
+# the file. CI's Linux leg re-runs update_translations and fails while
+# the file is stale or a form is missing.
+#
+# SOURCE_TARGETS: every module with tr() texts. gitbolt_conpty
+# (Windows) is Qt-free. -locations none keeps line numbers out of the
+# file, so it only changes when a text does; -no-obsolete drops texts
+# the sources no longer have.
+find_package(Qt6 QUIET OPTIONAL_COMPONENTS LinguistTools)
+if(Qt6LinguistTools_FOUND AND Qt6_VERSION VERSION_GREATER_EQUAL 6.7)
+    # The .qm must sit in gitbolt_util's binary dir: the resource path
+    # is the file's path relative to it, under RESOURCE_PREFIX.
+    get_target_property(_gitbolt_util_bin gitbolt_util BINARY_DIR)
+    qt_add_translations(gitbolt_util
+        SOURCE_TARGETS
+            gitbolt gitbolt_instance gitbolt_ui gitbolt_dialogs gitbolt_widgets
+            gitbolt_editor gitbolt_services gitbolt_models gitbolt_git
+            gitbolt_telemetry gitbolt_watcher gitbolt_conf gitbolt_util
+        PLURALS_TS_FILE ${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts
+        RESOURCE_PREFIX /i18n
+        QM_OUTPUT_DIRECTORY ${_gitbolt_util_bin}
+        LUPDATE_OPTIONS -locations none -no-obsolete)
+    target_compile_definitions(gitbolt_util PUBLIC GITBOLT_ENGLISH_PLURALS)
+    # lupdate reads every source of a target and took the app's .qrc
+    # for C++ ("Unterminated C++ character"). Only C++ has texts here.
+    get_target_property(_gitbolt_app_sources gitbolt SOURCES)
+    list(FILTER _gitbolt_app_sources EXCLUDE REGEX "\\.(cpp|h)$")
+    set_property(TARGET gitbolt APPEND PROPERTY
+        QT_EXCLUDE_SOURCES_FROM_TRANSLATION ${_gitbolt_app_sources})
+    message(STATUS "English plural forms: on (Qt ${Qt6_VERSION} LinguistTools)")
+elseif(GITBOLT_REQUIRE_ENGLISH_PLURALS)
+    if(Qt6LinguistTools_FOUND)
+        set(_gitbolt_linguist "found")
+    else()
+        set(_gitbolt_linguist "not found")
+    endif()
+    message(FATAL_ERROR "GITBOLT_REQUIRE_ENGLISH_PLURALS: the English plural forms need "
+        "Qt LinguistTools and Qt 6.7 or later (Qt ${Qt6_VERSION}, LinguistTools "
+        "${_gitbolt_linguist})")
+else()
+    message(STATUS "English plural forms: off (needs Qt LinguistTools and Qt 6.7+); "
+        "texts with a count read \"1 file(s)\"")
+endif()
 
 # Tests
 if(GITBOLT_BUILD_TESTS)

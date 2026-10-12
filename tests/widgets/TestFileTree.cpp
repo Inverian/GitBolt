@@ -12,10 +12,14 @@
 // it didn't, the action could expand or collapse a directory of the new
 // tree that the user never picked.
 //
+// Its header counts the commit's files and directories in English:
+// "1 file, 1 directory", not "1 files, 1 directories".
+//
 
 #include <QAbstractItemModel>
 #include <QAction>
 #include <QApplication>
+#include <QLabel>
 #include <QMenu>
 #include <QTest>
 #include <QTimer>
@@ -23,6 +27,7 @@
 
 #include "../TestRepoHelper.h"
 #include "services/GitService.h"
+#include "util/Translations.h"
 #include "widgets/FileTreeWidget.h"
 
 using gitbolt::services::GitService;
@@ -74,6 +79,36 @@ private slots:
         auto second = repo_.commit(QStringLiteral("second"));
         QVERIFY(second.ok());
         second_ = *second;
+        // The app's English plural forms, as main.cpp installs them.
+        QCOMPARE(gitbolt::util::installEnglishPlurals(), gitbolt::util::hasEnglishPlurals());
+    }
+
+    void headerCountsFilesAndDirectories() {
+        if (!gitbolt::util::hasEnglishPlurals())
+            QSKIP("built without Qt LinguistTools (or with Qt before 6.7): no English plural forms");
+        TestRepo single;
+        single.writeFile(QStringLiteral("dir/file.txt"), "a\n");
+        QVERIFY(single.stageAll().ok());
+        auto only = single.commit(QStringLiteral("only"));
+        QVERIFY(only.ok());
+
+        GitService svc;
+        QVERIFY(svc.openRepository(single.path()));
+        FileTreeWidget tree;
+        tree.setGitService(&svc);
+        auto* header = tree.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
+        QVERIFY(header);
+        tree.setCommit(*only);
+        QVERIFY2(header->text().startsWith(QStringLiteral("1 file, 1 directory — ")),
+                 qPrintable(header->text()));
+
+        // dir/, dir/sub/, dir/sub/file.txt and dir/other.txt
+        GitService other;
+        QVERIFY(other.openRepository(repo_.path()));
+        tree.setGitService(&other);
+        tree.setCommit(first_);
+        QVERIFY2(header->text().startsWith(QStringLiteral("2 files, 2 directories — ")),
+                 qPrintable(header->text()));
     }
 
     void menuActionsSurviveARebuild_data() {

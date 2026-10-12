@@ -2952,8 +2952,9 @@ void MainWindow::buildPluginsMenu()
 
                     const auto confirm = QMessageBox::question(this,
                         tr("Delete Obsolete Branches"),
-                        tr("Delete %1 merged branch(es)? This cannot be "
-                           "undone from the UI.").arg(picked.size()),
+                        tr("Delete %n merged branch(es)? This cannot be "
+                           "undone from the UI.", nullptr,
+                           static_cast<int>(picked.size())),
                         QMessageBox::Yes | QMessageBox::Cancel,
                         QMessageBox::Cancel);
                     if (confirm != QMessageBox::Yes) return;
@@ -3060,10 +3061,10 @@ void MainWindow::buildPluginsMenu()
                     dlg.resize(720, 460);
                     auto* layout = new QVBoxLayout(&dlg);
                     layout->addWidget(new QLabel(tr(
-                        "Top %1 largest blobs across all branches and "
+                        "Top %n largest blob(s) across all branches and "
                         "history. Sizes are uncompressed object sizes; "
-                        "the on-disk pack will be smaller.")
-                            .arg(entries.size()), &dlg));
+                        "the on-disk pack will be smaller.", nullptr,
+                        static_cast<int>(entries.size())), &dlg));
                     auto* table = new QTableWidget(
                         static_cast<int>(entries.size()), 3, &dlg);
                     table->setHorizontalHeaderLabels(
@@ -3446,8 +3447,8 @@ void MainWindow::buildToolsMenu()
                     "in the main window to see it logged here."));
             } else {
                 console->appendOutput(
-                    tr("--- %1 prior command(s) replayed below ---")
-                        .arg(past.size()));
+                    tr("--- %n prior command(s) replayed below ---", nullptr,
+                       static_cast<int>(past.size())));
                 for (const auto& e : past) {
                     console->appendOutput(formatLine(
                         e.workdir, e.args, e.exitCode, e.durationMs));
