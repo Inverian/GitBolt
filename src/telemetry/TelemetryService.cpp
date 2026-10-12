@@ -153,7 +153,9 @@ void TelemetryService::scheduleFlush() {
 }
 
 void TelemetryService::beginCycle() {
-    if (!isActive() || inCycle_)
+    // backingOff_: a flush armed before a request failed would otherwise
+    // send again before the next retry tick.
+    if (!isActive() || inCycle_ || backingOff_)
         return;
     if (queue_->isEmpty()) {
         queue_->sync();
@@ -261,7 +263,6 @@ void TelemetryService::setUserEnabled(bool enabled) {
         inCycle_ = false;
         backingOff_ = false;
         counts_.clear();
-        reportedErrors_.clear();
         if (queue_)
             queue_->close();   // releases the lock, writes nothing
         queue_.reset();

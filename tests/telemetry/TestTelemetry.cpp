@@ -725,6 +725,32 @@ private slots:
         QCOMPARE(properties(stub_->requests().at(2)).value(QStringLiteral("open_ms")).toInt(), 2);
     }
 
+    // A flush armed before a request failed must not send before the
+    // next retry tick: here the tick fails first (600 ms), the armed
+    // flush comes due inside the back-off (900 ms), and only the next
+    // tick (1200 ms) may try again.
+    void armedFlushRespectsBackoff() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.flushIntervalMs = 600;
+        config.firstFlushDelayMs = 900;
+        int answered = 0;
+        stub_->respond = [&answered](const StubRequest&) {
+            return StubResponse{answered++ == 0 ? 503 : 202, {}};
+        };
+        QElapsedTimer clock;
+        clock.start();
+        auto service = makeService(config, provider);
+        service->recordRepoOpened(1, 1, 1);
+        service->start();
+        QTRY_COMPARE(stub_->requests().size(), 1);
+        while (clock.elapsed() < 1050)
+            QTest::qWait(10);
+        QCOMPARE(stub_->requests().size(), 1);
+        QTRY_COMPARE(stub_->requests().size(), 2);
+        QVERIFY2(clock.elapsed() >= 1100, qPrintable(QString::number(clock.elapsed())));
+    }
+
     void transientFailureEndsCycle_data() {
         QTest::addColumn<int>("status");    // -1: never answer; 0: nothing listening
         QTest::newRow("503") << 503;
@@ -1198,6 +1224,24 @@ private slots:
                 QVERIFY2(!all.contains(sentinel), sentinel);
         }
         QCOMPARE(provider.calls, 0);   // GlitchTip events never need the ID
+    }
+
+    // Turning usage statistics off and on again doesn't reset the
+    // per-session error dedupe: PRIVACY.md says the same error goes at
+    // most once per session.
+    void errorDedupeSurvivesToggle() {
+        Provider provider;
+        const Config config = testConfig(*stub_, dir_->path());
+        auto service = makeService(config, provider);
+        service->start();
+        service->recordError(ErrorKind::OperationFailed, QStringLiteral("fetch"));
+        QTRY_COMPARE(stub_->requests().size(), 1);
+        service->setUserEnabled(false);
+        service->setUserEnabled(true);
+        service->recordError(ErrorKind::OperationFailed, QStringLiteral("fetch"));
+        QTest::qWait(400);
+        QCOMPARE(stub_->requests().size(), 1);
+        QCOMPARE(service->queuedCount(), 0);
     }
 
     void glitchTipErrorShape() {
