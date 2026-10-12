@@ -121,6 +121,22 @@ target_link_libraries(test_terminal_widget PRIVATE gitbolt_widgets)
 if(WIN32)
     target_link_libraries(test_conpty_process PRIVATE gitbolt_conpty)
 endif()
+# The inspector's file tree, off screen. A regression of its context-menu
+# test reads memory the tree's proxy model has freed: Guard Malloc
+# (macOS) turns that into a crash every time; MALLOC_PERTURB_ (glibc)
+# fills it with garbage, to the same end.
+gitbolt_add_test(test_file_tree widgets/TestFileTree.cpp)
+target_link_libraries(test_file_tree PRIVATE gitbolt_widgets gitbolt_services)
+set_property(TEST test_file_tree APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+if(APPLE)
+    # dyld refuses to start a process whose inserted library is missing.
+    if(EXISTS /usr/lib/libgmalloc.dylib)
+        set_property(TEST test_file_tree APPEND PROPERTY ENVIRONMENT
+            "DYLD_INSERT_LIBRARIES=/usr/lib/libgmalloc.dylib")
+    endif()
+elseif(UNIX)
+    set_property(TEST test_file_tree APPEND PROPERTY ENVIRONMENT "MALLOC_PERTURB_=85")
+endif()
 # The Rebase dialog, its plan list and the repository view's in-progress bar
 gitbolt_add_test(test_rebase_widgets widgets/TestRebaseWidgets.cpp)
 target_link_libraries(test_rebase_widgets PRIVATE gitbolt_dialogs)
@@ -149,6 +165,14 @@ gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
 target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h)
 target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)
 set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# File > Recent Repositories following the recent list, and the
+# dashboard's list keeping each repository's probe on its own row.
+gitbolt_add_test(test_recent_menu ui/TestRecentMenu.cpp)
+target_link_libraries(test_recent_menu PRIVATE gitbolt_ui)
+set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
+target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
+set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.

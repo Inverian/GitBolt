@@ -257,6 +257,10 @@ private:
         QString  path;                 // non-empty while in flight
         QWidget* widgetBefore = nullptr;  // revert target on failure
         QString  titleBefore;
+        // The repository actions were on: a repository was on screen,
+        // or File > Home left its actions on. Not GitService::isOpen(),
+        // which Close leaves true.
+        bool     actionsBefore = false;
         bool     awaitingInitialLog = false;  // spinner latch
         quint64       generation = 0;     // GitService::openRepositoryAsync's
         QElapsedTimer started;            // invalid: nothing being timed
@@ -267,6 +271,7 @@ private:
             path.clear();
             widgetBefore = nullptr;
             titleBefore.clear();
+            actionsBefore = false;
             awaitingInitialLog = false;
             stopTiming();
         }

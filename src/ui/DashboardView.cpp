@@ -287,10 +287,9 @@ void DashboardView::setupUi()
         if (picked == openAct) {
             emit openRepositoryRequested(path);
         } else if (picked == forgetAct && settings_) {
+            // Its settingsChanged rebuilds the table (and the
+            // File > Recent Repositories submenu).
             settings_->removeRecentRepository(path);
-            // SettingsService doesn't emit a change signal today;
-            // refresh the table directly.
-            refreshRecentList();
         }
     });
 }
@@ -481,35 +480,34 @@ void DashboardView::refreshRecentList()
         for (int c = 0; c < recentList_->columnCount(); ++c)
             item->setToolTip(c, path);
 
-        probeAndPopulate(item, path);
+        probeAndPopulate(path);
     }
 
     updateRecentColumnWidths();
 }
 
-void DashboardView::probeAndPopulate(QTreeWidgetItem* row, const QString& path)
+void DashboardView::probeAndPopulate(const QString& path)
 {
-    // Capture a QPointer to `this` so the completion handler is a no-op
-    // if DashboardView is destroyed before the probe finishes. The row
-    // is identified by its stashed path (UserRole on column 0) rather
-    // than by pointer — if refreshRecentList() runs again and rebuilds
-    // the tree, the original QTreeWidgetItem* is dangling, but a new
-    // row with the same path has the same UserRole and receives the
-    // (still relevant) data. We look up the row by walking the tree's
-    // top-level items in the handler.
+    // The watcher is parented to `this`, so the completion handler
+    // never runs if DashboardView is destroyed before the probe
+    // finishes. The row is identified by its stashed path (UserRole on
+    // column 0) and nothing else: if refreshRecentList() runs again
+    // and rebuilds the tree, the row this probe was started for is
+    // deleted, but a new row with the same path has the same UserRole
+    // and receives the (still relevant) data. A pointer to the old row
+    // can't serve even as a hint: a new row of ANOTHER repository may
+    // have its address, and would get this repository's data.
     auto watcher = new QFutureWatcher<services::RecentRepoInfo>(this);
     QObject::connect(watcher, &QFutureWatcher<services::RecentRepoInfo>::finished,
-                     this, [this, watcher, path, row]() {
+                     this, [this, watcher, path]() {
         watcher->deleteLater();
 
         // Locate the row for `path` by scanning current top-level
-        // items. If the tree has since been rebuilt, `row` may be
-        // dangling — never dereference it; we only use it as a hint
-        // if it's still present (cheap common case).
+        // items.
         QTreeWidgetItem* target = nullptr;
         for (int i = 0; i < recentList_->topLevelItemCount(); ++i) {
             QTreeWidgetItem* it = recentList_->topLevelItem(i);
-            if (it == row || it->data(0, Qt::UserRole).toString() == path) {
+            if (it->data(0, Qt::UserRole).toString() == path) {
                 target = it;
                 break;
             }

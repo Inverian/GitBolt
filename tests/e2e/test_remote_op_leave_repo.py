@@ -19,6 +19,10 @@ and did just that when they finished:
   does wherever the repository actions are on, as File > Home leaves
   them (the repository stays open there).
 
+An open that failed after Close did the same for every repository
+action: it put the home screen back, but took the actions to go with it
+from the service, which still has the closed repository.
+
 Each op here waits on a server that never answers (SilentServer) until
 the test hangs up, which fails the fetch at a moment the test picks.
 """
@@ -219,6 +223,31 @@ def test(binary: str, scratch: str, apps: list) -> None:
               lambda: app.state().get("opIndicator") != ""
               and f"work-a's fetch left {app.state().get('opIndicator')!r} "
                   "on work-c")
+
+    # 8. Close, then an open that fails: the home screen stays, with
+    # every repository action still off.
+    app.ok("trigger repository.close")
+    app.wait_until(home_screen, "the home screen")
+    handoff = app.launch_second(not_a_repo)
+    if handoff.returncode != 0:
+        raise Failure(f"hand-off of not-a-repo failed: "
+                      f"rc={handoff.returncode}")
+    app.wait_until(lambda s: warning_up(app), "the failed open's warning")
+    app.ok("click OK")
+    app.wait_until(lambda s: not warning_up(app), "the warning closed")
+
+    def closed_problem() -> str:
+        on = [name for name in ("act.refresh", "act.fetch", "act.pull",
+                                "act.push", "act.commit",
+                                "commands.undo-last-commit")
+              if app.action_enabled(name)]
+        if on:
+            return f"enabled on the home screen: {', '.join(on)}"
+        windows = app.state()["windows"]
+        if windows != ["GitBolt"]:
+            return f"windows {windows}, not the home screen"
+        return ""
+    check_for(2, "Close, then an open that failed", closed_problem)
 
     rc = app.quit(timeout=15)
     if rc != 0:

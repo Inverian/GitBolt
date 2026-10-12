@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
@@ -502,11 +503,18 @@ void FileTreeWidget::onContextMenu(const QPoint& pos)
             emit openExternallyRequested(path);
         });
     } else {
-        menu.addAction(tr("Expand All"), this, [this, idx]() {
-            treeView_->expandRecursively(idx);
+        // menu.exec() runs a nested event loop, and a hand-off or log
+        // refresh handled in it can clear the model: a plain proxy
+        // index would then point into mappings the proxy has freed.
+        // A persistent one is invalid from then on.
+        const QPersistentModelIndex dir(idx);
+        menu.addAction(tr("Expand All"), this, [this, dir]() {
+            if (dir.isValid())
+                treeView_->expandRecursively(dir);
         });
-        menu.addAction(tr("Collapse All"), this, [this, idx]() {
-            treeView_->collapse(idx);
+        menu.addAction(tr("Collapse All"), this, [this, dir]() {
+            if (dir.isValid())
+                treeView_->collapse(dir);
         });
     }
 

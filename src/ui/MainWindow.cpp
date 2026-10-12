@@ -402,6 +402,12 @@ void MainWindow::buildFileMenu()
     recentMenu_ = fileMenu->addMenu(tr("Recent Repositories"));
     recentMenu_->setIcon(menuIcon(QStringLiteral("recent")));
     updateRecentMenu();
+    // Rebuilt on every settings change, which is cheap, so it follows
+    // the list wherever that changes: an open, the dashboard's Forget
+    // and Clear Recent. Queued, so a rebuild never deletes a Recent
+    // entry inside its own triggered().
+    connect(settingsService_, &conf::SettingsService::settingsChanged,
+            this, &MainWindow::updateRecentMenu, Qt::QueuedConnection);
 
     fileMenu->addSeparator();
     // Home: swap the central stack back to the dashboard. Unlike
@@ -3624,8 +3630,8 @@ void MainWindow::collectAndApplyShortcuts()
                     continue;
                 if (QMenu* sub = a->menu()) {
                     // Recent Repositories is rebuilt (its actions
-                    // deleted) on every open, and a path is no
-                    // command to bind a key to.
+                    // deleted) whenever the list changes, and a path
+                    // is no command to bind a key to.
                     if (sub != recentMenu_)
                         walk(sub->actions());
                     continue;
@@ -4400,8 +4406,9 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     // already pending, the current widget/title ARE the loading
     // screen, which would be a useless revert target.
     if (!pendingOpen_.active()) {
-        pendingOpen_.widgetBefore = centralStack_->currentWidget();
-        pendingOpen_.titleBefore  = windowTitle();
+        pendingOpen_.widgetBefore  = centralStack_->currentWidget();
+        pendingOpen_.titleBefore   = windowTitle();
+        pendingOpen_.actionsBefore = repoActionsEnabled_;
     }
     pendingOpen_.path   = path;
     pendingOpen_.awaitingInitialLog = true;
@@ -4503,8 +4510,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
         (repoName.isEmpty() ? QStringLiteral("GitBolt") : repoName) +
         QStringLiteral("  -  ") + path);
     centralStack_->setCurrentWidget(repoView_);
-    settingsService_->addRecentRepository(path);
-    updateRecentMenu();
+    settingsService_->addRecentRepository(path);   // File > Recent follows
 
     // Clear stale state from the previous repo before loading the new one.
     if (filterInput_)
@@ -4643,7 +4649,10 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
     if (repoView_)
         repoView_->hideLoading();
 
-    if (gitService_->isOpen()) {
+    // After Close the service still has the closed repository, so its
+    // being open alone doesn't say there is one to go back to: the
+    // actions the open began with do.
+    if (gitService_->isOpen() && pendingOpen_.actionsBefore) {
         // The failed open never touched the previously loaded
         // repository — put the user back where they were and
         // repopulate the models we cleared optimistically. The
@@ -4682,7 +4691,8 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         gitService_->refreshSubmodules();
         gitService_->refreshTags();
     } else {
-        // Nothing usable to fall back to — home screen.
+        // Nothing usable to fall back to (no repository, or Close took
+        // it off the screen) — home screen, its actions left off.
         setWindowTitle(QStringLiteral("GitBolt"));
         centralStack_->setCurrentWidget(dashboardView_);
         branchLabel_->setText(tr("No repository"));
@@ -4811,7 +4821,7 @@ void MainWindow::instrumentActionsForTelemetry()
             if (!a || a->isSeparator())
                 continue;
             if (QMenu* sub = a->menu()) {
-                if (sub != recentMenu_)   // rebuilt on every open; see below
+                if (sub != recentMenu_)   // rebuilt as the list changes; see below
                     walk(sub);
                 continue;
             }

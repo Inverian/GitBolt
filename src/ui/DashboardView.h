@@ -6,7 +6,6 @@ class QLabel;
 class QPushButton;
 class QToolButton;
 class QTreeWidget;
-class QTreeWidgetItem;
 
 namespace gitbolt::conf {
 class SettingsService;
@@ -49,10 +48,10 @@ private:
     void updateRecentColumnWidths();
     /// Kick off a background probe for one repo and populate the
     /// corresponding row's columns when it completes. Row lookup is by
-    /// path stashed in column 0's UserRole, not by index, so rows that
-    /// reshuffle (e.g. because the user opened a different repo) don't
-    /// get crossed data.
-    void probeAndPopulate(QTreeWidgetItem* row, const QString& path);
+    /// path stashed in column 0's UserRole only, never by index or
+    /// pointer: a rebuild in between deletes the rows, and a new row of
+    /// another repository can get a deleted one's address.
+    void probeAndPopulate(const QString& path);
     QPushButton* createActionCard(const QString& title, const QString& iconText,
                                   const QString& description);
 

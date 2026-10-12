@@ -133,7 +133,11 @@ void CommitLogModel::clear() {
     beginResetModel();
     commits_.clear();
     graphData_.clear();
-    hasMore_ = true;
+    // Nothing pages until setCommits brings a first page. An open
+    // clears the model while the service still has the PREVIOUS
+    // repository, and the view's fetchMore would page that one's
+    // history in under the new title.
+    hasMore_ = false;
     fetchPending_ = false;
     endResetModel();
 }
