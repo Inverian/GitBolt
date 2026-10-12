@@ -182,6 +182,18 @@ target_sources(test_changelog PRIVATE
 target_compile_definitions(test_changelog PRIVATE
     GITBOLT_VERSION="${PROJECT_VERSION}"
     GITBOLT_CHANGELOG_PATH="${PROJECT_SOURCE_DIR}/CHANGELOG.md")
+# The single-instance guard: lock, hand-off and listener, on every
+# platform. The e2e tests that launch the app twice are Unix-only, and
+# only this reaches Windows' named pipes. InstanceHelper is either end
+# of a hand-off in a process of its own, with no window or settings.
+gitbolt_add_test(test_single_instance app/TestSingleInstance.cpp)
+target_link_libraries(test_single_instance PRIVATE gitbolt_instance)
+add_executable(gitbolt_instance_helper app/InstanceHelper.cpp)
+target_link_libraries(gitbolt_instance_helper PRIVATE gitbolt_instance)
+gitbolt_set_warnings(gitbolt_instance_helper)
+add_dependencies(test_single_instance gitbolt_instance_helper)
+target_compile_definitions(test_single_instance PRIVATE
+    GITBOLT_INSTANCE_HELPER="$<TARGET_FILE:gitbolt_instance_helper>")
 
 # e2e/ tests — the real app binary driven through the test bridge.
 add_subdirectory(e2e)

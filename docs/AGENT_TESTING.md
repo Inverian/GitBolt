@@ -125,6 +125,16 @@ endpoints compiled in. Neither is ever `on` under the bridge
 `objectName`; a stopped timer is an error, since it could never fire).
 It's how a test reaches work the app only does every few minutes.
 
+The "Crash Detected" box that a crash leaves for the next launch never
+shows in a test session (bridge, instance name, offscreen or CI):
+`~/.gitbolt/crash.log` is the user's, and stays for their next launch.
+A test of the box sets `GITBOLT_TEST_CRASH_BOX=1`, and only with a
+`HOME` of its own with a `crash.log` planted in it
+(`tests/e2e/test_crash_box_handoff.py`). The box comes up over the
+window once the bridge and the single-instance listener are up, so
+`list-widgets` finds it by its `objectName`, `app.crashDetected`
+(macOS message boxes have no title), and `click OK` dismisses it.
+
 Addressing:
 - **Actions** by `objectName` (every action has one — see below), by
   menu-path slug (`commands/merge-branches`), or trailing suffix

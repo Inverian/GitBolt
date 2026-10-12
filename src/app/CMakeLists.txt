@@ -5,6 +5,15 @@ set(GITBOLT_APP_SOURCES
     resources/gitbolt.qrc
 )
 
+# The single-instance guard (lock, hand-off, listener): a library of
+# its own so tests/app/TestSingleInstance.cpp runs it on every platform,
+# Windows' named pipes included. The e2e tests that launch the app
+# twice are Unix-only.
+add_library(gitbolt_instance STATIC SingleInstance.cpp SingleInstance.h)
+target_include_directories(gitbolt_instance PUBLIC ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(gitbolt_instance PUBLIC Qt6::Core Qt6::Network)
+gitbolt_set_warnings(gitbolt_instance)
+
 # On macOS, bundle the .icns so the Dock and Finder show our app icon.
 # The source-file property MACOSX_PACKAGE_LOCATION places the file under
 # GitBolt.app/Contents/Resources/, where CFBundleIconFile expects it.
@@ -58,6 +67,7 @@ target_link_libraries(gitbolt PRIVATE
     gitbolt_watcher
     gitbolt_telemetry
     gitbolt_util
+    gitbolt_instance
     Qt6::Widgets
     Qt6::Concurrent
     Qt6::Network
