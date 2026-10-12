@@ -95,6 +95,12 @@ int runOwner(QCoreApplication& app, const QString& lockPath, const QString& serv
 
 int main(int argc, char* argv[])
 {
+    // std::cin straight off fd 0, not through stdin's FILE. In sync with
+    // stdio, glibc's cin reads with getc(), which holds stdin's lock for
+    // as long as it waits, and exit() takes every stream's lock to flush
+    // it: an owner told to quit waited at its exit for a line that never
+    // came, until the test's 10 s were up and it was killed (Linux).
+    std::ios::sync_with_stdio(false);
     QCoreApplication app(argc, argv);
     // As GitBolt reads them: on Windows from the command line itself.
     const QStringList args = app.arguments();

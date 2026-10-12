@@ -235,7 +235,10 @@ public:
     /// When the merge concluded had stashed changes away
     /// (merge.autoStash), git puts them back; if that conflicts, they
     /// stay in the stash, reported as operationFailed("autostash").
-    /// Nothing is reported if another repository was opened meanwhile.
+    /// The outcome goes out through reportTo(), as a rebase step's
+    /// does: while an open is on its way it waits for it, and nothing is
+    /// reported if another repository was opened meanwhile (the same
+    /// one opened again still gets it).
     /// A step of its own (stepStarted("commit")): refused, with a
     /// failed commitComplete, while a rebase step, a sequence's, an
     /// abort or another commit runs on the repository, and those are
@@ -318,6 +321,10 @@ public:
     /// is already in the branch (an `edit`, a reword a hook turned
     /// down), where Skip keeps it; empty otherwise. Runs git, briefly.
     QString committedRebaseStop() const;
+    /// GitProcess::hasTrackedChanges() for the open repository: whether
+    /// a tracked file has changes, staged or not, that a reset would
+    /// throw away (true when git can't tell). Runs git, briefly.
+    bool hasTrackedChanges() const;
 
     /// Why `plan` can't run on the open repository as it is now, or an
     /// empty string when it can: HEAD has moved, or another branch is
@@ -557,6 +564,9 @@ private:
     /// to resolve its conflicts, over that one's "Opening…", and the
     /// offer outlived the swap. A close drops it.
     void reportTo(std::string key, std::function<void()> report);
+    /// reportTo(), from any thread: `report` is posted to the service's
+    /// thread first. For a worker's outcome.
+    void postReport(std::string key, std::function<void()> report);
     /// Runs or drops the reports waiting on an open (reportTo), once no
     /// open is on its way any more.
     void settleReports();

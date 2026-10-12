@@ -30,7 +30,10 @@ class ConPtyProcess;
 /// escape sequences (no color rendering yet), forwards keystrokes to
 /// the child shell, and resizes the PTY when the widget is resized.
 /// On macOS and Linux rows don't wrap and the moves between rows are
-/// dropped (see appendOutput). Full ANSI color, fullscreen TUI support
+/// dropped (see appendOutput): a line longer than the terminal is one
+/// row here, and only a CR knows where its screen rows start (so
+/// readline's long command lines stay whole; a move up into a wrapped
+/// line's earlier row is still lost). Full ANSI color, fullscreen TUI support
 /// (vim/htop), and a real SGR parser are intentional follow-ups.
 ///
 /// Lifecycle:

@@ -202,7 +202,8 @@ public:
     Result<void> stashPop(size_t index = 0);
     Result<void> stashDrop(size_t index = 0);
 
-    // Cherry-pick
+    // Cherry-pick. Staged, not committed. One whose changes are on the
+    // branch already leaves nothing in progress (alreadyApplied).
     Result<CherryPickResult> cherryPick(const ObjectId& commitId);
 
     // Submodules

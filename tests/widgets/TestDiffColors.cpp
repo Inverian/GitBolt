@@ -15,7 +15,12 @@
 //     switch), and keep their light colours;
 //   - so do the Commit tab's labels, links and "Contained in" lines
 //     (rendered again on a switch), the Commit dialog's file-status
-//     colours, and the toolbar's outcome of an op.
+//     colours, and the toolbar's outcome of an op;
+//   - the Commit tab's separator is drawn in the theme's rule colour
+//     (#ddd, #3c3c3c), not in the text's (black, near-white);
+//   - the home screen's card descriptions, and the Submodules and
+//     Worktrees windows' status colours, read at 4.5:1 or more in the
+//     dark theme too.
 //
 // Themes switch the way the app switches them, through ThemeService:
 // the application palette, then the application style sheet (whose
@@ -28,6 +33,7 @@
 
 #include <QApplication>
 #include <QDialogButtonBox>
+#include <QImage>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -40,17 +46,21 @@
 
 #include <cmath>
 
+#include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "dialogs/CloneDialog.h"
 #include "git/Status.h"
 #include "models/CommitLogModel.h"
 #include "models/FileStatusModel.h"
+#include "ui/DashboardView.h"
 #include "ui/InlineOpIndicator.h"
 #include "ui/RepositoryView.h"
 #include "widgets/DiffTextEdit.h"
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
 #include "widgets/MergeConflictWidget.h"
+#include "widgets/SubmoduleWidget.h"
+#include "widgets/WorktreeWidget.h"
 
 using gitbolt::conf::ThemeService;
 using gitbolt::widgets::DiffTextEdit;
@@ -444,6 +454,125 @@ private slots:
                 QVERIFY(!list.isEmpty());
                 for (const QColor& color : list)
                     QVERIFY2(contrast(color, base) >= 4.5, qPrintable(describe(color, base)));
+            }
+        }
+    }
+
+    // The Commit tab's separator: its colour was set as a border, which
+    // Qt's <hr> ignores, so it was drawn in the text colour, near-white
+    // on the dark theme and black on the light one. It takes the rule
+    // colour now (#ddd, #3c3c3c), switched with the theme.
+    void commitSeparatorTakesTheThemesColour() {
+        gitbolt::models::CommitLogModel model;
+        gitbolt::git::CommitData commit;
+        commit.id = gitbolt::git::ObjectId::fromHex("0123456789abcdef0123456789abcdef01234567");
+        commit.author.name = commit.committer.name = "Ada";
+        commit.author.email = commit.committer.email = "ada@example.com";
+        commit.summary = commit.message = "A commit";
+        model.setCommits({commit});
+        gitbolt::ui::RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(900, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        view.onCommitSelected(QString::fromStdString(commit.id.toHex()));
+        QTextBrowser* message = nullptr;
+        for (QTextBrowser* browser : view.findChildren<QTextBrowser*>()) {
+            if (browser->toPlainText().contains(QStringLiteral("Contained in no tag")))
+                message = browser;
+        }
+        QVERIFY(message);
+        // A row of the rendered browser more than half of whose pixels
+        // are `rule`: the separator, drawn across the page.
+        const auto drawsRule = [&](const QColor& rule) {
+            QApplication::processEvents();
+            const QImage image = message->viewport()->grab().toImage();
+            for (int y = 0; y < image.height(); ++y) {
+                int matching = 0;
+                for (int x = 0; x < image.width(); ++x) {
+                    if (QColor(image.pixel(x, y)).rgb() == rule.rgb())
+                        ++matching;
+                }
+                if (matching > image.width() / 2)
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY2(drawsRule(QColor(0xdd, 0xdd, 0xdd)), "no #ddd rule in the light theme");
+        theme_.setTheme(QStringLiteral("Dark"));
+        QVERIFY2(drawsRule(QColor(0x3c, 0x3c, 0x3c)), "no #3c3c3c rule in the dark theme");
+    }
+
+    // The home screen's cards: their descriptions were palette(mid),
+    // the light theme's grey, which read at 1.4:1 on the dark theme's
+    // cards. Switched to with the home screen up.
+    void homeScreenCardsReadInTheDarkTheme() {
+        gitbolt::conf::SettingsService settings;
+        gitbolt::ui::DashboardView view(&settings);
+        view.resize(1100, 800);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        theme_.setTheme(QStringLiteral("Dark"));
+        // A card, and a hovered one (palette(midlight)).
+        const QColor card(0x3c, 0x3c, 0x3c);
+        const QColor hovered = QApplication::palette().color(QPalette::Midlight);
+        for (const QString& text : {gitbolt::ui::DashboardView::tr("Open an existing local repository"),
+                                    gitbolt::ui::DashboardView::tr("Clone a remote repository"),
+                                    gitbolt::ui::DashboardView::tr("Create a new empty repository")}) {
+            QLabel* label = labelWithText(view, text);
+            QVERIFY2(label, qPrintable(text));
+            const QColor color = textColor(label);
+            for (const QColor& bg : {card, hovered})
+                QVERIFY2(contrast(color, bg) >= 4.5,
+                         qPrintable(text + QStringLiteral(": ") + describe(color, bg)));
+        }
+    }
+
+    // The Submodules and Worktrees windows' status colours, on the dark
+    // theme's rows (#191919, and #252525 every other row); the light
+    // theme's as they were.
+    void submoduleAndWorktreeStatusReadInTheDarkTheme() {
+        using Status = gitbolt::git::SubmoduleStatus;
+        std::vector<gitbolt::git::SubmoduleInfo> subs;
+        for (const Status status : {Status::Clean, Status::Dirty, Status::Modified,
+                                    Status::Uninitialized, Status::OutOfDate, Status::Added,
+                                    Status::Deleted}) {
+            gitbolt::git::SubmoduleInfo info;
+            info.name = info.path = "sub";
+            info.status = status;
+            subs.push_back(info);
+        }
+        gitbolt::widgets::SubmoduleTableModel submodules;
+        submodules.setSubmodules(subs);
+        gitbolt::widgets::WorktreeTableModel worktrees;
+        gitbolt::git::WorktreeInfo locked;
+        locked.name = locked.path = "wt";
+        locked.isLocked = true;
+        gitbolt::git::WorktreeInfo unlocked = locked;
+        unlocked.isLocked = false;
+        worktrees.setWorktrees({locked, unlocked});
+        const auto colors = [&] {
+            QList<QColor> list;
+            for (int row = 0; row < submodules.rowCount(); ++row)
+                list << submodules.data(submodules.index(
+                            row, gitbolt::widgets::SubmoduleTableModel::ColStatus),
+                                        Qt::ForegroundRole).value<QColor>();
+            for (int row = 0; row < worktrees.rowCount(); ++row)
+                list << worktrees.data(worktrees.index(
+                            row, gitbolt::widgets::WorktreeTableModel::ColLocked),
+                                       Qt::ForegroundRole).value<QColor>();
+            return list;
+        };
+        QCOMPARE(colors().first(), QColor(0x2e, 0x7d, 0x32));   // Clean, light
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        const QList<QColor> dark = colors();
+        QCOMPARE(dark.size(), 9);
+        for (const QColor& base : {QApplication::palette().color(QPalette::Base),
+                                   QColor(0x25, 0x25, 0x25)}) {
+            for (const QColor& color : dark) {
+                QVERIFY(color.isValid());
+                QVERIFY2(contrast(color, base) >= 4.5, qPrintable(describe(color, base)));
             }
         }
     }

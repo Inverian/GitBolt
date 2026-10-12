@@ -1,6 +1,7 @@
 #include "git/GitProcess.h"
 #include "git/Askpass.h"
 #include "git/GitProcessLog.h"
+#include "util/LoginPath.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
@@ -15,6 +16,7 @@
 #include <QThreadPool>
 #include <optional>
 #include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <sstream>
 #include <string_view>
@@ -107,6 +109,12 @@ GitProcess::GitProcess(const std::string& workingDirectory)
 
 void GitProcess::applyEnvironment(QProcess& process, bool allowPrompts) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // The login shell's PATH ahead of the session's (util/LoginPath.h):
+    // launched from the Dock, GitBolt has launchd's, and a hook that
+    // runs node, npx or anything else from Homebrew, nvm or volta
+    // turned every commit down ("node: command not found").
+    env.insert(QStringLiteral("PATH"),
+               util::pathForChildren(env.value(QStringLiteral("PATH"))));
     // The child has no tty, so a git that decides to prompt (HTTPS
     // remote with no cached credential, ssh host-key confirmation)
     // used to block until waitForFinished's timeout killed it —
@@ -317,6 +325,9 @@ private:
 
 #if defined(Q_OS_WIN)
 
+// The Ctrl-Cs ignoreCtrlC has taken (see interruptTree).
+std::atomic<unsigned> ctrlCsTaken{0};
+
 // GitBolt's answer to the Ctrl-C it sends git (see interruptTree):
 // GenerateConsoleCtrlEvent reaches every process on the console, the
 // sender attached to it included, and the default handler would end
@@ -325,7 +336,10 @@ private:
 // ignore Ctrl-C.
 BOOL WINAPI ignoreCtrlC(DWORD type)
 {
-    return (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) ? TRUE : FALSE;
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT)
+        return FALSE;
+    ++ctrlCsTaken;
+    return TRUE;
 }
 
 // Ctrl-C for git and everything it started, as in a terminal: they all
@@ -338,18 +352,41 @@ BOOL WINAPI ignoreCtrlC(DWORD type)
 // failed on it. False when no Ctrl-C can be sent: GitBolt has a
 // console of its own (a console test does; the app never has), which
 // git then shares with whatever else runs there, or git is gone.
+//
+// The handler goes in after AttachConsole, every time: attaching puts
+// the process's handler list back to the default one alone, which ends
+// the process (ExitProcess(STATUS_CONTROL_C_EXIT)). Registered once,
+// before the first attach, it was gone when the Ctrl-C came, and GitBolt
+// ended with git: a quit, a repository switch during an auto-fetch, a
+// clone's Cancel or any timeout took the whole app down (the Windows
+// CI's test_git_process died "Interrupt" in its timeout test). Removed
+// first, so that where attaching resets nothing it is listed once. The
+// Ctrl-C reaches GitBolt on a thread of its own, after the call: the
+// console stays attached, and the next cancel waits its turn, until the
+// handler has taken it (or a second has gone by).
 bool interruptTree(const QProcess& process)
 {
-    static const bool ignoring = SetConsoleCtrlHandler(ignoreCtrlC, TRUE) != 0;
     const auto pid = static_cast<DWORD>(process.processId());
-    if (!ignoring || pid == 0)
+    if (pid == 0)
         return false;
     // A process has one console at a time: two cancels take turns.
     static std::mutex consoleMutex;
     const std::lock_guard<std::mutex> lock(consoleMutex);
     if (!AttachConsole(pid))
         return false;
+    SetConsoleCtrlHandler(ignoreCtrlC, FALSE);
+    if (!SetConsoleCtrlHandler(ignoreCtrlC, TRUE)) {
+        FreeConsole();
+        return false;
+    }
+    const unsigned before = ctrlCsTaken.load();
     const bool sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+    if (sent) {
+        QElapsedTimer waited;
+        waited.start();
+        while (ctrlCsTaken.load() == before && waited.elapsed() < 1000)
+            QThread::msleep(5);
+    }
     FreeConsole();
     return sent;
 }
@@ -929,7 +966,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         return QStringLiteral("'%1'").arg(quoted);
     };
     // The new messages, and the comment character, go into the rebase's
-    // own state, for kEditor and rebaseCommentConfig() to find: the
+    // own state, for kEditor and rebaseConfig() to find: the
     // sequence editor runs once git has set that up, and before any
     // commit is made.
     QTemporaryDir messageDir(QDir::tempPath() + QStringLiteral("/gitbolt-messages-XXXXXX"));
@@ -954,27 +991,31 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
     // nothing could stop, and quitting waited out the whole rebase. The
     // git commands the rebase runs (`git commit` for a reword or a
     // squash) inherit the -c.
-    auto result = runImpl({"-c", std::string("core.commentChar=") + commentChar, "rebase", "-i", onto},
+    // The new messages are UTF-8, and so are the commits' (kUtf8Commits).
+    auto result = runImpl({"-c", kUtf8Commits, "-c", std::string("core.commentChar=") + commentChar,
+                           "rebase", "-i", onto},
                           kRebaseTimeoutMs, nullptr,
                           {{"GIT_SEQUENCE_EDITOR", sequenceEditor.toStdString()}});
     keepRewordMessage();
     return result;
 }
 
-std::vector<std::string> GitProcess::rebaseCommentConfig() const {
+std::vector<std::string> GitProcess::rebaseConfig() const {
+    std::vector<std::string> config = {"-c", kUtf8Commits};
     const auto path = run({"rev-parse", "--git-path",
                            QStringLiteral("rebase-merge/%1/%2")
                                .arg(kRewordMessages, kCommentChar).toStdString()});
     if (!path || !path->success())
-        return {};
+        return config;
     QFile file(QDir(QString::fromStdString(workDir_))
                    .absoluteFilePath(QString::fromStdString(path->stdoutData).trimmed()));
     if (!file.open(QIODevice::ReadOnly))
-        return {};
+        return config;
     const QByteArray commentChar = file.read(2);
     if (commentChar.size() != 1)
-        return {};
-    return {"-c", "core.commentChar=" + commentChar.toStdString()};
+        return config;
+    config.insert(config.end(), {"-c", "core.commentChar=" + commentChar.toStdString()});
+    return config;
 }
 
 QString GitProcess::gitPath(const QString& path) const {
@@ -1021,11 +1062,17 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
                                  .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     if (both.size() == 2 && both[0] == both[1])
         return true;
-    const auto commit = [&](const std::string& rev) {
-        return run({"log", "-1", "--date=raw", "--format=%an%n%ae%n%ad%n%B", rev});
+    // Who and when, not the message: a prepare-commit-msg hook that
+    // adds to every message it's given ("[T-1]", a Change-Id) gave the
+    // pick another one, and Continue's retry of a reword a commit-msg
+    // hook had turned down never came ("Rebase complete.", the reword
+    // gone). The patch-id below pins the change, which tells "wip" from
+    // "wip".
+    const auto commit = [&](const std::string& rev, const char* format) {
+        return run({"log", "-1", "--date=raw", std::string("--format=") + format, rev});
     };
-    const auto now = commit("HEAD");
-    const auto before = commit(hash);
+    const auto now = commit("HEAD", "%an%n%ae%n%ad");
+    const auto before = commit(hash, "%an%n%ae%n%ad");
     if (!now || !before || !now->success() || !before->success()
         || now->stdoutData != before->stdoutData)
         return false;
@@ -1042,7 +1089,18 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
         return id->stdoutData.substr(0, id->stdoutData.find(' '));
     };
     const auto headId = patchId("HEAD");
-    return headId && headId == patchId(hash);
+    if (!headId || headId != patchId(hash))
+        return false;
+    if (!headId->empty())
+        return true;
+    // No change to tell them apart by: the message has to start as the
+    // commit's did, whatever a hook added after it.
+    const auto nowMessage = commit("HEAD", "%B");
+    const auto beforeMessage = commit(hash, "%B");
+    if (!nowMessage || !beforeMessage || !nowMessage->success() || !beforeMessage->success())
+        return false;
+    const QString was = QString::fromStdString(beforeMessage->stdoutData).trimmed();
+    return QString::fromStdString(nowMessage->stdoutData).trimmed().startsWith(was);
 }
 
 std::string GitProcess::committedRebaseStop() const {
@@ -1095,7 +1153,7 @@ void GitProcess::keepRewordMessage() const {
 }
 
 Result<ProcessOutput> GitProcess::rebaseContinue() const {
-    const std::vector<std::string> commentConfig = rebaseCommentConfig();
+    const std::vector<std::string> commentConfig = rebaseConfig();
     // A reword whose new message a hook turned down (commit-msg, say)
     // stopped the rebase with the commit picked under its old message.
     // git's --continue then went on with that message, and Continue
@@ -1120,8 +1178,26 @@ Result<ProcessOutput> GitProcess::rebaseAbort() const {
     return run({"rebase", "--abort"}, kRebaseTimeoutMs);
 }
 
+bool GitProcess::hasTrackedChanges() const {
+    // --no-optional-locks: a look, which mustn't take index.lock from a
+    // git that runs meanwhile. Submodules: a dirty one's work tree is
+    // its own, which no reset of this one touches.
+    const auto status = run({"--no-optional-locks", "status", "--porcelain",
+                             "--untracked-files=no", "--ignore-submodules=dirty"});
+    if (!status || !status->success())
+        return true;
+    return !QString::fromStdString(status->stdoutData).trimmed().isEmpty();
+}
+
 Result<ProcessOutput> GitProcess::rebaseSkip() const {
-    std::vector<std::string> args = rebaseCommentConfig();
+    // At an `edit` (or a reword a hook turned down) HEAD is the stopped
+    // commit, and the paused bar says to make changes there; Continue
+    // turns unstaged ones down, which left Skip, and git's --skip runs
+    // `reset --hard` first: the edits to tracked files, and new files
+    // staged, were gone for good, with "Rebase complete.".
+    if (!committedRebaseStop().empty() && hasTrackedChanges())
+        return GitError(GitErrorCode::Uncommitted, kSkipWouldDiscard);
+    std::vector<std::string> args = rebaseConfig();
     args.insert(args.end(), {"rebase", "--skip"});
     auto result = run(args, kRebaseTimeoutMs);
     keepRewordMessage();
@@ -1137,7 +1213,8 @@ Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {
 }
 
 Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend) const {
-    std::vector<std::string> args = {"commit", "-F", "-"};
+    // The message is UTF-8, and labelled so (kUtf8Commits).
+    std::vector<std::string> args = {"-c", kUtf8Commits, "commit", "-F", "-"};
     if (amend)
         args.emplace_back("--amend");
     return runImpl(args, kCommitTimeoutMs, &message);

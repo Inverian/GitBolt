@@ -3,6 +3,7 @@
 #include "services/RecentRepoProbe.h"
 #include "widgets/BoltLogoWidget.h"
 
+#include <QApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -294,6 +295,30 @@ void DashboardView::setupUi()
     });
 }
 
+void DashboardView::applyCardColors()
+{
+    // Dark: lighter than the card (#3c3c3c, #323232 hovered), at 5:1 or
+    // more. Light: the grey it always had.
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    const QString sheet = QStringLiteral(
+        "QLabel { font-size: 13pt; color: %1;"
+        "         background: transparent; border: none; }")
+        .arg(dark ? QStringLiteral("#b4b4b4") : QStringLiteral("palette(mid)"));
+    for (QLabel* label : std::as_const(cardDescriptions_)) {
+        if (label->styleSheet() != sheet)
+            label->setStyleSheet(sheet);
+    }
+}
+
+void DashboardView::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        applyCardColors();
+}
+
 QPushButton* DashboardView::createActionCard(const QString& title, const QString& iconText,
                                              const QString& description)
 {
@@ -345,9 +370,8 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     descLabel->setAlignment(Qt::AlignCenter);
     descLabel->setWordWrap(true);
     descLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    descLabel->setStyleSheet(QStringLiteral(
-        "QLabel { font-size: 13pt; color: palette(mid);"
-        "         background: transparent; border: none; }"));
+    cardDescriptions_.append(descLabel);
+    applyCardColors();
 
     // Stretch on both ends so the icon/title/description block sits
     // vertically centered within the fixed-height card, rather than

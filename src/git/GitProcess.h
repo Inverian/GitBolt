@@ -149,7 +149,21 @@ public:
     /// rebase stays where it is and this fails with what they said.
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
+    /// `git rebase --skip`, refused (GitErrorCode::Uncommitted, with
+    /// kSkipWouldDiscard) where it would throw away the user's own work:
+    /// at a stop whose commit is made (committedRebaseStop()), git's
+    /// --skip resets the work tree to it, and every change to a tracked
+    /// file there, staged or not, is the user's, made since.
     Result<ProcessOutput> rebaseSkip() const;
+    static constexpr const char* kSkipWouldDiscard =
+        "Skipping would discard your uncommitted changes: the commit the rebase "
+        "stopped at is made, and git resets the working tree to it. Commit them "
+        "(amend the commit, or a commit of their own) or stash them first.";
+
+    /// Whether a tracked file differs from HEAD, in the index or the work
+    /// tree (untracked files, and what is inside a submodule, aside).
+    /// True when git can't tell: it's asked before throwing work away.
+    bool hasTrackedChanges() const;
 
     /// The todo verb ("pick", "reword" or "edit") of the commit the
     /// rebase in progress stopped at, when that commit is in the branch
@@ -209,12 +223,22 @@ private:
     /// Whether any of cancelFlags_ is set.
     bool cancelled() const;
 
-    /// "-c core.commentChar=<c>" with the comment character that
-    /// interactiveRebase() started the rebase in progress with, for
-    /// the git that carries it on: a reword that stopped on a conflict
-    /// is committed then. Empty for a rebase started some other way,
-    /// which keeps the user's own setting.
-    std::vector<std::string> rebaseCommentConfig() const;
+    /// The -c options for a git that carries the rebase in progress on:
+    /// kUtf8Commits, and "-c core.commentChar=<c>" with the comment
+    /// character that interactiveRebase() started it with (a reword that
+    /// stopped on a conflict is committed then). No comment character
+    /// for a rebase started some other way, which keeps the user's own
+    /// setting.
+    std::vector<std::string> rebaseConfig() const;
+
+    /// "-c i18n.commitEncoding=UTF-8", for every git that writes a
+    /// message of GitBolt's into a commit: they are UTF-8 (Qt's
+    /// strings), and git labels a commit's message with the configured
+    /// encoding without converting it. In a repository set to
+    /// ISO-8859-1 "Café" went into history labelled as Latin-1, and read
+    /// "CafÃ©" everywhere that honours the label. With UTF-8 there is no
+    /// label at all, as libgit2's commits had none.
+    static constexpr const char* kUtf8Commits = "i18n.commitEncoding=UTF-8";
 
     /// `git rev-parse --git-path <path>`, made absolute; empty when git
     /// can't say (no repository).
@@ -232,7 +256,9 @@ private:
     QString rejectedRewordMessage() const;
 
     /// Whether HEAD is the commit `hash` as a rebase picked it: that
-    /// commit, or one with its author, date, message and patch-id.
+    /// commit, or one with its author, date and patch-id. Not its
+    /// message, which a prepare-commit-msg hook may have added to; a
+    /// commit with no change at all has to start with it.
     bool headIsPickOf(const std::string& hash) const;
 
     /// Where the rebase stopped at a reword, puts its new message where

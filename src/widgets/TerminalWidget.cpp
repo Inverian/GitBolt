@@ -678,7 +678,22 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 
         if (u == '\r') {
             // CR — move to column 0 of the current line (NOT a new line)
+#ifdef Q_OS_WIN
             cur.movePosition(QTextCursor::StartOfBlock);
+#else
+            // Of the current screen row, where the line is longer than
+            // the terminal: its rows don't wrap here, but the shell's
+            // do, so they are one block, a row every screenColumns_
+            // cells. readline, at the right margin, sends "<key> \r" to
+            // get onto the next row; to the block's start, the keys
+            // after it overwrote the prompt and the command. A cursor
+            // just past the last column hasn't wrapped yet (terminals
+            // put that off until the next character), so its row is
+            // still the one before.
+            const int column = cur.positionInBlock();
+            const int columns = qMax(1, screenColumns_);
+            placeInRow(cur, column > 0 ? (column - 1) / columns * columns : 0);
+#endif
             ++i;
             continue;
         }

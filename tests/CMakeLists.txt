@@ -69,6 +69,9 @@ endif()
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+# The login shell's PATH for git's children (util/LoginPath.h): a
+# Dock-launched GitBolt had launchd's, and a hook that needs node failed.
+gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
 # English plural forms (util::installEnglishPlurals): "1 file", "2
 # files", and both forms of every %n text in the .ts file, as the .qm
 # built into gitbolt_util gives them.

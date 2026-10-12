@@ -65,9 +65,14 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
     }
 
     if (role == Qt::ForegroundRole && index.column() == ColLocked) {
+        // The dark theme's own: the light theme's red and green read at
+        // 2.7:1 to 3.4:1 on its rows.
+        const QPalette app = QGuiApplication::palette();
+        const bool dark = app.color(QPalette::WindowText).lightness()
+                          > app.color(QPalette::Window).lightness();
         if (wt.isLocked)
-            return QColor(0xc6, 0x28, 0x28);   // red
-        return QColor(0x2e, 0x7d, 0x32);       // green
+            return dark ? QColor(0xff, 0x7b, 0x72) : QColor(0xc6, 0x28, 0x28);   // red
+        return dark ? QColor(0x3f, 0xb9, 0x50) : QColor(0x2e, 0x7d, 0x32);       // green
     }
 
     if (role == Qt::FontRole && index.column() == ColPath) {

@@ -11,6 +11,7 @@
 #include "telemetry/TelemetryService.h"
 #include "util/CrashHandler.h"
 #include "util/LockFiles.h"
+#include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
 
@@ -370,6 +371,14 @@ int main(int argc, char* argv[]) {
         reportUnresponsiveInstance();
         return 1;
     }
+
+    // The PATH git's children get, a commit's hooks among them: the
+    // login shell's, asked in the background now, well before the
+    // first commit (util/LoginPath.h). Started from the Dock, GitBolt
+    // has launchd's PATH, and a hook that needs node (husky,
+    // lint-staged) turned every commit down.
+    if (gitbolt::util::shouldLookUpLoginPath())
+        gitbolt::util::startLoginPathLookup();
 
     // Settings service — constructed before the theme so the saved
     // theme choice is restored before any window paints. Also used

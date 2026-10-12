@@ -7,8 +7,9 @@
 //     it), and on again once the operation is over;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
-//   - while the commit runs, nothing stages, unstages or commits, and
-//     Commit & Push still pushes once it's in.
+//   - while the commit runs, nothing stages, unstages or commits, the
+//     button clicked says "Committing…", and Commit & Push still pushes
+//     once it's in.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is an empty file there: a developer's
@@ -189,6 +190,9 @@ private slots:
             QVERIFY2(!child<QWidget>(dialog, name)->isEnabled(), name);
         for (const char* name : {"commit.unstagedList", "commit.stagedList"})
             QVERIFY2(!child<QWidget>(dialog, name)->isEnabled(), name);
+        // And it says so where it shows, greyed out or not: a tooltip on
+        // the disabled button was all there was while the hook ran.
+        QCOMPARE(commit->text(), QStringLiteral("Committing…"));
         // Ctrl+Return, as its shortcut would.
         auto* shortcut = dialog.findChild<QShortcut*>();
         QVERIFY(shortcut);
@@ -204,6 +208,7 @@ private slots:
                  QStringLiteral("b.txt"));
         QVERIFY(child<QPushButton>(dialog, "commit.stageAllBtn")->isEnabled());
         QVERIFY(commit->isEnabled());
+        QCOMPARE(commit->text(), QStringLiteral("Commit"));
     }
 
     // Commit & Push pushes once the commit is in. A stage that failed
@@ -234,6 +239,8 @@ private slots:
         child<QPlainTextEdit>(dialog, "commit.message")->setPlainText(QStringLiteral("add b"));
         child<QPushButton>(dialog, "commit.commitPushBtn")->click();
         QTRY_VERIFY_WITH_TIMEOUT(hookStarted(repo), 15000);
+        QCOMPARE(child<QPushButton>(dialog, "commit.commitPushBtn")->text(),
+                 QStringLiteral("Committing…"));
 
         if (meanwhile == QLatin1String("stage"))
             emit svc.operationFailed(QStringLiteral("stage"), QStringLiteral("index.lock exists"));

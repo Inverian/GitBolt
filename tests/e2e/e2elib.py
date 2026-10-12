@@ -259,8 +259,10 @@ class App:
 
         args = [binary] + ([repo] if repo else [])
         self._log = open(self.log_path, "w")
+        # stdin from nowhere, as a desktop launch has it: no terminal.
         self.proc = subprocess.Popen(
-            args, env=self.env, stdout=self._log, stderr=subprocess.STDOUT)
+            args, env=self.env, stdin=subprocess.DEVNULL, stdout=self._log,
+            stderr=subprocess.STDOUT)
 
     @property
     def lock_path(self) -> str:
@@ -287,6 +289,7 @@ class App:
         # would hang to its timeout instead of seeing exit 1.
         env["QT_QPA_PLATFORM"] = "offscreen"
         return subprocess.Popen([self.binary, *args], env=env,
+                                stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
 

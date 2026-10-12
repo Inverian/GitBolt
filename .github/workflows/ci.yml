@@ -228,9 +228,11 @@ jobs:
       # flushing its output leaves ctest nothing to show, and the code tells
       # a missing DLL (0xC0000135) from a crash (0xC0000005) from a plain
       # failure count. e2e tests (Python) already show their output above.
-      # Each binary runs as ctest ran it: in the test's WORKING_DIRECTORY,
-      # with its ENVIRONMENT (read from `ctest --show-only=json-v1`, and
-      # put back after it). Without them the rerun showed another failure
+      # Each binary runs as ctest ran it: the command ctest ran (its
+      # path: on Windows qt_standard_project_setup() puts every binary in
+      # build/, not build/tests, where the lookup used to find none), in
+      # the test's WORKING_DIRECTORY, with its ENVIRONMENT (read from
+      # `ctest --show-only=json-v1`, and put back after it). Without them the rerun showed another failure
       # than the real one: test_about_dialog names its screen config
       # relative to tests/fixtures, and test_file_tree's use-after-free
       # check needs Guard Malloc / MALLOC_PERTURB_.
@@ -251,18 +253,25 @@ jobs:
         run: |
           $failed = Get-Content build/Testing/Temporary/LastTestsFailed.log -ErrorAction SilentlyContinue
           $props = @{}
+          $cmds = @{}
           foreach ($t in (ctest --test-dir build --show-only=json-v1 | Out-String | ConvertFrom-Json).tests) {
             $props[$t.name] = $t.properties
+            $cmds[$t.name] = $t.command
           }
           foreach ($line in $failed) {
             $name = ($line -split ':', 2)[1]
-            $exe = Get-ChildItem build/tests -File |
-                   Where-Object { $_.BaseName -eq $name -and $_.Extension -in '.exe', '' } |
-                   Select-Object -First 1
+            # The binary ctest ran, if it is the test's own: an e2e test's
+            # command is Python.
+            $cmd = @($cmds[$name])
+            $exe = if ($cmd.Count -gt 0 -and $cmd[0]) {
+                     Get-Item -LiteralPath $cmd[0] -ErrorAction SilentlyContinue |
+                       Where-Object { $_.BaseName -eq $name } | Select-Object -First 1
+                   }
             if (-not $exe) { Write-Host "== ${name}: not a test binary (see ctest output above)"; continue }
             $tp = $props[$name]
             $wd = ($tp | Where-Object name -eq 'WORKING_DIRECTORY').value
-            if (-not $wd) { $wd = $exe.DirectoryName }
+            # ctest's own default: the directory of the add_test() call.
+            if (-not $wd) { $wd = (Resolve-Path build/tests).Path }
             $saved = @{}
             foreach ($kv in ($tp | Where-Object name -eq 'ENVIRONMENT').value) {
               $k, $v = $kv -split '=', 2

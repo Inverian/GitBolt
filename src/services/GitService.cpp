@@ -212,6 +212,12 @@ void GitService::reportTo(std::string key, std::function<void()> report) {
         report();
 }
 
+void GitService::postReport(std::string key, std::function<void()> report) {
+    QMetaObject::invokeMethod(this, [this, key = std::move(key), report = std::move(report)]() mutable {
+        reportTo(std::move(key), std::move(report));
+    }, Qt::QueuedConnection);
+}
+
 void GitService::settleReports() {
     if (openPending_)
         return;     // a newer open is on its way: they wait for it in turn
@@ -643,8 +649,8 @@ void GitService::applyPatchToIndex(const QString& patchText,
 void GitService::unstageAll() {
     if (!repo_) return;
     if (refusedWhileAStepRuns(QStringLiteral("unstageAll"))) return;
-    // `git reset` with no paths unstages everything: it rewrites the
-    // index to match HEAD. This is the cleanest way to do "un-add all."
+    // `git reset -- :/` unstages everything: it rewrites the index to
+    // match HEAD. This is the cleanest way to do "un-add all."
     // We use the CLI rather than libgit2 here because libgit2's
     // git_reset_default requires an explicit pathspec list, and building
     // one from the current status just to undo everything is wasted work.
@@ -660,7 +666,12 @@ void GitService::unstageAll() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         return repo_->process();
     }()};
-    auto result = proc.run({"reset"});
+    // With a pathspec (the whole tree, ":/"): with none, git's reset
+    // also ends a merge or a cherry-pick in progress (it removes
+    // MERGE_HEAD, CHERRY_PICK_HEAD), and the stopped pick of a
+    // `git cherry-pick A B C` was then dropped by Continue, which said
+    // "Cherry-pick complete." with its resolution left uncommitted.
+    auto result = proc.run({"reset", "-q", "--", ":/"});
     if (!result) {
         emit operationFailed(QStringLiteral("unstageAll"),
             QString::fromStdString(result.error().message()));
@@ -775,8 +786,34 @@ void GitService::commitChanges(const QString& message, bool amend) {
             if (!refusal.isEmpty())
                 clearMark();
         }
+        // Reported on the service's thread, to this repository if it is
+        // the open one then (reportTo), as a rebase step's outcome is.
+        // Emitted here, a commit that ended while another repository
+        // was opening said "Commit created: …" (or a hook's refusal)
+        // over that one's "Opening…", and one posted just before the
+        // swap arrived after it. Held while an open is pending, a Commit
+        // & Push of this repository, opened again meanwhile, still
+        // pushes: its Push is back by the time the outcome is in.
+        const auto report = [this, gitDir](bool ok, QString text, bool autostashKept) {
+            postReport(gitDir, [this, ok, text, autostashKept] {
+                emit commitComplete(ok, text);
+                if (!ok)
+                    return;
+                // After the commit's own note, which it would cover: the
+                // work tree has conflict markers in it now.
+                if (autostashKept) {
+                    emit operationFailed(QStringLiteral("autostash"),
+                                         tr("Applying the autostash resulted in "
+                                            "conflicts. Your changes are safe in "
+                                            "the stash."));
+                    refreshStashes();
+                }
+                refreshStatus();
+                refreshLog();
+            });
+        };
         if (!refusal.isEmpty()) {
-            emit commitComplete(false, refusal);
+            report(false, refusal, false);
             return;
         }
 
@@ -787,8 +824,8 @@ void GitService::commitChanges(const QString& message, bool amend) {
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
             clearMark();
-            if (!stillOpen())
-                return;
+            // `r` is the repository committed to, whether or not it is
+            // the open one now; reportTo decides where this goes.
             if (ok) {
                 if (auto head = r->head())
                     shortHex = QString::fromStdString(head->toShortHex());
@@ -802,22 +839,14 @@ void GitService::commitChanges(const QString& message, bool amend) {
             }
         }
         if (!ok) {
-            emit commitComplete(false, commitFailure(result));
+            report(false, commitFailure(result), false);
             return;
         }
-        emit commitComplete(true, autostash && !autostashKept
-                                      ? tr("Commit created: %1. Applied autostash.").arg(shortHex)
-                                      : tr("Commit created: %1").arg(shortHex));
-        // After the commit's own note, which it would cover: the work
-        // tree has conflict markers in it now.
-        if (autostashKept) {
-            emit operationFailed(QStringLiteral("autostash"),
-                                 tr("Applying the autostash resulted in conflicts. "
-                                    "Your changes are safe in the stash."));
-            refreshStashes();
-        }
-        refreshStatus();
-        refreshLog();
+        report(true,
+               autostash && !autostashKept
+                   ? tr("Commit created: %1. Applied autostash.").arg(shortHex)
+                   : tr("Commit created: %1").arg(shortHex),
+               autostashKept);
     });
 }
 
@@ -1259,6 +1288,11 @@ QString GitService::committedRebaseStop() const {
     return proc ? QString::fromStdString(proc->committedRebaseStop()) : QString();
 }
 
+bool GitService::hasTrackedChanges() const {
+    const auto proc = processIfOpen();
+    return proc && proc->hasTrackedChanges();
+}
+
 // These all reported success whenever git could be started: a rebase
 // that stopped on a conflict, or never began, said "Rebase complete."
 // A step that succeeds can still leave the rebase in progress — an
@@ -1439,18 +1473,21 @@ void GitService::cherryPick(const git::ObjectId& commit) {
         auto result = r->cherryPick(commit);
         QString error;
         bool conflicts = false;
-        if (!result)
+        bool alreadyApplied = false;
+        if (!result) {
             error = QString::fromStdString(result.error().message());
-        else
+        } else {
             conflicts = result->hasConflicts;
+            alreadyApplied = result->alreadyApplied;
+        }
         // Reported on the service's thread, to this repository if it is
         // the open one then (reportTo), as a rebase step's outcome is.
         // Emitted here, a pick that stopped on conflicts just before
         // another repository was opened said so over that one, and
         // offered to resolve its conflicts.
         QMetaObject::invokeMethod(this, [this, key = rebaseStepKey(*r), refused, error,
-                                         conflicts, commit]() {
-            reportTo(key, [this, refused, error, conflicts, commit] {
+                                         conflicts, alreadyApplied, commit]() {
+            reportTo(key, [this, refused, error, conflicts, alreadyApplied, commit] {
                 if (!error.isEmpty()) {
                     emit operationFailed(QStringLiteral("cherryPick"), error);
                     if (!refused)
@@ -1461,6 +1498,14 @@ void GitService::cherryPick(const git::ObjectId& commit) {
                     emit cherryPickComplete(
                         false,
                         tr("Cherry-pick produced conflicts for commit %1")
+                            .arg(QString::fromStdString(commit.toShortHex())));
+                    refreshStatus();
+                    return;
+                }
+                if (alreadyApplied) {
+                    emit cherryPickComplete(
+                        true,
+                        tr("Commit %1 is already on this branch: nothing to pick.")
                             .arg(QString::fromStdString(commit.toShortHex())));
                     refreshStatus();
                     return;
@@ -1764,129 +1809,157 @@ void GitService::gitFlowInit(const QString& master, const QString& develop,
         cfg.setString("gitflow.prefix.versiontag", "");
     }
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc)]() mutable {
         auto result = proc.gitFlowInit();
-        if (!result) {
-            emit operationFailed("gitFlowInit",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true, tr("Git Flow initialized."));
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result] {
+            if (!result) {
+                emit operationFailed("gitFlowInit",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true, tr("Git Flow initialized."));
+            }
+        });
     });
 }
 
 void GitService::featureStart(const QString& name) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), n = name.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), n = name.toStdString()]() mutable {
         auto result = proc.gitFlowFeatureStart(n);
-        if (!result) {
-            emit operationFailed("featureStart",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Feature '%1' started.").arg(QString::fromStdString(n)));
-            refreshBranches();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, n] {
+            if (!result) {
+                emit operationFailed("featureStart",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Feature '%1' started.").arg(QString::fromStdString(n)));
+                refreshBranches();
+            }
+        });
     });
 }
 
 void GitService::featureFinish(const QString& name) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), n = name.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), n = name.toStdString()]() mutable {
         auto result = proc.gitFlowFeatureFinish(n);
-        if (!result) {
-            emit operationFailed("featureFinish",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Feature '%1' finished.").arg(QString::fromStdString(n)));
-            refreshBranches();
-            refreshLog();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, n] {
+            if (!result) {
+                emit operationFailed("featureFinish",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Feature '%1' finished.").arg(QString::fromStdString(n)));
+                refreshBranches();
+                refreshLog();
+            }
+        });
     });
 }
 
 void GitService::releaseStart(const QString& version) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowReleaseStart(v);
-        if (!result) {
-            emit operationFailed("releaseStart",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Release '%1' started.").arg(QString::fromStdString(v)));
-            refreshBranches();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, v] {
+            if (!result) {
+                emit operationFailed("releaseStart",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Release '%1' started.").arg(QString::fromStdString(v)));
+                refreshBranches();
+            }
+        });
     });
 }
 
 void GitService::releaseFinish(const QString& version) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowReleaseFinish(v);
-        if (!result) {
-            emit operationFailed("releaseFinish",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Release '%1' finished.").arg(QString::fromStdString(v)));
-            refreshBranches();
-            refreshLog();
-            refreshTags();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, v] {
+            if (!result) {
+                emit operationFailed("releaseFinish",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Release '%1' finished.").arg(QString::fromStdString(v)));
+                refreshBranches();
+                refreshLog();
+                refreshTags();
+            }
+        });
     });
 }
 
 void GitService::hotfixStart(const QString& version) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowHotfixStart(v);
-        if (!result) {
-            emit operationFailed("hotfixStart",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Hotfix '%1' started.").arg(QString::fromStdString(v)));
-            refreshBranches();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, v] {
+            if (!result) {
+                emit operationFailed("hotfixStart",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Hotfix '%1' started.").arg(QString::fromStdString(v)));
+                refreshBranches();
+            }
+        });
     });
 }
 
 void GitService::hotfixFinish(const QString& version) {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowHotfixFinish(v);
-        if (!result) {
-            emit operationFailed("hotfixFinish",
-                QString::fromStdString(result.error().message()));
-            emit gitFlowOperationComplete(false,
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit gitFlowOperationComplete(true,
-                tr("Hotfix '%1' finished.").arg(QString::fromStdString(v)));
-            refreshBranches();
-            refreshLog();
-            refreshTags();
-        }
+        // To the repository it ran on, if that is the open one then
+        // (reportTo): emitted here, it reached the next one.
+        postReport(key, [this, result, v] {
+            if (!result) {
+                emit operationFailed("hotfixFinish",
+                    QString::fromStdString(result.error().message()));
+                emit gitFlowOperationComplete(false,
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit gitFlowOperationComplete(true,
+                    tr("Hotfix '%1' finished.").arg(QString::fromStdString(v)));
+                refreshBranches();
+                refreshLog();
+                refreshTags();
+            }
+        });
     });
 }
 
@@ -1959,60 +2032,68 @@ QStringList GitService::activeHotfixes() {
 void GitService::runGc() {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc)]() mutable {
         auto result = proc.gc();
-        if (!result) {
-            emit operationFailed("gc",
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit maintenanceComplete(
-                QString::fromStdString(result->stdoutData + result->stderrData));
-        }
+        postReport(key, [this, result] {
+            if (!result) {
+                emit operationFailed("gc",
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit maintenanceComplete(
+                    QString::fromStdString(result->stdoutData + result->stderrData));
+            }
+        });
     });
 }
 
 void GitService::runPrune() {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc)]() mutable {
         auto result = proc.prune();
-        if (!result) {
-            emit operationFailed("prune",
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit maintenanceComplete(
-                QString::fromStdString(result->stdoutData + result->stderrData));
-        }
+        postReport(key, [this, result] {
+            if (!result) {
+                emit operationFailed("prune",
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit maintenanceComplete(
+                    QString::fromStdString(result->stdoutData + result->stderrData));
+            }
+        });
     });
 }
 
 void GitService::runFsck() {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc)]() mutable {
         auto result = proc.fsck();
-        if (!result) {
-            emit operationFailed("fsck",
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit maintenanceComplete(
-                QString::fromStdString(result->stdoutData + result->stderrData));
-        }
+        postReport(key, [this, result] {
+            if (!result) {
+                emit operationFailed("fsck",
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit maintenanceComplete(
+                    QString::fromStdString(result->stdoutData + result->stderrData));
+            }
+        });
     });
 }
 
 void GitService::runRepack() {
     if (!repo_) return;
     git::GitProcess proc = process();
-    runner_.run([this, proc = std::move(proc)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(proc)]() mutable {
         auto result = proc.run({"repack", "-a", "-d"});
-        if (!result) {
-            emit operationFailed("repack",
-                QString::fromStdString(result.error().message()));
-        } else {
-            emit maintenanceComplete(
-                QString::fromStdString(result->stdoutData + result->stderrData));
-        }
+        postReport(key, [this, result] {
+            if (!result) {
+                emit operationFailed("repack",
+                    QString::fromStdString(result.error().message()));
+            } else {
+                emit maintenanceComplete(
+                    QString::fromStdString(result->stdoutData + result->stderrData));
+            }
+        });
     });
 }
 

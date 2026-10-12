@@ -667,6 +667,12 @@ void MainWindow::buildRepositoryMenu()
                     });
             connect(widget, &widgets::SubmoduleWidget::deinitRequested,
                     this, [this, dlg](const QString& n) {
+                        // Turned away before the question, not after
+                        // it: the answer was asked for and thrown away
+                        // ("Another operation is still running…").
+                        if (refuseWhileLocalOpRuns())
+                            return;
+                        const std::string key = gitService_->openKey();
                         // Deinit empties the submodule's working
                         // tree — confirm before running, and pass
                         // -f so local modifications don't make git
@@ -679,6 +685,11 @@ void MainWindow::buildRepositoryMenu()
                                "Init + Update).").arg(n));
                         if (answer != QMessageBox::Yes)
                             return;
+                        // Another repository's submodule of that name
+                        // went, opened while the question was up.
+                        if (repositoryChangedSince(
+                                key, tr("the submodule was not deinitialized.")))
+                            return;
                         repoCmd_->runAsync({"submodule", "deinit", "-f",
                                             "--", n.toStdString()},
                                            tr("Submodule Deinit Failed"),
@@ -689,6 +700,10 @@ void MainWindow::buildRepositoryMenu()
                     this, [](const QString& p) {
                         QDesktopServices::openUrl(QUrl::fromLocalFile(p));
                     });
+
+            // Its row actions are local ops: off while one runs (or a
+            // step), as the main window's are, not offered and refused.
+            followRepoBusy(widget, [widget](bool busy) { widget->setEnabled(!busy); });
 
             dlg->show();
         });
@@ -947,6 +962,11 @@ void MainWindow::buildRepositoryMenu()
                 f.close();
             }
 
+            // The editor turns the event loop: a second launch can hand
+            // another repository over while it is up, and its git ran
+            // `sparse-checkout set` there with these patterns (that
+            // repository's other files went).
+            const std::string key = gitService_->openKey();
             dialogs::TextEditorDialog dlg(this);
             dlg.setTitle(tr("Sparse Checkout Patterns"));
             dlg.setLabel(tr("One pattern per line, gitignore-style "
@@ -956,6 +976,9 @@ void MainWindow::buildRepositoryMenu()
             if (dlg.exec() != QDialog::Accepted) return;
             const QString updated = dlg.contents();
             if (updated == original) return;
+            if (repositoryChangedSince(
+                    key, tr("the sparse checkout patterns were not applied.")))
+                return;
 
             // A local op like Init's: `set` rewrites the working tree.
             auto out = std::make_shared<
@@ -979,6 +1002,7 @@ void MainWindow::buildRepositoryMenu()
         disableA->setObjectName(QStringLiteral("repository.sparse-working-copy.disable"));
         connect(disableA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
+            const std::string key = gitService_->openKey();
             const auto confirm = QMessageBox::question(this,
                 tr("Disable Sparse Checkout"),
                 tr("Restore the full working tree? All ignored "
@@ -986,6 +1010,8 @@ void MainWindow::buildRepositoryMenu()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (confirm != QMessageBox::Yes) return;
+            if (repositoryChangedSince(key, tr("sparse checkout was not disabled.")))
+                return;
             repoCmd_->runAsync({"sparse-checkout", "disable"},
                                tr("Sparse Disable Failed"),
                                RepoCommandController::RefreshStatus,
@@ -2009,6 +2035,7 @@ void MainWindow::buildCommandsMenu()
 
             auto* dlg = new dialogs::StashManageDialog(this);
             dlg->setAttribute(Qt::WA_DeleteOnClose);
+            dlg->setObjectName(QStringLiteral("dlg.stashes"));
 
             // Initial population from the synchronous Repository
             // call. Subsequent updates arrive via stashesReady.
@@ -2025,16 +2052,26 @@ void MainWindow::buildCommandsMenu()
                 dlg->setStashes(s);
             });
 
+            // Modeless, so it stays usable while a local op runs (a
+            // reset, a merge): its buttons are off then, and turned
+            // away if they get through. A Pop under a running reset
+            // wrote the stash's files, failed on index.lock, and kept
+            // the stash, said to have failed.
+            followRepoBusy(dlg, [dlg](bool busy) { dlg->setBusy(busy); });
             connect(dlg, &dialogs::StashManageDialog::applyRequested,
                     this, [this](size_t i) {
+                if (refuseWhileLocalOpRuns()) return;
                 gitService_->stashApply(static_cast<int>(i));
             });
             connect(dlg, &dialogs::StashManageDialog::popRequested,
                     this, [this](size_t i) {
+                if (refuseWhileLocalOpRuns()) return;
                 gitService_->stashPop(static_cast<int>(i));
             });
             connect(dlg, &dialogs::StashManageDialog::dropRequested,
                     this, [this, dlg](size_t i) {
+                if (refuseWhileLocalOpRuns()) return;
+                const std::string key = gitService_->openKey();
                 // Look up the stash message so the confirm shows
                 // what the user is about to discard, not just an
                 // index. "Drop stash@{0}?" is meaningless to a user
@@ -2061,17 +2098,28 @@ void MainWindow::buildCommandsMenu()
                     dlg, tr("Drop Stash"), detail,
                     QMessageBox::Yes | QMessageBox::Cancel,
                     QMessageBox::Cancel);
-                if (confirm == QMessageBox::Yes)
-                    gitService_->stashDrop(static_cast<int>(i));
+                if (confirm != QMessageBox::Yes)
+                    return;
+                // The question turns the event loop: an op started, or
+                // another repository opened (its stash@{i} is another).
+                if (refuseWhileLocalOpRuns()
+                    || repositoryChangedSince(key, tr("no stash was dropped.")))
+                    return;
+                gitService_->stashDrop(static_cast<int>(i));
             });
             connect(dlg, &dialogs::StashManageDialog::newStashRequested,
                     this, [this, dlg]() {
+                if (refuseWhileLocalOpRuns()) return;
+                const std::string key = gitService_->openKey();
                 dialogs::StashDialog save(dlg);
-                if (save.exec() == QDialog::Accepted) {
-                    gitService_->stashSave(save.message(),
-                                           save.includeUntracked(),
-                                           save.keepIndex());
-                }
+                if (save.exec() != QDialog::Accepted)
+                    return;
+                if (refuseWhileLocalOpRuns()
+                    || repositoryChangedSince(key, tr("no stash was saved.")))
+                    return;
+                gitService_->stashSave(save.message(),
+                                       save.includeUntracked(),
+                                       save.keepIndex());
             });
 
             dlg->show();
@@ -2092,6 +2140,10 @@ void MainWindow::buildCommandsMenu()
                 tr("mixed — keep working tree (default)"),
                 tr("hard — DESTROY working tree changes"),
             };
+            // The picker and the question turn the event loop: a second
+            // launch can hand another repository over meanwhile, and a
+            // hard reset then threw that one's changes away.
+            const std::string key = gitService_->openKey();
             bool ok = false;
             const QString picked = QInputDialog::getItem(
                 this, tr("Reset Changes"),
@@ -2110,6 +2162,8 @@ void MainWindow::buildCommandsMenu()
                     QMessageBox::Cancel);
                 if (ret != QMessageBox::Yes) return;
             }
+            if (repositoryChangedSince(key, tr("nothing was reset.")))
+                return;
             repoCmd_->runAsync({"reset", flag, "HEAD"},
                                tr("Reset Failed"),
                                RepoCommandController::RefreshStatus,
@@ -2126,6 +2180,7 @@ void MainWindow::buildCommandsMenu()
         a->setObjectName(QStringLiteral("commands.clean-working-directory"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
+            const std::string key = gitService_->openKey();
             const auto ret = QMessageBox::warning(
                 this, tr("Clean Working Directory"),
                 tr("This will permanently remove every untracked file "
@@ -2134,6 +2189,10 @@ void MainWindow::buildCommandsMenu()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (ret != QMessageBox::Yes) return;
+            // Another repository's untracked files went, opened while
+            // the question was up.
+            if (repositoryChangedSince(key, tr("nothing was cleaned.")))
+                return;
             repoCmd_->runAsync({"clean", "-f", "-d"},
                                tr("Clean Failed"),
                                RepoCommandController::RefreshStatus,
@@ -3659,6 +3718,30 @@ bool MainWindow::gitStepRunning() const
     return gitService_ && gitService_->rebaseStepRunning();
 }
 
+bool MainWindow::repositoryChangedSince(const std::string& key, const QString& notDone)
+{
+    if (gitService_ && gitService_->isOpen() && !gitService_->openPending()
+        && gitService_->openKey() == key)
+        return false;
+    statusBar()->showMessage(tr("Another repository was opened; %1").arg(notDone), 5000);
+    return true;
+}
+
+void MainWindow::followRepoBusy(QObject* context, std::function<void(bool busy)> apply)
+{
+    // Behind the window's own handlers (connected first), which keep
+    // localOpRunning_; a step's mark is the service's.
+    const auto update = [this, apply] { apply(localOpRunning_ || gitStepRunning()); };
+    connect(repoCmd_, &RepoCommandController::busyChanged, context,
+            [this, apply](bool busy) { apply(busy || gitStepRunning()); });
+    connect(gitService_, &services::GitService::stepStarted, context, update);
+    connect(gitService_, &services::GitService::rebaseStepFinished, context, update);
+    connect(gitService_, &services::GitService::commitComplete, context, update);
+    connect(gitService_, &services::GitService::repositoryOpened, context, update);
+    connect(gitService_, &services::GitService::repositoryClosed, context, update);
+    update();
+}
+
 void MainWindow::reapplyRepoActionLocks()
 {
     setRepoActionsEnabled(repoActionsEnabled_);
@@ -4105,8 +4188,8 @@ void MainWindow::setupConnections()
                                                     : tr("Revert complete."),
                                          4000);
         } else if (success && inProgress) {
-            statusBar()->showMessage(tr("Rebase paused. Amend the commit or make changes, "
-                                        "then click Continue."));
+            statusBar()->showMessage(tr("Rebase paused. Amend the commit (or commit your "
+                                        "changes), then click Continue."));
         } else if (success) {
             statusBar()->showMessage(step == QLatin1String("rebase --abort")
                                          ? tr("Rebase aborted.")
@@ -4145,7 +4228,14 @@ void MainWindow::setupConnections()
     // which then committed onto that branch. A step ends with
     // rebaseStepFinished (above), a commit with commitComplete.
     connect(gitService_, &services::GitService::stepStarted, this,
-            [this]() { reapplyRepoActionLocks(); });
+            [this](const QString& step) {
+                reapplyRepoActionLocks();
+                // The hooks may take a while, and nothing said a commit
+                // was running; its outcome replaces this.
+                if (step == QLatin1String("commit"))
+                    statusBar()->showMessage(
+                        tr("Committing… (git runs the repository's hooks)"));
+            });
     connect(gitService_, &services::GitService::commitComplete, this,
             [this]() { reapplyRepoActionLocks(); });
     if (repoView_) {
@@ -4186,6 +4276,19 @@ void MainWindow::setupConnections()
             // said its changes were left out, and "Rebase complete."
             // then came with it still there.
             const QString committed = sequence ? QString() : gitService_->committedRebaseStop();
+            // There, git's --skip resets the work tree to that commit
+            // (reset --hard): the changes made since, which the paused
+            // bar asks for and Continue turns down unstaged, went for
+            // good. The step refuses it too (GitProcess::rebaseSkip()).
+            if (!committed.isEmpty() && gitService_->hasTrackedChanges()) {
+                QMessageBox::warning(
+                    this, tr("Skip Commit"),
+                    tr("Skipping would discard your uncommitted changes.\n\nThe commit "
+                       "the rebase stopped at is already made, and git resets the "
+                       "working tree to it. Commit your changes (amend the commit, or "
+                       "make a commit of their own) or stash them first."));
+                return;
+            }
             const auto answer = QMessageBox::question(
                 this, tr("Skip Commit"),
                 committed == QLatin1String("reword")
@@ -4229,16 +4332,25 @@ void MainWindow::setupConnections()
             const bool keepsCommits = bar->sequencePaused() && !bar->sequenceSkippable()
                 && (bar->state() == git::RepoState::CherryPick
                     || bar->state() == git::RepoState::Revert);
+            // git's rebase --abort resets the work tree (reset --hard):
+            // at an `edit`, changes made there since go with it. The
+            // question spoke of resolved conflicts alone.
+            const bool discardsOwnWork = bar->state() == git::RepoState::Rebase
+                && !gitService_->committedRebaseStop().isEmpty()
+                && gitService_->hasTrackedChanges();
+            QString question = keepsCommits
+                ? tr("Stop the %1?\n\nThe commits it has made so far stay on the branch "
+                     "(git doesn't rewind past a commit made during it); the ones not "
+                     "done yet are left out.")
+                      .arg(operation)
+                : tr("Abort the %1?\n\nThe branch goes back to where it was before "
+                     "the %1 started, and any conflicts resolved so far are lost.")
+                      .arg(operation);
+            if (discardsOwnWork)
+                question += QStringLiteral("\n\n")
+                    + tr("Your uncommitted changes in the working tree are discarded too.");
             const auto answer = QMessageBox::question(
-                this, tr("Abort"),
-                keepsCommits
-                    ? tr("Stop the %1?\n\nThe commits it has made so far stay on the branch "
-                         "(git doesn't rewind past a commit made during it); the ones not "
-                         "done yet are left out.")
-                          .arg(operation)
-                    : tr("Abort the %1?\n\nThe branch goes back to where it was before "
-                         "the %1 started, and any conflicts resolved so far are lost.")
-                          .arg(operation),
+                this, tr("Abort"), question,
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
             if (answer != QMessageBox::Yes) return;
             // A step either way (stepStarted makes the bar busy until
@@ -5080,8 +5192,15 @@ void MainWindow::showCommitDialog()
         connect(commitDialog_,
                 &dialogs::CommitDialog::pushAfterCommitRequested,
                 this, [this]() {
-            if (pushAction_ && pushAction_->isEnabled())
+            if (pushAction_ && pushAction_->isEnabled()) {
                 pushAction_->trigger();
+                return;
+            }
+            // Said, not dropped without a word: the commit is in, and
+            // "ahead 1" was all that showed the push never ran.
+            statusBar()->showMessage(
+                tr("Committed, but not pushed: another operation is still running. "
+                   "Push once it's done."), 8000);
         });
     }
     commitDialog_->show();
@@ -5174,9 +5293,18 @@ void MainWindow::showConflictResolver()
         });
     gitService_->refreshConflicts();
 
+    // Modeless: it outlives a local op starting, and another repository
+    // being opened. Its resolutions are this repository's; written into
+    // another one's files of the same names, they'd be lost there.
+    const std::string key = gitService_->openKey();
     connect(widget,
             &widgets::MergeConflictWidget::allConflictsResolved,
-            dlg, [this, dlg, widget]() {
+            dlg, [this, dlg, widget, key]() {
+        // Turned down, the dialog stays, resolutions and all: git still
+        // has the index (a local op), or it's another repository's.
+        if (refuseWhileLocalOpRuns()
+            || repositoryChangedSince(key, tr("the resolutions were not applied.")))
+            return;
         const auto& conflicts = widget->conflicts();
         const auto contents = widget->allResolvedContents();
         std::vector<std::pair<QString, QString>> resolutions;
@@ -5204,9 +5332,13 @@ void MainWindow::showConflictResolver()
     });
 
     connect(widget, &widgets::MergeConflictWidget::mergeAborted,
-            dlg, [this, dlg]() {
+            dlg, [this, dlg, key]() {
         // The widget has already confirmed with the user. Turned down
-        // while a rebase step runs, the dialog stays.
+        // while a rebase step or a local op runs, or once another
+        // repository is open, the dialog stays.
+        if (refuseWhileLocalOpRuns()
+            || repositoryChangedSince(key, tr("nothing was aborted.")))
+            return;
         if (gitService_->abortConflictState())
             dlg->close();
     });

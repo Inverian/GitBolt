@@ -74,7 +74,9 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 - File-level staging with per-file and stage-all/unstage-all flows
 - Interactive rebase with drag-and-drop reordering and
   continue / skip / abort controls for conflicted rebases
-- Cherry-pick with multi-commit selection
+- Cherry-pick a commit, with a preview of its details; a
+  `git cherry-pick` of several commits started in a terminal can be
+  continued, skipped or aborted from the operation bar
 - Stash save/apply/pop/drop with diff preview
 - Branch management (create, delete, rename, checkout, merge,
   push, set-upstream — from the sidebar context menu or Commands)

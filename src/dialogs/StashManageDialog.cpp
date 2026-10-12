@@ -59,17 +59,14 @@ void StashManageDialog::setupUi() {
     // tightly on the left and Close on the right.
     auto* btnRow = new QHBoxLayout();
     applyBtn_ = new QPushButton(tr("&Apply"), this);
-    applyBtn_->setToolTip(tr("Apply selected stash to the working tree, "
-                             "keeping it in the stash list."));
     popBtn_   = new QPushButton(tr("&Pop"), this);
-    popBtn_->setToolTip(tr("Apply selected stash to the working tree "
-                           "and drop it on success."));
     dropBtn_  = new QPushButton(tr("&Drop"), this);
-    dropBtn_->setToolTip(tr("Discard the selected stash without "
-                            "applying it. Cannot be undone."));
     newBtn_   = new QPushButton(tr("&New stash..."), this);
-    newBtn_->setToolTip(tr("Save the current working tree as a new stash."));
     closeBtn_ = new QPushButton(tr("&Close"), this);
+    applyBtn_->setObjectName(QStringLiteral("stash.applyBtn"));
+    popBtn_->setObjectName(QStringLiteral("stash.popBtn"));
+    dropBtn_->setObjectName(QStringLiteral("stash.dropBtn"));
+    newBtn_->setObjectName(QStringLiteral("stash.newBtn"));
 
     btnRow->addWidget(applyBtn_);
     btnRow->addWidget(popBtn_);
@@ -100,11 +97,29 @@ void StashManageDialog::setupUi() {
     onSelectionChanged();
 }
 
+void StashManageDialog::setBusy(bool busy) {
+    busy_ = busy;
+    onSelectionChanged();
+}
+
 void StashManageDialog::onSelectionChanged() {
     const bool any = list_->currentItem() != nullptr;
-    applyBtn_->setEnabled(any);
-    popBtn_->setEnabled(any);
-    dropBtn_->setEnabled(any);
+    applyBtn_->setEnabled(any && !busy_);
+    popBtn_->setEnabled(any && !busy_);
+    dropBtn_->setEnabled(any && !busy_);
+    newBtn_->setEnabled(!busy_);
+    // What the button does (set here, for setupUi too), or why it's off.
+    applyBtn_->setToolTip(busy_ ? tr("Another operation is still running")
+                                : tr("Apply selected stash to the working tree, "
+                                     "keeping it in the stash list."));
+    popBtn_->setToolTip(busy_ ? tr("Another operation is still running")
+                              : tr("Apply selected stash to the working tree "
+                                   "and drop it on success."));
+    dropBtn_->setToolTip(busy_ ? tr("Another operation is still running")
+                               : tr("Discard the selected stash without "
+                                    "applying it. Cannot be undone."));
+    newBtn_->setToolTip(busy_ ? tr("Another operation is still running")
+                              : tr("Save the current working tree as a new stash."));
 }
 
 int StashManageDialog::selectedIndex() const {

@@ -1195,7 +1195,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     white-space: pre-wrap; margin: 0; padding: 6px 0 2px 0;
     font-family: Menlo, Consolas, monospace; font-size: 11px;
   }
-  hr.sep { border: none; border-top: 1px solid %4; margin: 12px 0; }
+  hr.sep { background-color: %4; margin: 12px 0; }
   div.contains { color: %5; padding: 2px 0; }
   div.contains a { color: %6; text-decoration: none; }
   span.muted { color: %7; font-style: italic; }

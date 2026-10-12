@@ -531,6 +531,12 @@ void CommitDialog::applyLocks()
         amendCheck_->setEnabled(false);
     else
         updateAmend();
+    // Said on the button, which shows it disabled too: a tooltip on a
+    // disabled button was all there was while a hook took its time, the
+    // dialog greyed out and silent.
+    commitBtn_->setText(pendingCommit_ && !pushAfterCommit_ ? tr("Committing…") : tr("Commit"));
+    commitPushBtn_->setText(pendingCommit_ && pushAfterCommit_ ? tr("Committing…")
+                                                               : tr("Commit && Push"));
     commitBtn_->setToolTip(pendingCommit_ ? tr("Committing… (git runs the repository's hooks)")
                            : localOpBusy_ ? tr("Another operation is still running")
                            : step         ? tr("Another git operation is still running "

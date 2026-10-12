@@ -986,7 +986,12 @@ private slots:
             QVERIFY(picked.ok());
             QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
             QVERIFY(repo.writeAndCommit("c.txt", "c\n", "c here too").ok());
-            QVERIFY(repo.repo().cherryPick(*picked).ok());
+            // GitBolt's own pick says so and leaves nothing in progress;
+            // git's (a terminal's) stops with the pick in progress.
+            const auto ours = repo.repo().cherryPick(*picked);
+            QVERIFY(ours.ok() && ours->alreadyApplied && !ours->hasConflicts);
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+            QVERIFY(!succeeded(git.run({"cherry-pick", picked->toHex()})));
             QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::CherryPick);
         } else if (situation == QLatin1String("merge")) {
             QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));

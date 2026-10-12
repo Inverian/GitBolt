@@ -1563,6 +1563,26 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
         return GitError::fromLibgit2(err);
     CherryPickResult result;
     result.hasConflicts = git_index_has_conflicts(index) != 0;
+    // A pick whose changes are on the branch already changes nothing.
+    // It was reported a success, and left in progress for a commit that
+    // git then refused ("The previous cherry-pick is now empty…"), with
+    // advice (--allow-empty, `git cherry-pick --skip`) GitBolt doesn't
+    // offer. Nothing is left in progress: there's nothing to commit.
+    if (!result.hasConflicts) {
+        git_oid treeOid;
+        git_reference* headRef = nullptr;
+        git_commit* head = nullptr;
+        if (git_index_write_tree(&treeOid, index) == 0
+            && git_repository_head(&headRef, repo_) == 0
+            && git_reference_peel(reinterpret_cast<git_object**>(&head), headRef,
+                                  GIT_OBJECT_COMMIT) == 0
+            && git_oid_equal(&treeOid, git_commit_tree_id(head))) {
+            result.alreadyApplied = true;
+            git_repository_state_cleanup(repo_);
+        }
+        git_commit_free(head);
+        git_reference_free(headRef);
+    }
     git_index_free(index);
     return result;
 }

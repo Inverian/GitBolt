@@ -84,6 +84,8 @@ public:
         if (process_.state() == QProcess::NotRunning)
             return;
         send("quit");
+        // Its stdin ends there too: nothing it reads can hold it up.
+        process_.closeWriteChannel();
         if (!process_.waitForFinished(10000)) {
             process_.kill();
             process_.waitForFinished(10000);
@@ -212,6 +214,25 @@ private slots:
         LaunchProcess bare(dir.path(), name, QString());
         QCOMPARE(bare.outcome(), QStringLiteral("delivered"));
         QCOMPARE(owner.waitForLine(QStringLiteral("path:")), QStringLiteral("path:"));
+    }
+
+    // An owner told to quit exits at once, its stdin still open (as
+    // GitBolt's own is). On Linux it waited at its exit for its stdin
+    // reader, until the 10 s above were up and it was killed: each test
+    // that ended with one took 10 s more there.
+    void anOwnerToldToQuitExitsAtOnce()
+    {
+        LockDir dir;
+        QVERIFY(dir.dir.isValid());
+        OwnerProcess owner(dir.path(), uniqueServerName());
+        QVERIFY2(owner.isReady(), qPrintable(owner.output()));
+        QElapsedTimer clock;
+        clock.start();
+        owner.send("quit");
+        QVERIFY2(owner.process().waitForFinished(5000),
+                 qPrintable(QStringLiteral("still running after %1 ms").arg(clock.elapsed())));
+        QCOMPARE(owner.process().exitStatus(), QProcess::NormalExit);
+        QCOMPARE(owner.process().exitCode(), 0);
     }
 
     // Busy for 3 s: longer than that would make a slow test. The

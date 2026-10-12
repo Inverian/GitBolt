@@ -66,6 +66,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSocketNotifier>
 #include <QStringList>
@@ -525,6 +526,44 @@ private slots:
         QCOMPARE(terminal.toPlainText(), shown);
     }
 
+    // A command line longer than the terminal, as bash's readline types
+    // it: at the right margin it sends the key, a space and a CR, for a
+    // terminal that wraps to put the cursor at the start of the next
+    // row. Rows don't wrap here (the line is one row), and the CR went
+    // to its start: the keys after it overwrote the prompt. The widget
+    // was never shown, so it has the default 80 columns.
+    void longCommandLineStaysWhole()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("ConPTY's screen wraps its rows itself");
+#else
+        FedTerminal terminal;
+        const QByteArray prompt = "P> ";
+        const QByteArray first(80 - prompt.size() - 1, 'x');   // to the last column but one
+        terminal.appendOutput(prompt);
+        for (const char c : first)
+            terminal.appendOutput(QByteArray(1, c));
+        terminal.appendOutput("y \r");                        // the last column, and the wrap
+        for (const char c : QByteArrayLiteral("echo"))
+            terminal.appendOutput(QByteArray(1, c));
+        // A second wrap.
+        const QByteArray second(80 - 4 - 1, 'z');
+        terminal.appendOutput(second + "w \r" + "tail");
+        QCOMPARE(terminal.toPlainText(),
+                 QString::fromLatin1(prompt + first + "y" + "echo" + second + "w" + "tail"));
+
+        // A CR right after the last column: the cursor hasn't wrapped
+        // yet, so it goes to the start of that row, not of the next. One
+        // character on, it's the next row's.
+        FedTerminal margin;
+        margin.appendOutput(QByteArray(80, 'a') + "\rB");
+        QCOMPARE(margin.toPlainText(), QStringLiteral("B") + QString(79, QLatin1Char('a')));
+        margin.appendOutput("\r\n" + QByteArray(80, 'a') + "b\rC");
+        QCOMPARE(margin.toPlainText().section(QLatin1Char('\n'), 1),
+                 QString(80, QLatin1Char('a')) + QStringLiteral("C"));
+#endif
+    }
+
     // An OSC (a title, an OSC 8 link) cut by a read, anywhere up to its
     // terminator's last byte, used to print its text on macOS and Linux.
     void oscSplitAcrossReads()
@@ -916,6 +955,39 @@ private slots:
         QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbmeter 2")),
                                   qPrintable(terminal.toPlainText()), kTimeoutMs);
         QVERIFY2(!terminal.toPlainText().contains(QStringLiteral("gbmeter 1")),
+                 qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // A command line longer than the terminal, typed into bash over a
+    // real PTY: readline's wrap at the right margin (the key, a space, a
+    // CR) took the line back to the prompt, which the rest of the
+    // command overwrote. 0.9.5 showed it whole.
+    void ptyLongCommandLineStaysWhole()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        if (!QFileInfo::exists(QStringLiteral("/bin/bash")))
+            QSKIP("no /bin/bash");
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        // bash's readline, whose wrap this is (PlainShell puts SHELL
+        // back on the way out).
+        qputenv("SHELL", "/bin/bash");
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        // Past the margin (the terminal tells the shell its size, about
+        // 44 columns never shown) twice.
+        const QString command = QStringLiteral("echo ") + QString(90, QLatin1Char('x'))
+                              + QStringLiteral("END");
+        QTest::keyClicks(&terminal, command);
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.toPlainText().contains(QStringLiteral("END")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QTest::qWait(200);
+        QVERIFY2(rows(terminal).contains(kShPrompt + QLatin1Char(' ') + command),
                  qPrintable(terminal.toPlainText()));
 #endif
     }

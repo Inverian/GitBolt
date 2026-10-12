@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QList>
 #include <QWidget>
 
 class QLabel;
@@ -39,6 +40,9 @@ protected:
     /// view. We reposition it on every resize so it stays in the
     /// corner regardless of window size.
     void resizeEvent(QResizeEvent* event) override;
+    /// A theme switch: the cards' descriptions take the theme's colour
+    /// (applyCardColors()).
+    void changeEvent(QEvent* event) override;
 
 private:
     void setupUi();
@@ -54,6 +58,11 @@ private:
     void probeAndPopulate(const QString& path);
     QPushButton* createActionCard(const QString& title, const QString& iconText,
                                   const QString& description);
+    /// The cards' descriptions in the theme's colour. palette(mid) was
+    /// the light theme's grey: on the dark theme's cards (#3c3c3c) it
+    /// read at 1.4:1.
+    void applyCardColors();
+    QList<QLabel*> cardDescriptions_;
 
     conf::SettingsService* settings_ = nullptr;
 

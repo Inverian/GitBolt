@@ -200,6 +200,20 @@ private:
     /// Applies localOpRunning_ and gitStepRunning() to the repo actions,
     /// menus and sidebar again, keeping what repoActionsEnabled_ says.
     void reapplyRepoActionLocks();
+    /// For a flow that asks first (a question, an editor, a picker) and
+    /// then runs git on the open repository: whether that is no longer
+    /// the repository it asked about (`key`, GitService::openKey() taken
+    /// before asking) — another was opened, or is opening, meanwhile (a
+    /// second launch hands its path over while the question is up).
+    /// Says so on the status bar, `notDone` saying what wasn't done.
+    /// Asked once the answer is in: git ran on whatever repository was
+    /// open then, and Edit patterns applied one repository's sparse
+    /// patterns to another, whose files went.
+    bool repositoryChangedSince(const std::string& key, const QString& notDone);
+    /// Keeps `apply` told whether the repository is busy (a local op or
+    /// a step runs), for as long as `context` lives: the modeless
+    /// windows' buttons (stashes, submodules) went to git under the op.
+    void followRepoBusy(QObject* context, std::function<void(bool busy)> apply);
 
     /// Walk every named leaf action under the menu bar, record its
     /// factory-default shortcut, and apply any user override saved
