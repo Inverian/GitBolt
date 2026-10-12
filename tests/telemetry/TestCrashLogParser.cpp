@@ -270,12 +270,12 @@ private slots:
         QVERIFY(!names.contains(QStringLiteral("main")));
         QVERIFY(!eventJson(*mac).contains("MainWindow"));
 
-        const std::optional<CrashEvent> linux = CrashLogParser::parse(fixture(QStringLiteral("linux.log")));
-        QVERIFY(linux);
-        QCOMPARE(functions(*linux).contains(QStringLiteral("std::terminate")), kDemangles);
-        QVERIFY(functions(*linux).contains(QStringLiteral("abort")));
+        const std::optional<CrashEvent> linuxEvent = CrashLogParser::parse(fixture(QStringLiteral("linux.log")));
+        QVERIFY(linuxEvent);
+        QCOMPARE(functions(*linuxEvent).contains(QStringLiteral("std::terminate")), kDemangles);
+        QVERIFY(functions(*linuxEvent).contains(QStringLiteral("abort")));
         // The trampoline (#1) had no name; dropped by position anyway.
-        QCOMPARE(linux->frames.last().function, QStringLiteral("pthread_kill"));
+        QCOMPARE(linuxEvent->frames.last().function, QStringLiteral("pthread_kill"));
     }
 
     void frameLineVariants() {

@@ -934,7 +934,13 @@ private slots:
         auto service = makeService(config, provider);
         service->recordLaunch();
         service->start();
-        QTRY_COMPARE(stub_->requests().size(), 1);
+        // Wait for the 503 to be handled (the cycle ends with the attempt
+        // counted on disk), not just for the stub to see the request:
+        // quitting while the reply is still on its way aborts it, and an
+        // abort is rightly not counted. Slower runners hit that window.
+        QTRY_VERIFY(!queueLines(config).isEmpty()
+                    && queueLines(config).first().value(QStringLiteral("attempts")).toInt() == 1);
+        QCOMPARE(stub_->requests().size(), 1);
         service->persistPending();
         service.reset();
         QCOMPARE(queueLines(config).size(), 1);
