@@ -248,27 +248,6 @@ See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on you
 
 ---
 
-## Project Status
-
-GitBolt **0.9.4** is a beta: every planned module is implemented and
-wired into the UI, and CI builds and tests it on macOS, Linux, and Windows.
-See [CHANGELOG.md](CHANGELOG.md) for what each release contains.
-
-### Roadmap
-
-The scaffolded-but-unwired backlog has been cleared — **blame view**,
-**three-way merge conflict resolution**, **hunk / line-level staging**,
-**worktree remove / lock**, and **clone cancellation** are all wired in
-and reachable from the UI.
-
-Remaining deferred work:
-
-- **GPG signature verification** — the commit inspector's signature tab
-  is an intentional placeholder; signature checking is not implemented
-  yet.
-
----
-
 ## Privacy and usage statistics
 
 Official GitBolt builds (releases, and CI's builds of `main`) send
