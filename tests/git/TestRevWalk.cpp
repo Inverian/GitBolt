@@ -102,6 +102,47 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // skip(N) steps over N commits without yielding them, so a fresh
+    // walk can start a page at an offset; it reports a short count
+    // when the walk runs out.
+    // -----------------------------------------------------------------
+    void skipStartsAtOffset() {
+        gitbolt::test::TestRepo repo;
+
+        std::vector<gitbolt::git::ObjectId> ids;
+        for (int i = 1; i <= 5; ++i) {
+            auto r = repo.writeAndCommit(QStringLiteral("file%1.txt").arg(i),
+                                         "x\n", QStringLiteral("commit %1").arg(i));
+            QVERIFY(r.ok());
+            ids.push_back(*r);
+        }
+
+        auto walk = repo.repo().createRevWalk();
+        QVERIFY(walk.ok());
+        walk->setSorting(gitbolt::git::SortOrder::Topological);
+        QVERIFY(walk->pushHead().ok());
+
+        auto skipped = walk->skip(2);
+        QVERIFY(skipped.ok());
+        QCOMPARE(*skipped, size_t(2));
+
+        // Newest first: commits 5 and 4 were skipped.
+        auto page = walk->next(2);
+        QVERIFY(page.ok());
+        QCOMPARE(page->size(), size_t(2));
+        QCOMPARE((*page)[0].id, ids[2]);
+        QCOMPARE((*page)[1].id, ids[1]);
+
+        // Only commit 1 is left.
+        auto rest = walk->skip(10);
+        QVERIFY(rest.ok());
+        QCOMPARE(*rest, size_t(1));
+        auto empty = walk->next(1);
+        QVERIFY(empty.ok());
+        QCOMPARE(empty->size(), size_t(0));
+    }
+
+    // -----------------------------------------------------------------
     // reset() restarts iteration from scratch.
     // -----------------------------------------------------------------
     void resetRewindsIteration() {

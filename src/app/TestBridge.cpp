@@ -3,6 +3,7 @@
 #include "conf/SettingsService.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
+#include "telemetry/TelemetryGate.h"
 #include "ui/MainWindow.h"
 
 #include <QAbstractButton>
@@ -692,8 +693,20 @@ QByteArray TestBridge::cmdDumpState()
                 QString::fromStdString(head.value().toHex());
     }
 
-    if (auto* settings = window_->findChild<conf::SettingsService*>())
+    auto* settings = window_->findChild<conf::SettingsService*>();
+    if (settings)
         state[QStringLiteral("theme")] = settings->theme();
+    // Usage statistics: the gate main() evaluated, and the one this
+    // session would get with endpoints compiled in — so a PR build,
+    // which has none, still shows the shipped binary would stay quiet
+    // under the bridge. Neither may ever be "on" here.
+    state[QStringLiteral("telemetry")] = telemetry::gateName(window_->telemetryGate());
+    state[QStringLiteral("telemetryIfConfigured")] = telemetry::gateName(telemetry::evaluateGate({
+        .configured = true,
+        .platformName = QGuiApplication::platformName(),
+        .arguments = QCoreApplication::arguments(),
+        .settingOn = !settings || settings->usageStatisticsEnabled(),
+    }));
     // The *effective* palette, not the stored preference: a startup-
     // ordering bug once left the INI saying Dark while the window
     // rendered light, and only this distinction can catch that.

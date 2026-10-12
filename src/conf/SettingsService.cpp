@@ -7,6 +7,7 @@
 #include <QGuiApplication>
 #include <QScreen>
 #include <QShortcut>
+#include <QUuid>
 
 namespace gitbolt::conf {
 
@@ -414,6 +415,45 @@ void SettingsService::setRestoreLastWindowSize(bool restore)
 {
     settings_.setValue(QStringLiteral("window/restoreLastSize"), restore);
     notifyChanged();
+}
+
+// ---------------------------------------------------------------------------
+// Usage statistics
+// ---------------------------------------------------------------------------
+
+bool SettingsService::usageStatisticsEnabled() const
+{
+    return settings_.value(QStringLiteral("telemetry/enabled"), true).toBool();
+}
+
+void SettingsService::setUsageStatisticsEnabled(bool enabled)
+{
+    // Unchanged: no settingsChanged, so an Apply that leaves the
+    // switch alone doesn't look like a toggle to anyone.
+    if (usageStatisticsEnabled() == enabled)
+        return;
+    settings_.setValue(QStringLiteral("telemetry/enabled"), enabled);
+    notifyChanged();
+}
+
+QString SettingsService::telemetryInstallId() const
+{
+    return settings_.value(QStringLiteral("telemetry/installId")).toString();
+}
+
+QString SettingsService::ensureTelemetryInstallId()
+{
+    QString id = telemetryInstallId();
+    if (id.isEmpty()) {
+        id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        settings_.setValue(QStringLiteral("telemetry/installId"), id);
+    }
+    return id;
+}
+
+QString SettingsService::fileName() const
+{
+    return settings_.fileName();
 }
 
 // ---------------------------------------------------------------------------

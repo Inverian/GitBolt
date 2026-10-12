@@ -23,6 +23,7 @@ target_link_libraries(gitbolt_ui PUBLIC
     gitbolt_services
     gitbolt_conf
     gitbolt_dialogs   # MainWindow opens AboutDialog, SettingsDialog, etc.
+    gitbolt_telemetry # MainWindow counts actions and times opens (setTelemetry)
     Qt6::Widgets
     Qt6::Svg     # SVG icon rendering for Commands menu (Material Symbols)
     Qt6::Concurrent  # QtConcurrent::run for async dashboard repo probes

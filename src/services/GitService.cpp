@@ -55,7 +55,7 @@ bool GitService::openRepository(const QString& path) {
     return true;
 }
 
-void GitService::openRepositoryAsync(const QString& path) {
+quint64 GitService::openRepositoryAsync(const QString& path) {
     const quint64 gen = ++openGeneration_;
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
@@ -65,6 +65,7 @@ void GitService::openRepositoryAsync(const QString& path) {
     struct OpenOutcome {
         std::shared_ptr<git::Repository> repo;
         QString error;
+        int errorCode = 0;   // git::GitErrorCode
     };
 
     runner_.runWithResult<OpenOutcome>(
@@ -74,9 +75,10 @@ void GitService::openRepositoryAsync(const QString& path) {
             auto result = git::Repository::open(path.toStdString());
             if (!result)
                 return { nullptr,
-                         QString::fromStdString(result.error().message()) };
+                         QString::fromStdString(result.error().message()),
+                         static_cast<int>(result.error().code()) };
             return { std::make_shared<git::Repository>(std::move(*result)),
-                     QString() };
+                     QString(), 0 };
         },
         [this, path, gen](OpenOutcome outcome) {
             // Main thread. A newer open/close superseded us — drop
@@ -86,7 +88,7 @@ void GitService::openRepositoryAsync(const QString& path) {
                 return;
 
             if (!outcome.repo) {
-                emit repositoryOpenFailed(path, outcome.error);
+                emit repositoryOpenFailed(path, outcome.error, outcome.errorCode);
                 return;
             }
 
@@ -107,9 +109,10 @@ void GitService::openRepositoryAsync(const QString& path) {
             // finish before any refresh worker grabs repoMutex_.
             emit repositoryOpened(path);
             refreshStatus();
-            refreshLog();
+            loadLog(0, kLogPageSize, gen);   // tagged: initialLogLoaded
             refreshBranches();
         });
+    return gen;
 }
 
 void GitService::startWatchEnumeration(const QString& path, quint64 gen) {
@@ -206,15 +209,25 @@ void GitService::refreshStatus() {
 void GitService::refreshLog(int offset, int count) {
     if (deferToOwnerThread([this, offset, count] { refreshLog(offset, count); }))
         return;
+    loadLog(offset, count, 0);
+}
+
+void GitService::loadLog(int offset, int count, quint64 openGeneration) {
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     const LogScope scope = logScope_;
     // Snapshot so the worker lambda doesn't race with a UI-thread
     // setSelectedBranches() during the walk.
     const QStringList selected = selectedBranches_;
-    runner_.run([this, r, offset, count, scope, selected]() {
+    runner_.run([this, r, offset, count, scope, selected, openGeneration]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
+        // The first page of an open, every path below: right behind
+        // its logReady, so a receiver sees the page first.
+        const auto firstPageOfOpen = [this, offset, openGeneration](int commits) {
+            if (offset == 0 && openGeneration != 0)
+                emit initialLogLoaded(openGeneration, commits);
+        };
         auto walk = r->createRevWalk();
         if (!walk) {
             // Still emit for the initial page: the UI uses the first
@@ -223,6 +236,7 @@ void GitService::refreshLog(int offset, int count) {
             // closure too — an empty log, same end state as today.
             if (offset == 0)
                 emit logReady(std::vector<git::CommitData>{}, 0);
+            firstPageOfOpen(0);
             return;
         }
         walk->setSorting(git::SortOrder::TopologicalTime);
@@ -269,11 +283,23 @@ void GitService::refreshLog(int offset, int count) {
         } else {
             walk->pushHead();
         }
+        // Each page is a fresh walk from the tips, so step over the
+        // rows the model already has; without this every page after
+        // the first repeated it. A walk that ends inside the skip
+        // yields an empty page, which tells the model there's no more.
+        if (offset > 0) {
+            auto skipped = walk->skip(static_cast<size_t>(offset));
+            if (!skipped) return;
+        }
         auto commits = walk->next(static_cast<size_t>(count));
-        if (commits)
+        if (commits) {
+            const int size = static_cast<int>(commits->size());
             emit logReady(std::move(*commits), offset);
-        else if (offset == 0)
+            firstPageOfOpen(size);
+        } else if (offset == 0) {
             emit logReady(std::vector<git::CommitData>{}, 0);
+            firstPageOfOpen(0);
+        }
     });
 }
 

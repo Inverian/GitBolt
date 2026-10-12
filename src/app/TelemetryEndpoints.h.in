@@ -1,0 +1,22 @@
+// Generated from src/app/TelemetryEndpoints.h.in by CMake
+// (cmake/Telemetry.cmake). Do not edit the generated copy.
+#pragma once
+
+/// Where this build sends usage statistics, crash and error reports:
+/// empty in every build but CI's pushes to upstream main, which leaves
+/// main() with no telemetry service at all. Compiled into the app
+/// target and included by main.cpp only, so no library or test binary
+/// can carry them. cmake/Telemetry.cmake checked them: all or none,
+/// https or a loopback stub, no quotes or backslashes.
+namespace gitbolt::app::telemetry_endpoints {
+
+/// Ingest origin, "https://<host>": OpenPanel at /track, GlitchTip at
+/// /api/<project>/store/.
+inline constexpr char kHost[] = "@GITBOLT_TELEMETRY_HOST@";
+inline constexpr char kOpenPanelClientId[] = "@GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID@";
+inline constexpr char kOpenPanelSecret[] = "@GITBOLT_TELEMETRY_OPENPANEL_SECRET@";
+/// From the GlitchTip DSN: its public key and project id.
+inline constexpr char kGlitchTipKey[] = "@GITBOLT_TELEMETRY_GLITCHTIP_KEY@";
+inline constexpr char kGlitchTipProject[] = "@GITBOLT_TELEMETRY_GLITCHTIP_PROJECT@";
+
+} // namespace gitbolt::app::telemetry_endpoints

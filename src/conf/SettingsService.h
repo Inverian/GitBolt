@@ -119,6 +119,32 @@ public:
     bool restoreLastWindowSize() const;
     void setRestoreLastWindowSize(bool restore);
 
+    // ----- Usage statistics (src/telemetry, PRIVACY.md) -----
+    //
+    // The Settings switch, on by default. main() reads it once for the
+    // telemetry gate; MainWindow passes every change on to the
+    // TelemetryService, which stops sending and deletes its queue the
+    // moment it is turned off.
+    bool usageStatisticsEnabled() const;
+    void setUsageStatisticsEnabled(bool enabled);
+
+    /// The random ID usage statistics are sent under (a UUID v4), or
+    /// empty: it is created with the first event of a session that
+    /// sends. Read-only, so opening Settings, which shows it for
+    /// deletion requests, never creates one. Turning statistics off
+    /// keeps it, so it can still be quoted.
+    QString telemetryInstallId() const;
+    /// The install ID, created first if there is none (lower-case
+    /// UUID v4, as telemetry::isValidInstallId() expects). No
+    /// settingsChanged: nothing displays it live, as for the window
+    /// geometry.
+    QString ensureTelemetryInstallId();
+
+    /// GitBolt.ini's path. main() keeps the telemetry queue next to
+    /// it, so whatever isolates the INI (XDG_CONFIG_HOME in e2e runs,
+    /// QSettings::setPath in unit tests) isolates the queue too.
+    QString fileName() const;
+
     // ----- Dialog default size -----
     //
     // One W × H pair shared across every popup dialog the user

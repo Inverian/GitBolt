@@ -1,0 +1,28 @@
+=== GitBolt Crash Report ===
+Format: 2
+App version: 0.9.5
+Build: official
+Opt-out: none
+Session: user
+Qt version: 6.10.0 (runtime), 6.10.0 (compile)
+OS: windows 11
+Kernel: winnt 10.0.22631
+CPU Arch: x86_64
+Signal: SIGSEGV (11)
+Epoch: 1760000456
+
+--- Stack Trace ---
+#0 GitBolt.exe +0x1c2a0 ?
+#1 ucrtbase.dll +0x7c4e0 _seh_filter_exe+0x1a0
+#2 GitBolt.exe +0x2f3c0 ?
+#3 ntdll.dll +0xa2f1c __C_specific_handler+0x96
+#4 ntdll.dll +0x1e4b8 RtlDispatchException+0x2f8
+#5 ntdll.dll +0xa4a2e KiUserExceptionDispatcher+0x2e
+#6 GitBolt.exe +0x51a40 ?
+#7 Qt6Core.dll +0x2b1c0 QMetaObject::activate+0x40
+#8 Qt6Widgets.dll +0x1d0e4 QApplicationPrivate::notify_helper+0x1a4
+#9 C:\Users\alice\AppData\Local\Foo\foohook64.dll +0x2200 FooHook+0x10
+#10 KERNEL32.DLL +0x17344 BaseThreadInitThunk+0x14
+#11 ntdll.dll +0x526b1 RtlUserThreadStart+0x21
+
+=== End of Report ===

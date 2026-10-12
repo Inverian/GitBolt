@@ -50,7 +50,13 @@ public:
     /// repositoryOpenFailed (failure). A newer openRepositoryAsync /
     /// openRepository / closeRepository call supersedes an in-flight
     /// one — the stale result is discarded without any signal.
-    void openRepositoryAsync(const QString& path);
+    /// Returns this open's generation: initialLogLoaded carries it
+    /// with the open's first history page.
+    quint64 openRepositoryAsync(const QString& path);
+
+    /// The generation of the latest open or close: equal to what
+    /// openRepositoryAsync returned while that open is the latest.
+    quint64 openGeneration() const { return openGeneration_; }
 
     void closeRepository();
     bool isOpen() const;
@@ -108,7 +114,9 @@ public:
     git::GitProcess process() const;
 
     void refreshStatus();
-    void refreshLog(int offset = 0, int count = 256);
+    /// Commits per history page (CommitLogModel pages by the same).
+    static constexpr int kLogPageSize = 256;
+    void refreshLog(int offset = 0, int count = kLogPageSize);
     void refreshBranches();
 
     /// Async per-line blame for a repo-relative path. Result lands
@@ -305,7 +313,9 @@ public:
 
 signals:
     void repositoryOpened(const QString& path);
-    void repositoryOpenFailed(const QString& path, const QString& error);
+    /// `errorCode`: the git::GitErrorCode, for usage statistics'
+    /// repo_open_failed, which never sends the message.
+    void repositoryOpenFailed(const QString& path, const QString& error, int errorCode);
     void repositoryClosed();
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
     /// Right after each statusReady (and in its place when status
@@ -315,6 +325,13 @@ signals:
     /// step left behind.
     void repoStateReady(gitbolt::git::RepoState state, int conflicts);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
+    /// Right behind the logReady(…, 0) of the first history page a
+    /// successful openRepositoryAsync loads: that open's generation and
+    /// the page's size. A refresh of the previous repository that was
+    /// still walking when the open landed delivers its page after
+    /// repositoryOpened too, so only this tells the new repository's
+    /// first page apart (MainWindow times opens by it).
+    void initialLogLoaded(quint64 openGeneration, int commits);
     void branchesReady(std::vector<gitbolt::git::BranchInfo> branches);
     void blameReady(gitbolt::git::BlameResult result);
     void conflictsReady(std::vector<gitbolt::git::MergeConflictEntry> conflicts);
@@ -359,6 +376,11 @@ private:
     /// not thread-safe). `gen` ties the apply to the open that
     /// requested it.
     void startWatchEnumeration(const QString& path, quint64 gen);
+
+    /// refreshLog's worker. `openGeneration`, when not 0, marks the
+    /// first page of that open, which then also emits
+    /// initialLogLoaded.
+    void loadLog(int offset, int count, quint64 openGeneration);
 
     /// The threading rule's hop. Returns false on the service's own
     /// thread. Anywhere else it queues `retry` onto that thread, with

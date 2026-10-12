@@ -185,6 +185,8 @@ void AboutDialog::setupUi()
         "<a href='https://github.com/ThePieMonster/GitBolt/issues'>Report a bug</a>"
         " &nbsp;·&nbsp; "
         "<a href='https://github.com/ThePieMonster/GitBolt/blob/main/CONTRIBUTING.md'>Contribute</a>"
+        " &nbsp;·&nbsp; "
+        "<a href='https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md'>Privacy</a>"
         "</p>"));
 
     // ----- Assemble the layout -------------------------------------------

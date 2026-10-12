@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFontComboBox>
@@ -43,6 +44,11 @@ namespace {
 // from SettingsService::defaultDialogSize() — this is just the
 // nav-tree column width inside the dialog.
 constexpr int kNavWidth = 220;
+
+// What usage statistics collect, where they go, and how to have them
+// deleted (General › Usage statistics links here; so does About).
+constexpr char kPrivacyPolicyUrl[] =
+    "https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md";
 
 // Indent the category header slightly so sub-section rows sit
 // clearly under it without looking flat.
@@ -232,6 +238,81 @@ QWidget* SettingsDialog::createGeneralPage()
 
     showWhitespaceCheck_ = new QCheckBox(tr("Show whitespace characters"), page);
     form->addRow(QString(), showWhitespaceCheck_);
+
+    // Usage statistics: a row of its own, hidden until MainWindow says
+    // this build has telemetry (setUsageStatistics). Every control has
+    // an objectName: the test bridge's `click` falls back to matching
+    // button text by prefix, and "Copy" is no name to aim at.
+    usageGroup_ = new QGroupBox(tr("Usage statistics"), page);
+    usageGroup_->setObjectName(QStringLiteral("settings.usage-group"));
+    auto* usageForm = new QFormLayout(usageGroup_);
+    usageForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+    // A wrapped label's size hint is narrow; the notes below take about
+    // the width of the install ID row instead of four short lines.
+    constexpr int kUsageNoteWidth = 400;
+
+    // Not "anonymous": the statistics carry a pseudonymous install ID.
+    usageStatsCheck_ = new QCheckBox(tr("Send usage statistics and crash reports"),
+                                     usageGroup_);
+    usageStatsCheck_->setObjectName(QStringLiteral("settings.usage-statistics"));
+    usageForm->addRow(QString(), usageStatsCheck_);
+
+    // Why the switch is disabled, when an environment variable turned
+    // statistics off for this session.
+    usageLockedNote_ = new QLabel(usageGroup_);
+    usageLockedNote_->setObjectName(QStringLiteral("settings.usage-locked-note"));
+    usageLockedNote_->setWordWrap(true);
+    usageLockedNote_->setMinimumWidth(kUsageNoteWidth);
+    usageLockedNote_->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    usageForm->addRow(QString(), usageLockedNote_);
+    usageForm->setRowVisible(usageLockedNote_, false);
+
+    auto* usageNote = new QLabel(
+        tr("Which features you use, how fast repositories open, and summaries "
+           "of crashes and errors. Never repository names, paths, branches, "
+           "commit messages or file contents."),
+        usageGroup_);
+    usageNote->setWordWrap(true);
+    usageNote->setMinimumWidth(kUsageNoteWidth);
+    usageNote->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    usageForm->addRow(QString(), usageNote);
+
+    // The ID the statistics are sent under, for a deletion request.
+    // Read-only, and read only: opening Settings never creates one.
+    auto* idRow = new QHBoxLayout;
+    installIdEdit_ = new QLineEdit(usageGroup_);
+    installIdEdit_->setObjectName(QStringLiteral("settings.install-id"));
+    installIdEdit_->setReadOnly(true);
+    installIdEdit_->setPlaceholderText(tr("(none yet)"));
+    installIdEdit_->setToolTip(
+        tr("Quote this ID to have the usage statistics sent under it deleted."));
+    // A UUID is 36 characters; the same bounds as the Git Config page.
+    installIdEdit_->setMinimumWidth(320);
+    installIdEdit_->setMaximumWidth(360);
+    installIdCopy_ = new QPushButton(tr("Copy"), usageGroup_);
+    installIdCopy_->setObjectName(QStringLiteral("settings.install-id-copy"));
+    connect(installIdCopy_, &QPushButton::clicked, this, [this]() {
+        QApplication::clipboard()->setText(installIdEdit_->text());
+    });
+    idRow->addWidget(installIdEdit_);
+    idRow->addWidget(installIdCopy_);
+    idRow->addStretch();
+    usageForm->addRow(tr("Install ID:"), idRow);
+
+    auto* privacyLink = new QLabel(
+        QStringLiteral("<a href=\"%1\">%2</a>")
+            .arg(QString::fromLatin1(kPrivacyPolicyUrl),
+                 tr("What's collected").toHtmlEscaped()),
+        usageGroup_);
+    privacyLink->setObjectName(QStringLiteral("settings.usage-privacy-link"));
+    privacyLink->setTextFormat(Qt::RichText);
+    privacyLink->setOpenExternalLinks(true);
+    privacyLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    usageForm->addRow(QString(), privacyLink);
+
+    form->addRow(usageGroup_);
+    form->setRowVisible(usageGroup_, false);
+    generalForm_ = form;
 
     form->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
     return page;
@@ -819,6 +900,28 @@ void SettingsDialog::setShortcutActions(
     populateShortcutsTable();
 }
 
+void SettingsDialog::setUsageStatistics(bool available, const QString& lockedReason)
+{
+    usageAvailable_ = available;
+    usageLocked_ = available && !lockedReason.isEmpty();
+    generalForm_->setRowVisible(usageGroup_, available);
+    if (!available)
+        return;
+
+    // Locked, the switch shows what this session does (nothing is
+    // sent), not the stored preference the environment overrides.
+    usageStatsCheck_->setChecked(!usageLocked_ && settings_
+                                 && settings_->usageStatisticsEnabled());
+    usageStatsCheck_->setEnabled(!usageLocked_);
+    usageLockedNote_->setText(lockedReason);
+    if (auto* usageForm = qobject_cast<QFormLayout*>(usageGroup_->layout()))
+        usageForm->setRowVisible(usageLockedNote_, usageLocked_);
+
+    const QString installId = settings_ ? settings_->telemetryInstallId() : QString();
+    installIdEdit_->setText(installId);
+    installIdCopy_->setEnabled(!installId.isEmpty());
+}
+
 void SettingsDialog::populateShortcutsTable()
 {
     // Rows mirror the REAL QActions handed over by MainWindow. The
@@ -1121,6 +1224,11 @@ void SettingsDialog::apply()
     settings_->setCodeFontSize(fontSizeSpin_->value());
     settings_->setTabSize(tabSizeSpin_->value());
     settings_->setShowWhitespace(showWhitespaceCheck_->isChecked());
+    // Usage statistics: only when the group is shown and the switch is
+    // the user's to set. MainWindow passes the change on to telemetry
+    // when this batch's settingsChanged fires.
+    if (usageAvailable_ && !usageLocked_)
+        settings_->setUsageStatisticsEnabled(usageStatsCheck_->isChecked());
 
     // UI Design — writing this triggers settingsChanged, which
     // RepositoryView is connected to; it re-runs applyBottomPanePercent

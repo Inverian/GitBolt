@@ -30,8 +30,12 @@ function(gitbolt_add_test test_name source_file)
     # so TIMEOUT leaves room for the functions before it and for the
     # debugger; it also catches hangs outside test functions, such as
     # teardown. These binaries take seconds, no function close to 60 s.
+    # DO_NOT_TRACK, GITBOLT_TELEMETRY: belt and braces on top of the
+    # facts that no test binary links the app, where telemetry
+    # endpoints live, and that the telemetry tests inject the gate's
+    # environment instead of reading this one.
     set_tests_properties(${test_name} PROPERTIES
-        ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000"
+        ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000;DO_NOT_TRACK=1;GITBOLT_TELEMETRY=0"
         TIMEOUT 180)
 endfunction()
 
@@ -62,6 +66,33 @@ endif()
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+
+# telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
+# Never a real endpoint: test binaries don't link src/app, where the
+# endpoints live.
+gitbolt_add_test(test_telemetry telemetry/TestTelemetry.cpp)
+target_sources(test_telemetry PRIVATE telemetry/HttpStub.h telemetry/CrashHeader.h)
+target_link_libraries(test_telemetry PRIVATE gitbolt_telemetry Qt6::Network)
+# Crash reports: fixtures for every refusal, the renderHeader round
+# trip, and (POSIX) a death test that parses the crash.log a real
+# handler wrote. Its helper is built as "gitbolt", in a directory of
+# its own, so the parser counts its frames as the app's.
+gitbolt_add_test(test_crash_log_parser telemetry/TestCrashLogParser.cpp)
+target_sources(test_crash_log_parser PRIVATE telemetry/CrashHeader.h)
+target_link_libraries(test_crash_log_parser PRIVATE gitbolt_telemetry)
+target_compile_definitions(test_crash_log_parser PRIVATE
+    GITBOLT_CRASH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crash")
+if(NOT WIN32)
+    add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
+    target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util)
+    set_target_properties(gitbolt_crash_helper PROPERTIES
+        OUTPUT_NAME gitbolt
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
+    gitbolt_set_warnings(gitbolt_crash_helper)
+    add_dependencies(test_crash_log_parser gitbolt_crash_helper)
+    target_compile_definitions(test_crash_log_parser PRIVATE
+        GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
+endif()
 
 # models/ tests — exercise the Qt model layer (the log model from in-memory
 # data, the branch model from what a temp repo reports)
@@ -94,6 +125,22 @@ target_link_libraries(test_rebase_widgets PRIVATE gitbolt_dialogs)
 # so a local run doesn't flash windows or steal focus (CI runs every test
 # off screen anyway).
 set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# dialogs/ — Settings › General › Usage statistics and the
+# SettingsService keys behind it. Off screen like test_rebase_widgets:
+# no flashing windows, and its Copy test needs the offscreen platform's
+# in-process clipboard (it skips anywhere else, rather than overwrite
+# the user's).
+gitbolt_add_test(test_usage_statistics_settings dialogs/TestUsageStatisticsSettings.cpp)
+target_link_libraries(test_usage_statistics_settings PRIVATE gitbolt_dialogs gitbolt_telemetry)
+set_property(TEST test_usage_statistics_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# ui/ — the Settings switch reaching usage statistics through a real
+# MainWindow's own SettingsService, against the loopback HttpStub.
+gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
+target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h)
+target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)
+set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.
