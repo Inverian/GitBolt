@@ -436,6 +436,14 @@ void SettingsService::setUsageStatisticsEnabled(bool enabled)
     notifyChanged();
 }
 
+bool SettingsService::reloadUsageStatisticsEnabled()
+{
+    // sync() re-reads the file when its size or time changed, merging
+    // this process's own pending writes (which it writes out).
+    settings_.sync();
+    return usageStatisticsEnabled();
+}
+
 QString SettingsService::telemetryInstallId() const
 {
     return settings_.value(QStringLiteral("telemetry/installId")).toString();

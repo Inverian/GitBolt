@@ -1,5 +1,7 @@
 #include "app/SingleInstance.h"
 
+#include "util/LockFiles.h"
+
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDeadlineTimer>
@@ -11,35 +13,6 @@
 #include <QThread>
 
 namespace gitbolt::app {
-
-namespace {
-
-// Clears a leftover lock file that QLockFile's own PID check can never
-// prove stale: one truncated by a crash mid-write, or naming another
-// machine ID. Safe against a live owner: its flock (Unix) or open
-// handle (Windows) dies with it, and removeStaleLockFile() fails while
-// one is held. The age check stays clear of the instant between a new
-// owner creating the file and locking it. Serialised through
-// "<lock>.rmlock" exactly as QLockFile serialises its own stale
-// removal: two launchers removing at once could otherwise each unlink
-// a lock the other had just re-created, and both would run as the
-// single instance.
-bool removeUnprovableStaleLock(QLockFile& lock)
-{
-    const auto settled = [&lock]() {
-        const QDateTime written = QFileInfo(lock.fileName()).lastModified();
-        return written.isValid()
-               && qAbs(written.secsTo(QDateTime::currentDateTime())) >= 2;
-    };
-    if (!settled())
-        return false;
-    QLockFile removal(lock.fileName() + QStringLiteral(".rmlock"));
-    // Re-checked under the removal lock: another launcher may have
-    // just removed the file and re-created it as a live lock.
-    return removal.tryLock(0) && settled() && lock.removeStaleLockFile();
-}
-
-} // namespace
 
 QString instanceRuntimeDir()
 {
@@ -124,7 +97,7 @@ Claim claimInstance(QLockFile& lock, const QString& serverName, const QString& p
         // Nobody listening, or the owner hung up unanswered: retry —
         // unless the lock is stale in a way its contents can't prove,
         // which removal settles.
-        if (removeUnprovableStaleLock(lock))
+        if (util::removeUnprovableStaleLock(lock))
             continue;
         QThread::msleep(100);
     }

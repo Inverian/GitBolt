@@ -23,10 +23,12 @@ constexpr qsizetype kMaxDistinctCommands = 512;
 } // namespace
 
 TelemetryService::TelemetryService(Config config, std::function<QString()> installIdProvider,
-                                   bool enabled, QObject* parent)
+                                   bool enabled, std::function<bool()> switchReader,
+                                   QObject* parent)
     : QObject(parent),
       config_(std::move(config)),
       installIdProvider_(std::move(installIdProvider)),
+      switchReader_(std::move(switchReader)),
       client_{config_.appVersion, Environment::current()},
       userAgent_(userAgent(client_)),
       complete_(config_.isComplete()),
@@ -149,13 +151,21 @@ void TelemetryService::scheduleFlush() {
     if (!isActive() || inCycle_ || backingOff_ || flushTimer_.isActive()
         || sentThisTick_ >= config_.maxPerFlush)
         return;
-    flushTimer_.start(config_.firstFlushDelayMs);
+    // A crash summary (the queue keeps it in front) goes at once: the
+    // crash may come back within seconds, and the next one replaces a
+    // summary still queued, so a crash loop would never be reported.
+    const bool crash = !queue_->isEmpty() && queue_->front().isCrash();
+    flushTimer_.start(crash ? 0 : config_.firstFlushDelayMs);
 }
 
 void TelemetryService::beginCycle() {
     // backingOff_: a flush armed before a request failed would otherwise
     // send again before the next retry tick.
     if (!isActive() || inCycle_ || backingOff_)
+        return;
+    // Every cycle, the first flush's and each retry tick's, idle or
+    // not: the switch may have been turned off in another process.
+    if (switchedOffElsewhere())
         return;
     if (queue_->isEmpty()) {
         queue_->sync();
@@ -224,6 +234,12 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
         backingOff_ = true;
         endCycle();
         return;
+    case Outcome::Unreachable:
+        // As a Retry, but the record keeps its attempts: time offline
+        // costs it nothing, and adds nothing for endCycle to write.
+        backingOff_ = true;
+        endCycle();
+        return;
     }
 }
 
@@ -282,6 +298,10 @@ void TelemetryService::setUserEnabled(bool enabled) {
 }
 
 void TelemetryService::persistPending() {
+    // Turned off in another process since the last cycle: the queue is
+    // deleted, as by the switch, rather than written once more.
+    if (isActive())
+        switchedOffElsewhere();
     if (!isActive()) {
         abortInFlight();
         stopTimers();
@@ -312,6 +332,13 @@ void TelemetryService::stopTimers() {
     retryTimer_.stop();
     paceTimer_.stop();
     countTimer_.stop();
+}
+
+bool TelemetryService::switchedOffElsewhere() {
+    if (!switchReader_ || switchReader_())
+        return false;
+    setUserEnabled(false);   // stops, and deletes the queue
+    return true;
 }
 
 } // namespace gitbolt::telemetry

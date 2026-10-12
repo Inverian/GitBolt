@@ -11,7 +11,7 @@ set(GITBOLT_APP_SOURCES
 # twice are Unix-only.
 add_library(gitbolt_instance STATIC SingleInstance.cpp SingleInstance.h)
 target_include_directories(gitbolt_instance PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(gitbolt_instance PUBLIC Qt6::Core Qt6::Network)
+target_link_libraries(gitbolt_instance PUBLIC Qt6::Core Qt6::Network PRIVATE gitbolt_util)
 gitbolt_set_warnings(gitbolt_instance)
 
 # On macOS, bundle the .icns so the Dock and Finder show our app icon.

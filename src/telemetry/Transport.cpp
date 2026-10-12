@@ -2,15 +2,34 @@
 
 namespace gitbolt::telemetry {
 
+namespace {
+
+// The request never left this machine, or reached nothing that
+// answers: it says nothing about the record.
+bool isUnreachable(QNetworkReply::NetworkError error) {
+    switch (error) {
+    case QNetworkReply::HostNotFoundError:
+    case QNetworkReply::ConnectionRefusedError:
+    case QNetworkReply::TemporaryNetworkFailureError:
+    case QNetworkReply::NetworkSessionFailedError:
+    case QNetworkReply::ProxyNotFoundError:
+    case QNetworkReply::ProxyConnectionRefusedError:
+        return true;
+    default:
+        return false;
+    }
+}
+
+} // namespace
+
 Outcome classify(int httpStatus, QNetworkReply::NetworkError error) {
-    Q_UNUSED(error);   // every no-status error is a Retry; see the header
     if (httpStatus >= 200 && httpStatus < 300)
         return Outcome::Sent;
     if (httpStatus == 408 || httpStatus == 429 || (httpStatus >= 500 && httpStatus < 600))
         return Outcome::Retry;
     if (httpStatus > 0)
         return Outcome::Drop;
-    return Outcome::Retry;
+    return isUnreachable(error) ? Outcome::Unreachable : Outcome::Retry;
 }
 
 QNetworkRequest jsonPostRequest(const QUrl& url, const Config& config, const QString& userAgent) {

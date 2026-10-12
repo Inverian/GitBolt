@@ -14,9 +14,11 @@
 //   - the fingerprint: stable for one build, per release
 //   - a death test (POSIX): a helper installs the real handler and
 //     dies on SIGSEGV; the crash.log it wrote parses, with the handler
-//     and trampoline frames gone, and GitBolt's frames keep their
-//     module when it was started through a link of another name (an
-//     AppImage's AppRun)
+//     and trampoline frames gone, GitBolt's frames keep their module
+//     when it was started through a link of another name (an
+//     AppImage's AppRun), and a fault's newest frame is the faulting
+//     function itself; a test session's crash leaves the user's
+//     crash.log alone
 //
 // Synthetic reports pin their "OS:" line (CrashHeader.h): the parser's
 // frame rules follow it, and the Windows runner would otherwise write
@@ -187,6 +189,13 @@ private slots:
         QTest::newRow("Windows") << "windows.log" << "SIGSEGV" << 11 << "Windows" << "11"
                                  << "x86_64" << qint64(1760000456) << 6 << "GitBolt.exe"
                                  << quint64(0x51a40) << "RtlUserThreadStart";
+        // An unhandled C++ exception: #0 the handler, #1-#3 abort() from
+        // terminate(), #4 the CRT's unhandled-exception filter (inside
+        // GitBolt.exe), #5-#9 the dispatch, #10-#12 the throw itself.
+        QTest::newRow("Windows C++ exception")
+            << "windows-exception.log" << "SIGABRT" << 22 << "Windows" << "11" << "x86_64"
+            << qint64(1760000789) << 5 << "GitBolt.exe" << quint64(0x51a40)
+            << "RtlUserThreadStart";
     }
 
     void acceptedFixtures() {
@@ -323,6 +332,35 @@ private slots:
         QCOMPARE(event->frames.size(), 2);
         QCOMPARE(event->frames.last().package, QStringLiteral("GitBolt.exe"));
         QCOMPARE(event->frames.last().offset, std::optional<quint64>(0x400));
+    }
+
+    // An unhandled C++ exception reaches the handler through the CRT's
+    // unhandled-exception filter, which is in GitBolt.exe: it used to
+    // pass for the crash point, with the throw's frames kept above the
+    // thrower. The crash groups with the thrower, as a fault there would.
+    void windowsCxxExceptionDropsThrowMachinery() {
+        const std::optional<CrashEvent> event =
+            CrashLogParser::parse(fixture(QStringLiteral("windows-exception.log")));
+        QVERIFY(event);
+        const QStringList machinery = {QStringLiteral("terminate"),
+                                       QStringLiteral("UnhandledExceptionFilter"),
+                                       QStringLiteral("RtlDispatchException"),
+                                       QStringLiteral("RtlRaiseException"),
+                                       QStringLiteral("RaiseException"),
+                                       QStringLiteral("_CxxThrowException")};
+        for (const CrashFrame& frame : event->frames) {
+            QVERIFY(frame.offset != std::optional<quint64>(0x2f9a4));   // the CRT's filter
+            QVERIFY2(!machinery.contains(frame.function), qPrintable(frame.function));
+        }
+
+        const std::optional<CrashEvent> there = CrashLogParser::parse(report(
+            withCrashOs(officialHeader(), "windows 11"),
+            {QStringLiteral("#0 GitBolt.exe +0x1c2a0 ?"), QStringLiteral("#1 GitBolt.exe +0x51a40 ?"),
+             QStringLiteral("#2 GitBolt.exe +0x52b10 ?"),
+             QStringLiteral("#3 Qt6Core.dll +0x2b1c0 QMetaObject::activate+0x40")},
+            QStringLiteral("SIGABRT (22)")));
+        QVERIFY(there);
+        QCOMPARE(event->fingerprint, there->fingerprint);
     }
 
     void keepsTheNewest64Frames() {
@@ -466,11 +504,17 @@ private slots:
     // on SIGSEGV with HOME in a temporary directory.
     void realCrashLogParses_data() {
         QTest::addColumn<QString>("launchedAs");
-        QTest::newRow("by its own name") << QString();
+        QTest::addColumn<bool>("fault");
+        QTest::newRow("by its own name") << QString() << false;
         // glibc's dladdr names the main program by argv[0], and an
         // AppImage runs GitBolt as AppRun or by the .AppImage's name.
         QTest::newRow("through a link of another name")
-            << QStringLiteral("GitBolt-0.9.5-x86_64.AppImage");
+            << QStringLiteral("GitBolt-0.9.5-x86_64.AppImage") << false;
+        // A real fault, in a leaf function of GitBolt's own: that
+        // function must be the newest frame. macOS's backtrace() walks
+        // frame pointers and never has the interrupted PC, so the
+        // caller used to pass for the crash point.
+        QTest::newRow("a fault in a leaf function") << QString() << true;
     }
 
     void realCrashLogParses() {
@@ -478,6 +522,7 @@ private slots:
         QSKIP("POSIX only: the Windows handler is a different code path");
 #else
         QFETCH(QString, launchedAs);
+        QFETCH(bool, fault);
         QTemporaryDir home;
         QVERIFY(home.isValid());
         QString program = QStringLiteral(GITBOLT_CRASH_HELPER);
@@ -490,7 +535,7 @@ private slots:
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
         env.insert(QStringLiteral("HOME"), home.path());
         helper.setProcessEnvironment(env);
-        helper.start(program, {});
+        helper.start(program, fault ? QStringList{QStringLiteral("fault")} : QStringList());
         QVERIFY(helper.waitForFinished(60000));
         QCOMPARE(helper.exitStatus(), QProcess::CrashExit);
 
@@ -499,7 +544,7 @@ private slots:
         const QString log = QString::fromUtf8(file.readAll());
         QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("1.2.3", true, false, false))),
                  qPrintable(log));
-        QVERIFY(log.contains(QStringLiteral("\nSignal: SIGSEGV (11)\n")));
+        QVERIFY2(log.contains(QStringLiteral("\nSignal: SIGSEGV (11)\n")), qPrintable(log));
 
         // Every stack line is in the parser's format, numbered from 0.
         static const QRegularExpression line(QStringLiteral(
@@ -530,11 +575,23 @@ private slots:
         QCOMPARE(event->signal, QStringLiteral("SIGSEGV"));
         QCOMPARE(event->signalNumber, 11);
         QCOMPARE(event->frames.size(), lines.size() - 2);
-        // The newest frame left is #2, where raise() was running.
+        // The newest frame left is #2, where raise() was running, or
+        // the faulting instruction.
         const CrashFrame& top = event->frames.last();
         if (top.package != QLatin1String("<other>")) {
             QCOMPARE(top.package, modules.at(2));
             QCOMPARE(top.offset, std::optional<quint64>(offsets.at(2)));
+        }
+        if (fault) {
+            const QRegularExpressionMatch start =
+                QRegularExpression(QStringLiteral("^faultNow \\+0x([0-9a-f]+)$"),
+                                   QRegularExpression::MultilineOption)
+                    .match(QString::fromUtf8(helper.readAllStandardOutput()));
+            QVERIFY(start.hasMatch());
+            const quint64 faultNow = start.captured(1).toULongLong(nullptr, 16);
+            QVERIFY2(top.inApp && top.offset && *top.offset >= faultNow
+                         && *top.offset < faultNow + 0x100,
+                     qPrintable(log));
         }
         // crashNow, crashSoon and main, as the app's own: no names.
         int inApp = 0;
@@ -547,6 +604,49 @@ private slots:
         }
         QVERIFY2(inApp >= 1, qPrintable(log));
         QVERIFY(!eventJson(*event).contains(home.path().toUtf8()));
+#endif
+    }
+
+    // A test session's crash goes to crash-test.log. crash.log is the
+    // user's (e2e and bridge runs keep the real HOME), and the handler
+    // truncates the file it writes: a report of theirs still waiting
+    // for their next launch used to be replaced by one that launch
+    // then refused to send.
+    void testSessionCrashKeepsUsersLog() {
+#ifndef GITBOLT_CRASH_HELPER
+        QSKIP("POSIX only: the Windows handler is a different code path");
+#else
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QVERIFY(QDir(home.path()).mkpath(QStringLiteral(".gitbolt")));
+        const QString usersLog = home.filePath(QStringLiteral(".gitbolt/crash.log"));
+        const QByteArray users = fixture(QStringLiteral("macos.log")).toUtf8();
+        QVERIFY(!users.isEmpty());
+        {
+            QFile file(usersLog);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            QCOMPARE(file.write(users), users.size());
+        }
+
+        QProcess helper;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("HOME"), home.path());
+        helper.setProcessEnvironment(env);
+        helper.start(QStringLiteral(GITBOLT_CRASH_HELPER), {QStringLiteral("test-session")});
+        QVERIFY(helper.waitForFinished(60000));
+        QCOMPARE(helper.exitStatus(), QProcess::CrashExit);
+
+        QFile kept(usersLog);
+        QVERIFY(kept.open(QIODevice::ReadOnly));
+        QCOMPARE(kept.readAll(), users);
+
+        QFile testLog(home.filePath(QStringLiteral(".gitbolt/crash-test.log")));
+        QVERIFY(testLog.open(QIODevice::ReadOnly));
+        const QString log = QString::fromUtf8(testLog.readAll());
+        QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("1.2.3", true, false, true))),
+                 qPrintable(log));
+        QVERIFY(log.contains(QStringLiteral("\n--- Stack Trace ---\n#0 ")));
+        QVERIFY(!CrashLogParser::parse(log));
 #endif
     }
 };

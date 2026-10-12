@@ -1,5 +1,7 @@
 #include "telemetry/EventQueue.h"
 
+#include "util/LockFiles.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -64,6 +66,16 @@ QString lockPath(const QString& dir) {
     return dir + QStringLiteral("/queue.lock");
 }
 
+// tryLock(0), and once more after clearing a lock QLockFile can't prove
+// stale with stale time 0 (another machine's, or truncated): left in
+// place, it would keep the queue unusable, and undeletable, for good.
+// A live owner's lock is never cleared (util/LockFiles.h).
+bool tryLockOrClearUnprovable(QLockFile& lock) {
+    return lock.tryLock(0)
+           || (lock.error() == QLockFile::LockFailedError
+               && util::removeUnprovableStaleLock(lock) && lock.tryLock(0));
+}
+
 } // namespace
 
 bool QueuedRecord::isCrash() const {
@@ -94,7 +106,7 @@ bool EventQueue::open() {
         return false;
     lock_ = std::make_unique<QLockFile>(lockPath(dir_));
     lock_->setStaleLockTime(0);
-    if (!lock_->tryLock(0)) {
+    if (!tryLockOrClearUnprovable(*lock_)) {
         lock_.reset();
         return false;
     }
@@ -138,6 +150,15 @@ bool EventQueue::open() {
         lineBytes_.append(bytes);
         totalBytes_ += bytes;
     }
+    // The file has its lines in the order they were appended: the
+    // crash goes back in front.
+    for (qsizetype i = 1; i < records_.size(); ++i) {
+        if (records_.at(i).isCrash()) {
+            records_.move(i, 0);
+            lineBytes_.move(i, 0);
+            break;
+        }
+    }
     enforceCaps();
     return true;
 }
@@ -156,8 +177,11 @@ void EventQueue::append(QueuedRecord record) {
     }
     const QByteArray line = serialize(record);
     record.id = nextId_++;
-    records_.append(std::move(record));
-    lineBytes_.append(line.size());
+    // In memory only: the file keeps the order appended, and open()
+    // puts the crash back in front.
+    const qsizetype at = record.isCrash() ? 0 : records_.size();
+    records_.insert(at, std::move(record));
+    lineBytes_.insert(at, line.size());
     totalBytes_ += line.size();
 
     QFile file(filePath());
@@ -231,8 +255,9 @@ void EventQueue::discard(const QString& dir) {
     QLockFile lock(lockPath(dir));
     lock.setStaleLockTime(0);
     // Held by a live process: its session still uses the queue (that
-    // process applies its own gate). tryLock clears a dead owner's lock.
-    if (!lock.tryLock(0))
+    // process applies its own gate). tryLock clears a dead owner's
+    // lock, tryLockOrClearUnprovable one no PID check can clear.
+    if (!tryLockOrClearUnprovable(lock))
         return;
     QFile::remove(filePath(dir));
     lock.unlock();

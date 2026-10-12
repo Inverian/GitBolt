@@ -10,6 +10,7 @@
 #include "telemetry/TelemetryGate.h"
 #include "telemetry/TelemetryService.h"
 #include "util/CrashHandler.h"
+#include "util/LockFiles.h"
 #include "util/TestSession.h"
 
 #include <memory>
@@ -412,22 +413,26 @@ int main(int argc, char* argv[]) {
     if (telemetry::discardsQueue(telemetryGate))
         telemetry::EventQueue::discard(telemetryConfig.queueDir);
     // Declared before `window`, so it outlives the raw pointer the
-    // window keeps, and after `settings`, which its ID provider uses.
-    // A disabled one for the Settings switch, so turning it back on
-    // works without a restart.
+    // window keeps, and after `settings`, which its ID provider and
+    // switch reader use. A disabled one for the Settings switch, so
+    // turning it back on works without a restart. The reader re-reads
+    // GitBolt.ini at every flush cycle and at quit: a switch turned off
+    // by another process reaches this one no other way.
     std::unique_ptr<telemetry::TelemetryService> telemetryService;
     if (telemetry::createsService(telemetryGate)) {
         telemetryService = std::make_unique<telemetry::TelemetryService>(
             telemetryConfig,
             [&settings]() { return settings.ensureTelemetryInstallId(); },
-            telemetryGate == telemetry::Gate::Active);
+            telemetryGate == telemetry::Gate::Active,
+            [&settings]() { return settings.reloadUsageStatisticsEnabled(); });
         QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
                          &telemetry::TelemetryService::persistPending);
     }
 
     // Check for crash report from a previous session. Not in a test
     // session: ~/.gitbolt/crash.log is the user's (e2e and bridge runs
-    // keep the real HOME), so it stays for their next launch. A test
+    // keep the real HOME, and write their own crashes to
+    // crash-test.log), so it stays for their next launch. A test
     // that plants one in a HOME of its own opts in with
     // GITBOLT_TEST_CRASH_BOX=1 (tests/e2e/test_crash_box_handoff.py).
     // The report is read here, before the telemetry service starts

@@ -5,9 +5,11 @@
 set(SOURCES
     AsyncRunner.cpp
     CrashHandler.cpp
+    LockFiles.cpp
     TestSession.cpp
     AsyncRunner.h
     CrashHandler.h
+    LockFiles.h
     LruCache.h
     PerformanceTimer.h
     TestSession.h

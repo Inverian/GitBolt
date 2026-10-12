@@ -3,7 +3,8 @@
 // and the SettingsService keys behind it:
 //
 //   - the switch defaults to on, persists, and an unchanged value
-//     emits no settingsChanged;
+//     emits no settingsChanged; a reload sees another process turn it
+//     off;
 //   - the install ID is empty until telemetry asks for one, is then a
 //     UUID v4 the telemetry library accepts, and stays the same;
 //   - GitBolt.ini's path, which the telemetry queue sits next to,
@@ -22,6 +23,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDateTime>
 #include <QFile>
 #include <QFileInfo>
 #include <QGroupBox>
@@ -89,6 +91,34 @@ private slots:
         }
         SettingsService again;
         QVERIFY(!again.usageStatisticsEnabled());
+    }
+
+    // Another process turns the switch off: QSettings keeps serving
+    // what it read until it syncs, so the telemetry service re-reads
+    // through reloadUsageStatisticsEnabled(). Every SettingsService of
+    // this process sees the change then (MainWindow's own passes the
+    // switch on at each settingsChanged, so it must not stay on).
+    void reloadSeesAnotherProcessesSwitch() {
+        const QString ini = SettingsService().fileName();
+        auto writeIni = [&ini](const QByteArray& content, int ageSecs) {
+            QFile file(ini);
+            return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+                   && file.write(content) == content.size() && file.flush()
+                   && file.setFileTime(QDateTime::currentDateTime().addSecs(ageSecs),
+                                       QFileDevice::FileModificationTime);
+        };
+        QVERIFY(writeIni("[telemetry]\nenabled=true\n", -10));
+        SettingsService holder;
+        SettingsService window;
+        QVERIFY(holder.usageStatisticsEnabled());
+        QVERIFY(window.usageStatisticsEnabled());
+
+        // The other process's write: a new size and a later time.
+        QVERIFY(writeIni("[telemetry]\nenabled=false\n", 0));
+        QVERIFY(holder.usageStatisticsEnabled());   // what it read before
+        QVERIFY(!holder.reloadUsageStatisticsEnabled());
+        QVERIFY(!holder.usageStatisticsEnabled());
+        QVERIFY(!window.usageStatisticsEnabled());
     }
 
     void installIdIsCreatedOnceAndOnlyOnRequest() {

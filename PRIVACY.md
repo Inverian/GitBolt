@@ -104,12 +104,14 @@ computer, so you can still quote it to have your data deleted.
 ## When it is sent
 
 GitBolt sends nothing until its window is open. Events are sent about
-10 seconds after they happen, one request at a time. If the server
-can't be reached, they wait on your computer and GitBolt tries again
-every 15 minutes; events still waiting when GitBolt quits are sent
-the next time it starts. They are kept in a file next to GitBolt's
-settings file: at most 500 events, for at most 14 days, and an event
-that fails to send 5 times is dropped.
+10 seconds after they happen, one request at a time. A crash summary
+is sent as soon as the window is open, before other events. If the
+server can't be reached, they wait on your computer and GitBolt tries
+again every 15 minutes; events still waiting when GitBolt quits are
+sent the next time it starts. They are kept in a file next to
+GitBolt's settings file: at most 500 events, for at most 14 days, and
+an event that fails to send 5 times is dropped. Tries that never reach
+the server, such as while your computer is offline, don't count.
 
 ## Where it goes
 

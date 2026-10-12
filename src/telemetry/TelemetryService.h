@@ -26,12 +26,16 @@ namespace gitbolt::telemetry {
 /// one paced sender on the GUI thread drains it, one POST at a time:
 ///   - A flush starts firstFlushDelayMs after the first unsent record
 ///     (and after start() if records are left from earlier sessions).
+///     A crash summary goes first (the queue keeps it in front), and
+///     at once: start() flushes on the next event-loop turn.
 ///   - The next request starts paceMs after the previous one finished;
 ///     at most maxPerFlush requests per flushIntervalMs.
 ///   - A Retry outcome (Transport.h) counts an attempt and ends the
 ///     cycle: nothing more goes out until the next flushIntervalMs
 ///     tick, which is the only backoff. So an outage costs one request
 ///     per tick, and a poisoned record is gone after maxAttempts ticks.
+///     Unreachable (offline: no server saw the request) ends the cycle
+///     the same way but counts nothing.
 ///   - Command counts become command_used events every countWindowMs
 ///     and at quit.
 ///
@@ -49,8 +53,16 @@ public:
     /// create an ID. An ID that isn't a canonical UUID v4 is never
     /// sent; OpenPanel events are then dropped. `enabled`: the
     /// Settings switch (false for the SettingOff gate).
+    ///
+    /// `switchReader` re-reads the switch from disk (SettingsService::
+    /// reloadUsageStatisticsEnabled), for a switch turned off in
+    /// another process: no settingsChanged reaches this one, and while
+    /// this process holds the queue lock the other can't delete the
+    /// queue. Read at every flush cycle (each retry tick and each
+    /// first flush) and at quit; false acts as setUserEnabled(false),
+    /// before anything is sent or written.
     TelemetryService(Config config, std::function<QString()> installIdProvider, bool enabled,
-                     QObject* parent = nullptr);
+                     std::function<bool()> switchReader = {}, QObject* parent = nullptr);
     ~TelemetryService() override;
 
     /// Starts the timers and schedules the first flush. main() calls it
@@ -91,7 +103,8 @@ public:
     /// For QCoreApplication::aboutToQuit: writes pending counts into
     /// the queue, aborts the in-flight request (its record stays queued
     /// with its attempts unchanged), stops the timers and rewrites the
-    /// queue once. Nothing is sent after this.
+    /// queue once. Nothing is sent after this. A switch turned off in
+    /// another process (`switchReader`) deletes the queue instead.
     void persistPending();
 
     bool isActive() const;
@@ -112,9 +125,11 @@ private:
     void flushCounts();
     void abortInFlight();
     void stopTimers();
+    bool switchedOffElsewhere();
 
     Config config_;
     std::function<QString()> installIdProvider_;
+    std::function<bool()> switchReader_;
     ClientInfo client_;
     QString userAgent_;
     QString installId_;

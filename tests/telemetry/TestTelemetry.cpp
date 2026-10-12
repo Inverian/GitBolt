@@ -9,11 +9,14 @@
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
-//   - pacing, the per-tick budget, the debounced first flush, retry
-//     and drop outcomes, backoff until the next tick
-//   - the off switch and quit while a request is in flight: nothing
-//     written before the discard, attempts untouched, nothing lost
-//   - the queue's caps, load-time rules and lock
+//   - pacing, the per-tick budget, the debounced first flush (a crash
+//     summary goes first, at once), retry and drop outcomes, backoff
+//     until the next tick, offline tries that cost no attempt
+//   - the off switch, here or in another process, and quit while a
+//     request is in flight: nothing written before the discard,
+//     attempts untouched, nothing lost
+//   - the queue's caps, load-time rules and lock, and a stale lock no
+//     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
 //     leave
 //
@@ -25,6 +28,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLockFile>
+#include <QNetworkAccessManager>
 #include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTcpServer>
@@ -138,6 +143,41 @@ int closedPort() {
     const int port = probe.serverPort();
     probe.close();
     return port;
+}
+
+// A crash.log the parser accepts. A macOS report wherever this runs:
+// the parser's frame rules follow the OS line (CrashHeader.h).
+QString crashReport() {
+    return QString::fromUtf8(gitbolt::test::crashHeader("0.9.1", true, false, false))
+           + QStringLiteral("Signal: SIGSEGV (11)\nEpoch: 1760000000\n\n"
+                            "--- Stack Trace ---\n"
+                            "#0 GitBolt +0x10 ?\n"
+                            "#1 libsystem_platform.dylib +0x20 _sigtramp+0x1\n"
+                            "#2 GitBolt +0x30 ?\n"
+                            "#3 dyld +0x40 start+0x2\n"
+                            "\n=== End of Report ===\n");
+}
+
+// A new queue in `dir` holding one record.
+bool writeOneRecordQueue(const QString& dir) {
+    if (!QDir().mkpath(dir))
+        return false;
+    QFile file(EventQueue::filePath(dir));
+    const QByteArray line =
+        "{\"v\":1,\"sink\":\"openpanel\",\"attempts\":0,\"queued\":\""
+        + QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs).toUtf8()
+        + "\",\"payload\":{\"n\":1}}\n";
+    return file.open(QIODevice::WriteOnly) && file.write(line) == line.size();
+}
+
+// Rewrites `path` with `content`, last modified a minute ago: long past
+// util::removeUnprovableStaleLock's settle time.
+bool writeAgedFile(const QString& path, const QByteArray& content) {
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+           && file.write(content) == content.size() && file.flush()
+           && file.setFileTime(QDateTime::currentDateTime().addSecs(-60),
+                               QFileDevice::FileModificationTime);
 }
 
 } // namespace
@@ -540,10 +580,22 @@ private slots:
         QTest::newRow("503") << 503 << E::ServiceUnavailableError << Outcome::Retry;
         QTest::newRow("transfer timeout") << 0 << E::TimeoutError << Outcome::Retry;
         QTest::newRow("cancel not ours") << 0 << E::OperationCanceledError << Outcome::Retry;
-        QTest::newRow("refused") << 0 << E::ConnectionRefusedError << Outcome::Retry;
-        QTest::newRow("dns") << 0 << E::HostNotFoundError << Outcome::Retry;
         QTest::newRow("tls") << 0 << E::SslHandshakeFailedError << Outcome::Retry;
         QTest::newRow("closed") << 0 << E::RemoteHostClosedError << Outcome::Retry;
+        QTest::newRow("unknown network error") << 0 << E::UnknownNetworkError << Outcome::Retry;
+        // Never reached a server: offline, DNS down, nothing listening.
+        QTest::newRow("refused") << 0 << E::ConnectionRefusedError << Outcome::Unreachable;
+        QTest::newRow("dns") << 0 << E::HostNotFoundError << Outcome::Unreachable;
+        QTest::newRow("network down") << 0 << E::TemporaryNetworkFailureError
+                                      << Outcome::Unreachable;
+        QTest::newRow("network session") << 0 << E::NetworkSessionFailedError
+                                         << Outcome::Unreachable;
+        QTest::newRow("proxy not found") << 0 << E::ProxyNotFoundError << Outcome::Unreachable;
+        QTest::newRow("proxy refused") << 0 << E::ProxyConnectionRefusedError
+                                       << Outcome::Unreachable;
+        // A status always means a server answered.
+        QTest::newRow("503 with a refused error") << 503 << E::ConnectionRefusedError
+                                                  << Outcome::Retry;
     }
 
     void classifyOutcomes() {
@@ -757,12 +809,11 @@ private slots:
     }
 
     void transientFailureEndsCycle_data() {
-        QTest::addColumn<int>("status");    // -1: never answer; 0: nothing listening
+        QTest::addColumn<int>("status");    // -1: never answer
         QTest::newRow("503") << 503;
         QTest::newRow("429") << 429;
         QTest::newRow("408") << 408;
         QTest::newRow("no answer (transfer timeout)") << -1;
-        QTest::newRow("connection refused") << 0;
     }
 
     void transientFailureEndsCycle() {
@@ -770,11 +821,6 @@ private slots:
         Provider provider;
         Config config = testConfig(*stub_, dir_->path());
         config.flushIntervalMs = 500;
-        if (status == 0) {
-            const int port = closedPort();
-            config.trackUrl.setPort(port);
-            config.storeUrl.setPort(port);
-        }
         stub_->respond = [status](const StubRequest&) { return StubResponse{status, {}}; };
 
         auto service = makeService(config, provider);
@@ -788,8 +834,7 @@ private slots:
                     && queueLines(config).first().value(QStringLiteral("attempts")).toInt() == 1);
         QCOMPARE(queueLines(config).size(), 2);
         QCOMPARE(queueLines(config).at(1).value(QStringLiteral("attempts")).toInt(), 0);
-        if (status != 0)
-            QCOMPARE(stub_->requests().size(), 1);
+        QCOMPARE(stub_->requests().size(), 1);
 
         // Ticks retry it until maxAttempts, then it is dropped; one
         // request per tick, never two in one cycle.
@@ -800,15 +845,51 @@ private slots:
                            .value(QStringLiteral("properties")).toObject()
                            .value(QStringLiteral("open_ms")).toInt() == 2,
             10000);
-        if (status != 0) {
-            QVERIFY(stub_->requests().size() >= config.maxAttempts);
-            const QList<StubRequest>& requests = stub_->requests();
-            for (int i = 1; i < config.maxAttempts; ++i)
-                QVERIFY(requests.at(i).arrivedMs - requests.at(i - 1).arrivedMs
-                        >= config.flushIntervalMs / 2);
-            for (int i = 0; i < config.maxAttempts; ++i)
-                QCOMPARE(properties(requests.at(i)).value(QStringLiteral("open_ms")).toInt(), 1);
-        }
+        QVERIFY(stub_->requests().size() >= config.maxAttempts);
+        const QList<StubRequest>& requests = stub_->requests();
+        for (int i = 1; i < config.maxAttempts; ++i)
+            QVERIFY(requests.at(i).arrivedMs - requests.at(i - 1).arrivedMs
+                    >= config.flushIntervalMs / 2);
+        for (int i = 0; i < config.maxAttempts; ++i)
+            QCOMPARE(properties(requests.at(i)).value(QStringLiteral("open_ms")).toInt(), 1);
+    }
+
+    // A request no server saw (nothing listening here; offline or DNS
+    // down for real) ends the cycle like a Retry, but counts no attempt
+    // and writes nothing: attempts are for a server that keeps refusing
+    // a record, and time offline used to drop one every few ticks.
+    void unreachableCostsNoAttempt() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.flushIntervalMs = 300;
+        // So the refusal, not the transfer timeout (which counts), ends
+        // each request: Windows takes about 2 s to refuse a connection.
+        config.transferTimeoutMs = 10000;
+        const int port = closedPort();
+        config.trackUrl.setPort(port);
+        config.storeUrl.setPort(port);
+
+        auto service = makeService(config, provider);
+        service->recordRepoOpened(1, 1, 1);
+        service->recordRepoOpened(2, 2, 1);
+        const quint64 writes = EventQueue::diskWrites();
+        service->start();
+
+        // The service's manager, created at the first flush, sees every
+        // request finish. More of them than maxAttempts: each one used
+        // to count an attempt, and the front record was dropped.
+        QTRY_VERIFY(service->findChild<QNetworkAccessManager*>());
+        QSignalSpy finished(service->findChild<QNetworkAccessManager*>(),
+                            &QNetworkAccessManager::finished);
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() > config.maxAttempts, 20000);
+
+        QCOMPARE(service->queuedCount(), 2);
+        const QList<QJsonObject> lines = queueLines(config);
+        QCOMPARE(lines.size(), 2);
+        for (const QJsonObject& line : lines)
+            QCOMPARE(line.value(QStringLiteral("attempts")).toInt(), 0);
+        QCOMPARE(EventQueue::diskWrites(), writes);
+        QCOMPARE(stub_->requests().size(), 0);
     }
 
     void permanentFailureDrops_data() {
@@ -908,6 +989,50 @@ private slots:
         service->setUserEnabled(false);
         QCOMPARE(EventQueue::diskWrites(), writes);
         QVERIFY(!QFile::exists(EventQueue::filePath(config.queueDir)));
+    }
+
+    // The switch turned off in another process (a second GitBolt that
+    // couldn't take the instance lock, a test session sharing the INI):
+    // no settingsChanged reaches this one, and the other process can't
+    // delete the queue this one holds. The service re-reads the switch
+    // at every flush cycle and at quit, and stops as if it had been
+    // turned off here: nothing more sent, the queue deleted.
+    void switchOffElsewhereStopsHolder_data() {
+        QTest::addColumn<QString>("when");
+        QTest::newRow("before the first flush") << QStringLiteral("flush");
+        QTest::newRow("during the backoff") << QStringLiteral("backoff");
+        QTest::newRow("at quit") << QStringLiteral("quit");
+    }
+
+    void switchOffElsewhereStopsHolder() {
+        QFETCH(QString, when);
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.firstFlushDelayMs = when == QLatin1String("quit") ? 60000 : 200;
+        config.flushIntervalMs = 300;
+        stub_->respond = [](const StubRequest&) { return StubResponse{503, {}}; };
+        bool persisted = true;
+        TelemetryService service(config, provider.fn(), true, [&persisted] { return persisted; });
+        service.start();
+        service.recordLaunch();
+        qsizetype sent = 0;
+        if (when == QLatin1String("backoff")) {
+            // The first request failed; the next tick would retry it.
+            QTRY_VERIFY(!queueLines(config).isEmpty()
+                        && queueLines(config).first().value(QStringLiteral("attempts")).toInt()
+                               == 1);
+            sent = 1;
+        }
+
+        persisted = false;
+        if (when == QLatin1String("quit"))
+            service.persistPending();
+        else
+            QTest::qWait(700);   // past the first flush, and two ticks
+        QCOMPARE(stub_->requests().size(), sent);
+        QVERIFY(!service.isActive());
+        QVERIFY(!QFile::exists(EventQueue::filePath(config.queueDir)));
+        QVERIFY(!QDir(config.queueDir).exists());
     }
 
     void persistPendingDuringRequestKeepsAttempts() {
@@ -1048,6 +1173,43 @@ private slots:
         QCOMPARE(small.records().last().payload.value(QStringLiteral("n")).toInt(), 19);
     }
 
+    // The crash summary (there is at most one) is always the front, so
+    // it is the first record sent: in memory, and after a reload of a
+    // file whose lines are in the order they were appended.
+    void queueKeepsTheCrashInFront() {
+        const QString dir = dir_->path() + QStringLiteral("/q");
+        auto record = [](Sink sink, const char* level, int n) {
+            QueuedRecord r;
+            r.sink = sink;
+            r.queued = QDateTime::currentDateTimeUtc();
+            r.payload = QJsonObject{{QStringLiteral("level"), QLatin1String(level)},
+                                    {QStringLiteral("n"), n}};
+            return r;
+        };
+        auto order = [](const EventQueue& queue) {
+            QList<int> n;
+            for (const QueuedRecord& r : queue.records())
+                n << r.payload.value(QStringLiteral("n")).toInt();
+            return n;
+        };
+        {
+            EventQueue queue(dir, {});
+            QVERIFY(queue.open());
+            queue.append(record(Sink::OpenPanel, "", 1));
+            queue.append(record(Sink::GlitchTip, "fatal", 2));
+            queue.append(record(Sink::OpenPanel, "", 3));
+            QVERIFY(queue.front().isCrash());
+            QCOMPARE(order(queue), (QList<int>{2, 1, 3}));
+            // A later crash replaces it, in front.
+            queue.append(record(Sink::GlitchTip, "fatal", 4));
+            QCOMPARE(order(queue), (QList<int>{4, 1, 3}));
+        }   // no sync(): the file keeps every line, in the order appended
+        EventQueue reloaded(dir, {});
+        QVERIFY(reloaded.open());
+        QVERIFY(reloaded.front().isCrash());
+        QCOMPARE(order(reloaded), (QList<int>{4, 1, 3}));
+    }
+
     // A record appended while a request is in flight can push the queue
     // over its cap, and the oldest analytics record it drops may be the
     // one in flight. That reply's outcome then belongs to no record: it
@@ -1146,6 +1308,64 @@ private slots:
         QVERIFY(!QDir(config.queueDir).exists());
         QTest::qWait(100);
         QCOMPARE(stub_->requests().size(), 0);
+    }
+
+    // A queue.lock QLockFile can't prove stale with stale time 0: one
+    // naming another machine (a home shared between machines, or moved
+    // to a new one) or one a crash truncated. Left in place, it kept
+    // usage statistics off for good, and the off switch couldn't delete
+    // the queue. A live holder's lock is never taken, whatever it says.
+    void queueClearsUnprovableStaleLock_data() {
+        QTest::addColumn<QByteArray>("content");
+        QTest::addColumn<bool>("held");
+        QTest::newRow("other machine")
+            << QByteArray("999999\nGitBolt\nhost\nffffffff-0000-0000-0000-000000000000\n")
+            << false;
+        QTest::newRow("empty") << QByteArray() << false;
+        QTest::newRow("held, content unprovable") << QByteArray() << true;
+    }
+
+    void queueClearsUnprovableStaleLock() {
+        QFETCH(QByteArray, content);
+        QFETCH(bool, held);
+        const QString dir = dir_->path() + QStringLiteral("/q");
+        const QString lockPath = dir + QStringLiteral("/queue.lock");
+        QVERIFY(writeOneRecordQueue(dir));
+
+        if (held) {
+            QLockFile holder(lockPath);
+            holder.setStaleLockTime(0);
+            QVERIFY(holder.tryLock(0));
+#ifdef Q_OS_WIN
+            // The holder's handle denies writes, so its content can't
+            // be changed; wait until it has settled instead. Qt proves
+            // this PID alive, and the removal fails on the open handle.
+            QTest::qWait(2100);
+#else
+            QVERIFY(writeAgedFile(lockPath, content));
+#endif
+            EventQueue queue(dir, {});
+            QVERIFY(!queue.open());
+            EventQueue::discard(dir);
+            QVERIFY(QFile::exists(EventQueue::filePath(dir)));
+            QVERIFY(QFile::exists(lockPath));
+            return;
+        }
+
+        QVERIFY(writeAgedFile(lockPath, content));
+        {
+            EventQueue queue(dir, {});
+            QVERIFY(queue.open());
+            QCOMPARE(queue.size(), 1);
+        }
+
+        // The off switch's discard, in a queue of its own.
+        const QString other = dir_->path() + QStringLiteral("/discarded");
+        QVERIFY(writeOneRecordQueue(other));
+        QVERIFY(writeAgedFile(other + QStringLiteral("/queue.lock"), content));
+        EventQueue::discard(other);
+        QVERIFY(!QFile::exists(EventQueue::filePath(other)));
+        QVERIFY(!QDir(other).exists());
     }
 
     // ---- what is recorded ---------------------------------------------
@@ -1323,17 +1543,7 @@ private slots:
     void crashReportIsQueuedAndSent() {
         Provider provider;
         auto service = makeService(testConfig(*stub_, dir_->path()), provider);
-        // A macOS report wherever this runs: the parser's frame rules
-        // follow the OS line (CrashHeader.h).
-        const QByteArray header = gitbolt::test::crashHeader("0.9.1", true, false, false);
-        QString report = QString::fromUtf8(header)
-                               + QStringLiteral("Signal: SIGSEGV (11)\nEpoch: 1760000000\n\n"
-                                                "--- Stack Trace ---\n"
-                                                "#0 GitBolt +0x10 ?\n"
-                                                "#1 libsystem_platform.dylib +0x20 _sigtramp+0x1\n"
-                                                "#2 GitBolt +0x30 ?\n"
-                                                "#3 dyld +0x40 start+0x2\n"
-                                                "\n=== End of Report ===\n");
+        QString report = crashReport();
         // Refused reports queue nothing, and say so: the crash box only
         // mentions sending for a summary that was queued.
         QVERIFY(!service->queueCrashReport(report.replace(QStringLiteral("Session: user"),
@@ -1362,6 +1572,35 @@ private slots:
                  QStringLiteral("<unknown>"));
         QVERIFY(!stub_->requests().first().body.contains(kInstallId.toLatin1()));
         QCOMPARE(provider.calls, 0);
+    }
+
+    // The crash summary goes first, and at once: the crash may come
+    // back within seconds, and the next crash.log replaces a summary
+    // still queued, so a crash loop was never reported while the
+    // summary waited out the first-flush delay behind every record an
+    // earlier session left.
+    void crashSummaryGoesFirstAtOnce() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.firstFlushDelayMs = 10000;   // as shipped
+        {
+            // An earlier session that quit before sending.
+            auto earlier = makeService(config, provider);
+            earlier->recordLaunch();
+            earlier->recordRepoOpened(1, 1, 1);
+            QCOMPARE(earlier->queuedCount(), 2);
+        }
+        auto service = makeService(config, provider);
+        QVERIFY(service->queueCrashReport(crashReport()));
+        service->recordLaunch();
+        service->start();
+        QTRY_VERIFY_WITH_TIMEOUT(!stub_->requests().isEmpty(), 5000);
+        const StubRequest& first = stub_->requests().first();
+        QCOMPARE(first.path, QByteArray("/api/42/store/"));
+        QCOMPARE(first.json().value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
+        // The records behind it go in the same cycle.
+        QTRY_COMPARE(stub_->requests().size(), 4);
+        QTRY_COMPARE(service->queuedCount(), 0);
     }
 
     // ---- inert and off sessions ----------------------------------------

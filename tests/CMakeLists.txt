@@ -77,8 +77,8 @@ gitbolt_add_test(test_telemetry telemetry/TestTelemetry.cpp)
 target_sources(test_telemetry PRIVATE telemetry/HttpStub.h telemetry/CrashHeader.h)
 target_link_libraries(test_telemetry PRIVATE gitbolt_telemetry Qt6::Network)
 # Crash reports: fixtures for every refusal, the renderHeader round
-# trip, and (POSIX) a death test that parses the crash.log a real
-# handler wrote. Its helper is built as "gitbolt", in a directory of
+# trip, and (POSIX) death tests that parse the crash.log a real
+# handler wrote. Their helper is built as "gitbolt", in a directory of
 # its own, so the parser counts its frames as the app's.
 gitbolt_add_test(test_crash_log_parser telemetry/TestCrashLogParser.cpp)
 target_sources(test_crash_log_parser PRIVATE telemetry/CrashHeader.h)
@@ -87,7 +87,8 @@ target_compile_definitions(test_crash_log_parser PRIVATE
     GITBOLT_CRASH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crash")
 if(NOT WIN32)
     add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
-    target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util)
+    # dladdr, as for gitbolt_util: in libdl before glibc 2.34
+    target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
     set_target_properties(gitbolt_crash_helper PROPERTIES
         OUTPUT_NAME gitbolt
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
