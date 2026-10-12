@@ -1,0 +1,17 @@
+=== GitBolt Crash Report ===
+App version: unknown
+Qt version: 6.10.0 (runtime), 6.10.0 (compile)
+OS: macos 15.6
+Kernel: darwin 24.6.0
+CPU Arch: arm64
+Signal: SIGSEGV (11)
+Epoch: 1760000000
+
+--- Stack Trace ---
+0   GitBolt                             0x0000000100a1c2b4 _ZN7gitbolt4util12CrashHandler13signalHandlerEi + 264
+1   libsystem_platform.dylib            0x000000018f1a36a4 _sigtramp + 56
+2   GitBolt                             0x0000000100a5e3f0 _ZN7gitbolt2ui10MainWindow10onLogReadyEv + 68
+3   QtCore                              0x0000000101cd1a40 _ZN11QMetaObject8activateEP7QObjectPKS_iPPv + 928
+4   dyld                                0x000000018ee06b98 start + 6076
+
+=== End of Report ===

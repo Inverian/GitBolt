@@ -56,6 +56,7 @@ target_link_libraries(gitbolt PRIVATE
     gitbolt_git
     gitbolt_conf
     gitbolt_watcher
+    gitbolt_telemetry
     gitbolt_util
     Qt6::Widgets
     Qt6::Concurrent
@@ -105,6 +106,14 @@ endif()
 # package stamping. main.cpp once hardcoded its own copy.
 target_compile_definitions(gitbolt PRIVATE
     GITBOLT_VERSION="${PROJECT_VERSION}")
+
+# Usage statistics endpoints (cmake/Telemetry.cmake), compiled into the
+# app and nothing else: no library or test binary can carry them. Empty
+# in every build but CI's pushes to upstream main, which leaves main()
+# with no telemetry service at all. Only main.cpp includes the header.
+configure_file(TelemetryEndpoints.h.in
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/TelemetryEndpoints.h" @ONLY)
+target_include_directories(gitbolt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # Bundle the Qt runtime into the INSTALLED app. This runs at
 # `cmake --install` time — and therefore also inside CPack's own

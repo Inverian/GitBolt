@@ -101,6 +101,13 @@ else()
     # instead of hand-pinning a list that drifts. The bundled Qt itself
     # (/usr/lib/gitbolt, see src/app/CMakeLists.txt) has no package.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
+    # Plus OpenSSL 3, which shlibdeps can't see: the bundled Qt's TLS
+    # backend (plugins/tls/libqopensslbackend.so) dlopen()s libssl at
+    # runtime, so nothing links it. Without it every HTTPS request —
+    # usage statistics (PRIVACY.md) — fails silently. CPack merges this
+    # with the shlibdeps result. libssl3t64 is the package's name since
+    # the 64-bit time_t transition (Ubuntu 24.04), libssl3 before it.
+    set(CPACK_DEBIAN_PACKAGE_DEPENDS "libssl3t64 | libssl3")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://www.gitbolt.com")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
 

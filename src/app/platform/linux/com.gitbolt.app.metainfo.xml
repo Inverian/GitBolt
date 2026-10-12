@@ -18,5 +18,10 @@
   <provides>
     <binary>gitbolt</binary>
   </provides>
-  <content_rating type="oars-1.1"/>
+  <!-- OARS 1.1 social-info: "moderate" covers only diagnostic data
+       not identifiable to the user. Usage statistics carry a
+       persistent pseudonymous install ID (PRIVACY.md): "intense". -->
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-info">intense</content_attribute>
+  </content_rating>
 </component>

@@ -51,11 +51,13 @@
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
+#include "git/Error.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 
 #include <algorithm>
 #include <functional>
+#include <optional>
 #include <type_traits>
 
 using gitbolt::services::GitService;
@@ -278,8 +280,58 @@ private slots:
         QCOMPARE(failedSpy.count(), 1);
         QCOMPARE(failedSpy.first().at(0).toString(), notARepo.path());
         QVERIFY(!failedSpy.first().at(1).toString().isEmpty());
+        // The code, for usage statistics' repo_open_failed, which sends
+        // its name and never the message.
+        QCOMPARE(failedSpy.first().at(2).toInt(),
+                 int(gitbolt::git::GitErrorCode::NotFound));
         QCOMPARE(openedSpy.count(), 0);
         QVERIFY(!svc.isOpen());
+    }
+
+    // -----------------------------------------------------------------
+    // initialLogLoaded: the first history page of an async open, tagged
+    // with the generation openRepositoryAsync returned and the page's
+    // size, right behind that page's logReady. A plain refresh, and an
+    // open superseded by a newer one, emit none — so a page of the
+    // previous repository is never taken for the new one's (usage
+    // statistics time an open to it).
+    // -----------------------------------------------------------------
+    void asyncOpenTagsItsFirstLogPage() {
+        auto first = repoWithCommits(2);
+        auto second = repoWithCommits(3);
+        QVERIFY(first && second);
+
+        GitService svc;
+        MainThreadSpy initialSpy(&svc, &GitService::initialLogLoaded);
+        QStringList order;
+        QObject context;
+        QObject::connect(&svc, &GitService::logReady, &context,
+                         [&order](const std::vector<gitbolt::git::CommitData>&, int offset) {
+            order << QStringLiteral("log(%1)").arg(offset);
+        });
+        QObject::connect(&svc, &GitService::initialLogLoaded, &context,
+                         [&order](quint64, int) { order << QStringLiteral("initial"); });
+
+        // Superseded at once: only the second open's page is tagged.
+        const quint64 superseded = svc.openRepositoryAsync(first->path());
+        const quint64 gen = svc.openRepositoryAsync(second->path());
+        QVERIFY(gen > superseded);
+        QCOMPARE(svc.openGeneration(), gen);
+        QVERIFY(initialSpy.waitForAny());
+        QCOMPARE(initialSpy.size(), 1);
+        QCOMPARE(initialSpy.first().at(0).value<quint64>(), gen);
+        QCOMPARE(initialSpy.first().at(1).toInt(), 3);
+        QCOMPARE(order.mid(order.indexOf(QStringLiteral("initial")) - 1, 2),
+                 (QStringList{QStringLiteral("log(0)"), QStringLiteral("initial")}));
+
+        // A refresh of the open repository is no open's first page.
+        const qsizetype logs = order.count(QStringLiteral("log(0)"));
+        svc.refreshLog();
+        QVERIFY(QTest::qWaitFor([&] { return order.count(QStringLiteral("log(0)")) > logs; },
+                                5000));
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::processEvents();
+        QCOMPARE(initialSpy.size(), 1);
     }
 
     // -----------------------------------------------------------------
@@ -334,6 +386,41 @@ private slots:
         QCOMPARE(commits.size(), size_t(3));
         QCOMPARE(commits.front().summary, std::string("commit 2"));
         QCOMPARE(commits.back().summary, std::string("commit 0"));
+    }
+
+    // -----------------------------------------------------------------
+    // refreshLog(offset, count): a later page continues where the
+    // previous one stopped instead of repeating the newest commits,
+    // and a page past the end arrives empty, which ends paging.
+    // -----------------------------------------------------------------
+    void refreshLogPagesFromOffset() {
+        auto repo = repoWithCommits(5);
+        QVERIFY(repo);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+
+        // openRepository's own offset-0 refresh can land in the spy
+        // too, so wait for the page with the offset asked for.
+        MainThreadSpy logSpy(&svc, &GitService::logReady);
+        const auto pageAt = [&logSpy](int offset)
+            -> std::optional<std::vector<gitbolt::git::CommitData>> {
+            for (const auto& args : logSpy)
+                if (args.at(1).toInt() == offset)
+                    return args.at(0).value<std::vector<gitbolt::git::CommitData>>();
+            return std::nullopt;
+        };
+
+        svc.refreshLog(2, 2);
+        QVERIFY(QTest::qWaitFor([&] { return pageAt(2).has_value(); }, 5000));
+        const auto page = *pageAt(2);
+        QCOMPARE(page.size(), size_t(2));
+        QCOMPARE(page.front().summary, std::string("commit 2"));
+        QCOMPARE(page.back().summary, std::string("commit 1"));
+
+        svc.refreshLog(5, 2);
+        QVERIFY(QTest::qWaitFor([&] { return pageAt(5).has_value(); }, 5000));
+        QVERIFY(pageAt(5)->empty());
     }
 
     // -----------------------------------------------------------------

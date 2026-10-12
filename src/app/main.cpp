@@ -1,10 +1,17 @@
+#include "TelemetryEndpoints.h"
 #include "TestBridge.h"
 #include "ui/MainWindow.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "telemetry/EventQueue.h"
+#include "telemetry/TelemetryConfig.h"
+#include "telemetry/TelemetryGate.h"
+#include "telemetry/TelemetryService.h"
 #include "util/CrashHandler.h"
+#include "util/TestSession.h"
 
 #include <memory>
+#include <string_view>
 
 #include <QApplication>
 #include <QCommandLineParser>
@@ -204,11 +211,49 @@ void reportUnresponsiveInstance()
         QMessageBox::warning(nullptr, QStringLiteral("GitBolt"), text);
 }
 
+namespace endpoints = gitbolt::app::telemetry_endpoints;
+
+// Whether this build reports to the GitBolt maintainers: real (https)
+// usage statistics endpoints are compiled in (cmake/Telemetry.cmake).
+// Source builds, forks, PR and dry-run builds have none, and a
+// developer's loopback stub build isn't official either. Its crash
+// reports would otherwise be uploaded by the user's next launch of a
+// release, which reads the same ~/.gitbolt/crash.log.
+constexpr bool isOfficialBuild()
+{
+    return std::string_view(endpoints::kHost).starts_with("https://");
+}
+
+// The usage statistics queue's directory, next to GitBolt.ini.
+// "telemetry" is an official build's. Any other build that sends — a
+// developer's loopback stub build — keeps one per endpoint: with one
+// shared queue, the next release would upload what the stub build
+// recorded (its events, its errors under its version), and the stub
+// build would drain the release's queue into the stub.
+QString telemetryQueueDir(const QString& settingsFile)
+{
+    const QString dir =
+        QFileInfo(settingsFile).absolutePath() + QStringLiteral("/telemetry");
+    if (isOfficialBuild())
+        return dir;
+    const QByteArray scope = QCryptographicHash::hash(
+        QByteArrayView(endpoints::kHost), QCryptographicHash::Sha256);
+    return dir + QStringLiteral("-local-")
+           + QString::fromLatin1(scope.toHex().left(8));
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
-    // Install crash handler before anything else
-    gitbolt::util::CrashHandler::install();
+    // Install crash handler before anything else. Its report header
+    // says whether a later launch may upload the report: official
+    // build, no environment opt-out, not a test session. There is no
+    // QApplication yet, so the test-session check reads argv itself.
+    gitbolt::util::CrashHandler::install(
+        GITBOLT_VERSION, isOfficialBuild(),
+        gitbolt::util::isEnvOptOut(gitbolt::util::detectEnvOptOut()),
+        gitbolt::util::isTestSession(
+            gitbolt::util::detectTestSession(argc, argv)));
 
     // macOS hides menu icons by default in Qt. We want GitExtensions-style
     // colored glyphs in the Commands menu, so force them on. Must be set
@@ -383,14 +428,71 @@ int main(int argc, char* argv[]) {
                          settings.setTheme(name);
                      });
 
-    // Check for crash report from a previous session
-    if (gitbolt::util::CrashHandler::hasPendingCrashReport()) {
+    // Usage statistics (src/telemetry, PRIVACY.md). One gate, evaluated
+    // once, here: no endpoints compiled in, a test session, or an
+    // opt-out (DO_NOT_TRACK, GITBOLT_TELEMETRY, the Settings switch)
+    // keeps this session from sending. The queue lives next to
+    // GitBolt.ini, so whatever isolates the INI (XDG_CONFIG_HOME, a
+    // test's QSettings::setPath) isolates the queue too.
+    namespace telemetry = gitbolt::telemetry;
+    const telemetry::Config telemetryConfig = telemetry::Config::fromEndpoints(
+        QString::fromLatin1(endpoints::kHost),
+        QString::fromLatin1(endpoints::kOpenPanelClientId),
+        QString::fromLatin1(endpoints::kOpenPanelSecret),
+        QString::fromLatin1(endpoints::kGlitchTipKey),
+        QString::fromLatin1(endpoints::kGlitchTipProject),
+        app.applicationVersion(), telemetryQueueDir(settings.fileName()));
+    const telemetry::Gate telemetryGate = telemetry::evaluateGate({
+        .configured = telemetryConfig.isComplete(),
+        .platformName = QGuiApplication::platformName(),
+        .arguments = app.arguments(),
+        .settingOn = settings.usageStatisticsEnabled(),
+    });
+    // Opted out: whatever an earlier session queued goes, unsent. An
+    // inert test session never touches the queue, not even this way.
+    if (telemetry::discardsQueue(telemetryGate))
+        telemetry::EventQueue::discard(telemetryConfig.queueDir);
+    // Declared before `window`, so it outlives the raw pointer the
+    // window keeps, and after `settings`, which its ID provider uses.
+    // A disabled one for the Settings switch, so turning it back on
+    // works without a restart.
+    std::unique_ptr<telemetry::TelemetryService> telemetryService;
+    if (telemetry::createsService(telemetryGate)) {
+        telemetryService = std::make_unique<telemetry::TelemetryService>(
+            telemetryConfig,
+            [&settings]() { return settings.ensureTelemetryInstallId(); },
+            telemetryGate == telemetry::Gate::Active);
+        QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
+                         &telemetry::TelemetryService::persistPending);
+    }
+
+    // Check for crash report from a previous session. Not in a test
+    // session: ~/.gitbolt/crash.log is the user's (e2e and bridge runs
+    // keep the real HOME), so it stays for their next launch, and an
+    // offscreen box would block before the test bridge exists.
+    const bool testSession = gitbolt::util::isTestSession(
+        gitbolt::util::detectTestSession(QGuiApplication::platformName(),
+                                         app.arguments()));
+    if (!testSession && gitbolt::util::CrashHandler::hasPendingCrashReport()) {
         QString report = gitbolt::util::CrashHandler::readCrashReport();
+        // With usage statistics on, a summary goes into their queue
+        // before the file is deleted below: signal, versions and stack
+        // frames reduced to module offsets, never the raw report. The
+        // parser refuses reports from builds and sessions that must
+        // never send, and then the box says nothing about sending.
+        const bool summaryQueued =
+            telemetryService && telemetryService->queueCrashReport(report);
         QMessageBox crashBox;
         crashBox.setWindowTitle(QObject::tr("Crash Detected"));
         crashBox.setText(QObject::tr(
             "GitBolt crashed during the last session. "
             "A crash report has been saved."));
+        if (summaryQueued) {
+            crashBox.setInformativeText(QObject::tr(
+                "A summary of the report, with no repository data, will be sent "
+                "with the usage statistics. You can turn them off in "
+                "Tools › Settings › General."));
+        }
         crashBox.setDetailedText(report);
         crashBox.setStandardButtons(QMessageBox::Ok);
         crashBox.exec();
@@ -403,6 +505,7 @@ int main(int argc, char* argv[]) {
     // second ThemeService that would fight over the palette).
     gitbolt::ui::MainWindow window;
     window.setThemeService(themeService);
+    window.setTelemetry(telemetryService.get(), telemetryGate);
 
     // Restore window geometry from previous session. (Dock/toolbar
     // state via QMainWindow::saveState is no longer persisted — the
@@ -413,6 +516,13 @@ int main(int argc, char* argv[]) {
         window.restoreGeometry(geometry);
 
     window.show();
+
+    // Only once the window is up: nothing touches the network on the
+    // way there, and the first flush comes seconds after this record.
+    if (telemetryService) {
+        telemetryService->recordLaunch();
+        telemetryService->start();
+    }
 
     // Test bridge — agent/test control channel, never active unless
     // explicitly requested via the environment. Declared after

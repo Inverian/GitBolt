@@ -138,6 +138,18 @@ Result<std::vector<CommitData>> RevWalk::all() {
     return commits;
 }
 
+Result<size_t> RevWalk::skip(size_t count) {
+    git_oid oid;
+    size_t skipped = 0;
+    while (skipped < count) {
+        int err = git_revwalk_next(&oid, impl_->walker);
+        if (err == GIT_ITEROVER) break;
+        if (err < 0) return GitError::fromLibgit2(err);
+        ++skipped;
+    }
+    return skipped;
+}
+
 Result<void> RevWalk::walk(WalkCallback callback) {
     git_oid oid;
     while (true) {

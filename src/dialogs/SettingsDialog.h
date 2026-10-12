@@ -9,6 +9,8 @@ class QCheckBox;
 class QComboBox;
 class QDialogButtonBox;
 class QFontComboBox;
+class QFormLayout;
+class QGroupBox;
 class QKeySequenceEdit;
 class QLineEdit;
 class QSpinBox;
@@ -21,6 +23,7 @@ class QTreeWidgetItem;
 class QWidget;
 class QLabel;
 class QListWidget;
+class QPushButton;
 class QRadioButton;
 
 namespace gitbolt::conf {
@@ -49,6 +52,15 @@ public:
     /// exec(); without it the page is empty.
     void setShortcutActions(const QList<QAction*>& actions,
                             const QHash<QString, QKeySequence>& defaults);
+
+    /// Shows General › Usage statistics when this build has telemetry
+    /// (source builds and forks don't), with the switch, the install ID
+    /// and a link to what is collected. A non-empty `lockedReason` (an
+    /// environment variable turned statistics off for this session)
+    /// disables the switch and says why: the stored preference doesn't
+    /// decide then, and Apply leaves it alone. Called by MainWindow
+    /// before exec(); without it the group stays hidden.
+    void setUsageStatistics(bool available, const QString& lockedReason);
 
     explicit SettingsDialog(conf::SettingsService* settings,
                             conf::ThemeService* theme,
@@ -99,6 +111,17 @@ private:
     QSpinBox* fontSizeSpin_ = nullptr;
     QSpinBox* tabSizeSpin_ = nullptr;
     QCheckBox* showWhitespaceCheck_ = nullptr;
+
+    // General page — Usage statistics (setUsageStatistics). The group
+    // is a row of generalForm_, hidden unless the build has telemetry.
+    QFormLayout* generalForm_       = nullptr;
+    QGroupBox*   usageGroup_        = nullptr;
+    QCheckBox*   usageStatsCheck_   = nullptr;
+    QLineEdit*   installIdEdit_     = nullptr;
+    QPushButton* installIdCopy_     = nullptr;
+    QLabel*      usageLockedNote_   = nullptr;
+    bool         usageAvailable_    = false;
+    bool         usageLocked_       = false;
 
     // UI Design page — the default vertical split between the
     // revision graph (top) and the inspector tabs (bottom). The

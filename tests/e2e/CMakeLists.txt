@@ -29,6 +29,7 @@ set(E2E_TESTS
     test_settings_after_open
     test_single_instance
     test_tags
+    test_telemetry_inert
     test_theme_persistence
     test_watcher_external_commit
 )

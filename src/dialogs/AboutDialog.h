@@ -10,7 +10,8 @@ namespace gitbolt::dialogs {
 /// application name, version, tagline, a detailed build-info block
 /// (Qt version, libgit2 version and features, compiler, build date),
 /// license notice, and clickable links to the project repo,
-/// trademark policy, and license text.
+/// trademark policy, license text, and privacy policy (what usage
+/// statistics collect).
 ///
 /// The dialog takes no constructor arguments — everything it displays
 /// is pulled from QApplication metadata, libgit2 runtime APIs, and

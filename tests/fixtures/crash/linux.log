@@ -1,0 +1,30 @@
+=== GitBolt Crash Report ===
+Format: 2
+App version: 0.9.5
+Build: official
+Opt-out: none
+Session: user
+Qt version: 6.10.0 (runtime), 6.10.0 (compile)
+OS: ubuntu 24.04
+Kernel: linux 6.8.0-45-generic
+CPU Arch: x86_64
+Signal: SIGABRT (6)
+Epoch: 1760000123
+
+--- Stack Trace ---
+#0 gitbolt +0x8f2a0 ?
+#1 libc.so.6 +0x45320 ?
+#2 libc.so.6 +0x9eb2c pthread_kill+0x11c
+#3 libc.so.6 +0x4527e raise+0x1e
+#4 libc.so.6 +0x288ff abort+0xdf
+#5 gitbolt +0x12a4b0 ?
+#6 libQt6Core.so.6 +0x2f8a10 _ZN11QMetaObject8activateEP7QObjectPKS_iPPv+0x2a0
+#7 libibus-1.0.so.5 +0x31c40 bob_private_hook+0x40
+#8 /home/bob/apps/gitbolt +0x1b33c ?
+#9 libQt6Widgets.so.6 +0x1d0e44 _ZN19QApplicationPrivate13notify_helperEP7QObjectP6QEvent+0x1a4
+#10 AppRun +0x1234 ?
+#11 ? 0x7ffd1234abcd
+#12 libstdc++.so.6 +0xe5c9a _ZSt9terminatev+0x1a
+#13 libc.so.6 +0x2a1ca __libc_start_call_main+0x7a
+
+=== End of Report ===
