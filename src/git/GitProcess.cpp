@@ -64,6 +64,10 @@ const QString kCommentChar = QStringLiteral("comment-char");
 // a Continue off mid-plan, git killed and its index.lock left behind.
 constexpr int kRebaseTimeoutMs = 300000;
 
+// A commit runs the repository's hooks, and a pre-commit hook may lint
+// or test the whole tree: as long as a rebase step, not run()'s 30 s.
+constexpr int kCommitTimeoutMs = 300000;
+
 // git strips the lines that start with core.commentChar from every
 // message it has had edited: a reword's, which kEditor writes, and a
 // squash's, which git puts together from the messages it combines.
@@ -616,9 +620,12 @@ bool GitProcess::cancelled() const
 // a poll loop instead of one long waitForFinished(), so a cancel is
 // seen within kPollMs and stops the whole tree — including an ssh or
 // git-remote-https waiting on a network that stopped answering, which
-// would otherwise hold its caller until the timeout.
+// would otherwise hold its caller until the timeout. commit() runs this
+// way with or without a flag: a hook that hangs is git's child, and it
+// goes down with git at the time limit too.
 Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>& args,
-                                                 int timeoutMs) const
+                                                 int timeoutMs,
+                                                 const std::string* stdinData) const
 {
     const QString workDir = QString::fromStdString(workDir_);
     QStringList qargs;
@@ -646,6 +653,11 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
     if (!started) {
         GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
+    }
+    // Closed once written, so that git reading it (`-F -`) sees the end.
+    if (stdinData) {
+        process.write(stdinData->data(), static_cast<qint64>(stdinData->size()));
+        process.closeWriteChannel();
     }
 
     // Each wait also moves git's output into QProcess's buffers, so
@@ -913,6 +925,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
     output.stdoutData = process.readAllStandardOutput().toStdString();
     output.stderrData = process.readAllStandardError().toStdString();
     GitProcessLog::instance().emitCommand(workDir, args, output.exitCode, timer.elapsed());
+    keepRewordMessage();
     return output;
 }
 
@@ -932,10 +945,85 @@ std::vector<std::string> GitProcess::rebaseCommentConfig() const {
     return {"-c", "core.commentChar=" + commentChar.toStdString()};
 }
 
+QString GitProcess::gitPath(const QString& path) const {
+    const auto out = run({"rev-parse", "--git-path", path.toStdString()});
+    if (!out || !out->success())
+        return {};
+    return QDir(QString::fromStdString(workDir_))
+        .absoluteFilePath(QString::fromStdString(out->stdoutData).trimmed());
+}
+
+// git's done list ends with the line of the commit the rebase stopped
+// at ("reword <hash> <subject>", as kEditor reads it too).
+QString GitProcess::stoppedRewordMessage(std::string* hash) const {
+    const QString dir = gitPath(QStringLiteral("rebase-merge"));
+    if (dir.isEmpty())
+        return {};
+    QFile done(dir + QStringLiteral("/done"));
+    if (!done.open(QIODevice::ReadOnly))
+        return {};
+    const QList<QByteArray> words = done.readAll().trimmed().split('\n').last().simplified().split(' ');
+    if (words.size() < 2 || (words[0] != "reword" && words[0] != "r"))
+        return {};
+    const QString message = QStringLiteral("%1/%2/%3")
+                                .arg(dir, kRewordMessages, QString::fromLatin1(words[1]));
+    if (!QFileInfo(message).isFile())
+        return {};
+    if (hash)
+        *hash = words[1].toStdString();
+    return message;
+}
+
+QString GitProcess::rejectedRewordMessage() const {
+    std::string hash;
+    const QString message = stoppedRewordMessage(&hash);
+    if (message.isEmpty())
+        return {};
+    const auto staged = run({"diff", "--cached", "--quiet"});
+    if (!staged || staged->exitCode != 0)
+        return {};
+    const auto now = run({"log", "-1", "--format=%B", "HEAD"});
+    const auto before = run({"log", "-1", "--format=%B", hash});
+    if (!now || !before || !now->success() || !before->success()
+        || now->stdoutData != before->stdoutData)
+        return {};
+    return message;
+}
+
+// Only kEditor knew the new message: a `git rebase --continue` in a
+// terminal, after the conflict that stopped a reword, committed with
+// what these held, the old one.
+void GitProcess::keepRewordMessage() const {
+    const QString message = stoppedRewordMessage();
+    if (message.isEmpty())
+        return;
+    for (const QString& kept : {gitPath(QStringLiteral("rebase-merge/message")),
+                                gitPath(QStringLiteral("MERGE_MSG"))}) {
+        if (!kept.isEmpty() && QFileInfo::exists(kept) && QFile::remove(kept))
+            QFile::copy(message, kept);
+    }
+}
+
 Result<ProcessOutput> GitProcess::rebaseContinue() const {
-    std::vector<std::string> args = rebaseCommentConfig();
+    const std::vector<std::string> commentConfig = rebaseCommentConfig();
+    // A reword whose new message a hook turned down (commit-msg, say)
+    // stopped the rebase with the commit picked under its old message.
+    // git's --continue then went on with that message, and Continue
+    // said "Rebase complete." with the reword gone. It gets the plan's
+    // message again first, hooks and all.
+    if (const QString message = rejectedRewordMessage(); !message.isEmpty()) {
+        std::vector<std::string> amend = commentConfig;
+        amend.insert(amend.end(), {"commit", "--amend", "--only", "--allow-empty", "-F",
+                                   QDir::toNativeSeparators(message).toStdString()});
+        auto amended = run(amend, kRebaseTimeoutMs);
+        if (!amended || !amended->success())
+            return amended;
+    }
+    std::vector<std::string> args = commentConfig;
     args.insert(args.end(), {"rebase", "--continue"});
-    return run(args, kRebaseTimeoutMs);
+    auto result = run(args, kRebaseTimeoutMs);
+    keepRewordMessage();
+    return result;
 }
 
 Result<ProcessOutput> GitProcess::rebaseAbort() const {
@@ -945,7 +1033,24 @@ Result<ProcessOutput> GitProcess::rebaseAbort() const {
 Result<ProcessOutput> GitProcess::rebaseSkip() const {
     std::vector<std::string> args = rebaseCommentConfig();
     args.insert(args.end(), {"rebase", "--skip"});
-    return run(args, kRebaseTimeoutMs);
+    auto result = run(args, kRebaseTimeoutMs);
+    keepRewordMessage();
+    return result;
+}
+
+Result<ProcessOutput> GitProcess::sequenceContinue(bool revert) const {
+    return run({revert ? "revert" : "cherry-pick", "--continue"}, kRebaseTimeoutMs);
+}
+
+Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {
+    return run({revert ? "revert" : "cherry-pick", "--skip"}, kRebaseTimeoutMs);
+}
+
+Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend) const {
+    std::vector<std::string> args = {"commit", "-F", "-"};
+    if (amend)
+        args.emplace_back("--amend");
+    return runCancellable(args, kCommitTimeoutMs, &message);
 }
 
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }

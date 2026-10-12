@@ -202,7 +202,7 @@ void GitService::refreshStatus() {
                 [](const git::StatusEntry& e) { return e.isConflicted(); }));
             emit statusReady(std::move(*result));
         }
-        emit repoStateReady(r->state(), conflicts);
+        emit repoStateReady(r->state(), conflicts, r->sequencePaused());
     });
 }
 
@@ -470,11 +470,12 @@ void GitService::blameFile(const QString& path,
     });
 }
 
-// Synchronous mutators below: they all run on the main thread but
-// schedule async refreshes that touch repo_ on a worker. Locking here
-// serializes them against any in-flight worker — without this, a
-// commit on the main thread can race with a refreshStatus worker
-// that's mid-libgit2-call and corrupt the heap. Same lock as the
+// Synchronous mutators below (all but commitChanges, which runs git on
+// a worker): they run on the main thread but schedule async refreshes
+// that touch repo_ on a worker. Locking here serializes them against
+// any in-flight worker — without this, a stage on the main thread can
+// race with a refreshStatus worker that's mid-libgit2-call and
+// corrupt the heap. Same lock as the
 // worker lambdas, so a worker waits for the mutator to finish, and
 // vice versa.
 // Each mutator surfaces libgit2 failures via operationFailed —
@@ -573,6 +574,14 @@ void GitService::unstageAll() {
     if (!result) {
         emit operationFailed(QStringLiteral("unstageAll"),
             QString::fromStdString(result.error().message()));
+    } else if (!result->success()) {
+        // git ran, and unstaged nothing: another git holds index.lock,
+        // say. Unreported, the click just did nothing.
+        QString detail =
+            QString::fromStdString(result->stderrData).trimmed();
+        if (detail.isEmpty())
+            detail = QString::fromStdString(result->stdoutData).trimmed();
+        emit operationFailed(QStringLiteral("unstageAll"), detail);
     }
     refreshStatus();
 }
@@ -593,28 +602,104 @@ void GitService::discardFile(const QString& path) {
     refreshStatus();
 }
 
+namespace {
+std::string rebaseStepKey(const git::Repository& repo);   // below
+
+// Why `git commit` failed: git's own words as a terminal would show
+// them, a hook's among them; with nothing on stderr (git says "nothing
+// to commit" on stdout, after the whole status), stdout's last line; or
+// why git couldn't run at all.
+QString commitFailure(const git::Result<git::ProcessOutput>& result) {
+    if (!result)
+        return QString::fromStdString(result.error().message());
+    const QString errors = QString::fromStdString(result->stderrData).trimmed();
+    if (!errors.isEmpty())
+        return errors;
+    const QString last = QString::fromStdString(result->stdoutData)
+                             .trimmed().section(QLatin1Char('\n'), -1).trimmed();
+    return last.isEmpty()
+        ? GitService::tr("git commit exited with code %1").arg(result->exitCode)
+        : last;
+}
+} // namespace
+
+// Through git, not libgit2, which runs no hooks: a pre-commit that
+// guards against secrets, a commit-msg that adds Gerrit's Change-Id, a
+// post-commit were all skipped without a word, and so were
+// commit.gpgSign and a merge's autostash (merge.autoStash), whose
+// changes stayed stashed away. On a worker, as the hooks may take
+// minutes, and unlocked while git runs, as a rebase step is.
 void GitService::commitChanges(const QString& message, bool amend) {
     if (!repo_) return;
-    bool ok = false;
-    QString shortHex;
-    QString err;
+    std::shared_ptr<git::Repository> r = repo_;
+    std::string gitDir;
+    std::optional<git::GitProcess> process;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        auto result = repo_->commit(message.toStdString(), amend);
-        if (result) {
-            ok = true;
-            shortHex = QString::fromStdString(result->toShortHex());
-        } else {
-            err = QString::fromStdString(result.error().message());
-        }
+        gitDir = rebaseStepKey(*r);
+        process = r->process();
     }
-    if (ok) {
-        emit commitComplete(true, "Commit created: " + shortHex);
+    // Quitting stops git, and a hook that hangs with it: ~GitService
+    // waits for this worker.
+    process->addCancelFlag(remoteOpsCancelled_);
+    runner_.run([this, r, gitDir, proc = std::move(*process), message, amend]() {
+        // The repository the commit is for, opened again or not. A
+        // result reported while another is open reads as its own.
+        const auto stillOpen = [&] { return repo_ && rebaseStepKey(*repo_) == gitDir; };
+        QString refusal;
+        std::optional<git::ObjectId> autostash;
+        {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            if (!stillOpen())
+                return;
+            if (amend)
+                refusal = QString::fromStdString(r->amendProblem());
+            if (auto stash = r->resolveRef("MERGE_AUTOSTASH"))
+                autostash = *stash;
+        }
+        if (!refusal.isEmpty()) {
+            emit commitComplete(false, refusal);
+            return;
+        }
+
+        const auto result = proc.commit(message.toStdString(), amend);
+        const bool ok = result && result->success();
+        QString shortHex;
+        bool autostashKept = false;
+        {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            if (!stillOpen())
+                return;
+            if (ok) {
+                if (auto head = r->head())
+                    shortHex = QString::fromStdString(head->toShortHex());
+                // git keeps them in the stash when putting them back
+                // conflicts.
+                if (autostash) {
+                    if (auto stashes = r->stashes())
+                        autostashKept = std::any_of(stashes->begin(), stashes->end(),
+                            [&](const git::StashEntry& s) { return s.id == *autostash; });
+                }
+            }
+        }
+        if (!ok) {
+            emit commitComplete(false, commitFailure(result));
+            return;
+        }
+        emit commitComplete(true, autostash && !autostashKept
+                                      ? tr("Commit created: %1. Applied autostash.").arg(shortHex)
+                                      : tr("Commit created: %1").arg(shortHex));
+        // After the commit's own note, which it would cover: the work
+        // tree has conflict markers in it now.
+        if (autostashKept) {
+            emit operationFailed(QStringLiteral("autostash"),
+                                 tr("Applying the autostash resulted in conflicts. "
+                                    "Your changes are safe in the stash."));
+            refreshStashes();
+        }
         refreshStatus();
         refreshLog();
-    } else {
-        emit commitComplete(false, err);
-    }
+    });
 }
 
 void GitService::createBranch(const QString& name) {
@@ -994,7 +1079,8 @@ void GitService::rebaseSkip() {
 void GitService::runRebaseStep(
     const QString& step,
     std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command,
-    std::function<QString(const git::Repository&)> refusal) {
+    std::function<QString(const git::Repository&)> refusal,
+    git::RepoState operation) {
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
     std::string gitDir;
@@ -1010,7 +1096,7 @@ void GitService::runRebaseStep(
         return;
     }
     runner_.run([this, r, gitDir, step, proc = std::move(*process), command = std::move(command),
-                 refusal = std::move(refusal)]() {
+                 refusal = std::move(refusal), operation]() {
         // Whatever happens, the repository mustn't stay marked busy:
         // every later step on it would be refused until a restart.
         // The normal path clears the mark itself, under the same lock
@@ -1031,6 +1117,7 @@ void GitService::runRebaseStep(
             failure = rebaseFailure(command(proc));
         git::RepoState state = git::RepoState::None;
         int conflicts = 0;
+        bool paused = false;
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
             rebaseSteps_.erase(gitDir);
@@ -1045,6 +1132,7 @@ void GitService::runRebaseStep(
             if (!repo_ || rebaseStepKey(*repo_) != gitDir)
                 return;
             state = r->state();
+            paused = r->sequencePaused();
             // Counted from the index alone: the resolver reads the
             // blobs, if it's asked to.
             if (state != git::RepoState::None) {
@@ -1054,18 +1142,47 @@ void GitService::runRebaseStep(
         }
         if (!failure.isEmpty())
             emit operationFailed(step, failure);
-        emit repoStateReady(state, conflicts);
-        emit rebaseStepFinished(step, failure.isEmpty(), state == git::RepoState::Rebase);
+        emit repoStateReady(state, conflicts, paused);
+        emit rebaseStepFinished(step, failure.isEmpty(), state == operation);
         refreshStatus();
         refreshLog();
     });
+}
+
+// A cherry-pick or revert of several commits (`git cherry-pick A B C`,
+// from a terminal) paused between two of them: nothing in GitBolt ran
+// git's --continue, so the bar's Commit… was all there was, and with
+// nothing to commit the rest of the sequence never came. Steps like the
+// rebase's: one at a time, with the bar busy until the outcome.
+void GitService::sequenceContinue() {
+    runSequenceStep(/*skip=*/false);
+}
+
+void GitService::sequenceSkip() {
+    runSequenceStep(/*skip=*/true);
+}
+
+void GitService::runSequenceStep(bool skip) {
+    if (!repo_) return;
+    // Anything but a revert gets the cherry-pick's command, and git's
+    // own "no cherry-pick or revert in progress" if that's the case.
+    const bool revert = withRepository(
+        [](const git::Repository& r) { return r.state() == git::RepoState::Revert; });
+    const QString step = (revert ? QStringLiteral("revert") : QStringLiteral("cherry-pick"))
+                       + (skip ? QStringLiteral(" --skip") : QStringLiteral(" --continue"));
+    runRebaseStep(step, [revert, skip](const git::GitProcess& proc) {
+        return skip ? proc.sequenceSkip(revert) : proc.sequenceContinue(revert);
+    }, {}, revert ? git::RepoState::Revert : git::RepoState::CherryPick);
 }
 
 // ---------------------------------------------------------------------------
 // Cherry-pick
 // ---------------------------------------------------------------------------
 
-void GitService::cherryPick(const std::vector<git::ObjectId>& commits) {
+// One commit: this took a list, but libgit2's pick only stages, so the
+// second one met the first one's uncommitted changes, failed, and took
+// the first pick's CHERRY_PICK_HEAD and MERGE_MSG down with it.
+void GitService::cherryPick(const git::ObjectId& commit) {
     if (!repo_) return;
     // Pin the repository like every other async op does: the
     // shared_ptr keeps the object alive across a close/switch while
@@ -1074,27 +1191,31 @@ void GitService::cherryPick(const std::vector<git::ObjectId>& commits) {
     // that is no longer the open one. (This used to capture the raw
     // pointer with no re-check — a use-after-free.)
     std::shared_ptr<git::Repository> r = repo_;
-    runner_.run([this, r, commits]() {
+    runner_.run([this, r, commit]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_)
             return;  // superseded: repo closed or swapped mid-flight
-        for (const auto& commitId : commits) {
-            auto result = r->cherryPick(commitId);
-            if (!result) {
-                emit operationFailed(
-                    QStringLiteral("cherryPick"),
-                    QString::fromStdString(result.error().message()));
-                emit cherryPickComplete(false, QString::fromStdString(result.error().message()));
-                return;
-            }
-            if (result->hasConflicts) {
-                emit cherryPickComplete(
-                    false,
-                    tr("Cherry-pick produced conflicts for commit %1")
-                        .arg(QString::fromStdString(commitId.toShortHex())));
-                refreshStatus();
-                return;
-            }
+        // Refused while another operation is in progress (see
+        // Repository::cherryPick), with a failure alone: a
+        // cherryPickComplete(false) offers to resolve the conflicts
+        // the pick stopped on, and these would be the merge's, or the
+        // earlier pick's.
+        const bool refused = r->state() != git::RepoState::None;
+        auto result = r->cherryPick(commit);
+        if (!result) {
+            const QString error = QString::fromStdString(result.error().message());
+            emit operationFailed(QStringLiteral("cherryPick"), error);
+            if (!refused)
+                emit cherryPickComplete(false, error);
+            return;
+        }
+        if (result->hasConflicts) {
+            emit cherryPickComplete(
+                false,
+                tr("Cherry-pick produced conflicts for commit %1")
+                    .arg(QString::fromStdString(commit.toShortHex())));
+            refreshStatus();
+            return;
         }
         emit cherryPickComplete(true, tr("Cherry-pick completed successfully."));
         refreshStatus();

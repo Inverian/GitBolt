@@ -98,7 +98,20 @@ public:
     Result<void> discardWorkdirChanges(const std::string& path);
 
     // Commits
+    /// Commits the index, as `git commit` would, but through libgit2:
+    /// no hooks run, nothing is signed, the message is taken as is.
+    /// The app commits through git itself (GitProcess::commit); this
+    /// one is for the tests' fixtures. Refuses a commit that changes
+    /// nothing (a merge's may: its parents are the point), an amend
+    /// that would empty the commit, and amendProblem()'s amends.
     Result<ObjectId> commit(const std::string& message, bool amend = false);
+
+    /// Why the last commit can't be amended now, or an empty string
+    /// when it can: a merge, a cherry-pick or a revert is waiting for
+    /// its own commit. git refuses the first two; a revert is refused
+    /// here too, as it waits for "Commit to finish it". A rebase that
+    /// stopped can amend: that's what an `edit` stop is for.
+    std::string amendProblem() const;
 
     // Branches
     Result<std::vector<BranchInfo>> branches(BranchType filter = BranchType::Local) const;
@@ -114,8 +127,17 @@ public:
 
     /// In-progress operation state (merging, rebasing, …) — wraps
     /// git_repository_state. Drives which abort command applies
-    /// and whether the conflict resolver has anything to do.
+    /// and whether the conflict resolver has anything to do. A
+    /// cherry-pick or revert of several commits that is paused between
+    /// them (see sequencePaused()) is still CherryPick or Revert.
     RepoState state() const;
+
+    /// git's sequencer is paused between the commits of a cherry-pick
+    /// or revert of several (`git cherry-pick A B C` stopped at B, and
+    /// B was committed since): commits are still to come, and none is
+    /// waiting to be committed (no CHERRY_PICK_HEAD or REVERT_HEAD).
+    /// `git cherry-pick --continue` (or revert's) carries on.
+    bool sequencePaused() const;
 
     /// Three-way payloads for every conflicted index entry:
     /// ancestor / ours / theirs content (empty for sides that

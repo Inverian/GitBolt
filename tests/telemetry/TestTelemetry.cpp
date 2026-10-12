@@ -404,8 +404,11 @@ private slots:
         QTest::addColumn<QString>("literal");
         QTest::addColumn<QString>("expected");
         const QList<QPair<const char*, const char*>> table = {
-            {"abort", "abort"}, {"addWorktree", "add_worktree"}, {"blame", "blame"},
-            {"checkout", "checkout"}, {"cherryPick", "cherry_pick"}, {"conflicts", "conflicts"},
+            {"abort", "abort"}, {"addWorktree", "add_worktree"}, {"autostash", "autostash"},
+            {"blame", "blame"},
+            {"checkout", "checkout"}, {"cherryPick", "cherry_pick"},
+            {"cherry-pick --continue", "cherry_pick_continue"},
+            {"cherry-pick --skip", "cherry_pick_skip"}, {"conflicts", "conflicts"},
             {"create branch", "create_branch"}, {"createTag", "create_tag"},
             {"delete branch", "delete_branch"}, {"delete remote branch", "delete_remote_branch"},
             {"deleteTag", "delete_tag"}, {"discardFile", "discard_file"},
@@ -417,7 +420,9 @@ private slots:
             {"rebase --continue", "rebase_continue"}, {"rebase --skip", "rebase_skip"},
             {"releaseFinish", "release_finish"}, {"releaseStart", "release_start"},
             {"removeWorktree", "remove_worktree"}, {"repack", "repack"},
-            {"resolve conflicts", "resolve_conflicts"}, {"stage", "stage"},
+            {"resolve conflicts", "resolve_conflicts"},
+            {"revert --continue", "revert_continue"}, {"revert --skip", "revert_skip"},
+            {"stage", "stage"},
             {"stage all", "stage_all"}, {"stage hunk", "stage_hunk"},
             {"stashApply", "stash_apply"}, {"stashDrop", "stash_drop"},
             {"stashPop", "stash_pop"}, {"stashSave", "stash_save"},

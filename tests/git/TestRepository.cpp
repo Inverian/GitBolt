@@ -754,6 +754,348 @@ private slots:
         QCOMPARE(output(git.run({"log", "-1", "--format=%an <%ae>"})),
                  QStringLiteral("Test User <test@gitbolt.local>"));
     }
+
+    // Amending changes the commit, not who wrote it: like `git commit
+    // --amend`, the author keeps their name, email and date, and the
+    // user becomes the committer. The amend used to make the user its
+    // author, dated now.
+    void amendKeepsTheAuthor() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString base = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "their work",
+                                   "--author=Team Mate <mate@example.com>",
+                                   "--date=2001-02-03T04:05:06+01:00"})));
+
+        auto amended = repo.repo().commit("reworded", /*amend=*/true);
+        QVERIFY2(amended.ok(), amended.ok() ? "" : amended.error().message().c_str());
+        QCOMPARE(output(git.run({"log", "-1", "--date=iso-strict",
+                                 "--format=%an <%ae> %ad, %cn <%ce>"})),
+                 QStringLiteral("Team Mate <mate@example.com> 2001-02-03T04:05:06+01:00, "
+                                "Test User <test@gitbolt.local>"));
+        QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("reworded"));
+        QCOMPARE(output(git.run({"rev-parse", "HEAD^"})), base);
+    }
+
+    // An amend can't conclude a merge, a cherry-pick or a revert: it
+    // flattened the merge into a one-parent commit, or folded the pick
+    // into the commit before it, and left the operation's state files
+    // behind, so the repository still read as mid-operation. Refused,
+    // as git refuses it for a merge and a cherry-pick (a revert too,
+    // here: it reads "commit to finish it"). A rebase that stopped is
+    // another matter: amending is what an `edit` stop is for.
+    void amendIsRefusedMidOperation_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::addColumn<bool>("refused");
+        QTest::newRow("merge") << QStringLiteral("merge") << true;
+        QTest::newRow("cherry-pick") << QStringLiteral("cherry-pick") << true;
+        QTest::newRow("revert") << QStringLiteral("revert") << true;
+        QTest::newRow("rebase stop") << QStringLiteral("rebase") << false;
+    }
+
+    void amendIsRefusedMidOperation() {
+        QFETCH(QString, operation);
+        QFETCH(bool, refused);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("a.txt", "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "side"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("a.txt", "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main"})));
+
+        // A conflict in a.txt stops the first three, an exec that fails
+        // the rebase; a.txt is then resolved (changed) and staged.
+        if (operation == QLatin1String("merge"))
+            QVERIFY(!succeeded(git.run({"merge", "side"})));
+        else if (operation == QLatin1String("cherry-pick"))
+            QVERIFY(!succeeded(git.run({"cherry-pick", "side"})));
+        else if (operation == QLatin1String("revert"))
+            QVERIFY(!succeeded(git.run({"revert", "--no-edit", "side"})));
+        else
+            QVERIFY(!succeeded(git.run({"rebase", "--exec", "false", "HEAD~1"})));
+        repo.writeFile("a.txt", "resolved\n");
+        QVERIFY(repo.stageFile("a.txt").ok());
+        const auto state = repo.repo().state();
+        QVERIFY(state != gitbolt::git::RepoState::None);
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        QStringList stateFiles;
+        for (const char* name : {"MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "MERGE_MSG"})
+            if (QFileInfo::exists(gitDir + QLatin1String(name)))
+                stateFiles << QLatin1String(name);
+
+        // What the Commit dialog asks before it offers Amend.
+        const QString problem = refused
+            ? QStringLiteral("You are in the middle of a %1 -- cannot amend.").arg(operation)
+            : QString();
+        QCOMPARE(QString::fromStdString(repo.repo().amendProblem()), problem);
+
+        auto amended = repo.repo().commit("x", /*amend=*/true);
+        QCOMPARE(repo.repo().state(), state);
+        if (!refused) {
+            QVERIFY2(amended.ok(), amended.ok() ? "" : amended.error().message().c_str());
+            QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("x"));
+            return;
+        }
+        QVERIFY(!amended.ok());
+        QCOMPARE(QString::fromStdString(amended.error().message()), problem);
+        QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
+        for (const QString& name : stateFiles)
+            QVERIFY2(QFileInfo::exists(gitDir + name), qPrintable(name));
+    }
+
+    // -----------------------------------------------------------------
+    // Staging that fails partway (here another git holds index.lock, so
+    // the index file can't be written) left its change in libgit2's
+    // copy of the index, and status read that copy: a file that failed
+    // to stage showed as staged, one that failed to unstage as
+    // unstaged, though the index file had neither.
+    // -----------------------------------------------------------------
+    void failedStagingLeavesTheIndexAsItWas_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("stage") << QStringLiteral("stage");
+        QTest::newRow("stage all") << QStringLiteral("stage all");
+        QTest::newRow("unstage") << QStringLiteral("unstage");
+    }
+
+    void failedStagingLeavesTheIndexAsItWas() {
+        QFETCH(QString, operation);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        QVERIFY(repo.writeAndCommit("b.txt", "b\n", "b").ok());
+        repo.writeFile("a.txt", "changed\n");
+        repo.writeFile("b.txt", "staged\n");
+        QVERIFY(repo.stageFile("b.txt").ok());
+        const QStringList before{QStringLiteral("a.txt changed"), QStringLiteral("b.txt staged")};
+        QCOMPARE(statusLines(repo.repo()), before);
+        QFile lock(QDir(repo.path()).filePath(QStringLiteral(".git/index.lock")));
+        QVERIFY(lock.open(QIODevice::WriteOnly));
+        lock.close();
+
+        const auto result = operation == QLatin1String("stage") ? repo.stageFile("a.txt")
+                          : operation == QLatin1String("stage all") ? repo.stageAll()
+                          : repo.repo().unstageFile("b.txt");
+        QVERIFY(!result.ok());
+        QVERIFY(lock.remove());
+        QCOMPARE(statusLines(repo.repo()), before);
+    }
+
+    // -----------------------------------------------------------------
+    // A commit with nothing staged is refused, as `git commit` refuses
+    // it: it made an empty commit. A merge may conclude with nothing
+    // new (its second parent is the point), and an amend may keep the
+    // commit's changes as they are; an amend that would leave the
+    // commit with none at all is refused, as git refuses it.
+    // -----------------------------------------------------------------
+    void commitWithNothingStagedIsRefused_data() {
+        QTest::addColumn<QString>("situation");
+        QTest::addColumn<QString>("error");     // empty: the commit is made
+        const QString nothing = QStringLiteral("Nothing to commit: no changes are staged.");
+        QTest::newRow("unstaged changes only") << QStringLiteral("unstaged") << nothing;
+        QTest::newRow("unborn HEAD, empty index") << QStringLiteral("unborn") << nothing;
+        QTest::newRow("cherry-pick already applied") << QStringLiteral("cherry-pick")
+            << QStringLiteral("The cherry-picked changes are already on this branch; "
+                              "abort the cherry-pick.");
+        QTest::newRow("merge -s ours") << QStringLiteral("merge") << QString();
+        QTest::newRow("amend, nothing staged") << QStringLiteral("amend") << QString();
+        QTest::newRow("amend that empties the commit") << QStringLiteral("amend empty")
+            << QStringLiteral("Amending would leave the last commit empty.");
+    }
+
+    void commitWithNothingStagedIsRefused() {
+        QFETCH(QString, situation);
+        QFETCH(QString, error);
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        bool amend = false;
+        if (situation != QLatin1String("unborn")) {
+            QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+            QVERIFY(repo.writeAndCommit("b.txt", "b\n", "b").ok());
+        }
+        if (situation == QLatin1String("unstaged")) {
+            repo.writeFile("a.txt", "changed\n");
+            repo.writeFile("new.txt", "new\n");
+        } else if (situation == QLatin1String("cherry-pick")) {
+            // side adds c.txt; so does the branch picked onto.
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "c on side").ok());
+            auto picked = repo.repo().head();
+            QVERIFY(picked.ok());
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "c here too").ok());
+            QVERIFY(repo.repo().cherryPick(*picked).ok());
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::CherryPick);
+        } else if (situation == QLatin1String("merge")) {
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "c on side").ok());
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+            QVERIFY(succeeded(git.run({"merge", "-q", "-s", "ours", "--no-ff", "--no-commit",
+                                       "side"})));
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Merge);
+        } else if (situation == QLatin1String("amend")) {
+            amend = true;
+        } else if (situation == QLatin1String("amend empty")) {
+            // The index as it was before "b": amended, "b" adds nothing.
+            QVERIFY(succeeded(git.run({"rm", "-q", "--cached", "b.txt"})));
+            amend = true;
+        }
+        const QString head = output(git.run({"rev-parse", "--verify", "-q", "HEAD"}));
+        const auto state = repo.repo().state();
+
+        auto made = repo.repo().commit("x", amend);
+        if (error.isEmpty()) {
+            QVERIFY2(made.ok(), made.ok() ? "" : made.error().message().c_str());
+            QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("x"));
+            if (situation == QLatin1String("merge"))
+                QCOMPARE(output(git.run({"rev-list", "--parents", "-1", "HEAD"})).split(' ').size(),
+                         3);
+            return;
+        }
+        QVERIFY(!made.ok());
+        QCOMPARE(QString::fromStdString(made.error().message()), error);
+        QCOMPARE(output(git.run({"rev-parse", "--verify", "-q", "HEAD"})), head);
+        QCOMPARE(repo.repo().state(), state);
+    }
+
+    // -----------------------------------------------------------------
+    // A cherry-pick on top of an operation in progress. libgit2 writes
+    // its CHERRY_PICK_HEAD and MERGE_MSG over the ones there, and when
+    // the pick then fails (the earlier pick's changes are in the way)
+    // deletes them: the merge, or the earlier pick, was gone, and its
+    // commit went in as an ordinary one. Refused, before anything is
+    // written, as git refuses it.
+    // -----------------------------------------------------------------
+    void cherryPickRefusedWhileAnOperationIsInProgress_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("cherry-pick") << QStringLiteral("cherry-pick");
+        QTest::newRow("merge") << QStringLiteral("merge");
+    }
+
+    void cherryPickRefusedWhileAnOperationIsInProgress() {
+        QFETCH(QString, operation);
+        const bool merge = operation == QLatin1String("merge");
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("a.txt", "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "pick A",
+                                   "--author=Team Mate <mate@example.com>"})));
+        auto a = repo.repo().resolveRef("HEAD");
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "pick B"})));
+        auto b = repo.repo().resolveRef("HEAD");
+        QVERIFY(a.ok() && b.ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        if (merge) {
+            // Up to A: B's b.txt stays out of it.
+            repo.writeFile("a.txt", "main\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main"})));
+            QVERIFY(!succeeded(git.run({"merge", "side~1"})));
+        } else {
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "main").ok());
+            auto picked = repo.repo().cherryPick(*a);
+            QVERIFY(picked.ok() && !picked->hasConflicts);
+        }
+        const auto state = repo.repo().state();
+        QCOMPARE(state, merge ? gitbolt::git::RepoState::Merge
+                              : gitbolt::git::RepoState::CherryPick);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        const auto stateFiles = [&] {
+            QStringList files;
+            for (const char* name : {"MERGE_HEAD", "CHERRY_PICK_HEAD", "MERGE_MSG"})
+                files << QLatin1String(name) + QLatin1Char(' ')
+                             + QString::fromUtf8(readFile(gitDir, QLatin1String(name)));
+            return files;
+        };
+        const QStringList before = stateFiles();
+        QVERIFY(!merge || before.at(0) != QStringLiteral("MERGE_HEAD <missing>"));
+        QVERIFY(merge || before.at(1).startsWith(QStringLiteral("CHERRY_PICK_HEAD ")
+                                                 + QString::fromStdString(a->toHex())));
+        QVERIFY(merge || before.at(2).startsWith(QStringLiteral("MERGE_MSG pick A")));
+
+        auto refused = repo.repo().cherryPick(*b);
+        QVERIFY(!refused.ok());
+        QCOMPARE(repo.repo().state(), state);
+        QCOMPARE(stateFiles(), before);
+        QCOMPARE(readFile(repo.path(), QStringLiteral("b.txt")), QByteArray("<missing>"));
+        QCOMPARE(QString::fromStdString(refused.error().message()),
+                 merge ? QStringLiteral("A merge is in progress. Finish or abort it first.")
+                       : QStringLiteral("A cherry-pick is in progress. Finish or abort it first."));
+
+        // The earlier pick still concludes as itself.
+        if (!merge) {
+            QVERIFY(repo.commit("pick A").ok());
+            QCOMPARE(output(git.run({"log", "-1", "--format=%an <%ae>"})),
+                     QStringLiteral("Team Mate <mate@example.com>"));
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // `git cherry-pick A B C` (or a revert of several commits) that
+    // stopped at B: once B is committed, the sequence is paused between
+    // commits, with C still to come. libgit2 calls that no operation at
+    // all, as it only looks for CHERRY_PICK_HEAD / REVERT_HEAD, so the
+    // in-progress bar went away while `git status` still said
+    // "cherry-pick in progress".
+    // -----------------------------------------------------------------
+    void pausedSequenceIsStillInProgress_data() {
+        QTest::addColumn<bool>("revert");
+        QTest::newRow("cherry-pick") << false;
+        QTest::newRow("revert") << true;
+    }
+
+    void pausedSequenceIsStillInProgress() {
+        QFETCH(bool, revert);
+        const auto operation = revert ? gitbolt::git::RepoState::Revert
+                                      : gitbolt::git::RepoState::CherryPick;
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        if (revert) {
+            // Reverting "q" clashes with "later".
+            QVERIFY(repo.writeAndCommit("p.txt", "p\n", "p").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "q\n", "q").ok());
+            QVERIFY(repo.writeAndCommit("r.txt", "r\n", "r").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "later\n", "later").ok());
+            QVERIFY(!succeeded(git.run({"revert", "--no-edit", "HEAD~1", "HEAD~2", "HEAD~3"})));
+        } else {
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+            QVERIFY(repo.writeAndCommit("x.txt", "x\n", "A").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "side\n", "B").ok());
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "C").ok());
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+            QVERIFY(repo.writeAndCommit("a.txt", "main\n", "main").ok());
+            QVERIFY(!succeeded(git.run({"cherry-pick", "side~2", "side~1", "side"})));
+        }
+        // Stopped at the second commit, on a conflict.
+        QCOMPARE(repo.repo().state(), operation);
+        QVERIFY(!repo.repo().sequencePaused());
+
+        repo.writeFile("a.txt", "resolved\n");
+        QVERIFY(repo.stageFile("a.txt").ok());
+        QVERIFY(repo.commit("second").ok());
+        QCOMPARE(repo.repo().state(), operation);
+        QVERIFY(repo.repo().sequencePaused());
+
+        // git carries on from there, and is done.
+        QVERIFY(succeeded(git.run({revert ? "revert" : "cherry-pick", "--continue"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QVERIFY(!repo.repo().sequencePaused());
+        QCOMPARE(output(git.run({"log", "-3", "--format=%s"})).split('\n').at(1),
+                 QStringLiteral("second"));
+    }
 };
 
 QTEST_MAIN(TestRepository)

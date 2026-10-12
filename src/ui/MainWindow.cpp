@@ -2585,7 +2585,7 @@ void MainWindow::buildCommandsMenu()
                            "full or short SHA, branch name, or tag."));
                     return;
                 }
-                gitService_->cherryPick({*oid});
+                gitService_->cherryPick(*oid);
             });
 
             dlg->open();
@@ -3937,24 +3937,35 @@ void MainWindow::setupConnections()
     // own message on the status bar (the operationFailed handler); it
     // stays, and if git stopped mid-rebase on a conflict the resolver
     // is offered, as for a cherry-pick. A step can also succeed and
-    // leave the rebase going: the plan said `edit`.
+    // leave the rebase going: the plan said `edit`. A cherry-pick's or a
+    // revert's sequence of several commits goes on in such steps too.
     connect(gitService_, &services::GitService::rebaseStepFinished,
-            this, [this](const QString& step, bool success, bool rebasing) {
+            this, [this](const QString& step, bool success, bool inProgress) {
         if (repoView_)
             repoView_->operationBar()->setBusy(false);
-        if (success && rebasing)
+        const bool cherryPick = step.startsWith(QLatin1String("cherry-pick"));
+        const bool revert = step.startsWith(QLatin1String("revert"));
+        if (cherryPick || revert) {
+            if (success && !inProgress)
+                statusBar()->showMessage(cherryPick ? tr("Cherry-pick complete.")
+                                                    : tr("Revert complete."),
+                                         4000);
+        } else if (success && inProgress) {
             statusBar()->showMessage(tr("Rebase paused. Amend the commit or make changes, "
                                         "then click Continue."));
-        else if (success)
+        } else if (success) {
             statusBar()->showMessage(step == QLatin1String("rebase --abort")
                                          ? tr("Rebase aborted.")
                                          : tr("Rebase complete."),
                                      4000);
+        }
         gitService_->refreshLog();
         gitService_->refreshStatus();
         gitService_->refreshBranches();
-        if (!success && rebasing)
-            offerConflictResolution(tr("rebase"));
+        if (!success && inProgress)
+            offerConflictResolution(cherryPick ? tr("cherry-pick")
+                                    : revert   ? tr("revert")
+                                               : tr("rebase"));
     });
 
     // The in-progress bar: fed by every status refresh and by each
@@ -3967,6 +3978,16 @@ void MainWindow::setupConnections()
         connect(bar, &widgets::RepoOperationBar::resolveRequested,
                 this, &MainWindow::showConflictResolver);
         connect(bar, &widgets::RepoOperationBar::continueRequested, this, [this, bar]() {
+            if (bar->sequencePaused()) {
+                // Between two commits of a sequence: git picks (or
+                // reverts) the rest; there's nothing to commit.
+                bar->setBusy(true);
+                statusBar()->showMessage(bar->state() == git::RepoState::Revert
+                                             ? tr("Continuing the revert…")
+                                             : tr("Continuing the cherry-pick…"));
+                gitService_->sequenceContinue();
+                return;
+            }
             if (bar->state() != git::RepoState::Rebase) {
                 // Merge / cherry-pick / revert: the commit concludes it.
                 if (commitAction_) commitAction_->trigger();
@@ -3977,15 +3998,24 @@ void MainWindow::setupConnections()
             gitService_->rebaseContinue();
         });
         connect(bar, &widgets::RepoOperationBar::skipRequested, this, [this, bar]() {
+            const bool sequence = bar->sequencePaused();
             const auto answer = QMessageBox::question(
                 this, tr("Skip Commit"),
-                tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
-                   "out of the rebased branch."),
+                !sequence ? tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
+                               "out of the rebased branch.")
+                : bar->state() == git::RepoState::Revert
+                          ? tr("Skip the commit the revert stopped at?\n\nIt is left "
+                               "unreverted, and the revert goes on with the rest.")
+                          : tr("Skip the commit the cherry-pick stopped at?\n\nIts changes "
+                               "are left out, and the cherry-pick goes on with the rest."),
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
             if (answer != QMessageBox::Yes) return;
             bar->setBusy(true);
             statusBar()->showMessage(tr("Skipping the commit…"));
-            gitService_->rebaseSkip();
+            if (sequence)
+                gitService_->sequenceSkip();
+            else
+                gitService_->rebaseSkip();
         });
         connect(bar, &widgets::RepoOperationBar::abortRequested, this, [this, bar]() {
             QString operation;

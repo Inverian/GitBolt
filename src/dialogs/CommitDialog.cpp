@@ -318,6 +318,7 @@ void CommitDialog::setupUi()
     // footer status strip so the user's typed message stays visible.
     // -----------------------------------------------------------------------
     errorLabel_ = new QLabel(this);
+    errorLabel_->setObjectName(QStringLiteral("commit.error"));
     errorLabel_->setWordWrap(true);
     errorLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:#5a1f1f; color:#ffdada; padding:6px 10px; }"));
@@ -460,6 +461,12 @@ void CommitDialog::wireConnections()
             this, &CommitDialog::onCommitComplete);
     connect(svc_, &services::GitService::operationFailed,
             this, &CommitDialog::onOperationFailed);
+    // Right behind every status refresh: whether Amend can be offered.
+    // (Hidden, the dialog asks again when it's shown: refresh().)
+    connect(svc_, &services::GitService::repoStateReady, this, [this] {
+        if (isVisible())
+            updateAmend();
+    });
 
     // Branch list refreshes after every checkout / refresh / open. Use it
     // as our "the current branch may have changed" signal so the title
@@ -468,9 +475,36 @@ void CommitDialog::wireConnections()
             [this](std::vector<gitbolt::git::BranchInfo>) { updateTitle(); });
     connect(svc_, &services::GitService::repositoryOpened, this,
             [this](const QString&) {
+                // A commit still running for the repository before
+                // reports nowhere (see GitService::commitChanges): its
+                // wait would have kept Commit off for good.
+                pendingCommit_ = false;
+                pushAfterCommit_ = false;
+                commitBtn_->setEnabled(true);
+                commitPushBtn_->setEnabled(true);
                 readCommitterFromConfig();
                 updateTitle();
             });
+}
+
+// ---------------------------------------------------------------------------
+// Amend: not while a merge, cherry-pick or revert waits for its commit
+// ---------------------------------------------------------------------------
+
+void CommitDialog::updateAmend()
+{
+    // An amend there flattened the merge, or folded the pick into the
+    // commit before it, and left the operation in progress. The commit
+    // refuses it (Repository::amendProblem()); the box says so, in
+    // git's words, before it's ticked.
+    const QString problem = svc_ && svc_->isOpen()
+        ? QString::fromStdString(svc_->withRepository(
+              [](git::Repository& r) { return r.amendProblem(); }))
+        : QString();
+    if (!problem.isEmpty())
+        amendCheck_->setChecked(false);
+    amendCheck_->setEnabled(problem.isEmpty());
+    amendCheck_->setToolTip(problem);
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +886,7 @@ void CommitDialog::refresh()
         svc_->refreshStatus();
     updateTitle();
     readCommitterFromConfig();
+    updateAmend();
 }
 
 void CommitDialog::showEvent(QShowEvent* e)

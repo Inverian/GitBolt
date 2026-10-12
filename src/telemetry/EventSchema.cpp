@@ -163,8 +163,10 @@ QString operationName(const QString& opLiteral) {
     // Every literal GitService passes to operationFailed, normalized.
     static const QSet<QString> known = {
         QStringLiteral("abort"),            QStringLiteral("add_worktree"),
-        QStringLiteral("blame"),            QStringLiteral("checkout"),
-        QStringLiteral("cherry_pick"),      QStringLiteral("conflicts"),
+        QStringLiteral("autostash"),        QStringLiteral("blame"),
+        QStringLiteral("checkout"),         QStringLiteral("cherry_pick"),
+        QStringLiteral("cherry_pick_continue"), QStringLiteral("cherry_pick_skip"),
+        QStringLiteral("conflicts"),
         QStringLiteral("create_branch"),    QStringLiteral("create_tag"),
         QStringLiteral("delete_branch"),    QStringLiteral("delete_remote_branch"),
         QStringLiteral("delete_tag"),       QStringLiteral("discard_file"),
@@ -178,7 +180,8 @@ QString operationName(const QString& opLiteral) {
         QStringLiteral("rebase_continue"),  QStringLiteral("rebase_skip"),
         QStringLiteral("release_finish"),   QStringLiteral("release_start"),
         QStringLiteral("remove_worktree"),  QStringLiteral("repack"),
-        QStringLiteral("resolve_conflicts"), QStringLiteral("stage"),
+        QStringLiteral("resolve_conflicts"), QStringLiteral("revert_continue"),
+        QStringLiteral("revert_skip"),      QStringLiteral("stage"),
         QStringLiteral("stage_all"),        QStringLiteral("stage_hunk"),
         QStringLiteral("stash_apply"),      QStringLiteral("stash_drop"),
         QStringLiteral("stash_pop"),        QStringLiteral("stash_save"),

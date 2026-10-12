@@ -11,6 +11,7 @@
 #include <vector>
 
 class QProcess;
+class QString;
 
 namespace gitbolt::git {
 
@@ -120,9 +121,30 @@ public:
     Result<ProcessOutput> interactiveRebase(const std::string& onto, const std::string& todo,
                                             const std::map<std::string, std::string>& newMessages = {},
                                             const std::vector<std::string>& messages = {}) const;
+    /// Before git carries on, a reword whose new message a hook turned
+    /// down (git kept the commit, under its old message) is committed
+    /// with the plan's message again; while the hooks still say no, the
+    /// rebase stays where it is and this fails with what they said.
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
     Result<ProcessOutput> rebaseSkip() const;
+
+    /// `git cherry-pick --continue`, or `git revert --continue` when
+    /// `revert`: carries on with a sequence of several commits (see
+    /// Repository::sequencePaused()). Skip leaves out the commit the
+    /// sequence stopped at first. As long as a rebase step may take.
+    Result<ProcessOutput> sequenceContinue(bool revert) const;
+    Result<ProcessOutput> sequenceSkip(bool revert) const;
+
+    /// `git commit -F -` (`--amend` too when `amend`), the message on
+    /// stdin: the commit a terminal's git would make. The repository's
+    /// hooks run (core.hooksPath honoured), commit.gpgSign and
+    /// commit.cleanup apply, and git concludes a merge, cherry-pick or
+    /// revert in progress, a merge's autostash included. Up to five
+    /// minutes, for slow hooks. git runs in a process group of its own,
+    /// so a hook that hangs dies with it when that time is up or a
+    /// cancel flag is set.
+    Result<ProcessOutput> commit(const std::string& message, bool amend = false) const;
 
     Result<ProcessOutput> gitFlowInit() const;
     Result<ProcessOutput> gitFlowFeatureStart(const std::string& name) const;
@@ -145,8 +167,11 @@ private:
     /// GIT_EDITOR that never waits on anyone (see kEditor).
     static void applyEnvironment(QProcess& process);
 
-    /// run() with a cancel flag added.
-    Result<ProcessOutput> runCancellable(const std::vector<std::string>& args, int timeoutMs) const;
+    /// run() with a cancel flag added, and commit(): git in a process
+    /// group of its own, which a cancel or the time limit stops whole.
+    /// `stdinData`, when given, is written to git's stdin, then closed.
+    Result<ProcessOutput> runCancellable(const std::vector<std::string>& args, int timeoutMs,
+                                         const std::string* stdinData = nullptr) const;
     /// Whether any of cancelFlags_ is set.
     bool cancelled() const;
 
@@ -156,6 +181,26 @@ private:
     /// is committed then. Empty for a rebase started some other way,
     /// which keeps the user's own setting.
     std::vector<std::string> rebaseCommentConfig() const;
+
+    /// `git rev-parse --git-path <path>`, made absolute; empty when git
+    /// can't say (no repository).
+    QString gitPath(const QString& path) const;
+
+    /// The file with the new message of the commit the rebase in
+    /// progress stopped at, when an interactiveRebase() plan rewords
+    /// it; empty otherwise. `hash`, when given, gets that commit's.
+    QString stoppedRewordMessage(std::string* hash = nullptr) const;
+
+    /// stoppedRewordMessage() when git hasn't given the commit that
+    /// message: nothing is staged, and HEAD still has the commit's old
+    /// one (a hook turned the new one down). Empty otherwise.
+    QString rejectedRewordMessage() const;
+
+    /// Where the rebase stopped at a reword, puts its new message where
+    /// git keeps the message of the commit it stopped at
+    /// (rebase-merge/message, and MERGE_MSG at a conflict), for a
+    /// `git rebase --continue` or `git commit` in a terminal.
+    void keepRewordMessage() const;
 
     std::string workDir_;
     std::string gitPath_;

@@ -14,8 +14,10 @@
 //     picking the same target again lists its commits again;
 //   - the bar shows only while a rebase / merge / cherry-pick / revert
 //     is in progress, offers Resolve while files are conflicted, holds
-//     Continue / Commit back until they're not, goes quiet while a step
-//     runs, and follows a theme switch.
+//     Continue / Commit back until they're not, offers Continue and
+//     Skip for a cherry-pick or revert of several commits paused
+//     between two, goes quiet while a step runs, and follows a theme
+//     switch.
 //
 
 #include <QApplication>
@@ -249,6 +251,37 @@ private slots:
 
         bar.setState(gitbolt::git::RepoState::None, 0);
         QVERIFY(bar.isHidden());
+    }
+
+    // A cherry-pick or revert of several commits, paused between two of
+    // them, has nothing to commit: Continue and Skip carry it on, as for
+    // a rebase. Commit… led nowhere there. Stopped at a commit that
+    // waits for its own, it's Commit… still.
+    void barOffersContinueForAPausedSequence() {
+        RepoOperationBar bar;
+        for (const auto state : {gitbolt::git::RepoState::CherryPick,
+                                 gitbolt::git::RepoState::Revert}) {
+            bar.setState(state, 0, /*sequencePaused=*/true);
+            QVERIFY(!bar.isHidden());
+            QVERIFY(bar.sequencePaused());
+            QVERIFY(!button(bar, label("Commit…")));
+            QVERIFY(button(bar, label("Continue"))->isEnabled());
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+            QVERIFY(button(bar, label("Skip"))->toolTip().contains(
+                state == gitbolt::git::RepoState::Revert ? QLatin1String("git revert --skip")
+                                                         : QLatin1String("git cherry-pick --skip")));
+            QSignalSpy continued(&bar, &RepoOperationBar::continueRequested);
+            QSignalSpy skipped(&bar, &RepoOperationBar::skipRequested);
+            button(bar, label("Continue"))->click();
+            button(bar, label("Skip"))->click();
+            QCOMPARE(continued.count(), 1);
+            QCOMPARE(skipped.count(), 1);
+
+            bar.setState(state, 0, /*sequencePaused=*/false);
+            QVERIFY(!bar.sequencePaused());
+            QVERIFY(button(bar, label("Commit…"))->isEnabled());
+            QVERIFY(button(bar, label("Skip"))->isHidden());
+        }
     }
 
     void barButtonsAskForTheirStepUntilBusy() {

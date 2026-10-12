@@ -1,5 +1,7 @@
 #include "git/Repository.h"
 #include <QFile>
+#include <QFileInfo>
+#include <QScopeGuard>
 #include <QString>
 #include <git2.h>
 #include <cstring>
@@ -485,6 +487,40 @@ void reloadIndex(git_repository* repo) {
     if (freshIndex(&index, repo) == 0)
         git_index_free(index);
 }
+
+// Whether git's state file `name` (MERGE_HEAD, CHERRY_PICK_HEAD, …) is
+// in the git dir: a linked worktree's own, where git keeps them.
+bool hasStateFile(git_repository* repo, const char* name) {
+    return QFileInfo::exists(QString::fromUtf8(git_repository_path(repo))
+                             + QLatin1String(name));
+}
+
+// The operation git's sequencer still has commits to go for, by the
+// first verb of its todo list, as `git status` reads it: "pick" (or
+// "p") for a cherry-pick, "revert" for a revert. None without one.
+RepoState sequenceState(git_repository* repo) {
+    QFile todo(QString::fromUtf8(git_repository_path(repo))
+               + QLatin1String("sequencer/todo"));
+    if (!todo.open(QIODevice::ReadOnly))
+        return RepoState::None;
+    const std::string text = todo.read(4096).toStdString();
+    const auto isBlank = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    size_t start = 0;
+    while (start < text.size() && isBlank(text[start]))
+        ++start;
+    size_t end = start;
+    while (end < text.size() && !isBlank(text[end]))
+        ++end;
+    // git wants the verb followed by a space or a tab.
+    if (end == text.size() || (text[end] != ' ' && text[end] != '\t'))
+        return RepoState::None;
+    const std::string_view verb(text.data() + start, end - start);
+    if (verb == "pick" || verb == "p")
+        return RepoState::CherryPick;
+    if (verb == "revert")
+        return RepoState::Revert;
+    return RepoState::None;
+}
 } // namespace
 
 Result<void> Repository::stageFile(const std::string& path) {
@@ -506,7 +542,15 @@ Result<void> Repository::unstageFile(const std::string& path) {
     git_strarray arr = {const_cast<char**>(paths), 1};
     int err = git_reset_default(repo_, headCommit, &arr);
     if (headCommit) git_object_free(headCommit);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // The reset is made in the copy, then written. When the write
+        // failed (another git holds index.lock), the copy kept the
+        // file unstaged while the index file didn't, and status read
+        // the copy (see Index.cpp).
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return Result<void>::success();
 }
 
@@ -532,14 +576,27 @@ Result<void> Repository::discardWorkdirChanges(const std::string& path) {
 }
 
 Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
+    if (amend) {
+        if (std::string problem = amendProblem(); !problem.empty())
+            return GitError(GitErrorCode::Unmerged, std::move(problem));
+    }
+
     git_index* index = nullptr;
     int err = freshIndex(&index, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     git_oid treeOid;
     err = git_index_write_tree(&treeOid, index);
+    const bool indexEmpty = git_index_entrycount(index) == 0;
     git_index_free(index);
     if (err < 0) return GitError::fromLibgit2(err);
+
+    // Whether the commit would change nothing next to `base` (with no
+    // base, next to the empty tree), which `git commit` refuses: with
+    // nothing staged, this made an empty commit.
+    const auto changesNothing = [&](const git_commit* base) {
+        return base ? git_oid_equal(&treeOid, git_commit_tree_id(base)) != 0 : indexEmpty;
+    };
 
     git_tree* tree = nullptr;
     err = git_tree_lookup(&tree, repo_, &treeOid);
@@ -548,6 +605,10 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
     git_signature* sig = nullptr;
     err = git_signature_default(&sig, repo_);
     if (err < 0) { git_tree_free(tree); return GitError::fromLibgit2(err); }
+    const auto release = qScopeGuard([&] {
+        git_signature_free(sig);
+        git_tree_free(tree);
+    });
 
     git_oid commitOid;
     if (amend) {
@@ -557,20 +618,35 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
         // crash on the very first commit with "Amend" ticked.
         git_reference* headRef = nullptr;
         err = git_repository_head(&headRef, repo_);
-        if (err < 0) {
-            git_signature_free(sig);
-            git_tree_free(tree);
+        if (err < 0)
             return GitError::fromLibgit2(err);
-        }
         git_commit* headCommit = nullptr;
         err = git_reference_peel(reinterpret_cast<git_object**>(&headCommit), headRef, GIT_OBJECT_COMMIT);
         git_reference_free(headRef);
-        if (err < 0) {
-            git_signature_free(sig);
-            git_tree_free(tree);
+        if (err < 0)
             return GitError::fromLibgit2(err);
+        // Amended to its parent's tree, the commit would be empty, and
+        // git refuses that too. A merge's may be: its parents are what
+        // it records.
+        bool empty = false;
+        if (git_commit_parentcount(headCommit) <= 1) {
+            git_commit* parent = nullptr;
+            if (git_commit_parentcount(headCommit) == 0
+                || git_commit_parent(&parent, headCommit, 0) == 0)
+                empty = changesNothing(parent);
+            git_commit_free(parent);
         }
-        err = git_commit_amend(&commitOid, headCommit, "HEAD", sig, sig, nullptr, message.c_str(), tree);
+        if (empty) {
+            git_commit_free(headCommit);
+            return GitError(GitErrorCode::GenericError,
+                            "Amending would leave the last commit empty.");
+        }
+        // No author: libgit2 then keeps the commit's own (name, email
+        // and date), as `git commit --amend` does, and only the
+        // committer is the user. Given the user's signature, the amend
+        // made the user the author, dated now.
+        err = git_commit_amend(&commitOid, headCommit, "HEAD", nullptr, sig, nullptr,
+                               message.c_str(), tree);
         git_commit_free(headCommit);
     } else {
         std::vector<git_commit*> parents;
@@ -597,6 +673,17 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
                 return 0;
             },
             &mergeHeads);
+        // Nothing staged. A merge may conclude so ("-s ours", or every
+        // change already here): its second parent is the point.
+        if (mergeHeads.empty() && changesNothing(parents.empty() ? nullptr : parents.front())) {
+            for (auto* p : parents)
+                git_commit_free(p);
+            if (hasStateFile(repo_, "CHERRY_PICK_HEAD"))
+                return GitError(GitErrorCode::Applied,
+                                "The cherry-picked changes are already on this branch; "
+                                "abort the cherry-pick.");
+            return GitError(GitErrorCode::GenericError, "Nothing to commit: no changes are staged.");
+        }
         for (const auto& oid : mergeHeads) {
             git_commit* mergeParent = nullptr;
             if (git_commit_lookup(&mergeParent, repo_, &oid) == 0)
@@ -644,10 +731,21 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
         }
     }
 
-    git_signature_free(sig);
-    git_tree_free(tree);
     if (err < 0) return GitError::fromLibgit2(err);
     return ObjectId(&commitOid);
+}
+
+std::string Repository::amendProblem() const {
+    // By the files, as commit() clears them: state() names a rebase
+    // before anything else. At a rebase's stop a CHERRY_PICK_HEAD is
+    // the rebase's own pick (older gits wrote one), not one to finish.
+    if (hasStateFile(repo_, "MERGE_HEAD"))
+        return "You are in the middle of a merge -- cannot amend.";
+    if (hasStateFile(repo_, "CHERRY_PICK_HEAD") && state() != RepoState::Rebase)
+        return "You are in the middle of a cherry-pick -- cannot amend.";
+    if (hasStateFile(repo_, "REVERT_HEAD"))
+        return "You are in the middle of a revert -- cannot amend.";
+    return {};
 }
 
 Result<std::vector<BranchInfo>> Repository::branches(BranchType filter) const {
@@ -946,7 +1044,11 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
 RepoState Repository::state() const {
     switch (git_repository_state(repo_)) {
     case GIT_REPOSITORY_STATE_NONE:
-        return RepoState::None;
+        // libgit2 knows a cherry-pick or revert of several commits only
+        // while one of them waits for its commit. Paused between two
+        // (see sequencePaused()), it read as no operation at all: the
+        // in-progress bar went away with commits still to come.
+        return sequenceState(repo_);
     case GIT_REPOSITORY_STATE_MERGE:
         return RepoState::Merge;
     case GIT_REPOSITORY_STATE_REVERT:
@@ -962,6 +1064,11 @@ RepoState Repository::state() const {
     default:
         return RepoState::Other;
     }
+}
+
+bool Repository::sequencePaused() const {
+    return git_repository_state(repo_) == GIT_REPOSITORY_STATE_NONE
+        && sequenceState(repo_) != RepoState::None;
 }
 
 Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
@@ -1367,6 +1474,28 @@ Result<void> Repository::stashDrop(size_t index) {
 }
 
 Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
+    // On top of an operation in progress, libgit2 writes its own
+    // CHERRY_PICK_HEAD and MERGE_MSG over that operation's, and a pick
+    // that then fails (an earlier pick's changes in the way) deletes
+    // them: the merge, or the earlier pick, was gone without a word,
+    // and its commit went in as an ordinary one. Refused, as git
+    // refuses it, before anything is written.
+    const char* operation = nullptr;
+    switch (state()) {
+    case RepoState::None:       break;
+    case RepoState::Merge:      operation = "merge"; break;
+    case RepoState::Revert:     operation = "revert"; break;
+    case RepoState::CherryPick: operation = "cherry-pick"; break;
+    case RepoState::Rebase:     operation = "rebase"; break;
+    case RepoState::Other:
+        return GitError(GitErrorCode::Unmerged,
+                        "Another git operation (git am or bisect) is in progress. "
+                        "Finish it first.");
+    }
+    if (operation)
+        return GitError(GitErrorCode::Unmerged,
+                        std::string("A ") + operation + " is in progress. Finish or abort it first.");
+
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
     git_commit* commit = nullptr;

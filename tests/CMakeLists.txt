@@ -134,6 +134,11 @@ set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 gitbolt_add_test(test_usage_statistics_settings dialogs/TestUsageStatisticsSettings.cpp)
 target_link_libraries(test_usage_statistics_settings PRIVATE gitbolt_dialogs gitbolt_telemetry)
 set_property(TEST test_usage_statistics_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The Commit dialog against a real repository: Amend held back while an
+# operation waits for its commit, a hook's refusal shown. Off screen.
+gitbolt_add_test(test_commit_dialog dialogs/TestCommitDialog.cpp)
+target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs)
+set_property(TEST test_commit_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # ui/ — the Settings switch reaching usage statistics through a real
 # MainWindow's own SettingsService, against the loopback HttpStub.

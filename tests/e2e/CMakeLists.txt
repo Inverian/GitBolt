@@ -20,6 +20,7 @@ set(E2E_TESTS
     test_branch_switch
     test_clone_dialog
     test_commit_flow
+    test_commit_hooks
     test_instance_lock
     test_quit_during_fetch
     test_rebase_dialog

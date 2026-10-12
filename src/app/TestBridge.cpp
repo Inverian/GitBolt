@@ -680,6 +680,9 @@ QByteArray TestBridge::cmdDumpState()
             state[QStringLiteral("repoState")] = QStringLiteral("other");
             break;
         }
+        // A cherry-pick or revert of several commits, between two of
+        // them: the bar's Continue runs git's --continue.
+        state[QStringLiteral("sequencePaused")] = repo->sequencePaused();
         if (auto branch = repo->headBranchName())
             state[QStringLiteral("branch")] =
                 QString::fromStdString(*branch);

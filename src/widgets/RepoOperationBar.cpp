@@ -51,7 +51,6 @@ RepoOperationBar::RepoOperationBar(QWidget* parent)
         row->addWidget(button);
     }
 
-    skipButton_->setToolTip(tr("Leave this commit out and carry on (git rebase --skip)"));
     resolveButton_->setToolTip(tr("Open the three-way conflict resolver"));
 
     connect(resolveButton_, &QPushButton::clicked, this, &RepoOperationBar::resolveRequested);
@@ -63,9 +62,10 @@ RepoOperationBar::RepoOperationBar(QWidget* parent)
     refresh();
 }
 
-void RepoOperationBar::setState(git::RepoState state, int conflicts) {
+void RepoOperationBar::setState(git::RepoState state, int conflicts, bool sequencePaused) {
     state_ = state;
     conflicts_ = conflicts;
+    sequencePaused_ = sequencePaused;
     refresh();
 }
 
@@ -126,6 +126,8 @@ void RepoOperationBar::refresh() {
         text = conflicted
             ? tr("Cherry-pick stopped on conflicts in %n file(s). Resolve them, then commit.",
                  nullptr, conflicts_)
+            : sequencePaused_
+            ? tr("A cherry-pick of several commits is paused. Continue to pick the rest.")
             : tr("A cherry-pick is in progress. Commit to finish it.");
         abortTip = tr("Stop the cherry-pick and put the branch back where it was "
                       "(git cherry-pick --abort)");
@@ -134,6 +136,8 @@ void RepoOperationBar::refresh() {
         text = conflicted
             ? tr("Revert stopped on conflicts in %n file(s). Resolve them, then commit.",
                  nullptr, conflicts_)
+            : sequencePaused_
+            ? tr("A revert of several commits is paused. Continue to revert the rest.")
             : tr("A revert is in progress. Commit to finish it.");
         abortTip = tr("Stop the revert and put the branch back where it was (git revert --abort)");
         break;
@@ -144,16 +148,29 @@ void RepoOperationBar::refresh() {
     }
 
     const bool rebase = state_ == git::RepoState::Rebase;
+    const bool revert = state_ == git::RepoState::Revert;
+    // git carries these on itself: there's nothing to commit. A
+    // sequence stopped at a commit that waits for its own still
+    // concludes it with Commit….
+    const bool steps = rebase || sequencePaused_;
     message_->setText(text);
-    continueButton_->setText(rebase ? tr("Continue") : tr("Commit…"));
+    continueButton_->setText(steps ? tr("Continue") : tr("Commit…"));
     continueButton_->setToolTip(
         conflicted ? tr("Resolve the conflicts first")
         : rebase   ? tr("Carry on with the rebase (git rebase --continue)")
-                   : tr("Open the Commit dialog to finish it"));
+        : !steps   ? tr("Open the Commit dialog to finish it")
+        : revert   ? tr("Revert the rest of the commits (git revert --continue)")
+                   : tr("Pick the rest of the commits (git cherry-pick --continue)"));
+    skipButton_->setToolTip(
+        rebase   ? tr("Leave this commit out and carry on (git rebase --skip)")
+        : revert ? tr("Leave out the commit the revert stopped at and carry on "
+                      "(git revert --skip)")
+                 : tr("Leave out the commit the cherry-pick stopped at and carry on "
+                      "(git cherry-pick --skip)"));
     abortButton_->setToolTip(abortTip);
 
     resolveButton_->setVisible(conflicted);
-    skipButton_->setVisible(rebase);
+    skipButton_->setVisible(steps);
     resolveButton_->setEnabled(!busy_);
     continueButton_->setEnabled(!busy_ && !conflicted);
     skipButton_->setEnabled(!busy_);

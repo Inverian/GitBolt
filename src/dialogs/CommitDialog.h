@@ -96,6 +96,9 @@ private:
     void clearDiff();
     void updateStatusBar();
     void readCommitterFromConfig();
+    /// Amend is off, with the reason as its tooltip, while the
+    /// repository has a merge, cherry-pick or revert to commit.
+    void updateAmend();
 
     QStringList selectedUnstagedPaths() const;
     QStringList selectedStagedPaths() const;

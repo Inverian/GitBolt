@@ -23,6 +23,9 @@ namespace gitbolt::widgets {
 ///   Rebase:                 [Resolve Conflicts…] [Continue] [Skip] [Abort]
 ///   Merge / cherry-pick /
 ///   revert:                 [Resolve Conflicts…] [Commit…]         [Abort]
+///   Cherry-pick / revert of
+///   several commits, paused
+///   between two:                                 [Continue] [Skip] [Abort]
 ///
 /// Resolve Conflicts… shows only while files are conflicted, and
 /// Continue / Commit… wait until none are.
@@ -33,8 +36,12 @@ public:
 
     /// From GitService::repoStateReady: shows, updates or hides the
     /// bar. RepoState::Other (am, bisect) has nothing to offer here.
-    void setState(git::RepoState state, int conflicts);
+    /// `sequencePaused`: a cherry-pick or revert of several commits is
+    /// paused between two, with nothing to commit; Continue and Skip
+    /// carry it on, as for a rebase.
+    void setState(git::RepoState state, int conflicts, bool sequencePaused = false);
     git::RepoState state() const { return state_; }
+    bool sequencePaused() const { return sequencePaused_; }
 
     /// While a step runs, every button is off, so that a second click
     /// can't start another git command on top of it.
@@ -43,9 +50,11 @@ public:
 
 signals:
     void resolveRequested();
-    /// Rebase: `git rebase --continue`. Otherwise: commit, which
-    /// concludes the merge / cherry-pick / revert.
+    /// Rebase: `git rebase --continue`; a paused sequence: its
+    /// --continue. Otherwise: commit, which concludes the merge /
+    /// cherry-pick / revert.
     void continueRequested();
+    /// Rebase, or a paused sequence: its --skip.
     void skipRequested();
     void abortRequested();
 
@@ -59,6 +68,7 @@ private:
 
     git::RepoState state_ = git::RepoState::None;
     int conflicts_ = 0;
+    bool sequencePaused_ = false;
     bool busy_ = false;
     bool applyingColors_ = false;
     QColor border_;
