@@ -121,6 +121,9 @@ private:
     // overwriting the newer commit's details.
     quint64 containsQueryToken_ = 0;
 
+    /// showFileHistory's dialog, for `git log`'s output on `path`.
+    void showFileHistoryDialog(const QString& path, const QString& stdoutText);
+
     void setupUi();
     QWidget* buildCommitInfoTab();
     QWidget* buildDiffTab();

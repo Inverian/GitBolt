@@ -100,9 +100,11 @@ tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay is
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```
 
-`dump-state` also reports `headOid`, `theme`, `logRows`, and
-`statusMessage` so a harness can assert "HEAD moved", "Dark
-persisted", "the log loaded", and "the fetch failed" without shelling
+`dump-state` also reports `headOid`, `theme`, `logRows`,
+`statusMessage` and `opIndicator` (the toolbar's inline op label:
+"Merging topic…", "✓ Fetch complete.", "✗ fetch failed: …") so a
+harness can assert "HEAD moved", "Dark persisted", "the log loaded",
+"the fetch failed" and "the merge is still running" without shelling
 out or screenshotting, and `sequencePaused`: a cherry-pick or revert
 of several commits is paused between two of them (`repoState` is then
 `cherry-pick` or `revert`).

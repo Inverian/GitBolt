@@ -6,6 +6,7 @@
 #include <QThread>
 #include <QtConcurrent>
 
+#include <algorithm>
 #include <exception>
 #include <functional>
 #include <optional>
@@ -147,6 +148,13 @@ public:
         });
         watcher->setFuture(fut);
         futures_.append(std::move(fut));
+    }
+
+    /// Whether a job is queued or running. On this object's thread,
+    /// like run().
+    bool busy() const {
+        return std::any_of(futures_.begin(), futures_.end(),
+                           [](const QFuture<void>& f) { return !f.isFinished(); });
     }
 
 private:

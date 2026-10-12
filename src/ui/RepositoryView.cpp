@@ -43,6 +43,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <memory>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -283,18 +284,43 @@ void RepositoryView::showFileHistory(const QString& path)
     if (!gitService_ || !gitService_->isOpen())
         return;
 
-    // %x09 = tab separator; fields: full sha, short sha, date,
-    // author, subject.
-    auto out = gitService_->process().run(
-        {"log", "--follow", "--date=short",
-         "--pretty=format:%H%x09%h%x09%ad%x09%an%x09%s", "--",
-         path.toStdString()});
-    if (!out.ok() || !out.value().success()) {
-        QMessageBox::warning(this, tr("File History"),
-            tr("Could not load history for %1").arg(path));
-        return;
-    }
+    // On a worker, like the contained-in query below: `git log
+    // --follow` walks the whole history, which takes a while on a big
+    // repository, and it froze the window meanwhile. The dialog comes
+    // up once it's done, unless another repository was opened by then.
+    using Log = std::optional<std::string>;
+    const quint64 generation = gitService_->openGeneration();
+    auto* watcher = new QFutureWatcher<Log>(this);
+    connect(watcher, &QFutureWatcher<Log>::finished, this,
+            [this, watcher, path, generation]() {
+        watcher->deleteLater();
+        if (!gitService_ || generation != gitService_->openGeneration())
+            return;
+        const Log log = watcher->result();
+        if (!log) {
+            QMessageBox::warning(this, tr("File History"),
+                tr("Could not load history for %1").arg(path));
+            return;
+        }
+        showFileHistoryDialog(path, QString::fromStdString(*log));
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [proc = gitService_->process(), file = path.toStdString()]() -> Log {
+            // %x09 = tab separator; fields: full sha, short sha, date,
+            // author, subject.
+            auto out = proc.run(
+                {"log", "--follow", "--date=short",
+                 "--pretty=format:%H%x09%h%x09%ad%x09%an%x09%s", "--",
+                 file});
+            if (!out.ok() || !out.value().success())
+                return std::nullopt;
+            return std::move(out.value().stdoutData);
+        }));
+}
 
+void RepositoryView::showFileHistoryDialog(const QString& path,
+                                           const QString& stdoutText)
+{
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(tr("History — %1").arg(path));
@@ -310,8 +336,6 @@ void RepositoryView::showFileHistory(const QString& path)
     tree->setAlternatingRowColors(true);
     tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
 
-    const QString stdoutText =
-        QString::fromStdString(out.value().stdoutData);
     const QStringList lines =
         stdoutText.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     for (const QString& line : lines) {

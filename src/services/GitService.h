@@ -32,6 +32,12 @@ namespace gitbolt::services {
 /// refreshStatus() & co.; the request lands behind any completion
 /// signal the worker emitted first, so handlers see e.g.
 /// rebaseStepFinished before the statusReady it causes.
+///
+/// What the refresh workers and the rebase steps read goes out from
+/// the service's thread (deliverFor), and only while their repository
+/// is still the open one: the check on the worker alone let a result
+/// posted just before a swap reach the GUI after it, as the next
+/// repository's.
 class GitService : public QObject {
     Q_OBJECT
 public:
@@ -110,8 +116,15 @@ public:
     /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
     /// returns by value. Once you have the GitProcess object you can
     /// run shell commands on it without holding the lock — QProcess is
-    /// independent of libgit2 state.
+    /// independent of libgit2 state. Its commands stop on
+    /// cancelGitOps(), so a command run on a pool thread can't hold up
+    /// quitting.
     git::GitProcess process() const;
+
+    /// Whether a job the service runs (a refresh, a rebase step, a
+    /// checkout, Git Flow, maintenance) is still running. MainWindow
+    /// hides itself while quitting waits for them.
+    bool workRunning() const { return runner_.busy(); }
 
     void refreshStatus();
     /// Commits per history page (CommitLogModel pages by the same).
@@ -149,7 +162,9 @@ public:
     /// Abort whatever conflicted operation is in progress, using
     /// the command that matches the repository state: merge /
     /// cherry-pick / rebase / revert --abort. No-op when the
-    /// repository is in a normal state.
+    /// repository is in a normal state. git runs on a worker (a rebase
+    /// as a rebase step, reported on rebaseStepFinished); a failure
+    /// comes as operationFailed("abort", …), and the refreshes follow.
     /// Returns false, running nothing, while a rebase step runs on the
     /// repository, reported as an operationFailed.
     bool abortConflictState();
@@ -205,35 +220,45 @@ public:
 
     void createBranch(const QString& name);
     void deleteBranch(const QString& name);
-    void checkoutBranch(const QString& name);
+    /// False when the checkout failed (reported as an operationFailed)
+    /// or no repository is open.
+    bool checkoutBranch(const QString& name);
     /// The sidebar's "Checkout as local branch" on `remoteBranch`
     /// ("origin/feature/x"): the local branch named for it
-    /// ("feature/x"), created to track it unless it exists. Reports
-    /// failure as operationFailed("checkout", …).
+    /// ("feature/x"), created to track it unless it exists. git runs on
+    /// a worker: a first checkout can take minutes. Reports failure as
+    /// operationFailed("checkout", …).
     void checkoutRemoteBranch(const QString& remoteBranch);
+
+    // The remote ops return false exactly when they reported a failure
+    // (operationFailed) or no repository is open: the outcome of the op
+    // MainWindow ran, whatever else failed meanwhile.
 
     /// Pushes `branch` (empty = the checked-out branch). A branch with
     /// no upstream yet is published with --set-upstream instead of
     /// failing. Safe off the GUI thread, like pull/fetch.
-    void push(const QString& remote, const QString& branch);
+    bool push(const QString& remote, const QString& branch);
     /// `git push <remote> --delete <branch>`: removes the branch on the
     /// server and, on success, the local remote-tracking ref. Failures
     /// surface as operationFailed("delete remote branch", …). Safe off
     /// the GUI thread.
-    void deleteRemoteBranch(const QString& remote, const QString& branch);
-    void pull(const QString& remote, const QString& branch);
+    bool deleteRemoteBranch(const QString& remote, const QString& branch);
+    bool pull(const QString& remote, const QString& branch);
     /// `cancel`, when given, stops this fetch alone: set from any
-    /// thread, it ends git the way cancelRemoteOps() does (which stops
+    /// thread, it ends git the way cancelGitOps() does (which stops
     /// this fetch as well). MainWindow drops an auto-fetch with it.
-    void fetch(const QString& remote = "",
+    bool fetch(const QString& remote = "",
                std::shared_ptr<std::atomic<bool>> cancel = nullptr);
-    /// Stops the git command of every running push, pull, fetch and
-    /// remote-branch delete, and of a running commit, its hooks with it
-    /// (they fail with "Cancelled"), and makes later ones fail at once.
-    /// For shutdown: MainWindow calls it before waiting for its
-    /// remote-op thread, and ~GitService waits for the commit's.
-    /// Thread-safe.
-    void cancelRemoteOps();
+    /// Stops every git command the service, or anyone with a process()
+    /// of it, runs: a push, pull, fetch or remote-branch delete, a
+    /// rebase step, a commit and its hooks, a checkout, Git Flow,
+    /// maintenance, a local op MainWindow runs on a pool thread. They fail with "Cancelled",
+    /// and later ones fail at once. git and its hooks get SIGTERM, as
+    /// on Ctrl-C, so a rebase stopped mid-step stays in progress, to be
+    /// carried on later. For shutdown: MainWindow calls it before
+    /// waiting for its pool threads, and the destructor before waiting
+    /// for the service's own. Thread-safe.
+    void cancelGitOps();
 
     // Interactive Rebase. Each step reports on rebaseStepFinished.
     // One step at a time per repository: another asked for while one
@@ -285,14 +310,17 @@ public:
     void refreshTags();
     /// `target` is any revision spec (branch, short or full SHA, …).
     /// `pushAfter` pushes the new tag to origin once creation
-    /// succeeds (same synchronous CLI path as push()).
-    void createTag(const QString& name, const QString& target,
+    /// succeeds (same synchronous CLI path as push()); MainWindow
+    /// pushes it as a remote op of its own instead. False when the tag
+    /// (or the push) failed, reported as an operationFailed.
+    bool createTag(const QString& name, const QString& target,
                    const QString& message, bool annotated,
                    bool pushAfter = false);
     /// `name` may be short ("v1.0") or the full "refs/tags/v1.0".
     void deleteTag(const QString& name);
 
-    // Submodules
+    // Submodules. Init and update run git on a worker: an update
+    // clones and checks out.
     void refreshSubmodules();
     void submoduleInit(const QString& name);
     void submoduleUpdate(const QString& name);
@@ -425,6 +453,26 @@ private:
         return true;
     }
 
+    /// A refresh worker's way out: `emitResult` runs on the service's
+    /// thread, and only if `r` is still the open repository and no open
+    /// is pending. The swap happens on that thread too, so nothing can
+    /// come in between. Checked on the worker alone, a result posted
+    /// just before an open landed was delivered right after it: the
+    /// previous repository's history, status or branches under the next
+    /// one's name, and its first page let the loading overlay go.
+    /// While an open is pending the window shows neither repository,
+    /// and a failed one asks for every refresh again.
+    template <typename Fn>
+    void deliverFor(std::shared_ptr<git::Repository> r, Fn&& emitResult) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, r = std::move(r), fn = std::forward<Fn>(emitResult)]() mutable {
+                if (repo_ == r && !openPending_)
+                    fn();
+            },
+            Qt::QueuedConnection);
+    }
+
     /// Runs one rebase step on a worker (`step` names it in
     /// operationFailed and rebaseStepFinished): reports a failure,
     /// emits repoStateReady and rebaseStepFinished, and asks for the
@@ -447,14 +495,22 @@ private:
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network
     /// ops can use it from MainWindow's pool thread. Its commands stop
-    /// on cancelRemoteOps(), and once `cancel` is set when given.
+    /// on cancelGitOps(), and once `cancel` is set when given.
     std::optional<git::GitProcess> processIfOpen(
         std::shared_ptr<std::atomic<bool>> cancel = nullptr) const;
 
-    /// Set by cancelRemoteOps(); shared with every processIfOpen(), and
-    /// with every commit's GitProcess.
-    const std::shared_ptr<std::atomic<bool>> remoteOpsCancelled_ =
+    /// Set by cancelGitOps(); added to every GitProcess the service
+    /// hands out or runs, a commit's included.
+    const std::shared_ptr<std::atomic<bool>> opsCancelled_ =
         std::make_shared<std::atomic<bool>>(false);
+
+    // An openRepositoryAsync is in flight (service thread only): no
+    // refresh result is delivered meanwhile (deliverFor).
+    bool openPending_ = false;
+    // rebaseStepKey() of the open repository, empty when none is
+    // (service thread only): a rebase step's outcome is delivered only
+    // while it matches the step's.
+    std::string openKey_;
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_

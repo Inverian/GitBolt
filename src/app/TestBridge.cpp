@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -720,6 +721,11 @@ QByteArray TestBridge::cmdDumpState()
     // Where op outcomes land ("Push complete.", "fetch failed: …").
     state[QStringLiteral("statusMessage")] =
         window_->statusBar()->currentMessage();
+    // The toolbar's inline op label: an op running ("Merging topic…"),
+    // or its outcome ("✓ Fetch complete.", "✗ fetch failed: …"), which
+    // can outlive the status bar's.
+    if (auto* opIndicator = window_->findChild<QLabel*>(QStringLiteral("toolbar.opIndicator")))
+        state[QStringLiteral("opIndicator")] = opIndicator->text();
 
     QJsonArray windows;
     const QWidgetList tops = QApplication::topLevelWidgets();

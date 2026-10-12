@@ -148,54 +148,7 @@ int GitProcess::defaultTimeoutMs() {
 
 Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args,
                                       std::optional<int> timeout) const {
-    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
-    if (!cancelFlags_.empty())
-        return runCancellable(args, timeoutMs);
-
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-
-    QStringList qargs;
-    for (const auto& arg : args)
-        qargs.append(QString::fromStdString(arg));
-
-    // Wall-clock timing the run so the command log can show per-
-    // command latency. Cheap (no allocations after start()).
-    QElapsedTimer timer;
-    timer.start();
-
-    process.start(QString::fromStdString(gitPath_), qargs);
-
-    if (!process.waitForStarted(5000)) {
-        // Still log the failed-to-start case with exit code -1 so
-        // it shows up in the command log; users debugging "why
-        // didn't this run?" want to see attempts as well as
-        // successes.
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
-    }
-
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Git process timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-
-    GitProcessLog::instance().emitCommand(
-        QString::fromStdString(workDir_), qargs, output.exitCode,
-        timer.elapsed());
-
-    return output;
+    return runImpl(args, timeout.value_or(defaultTimeoutMs()));
 }
 
 Result<ProcessOutput> GitProcess::runWithInput(
@@ -203,52 +156,7 @@ Result<ProcessOutput> GitProcess::runWithInput(
     const std::string& stdinData,
     std::optional<int> timeout) const
 {
-    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-
-    QStringList qargs;
-    for (const auto& arg : args)
-        qargs.append(QString::fromStdString(arg));
-
-    QElapsedTimer timer;
-    timer.start();
-
-    process.start(QString::fromStdString(gitPath_), qargs);
-    if (!process.waitForStarted(5000)) {
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed,
-                        "Failed to start git process");
-    }
-
-    // Feed the payload and close stdin so git sees EOF — commands
-    // like `git apply -` block until the write channel closes.
-    process.write(stdinData.data(),
-                  static_cast<qint64>(stdinData.size()));
-    process.closeWriteChannel();
-
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed,
-                        "Git process timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-
-    GitProcessLog::instance().emitCommand(
-        QString::fromStdString(workDir_), qargs, output.exitCode,
-        timer.elapsed());
-
-    return output;
+    return runImpl(args, timeout.value_or(defaultTimeoutMs()), &stdinData);
 }
 
 Result<std::vector<std::string>> GitProcess::logOneline(const std::string& range, int maxCount) const {
@@ -321,7 +229,7 @@ Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) c
 }
 
 // ---------------------------------------------------------------------------
-// Clone, and run() with a cancel flag
+// Clone, and every other git command
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -333,13 +241,13 @@ constexpr int kPollMs = 50;
 // can never hang the worker (and through the thread pool, app exit).
 constexpr int kTerminateWaitMs = 2000;
 
-// The process tree of one `git clone` (or of a cancellable run(): a
-// fetch, pull or push). git does the transfer in children —
-// git-remote-https, ssh, index-pack, upload-pack for a local URL,
-// GitBolt itself in askpass mode — so killing only git on cancel
-// orphans them: they run on, and on Windows keep files inside the
-// destination open, so it can't be removed. ProcessTree puts git
-// in a group that one call stops as a whole:
+// The process tree of one git command: a `git clone`, or any run().
+// git does the transfer in children — git-remote-https, ssh,
+// index-pack, upload-pack for a local URL, GitBolt itself in askpass
+// mode — and local work too: hooks, clean / smudge filters. Killing
+// only git on cancel orphans them: they run on, and on Windows keep
+// files inside the destination open, so it can't be removed.
+// ProcessTree puts git in a group that one call stops as a whole:
 //
 //   Unix:    setsid() in the child makes git the leader of a new
 //            process group; terminate() signals the group.
@@ -517,7 +425,8 @@ void ProcessTree::terminate(QProcess& process)
         return;
     }
     // SIGTERM first: git clone's handler deletes the half-written
-    // destination itself, and ssh closes its connection. SIGKILL then
+    // destination itself, every git rolls back the lockfiles it holds
+    // (index.lock, HEAD.lock), and ssh closes its connection. SIGKILL then
     // sweeps the group for anything that ignored SIGTERM or outlived
     // git (ESRCH once the group is empty).
     ::kill(-group, SIGTERM);
@@ -616,16 +525,18 @@ bool GitProcess::cancelled() const
                        [](const auto& flag) { return flag->load(); });
 }
 
-// run() for a GitProcess with a cancel flag: git in a ProcessTree, and
-// a poll loop instead of one long waitForFinished(), so a cancel is
-// seen within kPollMs and stops the whole tree — including an ssh or
-// git-remote-https waiting on a network that stopped answering, which
-// would otherwise hold its caller until the timeout. commit() runs this
-// way with or without a flag: a hook that hangs is git's child, and it
-// goes down with git at the time limit too.
-Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>& args,
-                                                 int timeoutMs,
-                                                 const std::string* stdinData) const
+// Every git command: git in a ProcessTree, and a poll loop instead of
+// one long waitForFinished(), so a cancel is seen within kPollMs and
+// stops the whole tree — including an ssh or git-remote-https waiting
+// on a network that stopped answering, which would otherwise hold its
+// caller until the timeout. A timeout stops the tree the same way. It
+// used to SIGKILL git alone: git left its index.lock behind, which
+// every later stage, commit and checkout tripped over, and the hook or
+// filter it was running ran on, orphaned (a merge whose post-merge
+// hook was slow had gone through, and was reported as timed out).
+Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, int timeoutMs,
+                                          const std::string* stdinData,
+                                          const std::map<std::string, std::string>& extraEnv) const
 {
     const QString workDir = QString::fromStdString(workDir_);
     QStringList qargs;
@@ -639,8 +550,16 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
     QProcess process;
     process.setWorkingDirectory(workDir);
     applyEnvironment(process);
+    if (!extraEnv.empty()) {
+        QProcessEnvironment env = process.processEnvironment();
+        for (const auto& [name, value] : extraEnv)
+            env.insert(QString::fromStdString(name), QString::fromStdString(value));
+        process.setProcessEnvironment(env);
+    }
     tree.prepare(process);
 
+    // Wall-clock timing the run so the command log can show per-
+    // command latency.
     QElapsedTimer timer;
     timer.start();
     const QString gitPath = QString::fromStdString(gitPath_);
@@ -651,6 +570,8 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
         started = process.waitForStarted(kStartTimeoutMs);
     }
     if (!started) {
+        // Still logged, with exit code -1: someone debugging "why
+        // didn't this run?" wants to see the attempts too.
         GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
     }
@@ -660,8 +581,16 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
         process.closeWriteChannel();
     }
 
-    // Each wait also moves git's output into QProcess's buffers, so
-    // its pipes can't fill up and stall it between polls.
+    if (stdinData) {
+        // Feed the payload and close stdin so git sees EOF — commands
+        // like `git apply -` block until the write channel closes.
+        process.write(stdinData->data(), static_cast<qint64>(stdinData->size()));
+        process.closeWriteChannel();
+    }
+
+    // Each wait also moves git's output into QProcess's buffers (and
+    // the payload into its stdin), so its pipes can't fill up and
+    // stall it between polls.
     while (!process.waitForFinished(kPollMs) && process.state() != QProcess::NotRunning) {
         const bool stop = cancelled();
         if (stop || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
@@ -893,40 +822,16 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         "cp %1 \"$1\" && cp -R %2 \"$(git rev-parse --git-path rebase-merge)/%3\" && :")
         .arg(shellQuoted(todoFile.fileName()), shellQuoted(messageDir.path()), kRewordMessages);
 
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-    QProcessEnvironment env = process.processEnvironment();
-    env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), sequenceEditor);
-    process.setProcessEnvironment(env);
-
-    // The git commands the rebase runs (`git commit` for a reword or a
+    // Through runImpl() like every other command, so a cancel (quitting)
+    // stops it and its hooks; it used to run a QProcess of its own that
+    // nothing could stop, and quitting waited out the whole rebase. The
+    // git commands the rebase runs (`git commit` for a reword or a
     // squash) inherit the -c.
-    const QStringList args = {QStringLiteral("-c"),
-                              QStringLiteral("core.commentChar=") + QLatin1Char(commentChar),
-                              QStringLiteral("rebase"), QStringLiteral("-i"),
-                              QString::fromStdString(onto)};
-    const QString workDir = QString::fromStdString(workDir_);
-    QElapsedTimer timer;
-    timer.start();
-    process.start(QString::fromStdString(gitPath_), args);
-    if (!process.waitForStarted(5000)) {
-        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Failed to start rebase");
-    }
-    if (!process.waitForFinished(kRebaseTimeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Rebase timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-    GitProcessLog::instance().emitCommand(workDir, args, output.exitCode, timer.elapsed());
+    auto result = runImpl({"-c", std::string("core.commentChar=") + commentChar, "rebase", "-i", onto},
+                          kRebaseTimeoutMs, nullptr,
+                          {{"GIT_SEQUENCE_EDITOR", sequenceEditor.toStdString()}});
     keepRewordMessage();
-    return output;
+    return result;
 }
 
 std::vector<std::string> GitProcess::rebaseCommentConfig() const {
@@ -1050,7 +955,7 @@ Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend)
     std::vector<std::string> args = {"commit", "-F", "-"};
     if (amend)
         args.emplace_back("--amend");
-    return runCancellable(args, kCommitTimeoutMs, &message);
+    return runImpl(args, kCommitTimeoutMs, &message);
 }
 
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }

@@ -44,6 +44,9 @@ gitbolt_add_test(test_repository     git/TestRepository.cpp)
 gitbolt_add_test(test_revwalk        git/TestRevWalk.cpp)
 gitbolt_add_test(test_diff           git/TestDiff.cpp)
 gitbolt_add_test(test_status         git/TestStatus.cpp)
+# GitProcess::run(): a timeout stops git's whole process group, gently
+# first (Unix; a QSKIP on Windows, where git runs in a job object)
+gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
 # that never answers — StallTransport, run by git via ext:: — whose

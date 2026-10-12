@@ -133,6 +133,36 @@ class SilentServer:
                 pass    # git has closed it already
 
 
+class OpenGate:
+    """Holds every open of repository `repo` until release(), for a test
+    that needs something to happen while GitBolt opens it: the repo's
+    config includes a FIFO, and reading that config (libgit2's open,
+    and any git command run in the repo) blocks on the FIFO until
+    something writes to it. Released, a thread keeps opening the FIFO
+    for writing, so every read of it gets its end at once from then on.
+    """
+
+    def __init__(self, repo: str, scratch: str) -> None:
+        self.fifo = os.path.join(scratch, f"gate-{uuid.uuid4().hex[:8]}.fifo")
+        os.mkfifo(self.fifo)
+        git("config", "include.path", self.fifo, cwd=repo)
+        self._released = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        self._released.wait()
+        while True:
+            try:
+                with open(self.fifo, "w"):
+                    pass
+            except OSError:
+                return      # the scratch dir is gone
+            time.sleep(0.01)
+
+    def release(self) -> None:
+        self._released.set()
+
+
 class App:
     """One GitBolt process plus its private bridge connection."""
 

@@ -22,10 +22,13 @@ set(E2E_TESTS
     test_commit_flow
     test_commit_hooks
     test_instance_lock
+    test_local_op_async
     test_quit_during_fetch
+    test_quit_during_rebase
     test_rebase_dialog
     test_rebase_progress
     test_remote_branches
+    test_remote_op_feedback
     test_remote_op_leave_repo
     test_settings_after_open
     test_single_instance

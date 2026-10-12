@@ -95,17 +95,20 @@ private:
     void finishRemoteOpFeedback(const QString& successMsg);
 
     /// Run a network git op (fetch/pull/push/remote-branch delete) on a
-    /// pool thread with inline-indicator + status-bar narration. `after`
-    /// runs on the GUI thread once the op finishes, success or failure.
+    /// pool thread with inline-indicator + status-bar narration. `op`
+    /// returns whether it succeeded (GitService's remote ops do).
+    /// `after` runs on the GUI thread once the op finishes, success or
+    /// failure.
     void runRemoteOp(QAction* sourceAction, const QString& startMsg,
-                     const QString& successMsg, std::function<void()> op,
+                     const QString& successMsg, std::function<bool()> op,
                      std::function<void()> after = {});
 
     /// The part of a remote op that every caller shares: marks it
     /// running and runs `op` on a pool thread as remoteOp_ (which the
     /// destructor cancels and waits for); `finished` runs on the GUI
-    /// thread afterwards. Callers check remoteOpRunning_ first.
-    void startRemoteOp(std::function<void()> op,
+    /// thread afterwards, with lastRemoteOpFailed_ set from what `op`
+    /// returned. Callers check remoteOpRunning_ first.
+    void startRemoteOp(std::function<bool()> op,
                        std::function<void()> finished);
 
     /// Periodic fetch tick: a quiet fetch through startRemoteOp().
@@ -130,6 +133,14 @@ private:
     /// if the repo actions are on (setRepoActionsEnabled); if they are
     /// off, whatever turns them on brings it back.
     void reenableAfterRemoteOp(QAction* action);
+    /// Whether the inline label narrates a running remote op (a quiet
+    /// auto-fetch is no such op): a local op then leaves it be.
+    bool remoteOpNarrated() const;
+
+    /// Commands > Merge branches and the sidebar's Merge: `git merge
+    /// <branch>` as a local op (repoCmd_), offering the conflict
+    /// resolver if git stopped on conflicts.
+    void mergeBranch(const QString& branch);
 
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
     /// on its remote through runRemoteOp.
@@ -376,15 +387,23 @@ private:
     // git's message from the last failed auto-fetch, flagged on
     // periodicFetchStatus_ until one succeeds.
     QString autoFetchError_;
+    // The running auto-fetch has failed, as a quiet one: its failure is
+    // in, so a Fetch click no longer reveals it (revealAutoFetch).
+    bool autoFetchFailed_ = false;
+    // The git dir of a revealed auto-fetch that ended while an open was
+    // pending: its outcome went up over the loading screen, and goes
+    // once another repository is open (onRepositoryOpened).
+    std::string revealedFetchEndedRepo_;
 
-    // Set true by the operationFailed handler when fetch/pull/push
-    // emit a failure. Read by the toolbar action handlers right
-    // after the synchronous git op returns: if the flag is still
-    // false the op succeeded silently and we show our own
-    // confirmation message; if true, the failed-message that the
-    // operationFailed handler put on the status bar stays.
+    // Whether the last remote op failed: its own outcome, from what
+    // its op returned (startRemoteOp). If true, the failed-message
+    // that the operationFailed handler put on the status bar stays;
+    // otherwise we show our own confirmation message.
     bool lastRemoteOpFailed_ = false;
     bool remoteOpRunning_ = false;
+    // The action that started the running remote op (runRemoteOp): it
+    // stays off until the op ends, whatever turns the others on.
+    QAction* remoteOpAction_ = nullptr;
     // What setRepoActionsEnabled last set: whether there's a repository
     // for the repo actions (and the repo-only menus, which go with
     // them) to act on. A remote op's end re-enables its action only
@@ -392,7 +411,13 @@ private:
     bool repoActionsEnabled_ = false;
     // The running (or last) remote op's pool-thread job: the destructor
     // waits for it, since it runs inside gitService_.
-    QFuture<void> remoteOp_;
+    QFuture<bool> remoteOp_;
+    // A local op (repoCmd_) is running: the repo actions and menus are
+    // off until it ends. What it says it does, and whether it says so
+    // on the inline label (not over a remote op's narration).
+    bool localOpRunning_ = false;
+    QString localOpMessage_;
+    bool localOpNarrated_ = false;
 
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by
@@ -414,7 +439,8 @@ private:
     // the auto-clear timer that three sites used to hand-roll.
     InlineOpIndicator* opIndicator_ = nullptr;
     // Shared guard→run→report→refresh spine for menu actions that
-    // shell out to git.
+    // shell out to git: local ops, on a pool thread, one at a time.
+    // The destructor waits for the running one.
     RepoCommandController* repoCmd_ = nullptr;
 
     // Usage statistics (setTelemetry). Owned by main(), declared there

@@ -15,6 +15,18 @@ namespace {
 QString rebaseStepStillRunning() {
     return GitService::tr("A rebase step is still running; try again when it's done.");
 }
+
+// Which repository a rebase step runs on: its git dir, which libgit2
+// resolves however the path was typed. Windows paths ignore case, and
+// libgit2 keeps the case a path was typed in there, so "c:\repo" and
+// "C:\repo" must not count as two repositories.
+std::string rebaseStepKey(const git::Repository& repo) {
+#ifdef Q_OS_WIN
+    return QString::fromStdString(repo.path()).toLower().toStdString();
+#else
+    return repo.path();
+#endif
+}
 } // namespace
 
 GitService::GitService(QObject* parent)
@@ -30,6 +42,11 @@ GitService::~GitService() {
     // isn't held up by a worker stat()ing a huge tree for nothing.
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
+    // And stop the git of every job runner_ is about to wait for: a
+    // rebase step's hook, a slow checkout, gc. Quitting waited for the
+    // whole of it, and a second launch meanwhile found nobody to hand
+    // its path to and gave up.
+    cancelGitOps();
 }
 
 bool GitService::openRepository(const QString& path) {
@@ -39,6 +56,8 @@ bool GitService::openRepository(const QString& path) {
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
 
+    openPending_ = false;
+
     auto result = git::Repository::open(path.toStdString());
     if (!result) return false;
     {
@@ -46,6 +65,7 @@ bool GitService::openRepository(const QString& path) {
         // worker can't have the old repo destroyed mid-call.
         std::lock_guard<std::mutex> lock(repoMutex_);
         repo_ = std::make_shared<git::Repository>(std::move(*result));
+        openKey_ = rebaseStepKey(*repo_);
     }
     watcher_.watchRepository(path);
     emit repositoryOpened(path);
@@ -59,6 +79,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
     const quint64 gen = ++openGeneration_;
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
+    openPending_ = true;
 
     // Worker outcome: exactly one of repo / error is set. Must be
     // copyable + default-constructible for QFutureWatcher::result().
@@ -86,6 +107,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
             // destroyed with the outcome).
             if (gen != openGeneration_)
                 return;
+            openPending_ = false;
 
             if (!outcome.repo) {
                 emit repositoryOpenFailed(path, outcome.error, outcome.errorCode);
@@ -95,6 +117,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
             {
                 std::lock_guard<std::mutex> lock(repoMutex_);
                 repo_ = std::move(outcome.repo);
+                openKey_ = rebaseStepKey(*repo_);
             }
 
             // Cheap, immediate watches (.git internals + repo root)
@@ -142,11 +165,13 @@ void GitService::closeRepository() {
     ++openGeneration_;
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
+    openPending_ = false;
 
     watcher_.stop();
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
         repo_.reset();
+        openKey_.clear();
     }
     emit repositoryClosed();
 }
@@ -156,7 +181,9 @@ git::Repository* GitService::repository() const { return repo_.get(); }
 
 git::GitProcess GitService::process() const {
     std::lock_guard<std::mutex> lock(repoMutex_);
-    return repo_->process();
+    git::GitProcess proc = repo_->process();
+    proc.addCancelFlag(opsCancelled_);
+    return proc;
 }
 
 std::optional<git::GitProcess> GitService::processIfOpen(
@@ -164,23 +191,24 @@ std::optional<git::GitProcess> GitService::processIfOpen(
     std::lock_guard<std::mutex> lock(repoMutex_);
     if (!repo_) return std::nullopt;
     git::GitProcess proc = repo_->process();
-    proc.addCancelFlag(remoteOpsCancelled_);
+    proc.addCancelFlag(opsCancelled_);
     proc.addCancelFlag(std::move(cancel));
     return proc;
 }
 
-void GitService::cancelRemoteOps() {
-    remoteOpsCancelled_->store(true);
+void GitService::cancelGitOps() {
+    opsCancelled_->store(true);
 }
 
 // Refresh workers capture repo_ as a shared_ptr (pinning the object
 // alive across a concurrent repo swap) and re-check `r == repo_`
 // under repoMutex_ before doing any work: if the user opened a
 // different repository while this job sat in the thread-pool queue,
-// the job must neither touch the swapped-out repo nor emit results
-// the UI would misattribute to the new one. Reading repo_ from the
+// the job must not touch the swapped-out repo. Reading repo_ from the
 // worker is safe because every mutation of repo_ happens under
 // repoMutex_ (openRepository / openRepositoryAsync / closeRepository).
+// Their results go out through deliverFor, which checks again where
+// the swap happens, so none is misattributed to the next repository.
 //
 // Each entry point first hops to the service's thread (the threading
 // rule in GitService.h): the operation workers, and MainWindow's pool
@@ -200,9 +228,13 @@ void GitService::refreshStatus() {
             conflicts = static_cast<int>(std::count_if(
                 result->begin(), result->end(),
                 [](const git::StatusEntry& e) { return e.isConflicted(); }));
-            emit statusReady(std::move(*result));
         }
-        emit repoStateReady(r->state(), conflicts, r->sequencePaused());
+        deliverFor(r, [this, result = std::move(result), state = r->state(),
+                       conflicts, paused = r->sequencePaused()]() mutable {
+            if (result)
+                emit statusReady(std::move(*result));
+            emit repoStateReady(state, conflicts, paused);
+        });
     });
 }
 
@@ -222,11 +254,17 @@ void GitService::loadLog(int offset, int count, quint64 openGeneration) {
     runner_.run([this, r, offset, count, scope, selected, openGeneration]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
-        // The first page of an open, every path below: right behind
-        // its logReady, so a receiver sees the page first.
-        const auto firstPageOfOpen = [this, offset, openGeneration](int commits) {
-            if (offset == 0 && openGeneration != 0)
-                emit initialLogLoaded(openGeneration, commits);
+        // A page goes out, and right behind it, for the first page of
+        // an open, initialLogLoaded, so a receiver sees the page first.
+        const auto deliverPage = [this, r, offset, openGeneration](
+                                     std::vector<git::CommitData> commits) {
+            deliverFor(r, [this, commits = std::move(commits), offset,
+                           openGeneration]() mutable {
+                const int size = static_cast<int>(commits.size());
+                emit logReady(std::move(commits), offset);
+                if (offset == 0 && openGeneration != 0)
+                    emit initialLogLoaded(openGeneration, size);
+            });
         };
         auto walk = r->createRevWalk();
         if (!walk) {
@@ -235,8 +273,7 @@ void GitService::loadLog(int offset, int count, quint64 openGeneration) {
             // the open-repo spinner), so error paths must produce
             // closure too — an empty log, same end state as today.
             if (offset == 0)
-                emit logReady(std::vector<git::CommitData>{}, 0);
-            firstPageOfOpen(0);
+                deliverPage({});
             return;
         }
         walk->setSorting(git::SortOrder::TopologicalTime);
@@ -292,14 +329,10 @@ void GitService::loadLog(int offset, int count, quint64 openGeneration) {
             if (!skipped) return;
         }
         auto commits = walk->next(static_cast<size_t>(count));
-        if (commits) {
-            const int size = static_cast<int>(commits->size());
-            emit logReady(std::move(*commits), offset);
-            firstPageOfOpen(size);
-        } else if (offset == 0) {
-            emit logReady(std::vector<git::CommitData>{}, 0);
-            firstPageOfOpen(0);
-        }
+        if (commits)
+            deliverPage(std::move(*commits));
+        else if (offset == 0)
+            deliverPage({});
     });
 }
 
@@ -323,7 +356,10 @@ void GitService::refreshBranches() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->allBranches();
-        if (result) emit branchesReady(std::move(*result));
+        if (result)
+            deliverFor(r, [this, branches = std::move(*result)]() mutable {
+                emit branchesReady(std::move(branches));
+            });
     });
 }
 
@@ -334,12 +370,13 @@ void GitService::refreshConflicts() {
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
-        auto result = r->conflictEntries();
-        if (result)
-            emit conflictsReady(std::move(*result));
-        else
-            emit operationFailed(QStringLiteral("conflicts"),
-                QString::fromStdString(result.error().message()));
+        deliverFor(r, [this, result = r->conflictEntries()]() mutable {
+            if (result)
+                emit conflictsReady(std::move(*result));
+            else
+                emit operationFailed(QStringLiteral("conflicts"),
+                    QString::fromStdString(result.error().message()));
+        });
     });
 }
 
@@ -392,11 +429,10 @@ bool GitService::abortConflictState() {
     }
 
     git::RepoState state = git::RepoState::None;
-    git::GitProcess proc{[&]() {
+    {
         std::lock_guard<std::mutex> lock(repoMutex_);
         state = repo_->state();
-        return repo_->process();
-    }()};
+    }
 
     std::vector<std::string> args;
     switch (state) {
@@ -407,8 +443,10 @@ bool GitService::abortConflictState() {
         args = {"cherry-pick", "--abort"};
         break;
     case git::RepoState::Rebase:
-        args = {"rebase", "--abort"};
-        break;
+        // A step like the in-progress bar's Abort, so that nothing else
+        // goes to the rebase's state while it runs.
+        rebaseAbort();
+        return true;
     case git::RepoState::Revert:
         args = {"revert", "--abort"};
         break;
@@ -417,20 +455,24 @@ bool GitService::abortConflictState() {
         return true;   // nothing in progress to abort
     }
 
-    auto result = proc.run(args);
-    if (!result) {
-        emit operationFailed(QStringLiteral("abort"),
-            QString::fromStdString(result.error().message()));
-    } else if (!result->success()) {
-        QString detail =
-            QString::fromStdString(result->stderrData).trimmed();
-        if (detail.isEmpty())
-            detail = QString::fromStdString(result->stdoutData).trimmed();
-        emit operationFailed(QStringLiteral("abort"), detail);
-    }
-    refreshStatus();
-    refreshLog();
-    refreshBranches();
+    // On a worker: an abort puts the work tree back, which can take as
+    // long as a checkout, and it froze the window meanwhile.
+    runner_.run([this, proc = process(), args]() {
+        auto result = proc.run(args, /*timeoutMs=*/300000);
+        if (!result) {
+            emit operationFailed(QStringLiteral("abort"),
+                QString::fromStdString(result.error().message()));
+        } else if (!result->success()) {
+            QString detail =
+                QString::fromStdString(result->stderrData).trimmed();
+            if (detail.isEmpty())
+                detail = QString::fromStdString(result->stdoutData).trimmed();
+            emit operationFailed(QStringLiteral("abort"), detail);
+        }
+        refreshStatus();
+        refreshLog();
+        refreshBranches();
+    });
     return true;
 }
 
@@ -454,19 +496,22 @@ void GitService::blameFile(const QString& path,
             if (!resolved) {
                 // Typical case: "<root-commit>^" from Blame Before
                 // on the initial commit — there is no parent.
-                emit operationFailed(QStringLiteral("blame"),
-                    QString::fromStdString(resolved.error().message()));
+                deliverFor(r, [this, message = resolved.error().message()] {
+                    emit operationFailed(QStringLiteral("blame"),
+                                         QString::fromStdString(message));
+                });
                 return;
             }
             newest = *resolved;
         }
 
-        auto result = r->blame(p, newest);
-        if (result)
-            emit blameReady(std::move(*result));
-        else
-            emit operationFailed(QStringLiteral("blame"),
-                QString::fromStdString(result.error().message()));
+        deliverFor(r, [this, result = r->blame(p, newest)]() mutable {
+            if (result)
+                emit blameReady(std::move(*result));
+            else
+                emit operationFailed(QStringLiteral("blame"),
+                    QString::fromStdString(result.error().message()));
+        });
     });
 }
 
@@ -641,7 +686,7 @@ void GitService::commitChanges(const QString& message, bool amend) {
     }
     // Quitting stops git, and a hook that hangs with it: ~GitService
     // waits for this worker.
-    process->addCancelFlag(remoteOpsCancelled_);
+    process->addCancelFlag(opsCancelled_);
     runner_.run([this, r, gitDir, proc = std::move(*process), message, amend]() {
         // The repository the commit is for, opened again or not. A
         // result reported while another is open reads as its own.
@@ -736,8 +781,8 @@ void GitService::deleteBranch(const QString& name) {
     refreshBranches();
 }
 
-void GitService::checkoutBranch(const QString& name) {
-    if (!repo_) return;
+bool GitService::checkoutBranch(const QString& name) {
+    if (!repo_) return false;
     bool ok = false;
     QString err;
     {
@@ -759,11 +804,12 @@ void GitService::checkoutBranch(const QString& name) {
         // target's files, and those show up as changes.
         refreshStatus();
         refreshBranches();
-        return;
+        return false;
     }
     refreshStatus();
     refreshLog();
     refreshBranches();
+    return true;
 }
 
 // GitProcess::run() returns a successful Result whenever the QProcess
@@ -777,18 +823,6 @@ namespace {
 inline QString stderrOrFallback(const git::ProcessOutput& out, const QString& fallback) {
     QString s = QString::fromStdString(out.stderrData).trimmed();
     return s.isEmpty() ? fallback : s;
-}
-
-// Which repository a rebase step runs on: its git dir, which libgit2
-// resolves however the path was typed. Windows paths ignore case, and
-// libgit2 keeps the case a path was typed in there, so "c:\repo" and
-// "C:\repo" must not count as two repositories.
-std::string rebaseStepKey(const git::Repository& repo) {
-#ifdef Q_OS_WIN
-    return QString::fromStdString(repo.path()).toLower().toStdString();
-#else
-    return repo.path();
-#endif
 }
 
 // Why a rebase step failed, or an empty string if it didn't: git's
@@ -857,35 +891,36 @@ void GitService::checkoutRemoteBranch(const QString& remoteBranch) {
     // refs/remotes/origin/feature, so the one case the menu entry is
     // for failed with "revspec 'feature' not found".
     bool exists = false;
-    git::GitProcess proc{[&]() {
+    {
         std::lock_guard<std::mutex> lock(repoMutex_);
         exists = repo_->resolveRef("refs/heads/" + local.toStdString()).ok();
-        return repo_->process();
-    }()};
+    }
     if (exists) {
         checkoutBranch(local);
         return;
     }
-    // Five minutes, as for git's other long local work (gc, fsck, an
-    // interactive rebase), not run()'s default 30 s. Checking out a
-    // branch nobody has checked out here yet can take minutes: LFS
-    // files downloaded on the way, a slow post-checkout hook, a big
-    // tree on a slow disk. Killed at 30 s, git left the working tree
-    // half switched and its index.lock behind, which every later
-    // stage, commit and checkout then tripped over.
-    auto result = proc.run({"checkout", "-b", local.toStdString(),
-                            "--track", remoteBranch.toStdString()},
-                           /*timeoutMs=*/300000);
-    if (!result) {
-        emit operationFailed(QStringLiteral("checkout"),
-                             QString::fromStdString(result.error().message()));
-    } else if (!result->success()) {
-        emit operationFailed(QStringLiteral("checkout"), stderrOrFallback(*result,
-            tr("git checkout exited with code %1").arg(result->exitCode)));
-    }
-    refreshStatus();
-    refreshLog();
-    refreshBranches();
+    // On a worker, and five minutes, as for git's other long local work
+    // (gc, fsck, an interactive rebase), not run()'s default 30 s.
+    // Checking out a branch nobody has checked out here yet can take
+    // minutes: LFS files downloaded on the way, a slow post-checkout
+    // hook, a big tree on a slow disk. On the GUI thread that froze the
+    // window throughout, and killed at 30 s, git left the working tree
+    // half switched and its index.lock behind.
+    runner_.run([this, proc = process(), local = local.toStdString(),
+                 remote = remoteBranch.toStdString()]() {
+        auto result = proc.run({"checkout", "-b", local, "--track", remote},
+                               /*timeoutMs=*/300000);
+        if (!result) {
+            emit operationFailed(QStringLiteral("checkout"),
+                                 QString::fromStdString(result.error().message()));
+        } else if (!result->success()) {
+            emit operationFailed(QStringLiteral("checkout"), stderrOrFallback(*result,
+                tr("git checkout exited with code %1").arg(result->exitCode)));
+        }
+        refreshStatus();
+        refreshLog();
+        refreshBranches();
+    });
 }
 
 // push/pull/fetch shell out via GitProcess (QProcess) instead of
@@ -897,9 +932,9 @@ void GitService::checkoutRemoteBranch(const QString& remoteBranch) {
 // must not read repo_ unlocked. Once GitProcess is constructed (a
 // plain string + QProcess), it's independent of repo_ and runs
 // unlocked. Their follow-up refreshes hop to the GUI thread.
-void GitService::push(const QString& remote, const QString& branch) {
+bool GitService::push(const QString& remote, const QString& branch) {
     const auto snapshot = processIfOpen();
-    if (!snapshot) return;
+    if (!snapshot) return false;
     const git::GitProcess& proc = *snapshot;
     // A branch that has never been pushed has no upstream, and the bare
     // `git push <remote>` then fails with "has no upstream branch" — so
@@ -925,59 +960,73 @@ void GitService::push(const QString& remote, const QString& branch) {
         : proc.push(remote.toStdString(), branch.toStdString());
     if (!result) {
         emit operationFailed("push", QString::fromStdString(result.error().message()));
-    } else if (result.value().exitCode != 0) {
+        return false;
+    }
+    if (result.value().exitCode != 0) {
         emit operationFailed("push", stderrOrFallback(result.value(),
             tr("git push exited with code %1").arg(result.value().exitCode)));
+        return false;
     }
+    return true;
 }
 
-void GitService::deleteRemoteBranch(const QString& remote, const QString& branch) {
+bool GitService::deleteRemoteBranch(const QString& remote, const QString& branch) {
     const auto snapshot = processIfOpen();
-    if (!snapshot) return;
+    if (!snapshot) return false;
     const git::GitProcess& proc = *snapshot;
     auto result = proc.run({"push", remote.toStdString(), "--delete",
                             branch.toStdString()}, 120000);
     if (!result) {
         emit operationFailed(QStringLiteral("delete remote branch"),
                              QString::fromStdString(result.error().message()));
-    } else if (result.value().exitCode != 0) {
+        return false;
+    }
+    if (result.value().exitCode != 0) {
         emit operationFailed(QStringLiteral("delete remote branch"),
             stderrOrFallback(result.value(),
                 tr("git push --delete exited with code %1").arg(result.value().exitCode)));
+        return false;
     }
+    return true;
 }
 
-void GitService::pull(const QString& remote, const QString& branch) {
+bool GitService::pull(const QString& remote, const QString& branch) {
     const auto snapshot = processIfOpen();
-    if (!snapshot) return;
+    if (!snapshot) return false;
     const git::GitProcess& proc = *snapshot;
     auto result = proc.pull(remote.toStdString(), branch.toStdString());
     if (!result) {
         emit operationFailed("pull", QString::fromStdString(result.error().message()));
-    } else if (result.value().exitCode != 0) {
+        return false;
+    }
+    if (result.value().exitCode != 0) {
         emit operationFailed("pull", stderrOrFallback(result.value(),
             tr("git pull exited with code %1").arg(result.value().exitCode)));
-    } else {
-        refreshStatus();
-        refreshLog();
-        refreshBranches();
+        return false;
     }
+    refreshStatus();
+    refreshLog();
+    refreshBranches();
+    return true;
 }
 
-void GitService::fetch(const QString& remote,
+bool GitService::fetch(const QString& remote,
                        std::shared_ptr<std::atomic<bool>> cancel) {
     const auto snapshot = processIfOpen(std::move(cancel));
-    if (!snapshot) return;
+    if (!snapshot) return false;
     const git::GitProcess& proc = *snapshot;
     auto result = proc.fetch(remote.toStdString());
     if (!result) {
         emit operationFailed("fetch", QString::fromStdString(result.error().message()));
-    } else if (result.value().exitCode != 0) {
+        return false;
+    }
+    if (result.value().exitCode != 0) {
         emit operationFailed("fetch", stderrOrFallback(result.value(),
             tr("git fetch exited with code %1").arg(result.value().exitCode)));
-    } else {
-        refreshBranches();
+        return false;
     }
+    refreshBranches();
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,6 +1140,12 @@ void GitService::runRebaseStep(
         if (rebaseSteps_.insert(gitDir).second)
             process = r->process();
     }
+    // Quitting stops the step as Ctrl-C would: git and its hooks get
+    // SIGTERM, and the rebase stays in progress, to be carried on from
+    // the in-progress bar next time. Quitting used to wait for the
+    // whole step, a hook that never ended included.
+    if (process)
+        process->addCancelFlag(opsCancelled_);
     if (!process) {
         emit operationFailed(step, rebaseStepStillRunning());
         return;
@@ -1122,15 +1177,6 @@ void GitService::runRebaseStep(
             std::lock_guard<std::mutex> lock(repoMutex_);
             rebaseSteps_.erase(gitDir);
             cleared = true;
-            // Another repository was opened while git ran. What the
-            // step did, it did to this one; reported now, it would read
-            // as the open one's ("Rebase complete.", or an offer to
-            // resolve its conflicts). The same repository opened again
-            // (from Recent, or handed over by a second launch) is still
-            // this one, a new Repository for it or not: the outcome is
-            // its own, and its bar waits for it.
-            if (!repo_ || rebaseStepKey(*repo_) != gitDir)
-                return;
             state = r->state();
             paused = r->sequencePaused();
             // Counted from the index alone: the resolver reads the
@@ -1140,12 +1186,28 @@ void GitService::runRebaseStep(
                     conflicts = *count;
             }
         }
-        if (!failure.isEmpty())
-            emit operationFailed(step, failure);
-        emit repoStateReady(state, conflicts, paused);
-        emit rebaseStepFinished(step, failure.isEmpty(), state == operation);
-        refreshStatus();
-        refreshLog();
+        // Reported on the service's thread, if another repository
+        // hasn't been opened meanwhile (checked there, where the swap
+        // happens: checked here, an outcome posted just before an open
+        // landed reached the next repository). What the step did, it
+        // did to this one; reported then, it would read as the open
+        // one's ("Rebase complete.", or an offer to resolve its
+        // conflicts). The same repository opened again (from Recent, or
+        // handed over by a second launch) is still this one, a new
+        // Repository for it or not: the outcome is its own, and its bar
+        // waits for it. Not held back while an open is pending, as
+        // refreshes are: an open that fails leaves the bar waiting.
+        QMetaObject::invokeMethod(this, [this, gitDir, step, failure, state, conflicts,
+                                         paused, operation]() {
+            if (openKey_ != gitDir)
+                return;
+            if (!failure.isEmpty())
+                emit operationFailed(step, failure);
+            emit repoStateReady(state, conflicts, paused);
+            emit rebaseStepFinished(step, failure.isEmpty(), state == operation);
+            refreshStatus();
+            refreshLog();
+        }, Qt::QueuedConnection);
     });
 }
 
@@ -1301,7 +1363,10 @@ void GitService::refreshStashes() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->stashes();
-        if (result) emit stashesReady(std::move(*result));
+        if (result)
+            deliverFor(r, [this, stashes = std::move(*result)]() mutable {
+                emit stashesReady(std::move(stashes));
+            });
     });
 }
 
@@ -1317,14 +1382,17 @@ void GitService::refreshTags() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->tags();
-        if (result) emit tagsReady(std::move(*result));
+        if (result)
+            deliverFor(r, [this, tags = std::move(*result)]() mutable {
+                emit tagsReady(std::move(tags));
+            });
     });
 }
 
-void GitService::createTag(const QString& name, const QString& target,
+bool GitService::createTag(const QString& name, const QString& target,
                             const QString& message, bool annotated,
                             bool pushAfter) {
-    if (!repo_) return;
+    if (!repo_) return false;
 
     bool ok = false;
     QString err;
@@ -1347,7 +1415,7 @@ void GitService::createTag(const QString& name, const QString& target,
     }
     if (!ok) {
         emit operationFailed("createTag", err);
-        return;
+        return false;
     }
     refreshTags();
     if (pushAfter) {
@@ -1355,8 +1423,9 @@ void GitService::createTag(const QString& name, const QString& target,
         // path as push(remote, branch); failures surface via
         // operationFailed("push"). The full ref, because the short
         // name is ambiguous whenever a branch shares it.
-        push(QStringLiteral("origin"), QStringLiteral("refs/tags/") + name);
+        return push(QStringLiteral("origin"), QStringLiteral("refs/tags/") + name);
     }
+    return true;
 }
 
 void GitService::deleteTag(const QString& name) {
@@ -1385,34 +1454,34 @@ void GitService::refreshSubmodules() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->submodules();
-        if (result) emit submodulesReady(std::move(*result));
+        if (result)
+            deliverFor(r, [this, submodules = std::move(*result)]() mutable {
+                emit submodulesReady(std::move(submodules));
+            });
     });
 }
 
 void GitService::submoduleInit(const QString& name) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    auto result = proc.run({"submodule", "init", name.toStdString()});
-    if (!result)
-        emit operationFailed("submoduleInit", QString::fromStdString(result.error().message()));
-    else
-        refreshSubmodules();
+    runner_.run([this, proc = process(), n = name.toStdString()]() {
+        auto result = proc.run({"submodule", "init", n});
+        if (!result)
+            emit operationFailed("submoduleInit", QString::fromStdString(result.error().message()));
+        else
+            refreshSubmodules();
+    });
 }
 
 void GitService::submoduleUpdate(const QString& name) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
-    auto result = proc.run({"submodule", "update", "--init", name.toStdString()});
-    if (!result)
-        emit operationFailed("submoduleUpdate", QString::fromStdString(result.error().message()));
-    else
-        refreshSubmodules();
+    // Five minutes: an update clones the submodule and checks it out.
+    runner_.run([this, proc = process(), n = name.toStdString()]() {
+        auto result = proc.run({"submodule", "update", "--init", n}, /*timeoutMs=*/300000);
+        if (!result)
+            emit operationFailed("submoduleUpdate", QString::fromStdString(result.error().message()));
+        else
+            refreshSubmodules();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1427,7 +1496,10 @@ void GitService::refreshWorktrees() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
         auto result = r->worktrees();
-        if (result) emit worktreesReady(std::move(*result));
+        if (result)
+            deliverFor(r, [this, worktrees = std::move(*result)]() mutable {
+                emit worktreesReady(std::move(worktrees));
+            });
     });
 }
 
@@ -1522,10 +1594,7 @@ void GitService::gitFlowInit(const QString& master, const QString& develop,
         cfg.setString("gitflow.prefix.support", "support/");
         cfg.setString("gitflow.prefix.versiontag", "");
     }
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc)]() mutable {
         auto result = proc.gitFlowInit();
         if (!result) {
@@ -1541,10 +1610,7 @@ void GitService::gitFlowInit(const QString& master, const QString& develop,
 
 void GitService::featureStart(const QString& name) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), n = name.toStdString()]() mutable {
         auto result = proc.gitFlowFeatureStart(n);
         if (!result) {
@@ -1562,10 +1628,7 @@ void GitService::featureStart(const QString& name) {
 
 void GitService::featureFinish(const QString& name) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), n = name.toStdString()]() mutable {
         auto result = proc.gitFlowFeatureFinish(n);
         if (!result) {
@@ -1584,10 +1647,7 @@ void GitService::featureFinish(const QString& name) {
 
 void GitService::releaseStart(const QString& version) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowReleaseStart(v);
         if (!result) {
@@ -1605,10 +1665,7 @@ void GitService::releaseStart(const QString& version) {
 
 void GitService::releaseFinish(const QString& version) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowReleaseFinish(v);
         if (!result) {
@@ -1628,10 +1685,7 @@ void GitService::releaseFinish(const QString& version) {
 
 void GitService::hotfixStart(const QString& version) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowHotfixStart(v);
         if (!result) {
@@ -1649,10 +1703,7 @@ void GitService::hotfixStart(const QString& version) {
 
 void GitService::hotfixFinish(const QString& version) {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc), v = version.toStdString()]() mutable {
         auto result = proc.gitFlowHotfixFinish(v);
         if (!result) {
@@ -1738,10 +1789,7 @@ QStringList GitService::activeHotfixes() {
 
 void GitService::runGc() {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc)]() mutable {
         auto result = proc.gc();
         if (!result) {
@@ -1756,10 +1804,7 @@ void GitService::runGc() {
 
 void GitService::runPrune() {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc)]() mutable {
         auto result = proc.prune();
         if (!result) {
@@ -1774,10 +1819,7 @@ void GitService::runPrune() {
 
 void GitService::runFsck() {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc)]() mutable {
         auto result = proc.fsck();
         if (!result) {
@@ -1792,10 +1834,7 @@ void GitService::runFsck() {
 
 void GitService::runRepack() {
     if (!repo_) return;
-    git::GitProcess proc{[&]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        return repo_->process();
-    }()};
+    git::GitProcess proc = process();
     runner_.run([this, proc = std::move(proc)]() mutable {
         auto result = proc.run({"repack", "-a", "-d"});
         if (!result) {

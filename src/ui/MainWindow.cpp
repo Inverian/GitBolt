@@ -81,6 +81,8 @@
 #include <QVBoxLayout>
 
 #include <functional>
+#include <memory>
+#include <optional>
 #include <utility>
 
 namespace {
@@ -215,13 +217,19 @@ MainWindow::MainWindow(QWidget* parent)
 // stalled network would otherwise hold the quit until git's 2-minute
 // timeout) and wait for the job to leave. The event loop is gone, so
 // its finished handler never runs, and the signals it emits on the way
-// out are dropped with their receivers.
+// out are dropped with their receivers. The same goes for a local op
+// (a merge, a reset), and for the service's own jobs, which its
+// destructor waits for: a rebase step, a checkout. Their git and hooks
+// get SIGTERM as on Ctrl-C, no questions asked, as for a fetch; a
+// rebase stopped mid-step is still in progress next time, with
+// Continue, Skip and Abort on offer.
 MainWindow::~MainWindow()
 {
-    if (!remoteOp_.isFinished())
+    if (!remoteOp_.isFinished() || repoCmd_->busy() || gitService_->workRunning())
         hide();
-    gitService_->cancelRemoteOps();
+    gitService_->cancelGitOps();
     remoteOp_.waitForFinished();
+    repoCmd_->waitForFinished();
 }
 
 // ---------------------------------------------------------------------------
@@ -633,10 +641,11 @@ void MainWindow::buildRepositoryMenu()
                     });
             connect(widget, &widgets::SubmoduleWidget::syncRequested,
                     this, [this](const QString& n) {
-                        repoCmd_->run({"submodule", "sync", "--",
-                                       n.toStdString()},
-                                      tr("Submodule Sync Failed"),
-                                      RepoCommandController::RefreshSubmodules);
+                        repoCmd_->runAsync({"submodule", "sync", "--",
+                                            n.toStdString()},
+                                           tr("Submodule Sync Failed"),
+                                           RepoCommandController::RefreshSubmodules,
+                                           tr("Synchronizing submodule %1…").arg(n));
                     });
             connect(widget, &widgets::SubmoduleWidget::deinitRequested,
                     this, [this, dlg](const QString& n) {
@@ -652,10 +661,11 @@ void MainWindow::buildRepositoryMenu()
                                "Init + Update).").arg(n));
                         if (answer != QMessageBox::Yes)
                             return;
-                        repoCmd_->run({"submodule", "deinit", "-f",
-                                       "--", n.toStdString()},
-                                      tr("Submodule Deinit Failed"),
-                                      RepoCommandController::RefreshSubmodules);
+                        repoCmd_->runAsync({"submodule", "deinit", "-f",
+                                            "--", n.toStdString()},
+                                           tr("Submodule Deinit Failed"),
+                                           RepoCommandController::RefreshSubmodules,
+                                           tr("Deinitializing submodule %1…").arg(n));
                     });
             connect(widget, &widgets::SubmoduleWidget::openRequested,
                     this, [](const QString& p) {
@@ -676,11 +686,11 @@ void MainWindow::buildRepositoryMenu()
         a->setObjectName(QStringLiteral("repository.update-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            repoCmd_->run({"submodule", "update", "--init",
-                           "--recursive"},
-                          tr("Submodule Update Failed"),
-                          RepoCommandController::RefreshSubmodules,
-                          nullptr, /*timeoutMs=*/120000);
+            repoCmd_->runAsync({"submodule", "update", "--init",
+                                "--recursive"},
+                               tr("Submodule Update Failed"),
+                               RepoCommandController::RefreshSubmodules,
+                               tr("Updating submodules…"));
         });
         repoMenu->addAction(a);
     }
@@ -692,9 +702,10 @@ void MainWindow::buildRepositoryMenu()
         a->setObjectName(QStringLiteral("repository.synchronize-all-submodules"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            repoCmd_->run({"submodule", "sync", "--recursive"},
-                          tr("Submodule Sync Failed"),
-                          RepoCommandController::RefreshSubmodules);
+            repoCmd_->runAsync({"submodule", "sync", "--recursive"},
+                               tr("Submodule Sync Failed"),
+                               RepoCommandController::RefreshSubmodules,
+                               tr("Synchronizing submodules…"));
         });
         repoMenu->addAction(a);
     }
@@ -888,9 +899,10 @@ void MainWindow::buildRepositoryMenu()
         initA->setObjectName(QStringLiteral("repository.sparse-working-copy.initialize-cone-mode"));
         connect(initA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            repoCmd_->run({"sparse-checkout", "init", "--cone"},
-                          tr("Sparse Init Failed"),
-                          RepoCommandController::RefreshStatus);
+            repoCmd_->runAsync({"sparse-checkout", "init", "--cone"},
+                               tr("Sparse Init Failed"),
+                               RepoCommandController::RefreshStatus,
+                               tr("Turning on sparse checkout…"));
         });
         sub->addAction(initA);
 
@@ -927,23 +939,21 @@ void MainWindow::buildRepositoryMenu()
             const QString updated = dlg.contents();
             if (updated == original) return;
 
-            QProcess proc;
-            proc.setWorkingDirectory(workdir);
-            proc.start("git",
-                {"sparse-checkout", "set", "--stdin"});
-            if (!proc.waitForStarted(5000)) {
-                QMessageBox::warning(this, tr("Sparse Set Failed"),
-                    tr("Could not start `git sparse-checkout`."));
-                return;
-            }
-            proc.write(updated.toUtf8());
-            proc.closeWriteChannel();
-            if (!proc.waitForFinished(60000) || proc.exitCode() != 0) {
-                QMessageBox::warning(this, tr("Sparse Set Failed"),
-                    QString::fromUtf8(proc.readAllStandardError()));
-                return;
-            }
-            gitService_->refreshStatus();
+            // A local op like Init's: `set` rewrites the working tree.
+            auto out = std::make_shared<
+                std::optional<git::Result<git::ProcessOutput>>>();
+            repoCmd_->runJob(
+                tr("Setting sparse checkout patterns…"),
+                [out, patterns = updated.toStdString()](const git::GitProcess& proc) {
+                    out->emplace(proc.runWithInput(
+                        {"sparse-checkout", "set", "--stdin"}, patterns,
+                        RepoCommandController::kTimeoutMs));
+                },
+                [this, out]() {
+                    if (out->has_value())
+                        handleProcessResult(this, tr("Sparse Set Failed"), **out);
+                },
+                RepoCommandController::RefreshStatus);
         });
         sub->addAction(setA);
 
@@ -958,9 +968,10 @@ void MainWindow::buildRepositoryMenu()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (confirm != QMessageBox::Yes) return;
-            repoCmd_->run({"sparse-checkout", "disable"},
-                          tr("Sparse Disable Failed"),
-                          RepoCommandController::RefreshStatus);
+            repoCmd_->runAsync({"sparse-checkout", "disable"},
+                               tr("Sparse Disable Failed"),
+                               RepoCommandController::RefreshStatus,
+                               tr("Restoring the full working tree…"));
         });
         sub->addAction(disableA);
     }
@@ -1544,13 +1555,16 @@ void MainWindow::buildViewMenu()
                         .arg(sha.left(8)));
                 if (answer != QMessageBox::Yes)
                     return;
-                repoCmd_->run({"checkout", sha.toStdString()},
-                              tr("Checkout Failed"),
-                              RepoCommandController::RefreshStatus
-                                  | RepoCommandController::RefreshLog
-                                  | RepoCommandController::RefreshBranches,
-                              dlg);
-                dlg->refreshCurrentRef();
+                repoCmd_->runAsync({"checkout", sha.toStdString()},
+                                   tr("Checkout Failed"),
+                                   RepoCommandController::RefreshStatus
+                                       | RepoCommandController::RefreshLog
+                                       | RepoCommandController::RefreshBranches,
+                                   tr("Checking out %1…").arg(sha.left(8)),
+                                   [dlg = QPointer(dlg)](bool) {
+                                       if (dlg) dlg->refreshCurrentRef();
+                                   },
+                                   dlg);
             });
             connect(dlg, &dialogs::ReflogDialog::resetRequested,
                     this, [this, dlg](const QString& sha,
@@ -1567,14 +1581,17 @@ void MainWindow::buildViewMenu()
                     dlg, tr("Reset Branch"), warning);
                 if (answer != QMessageBox::Yes)
                     return;
-                repoCmd_->run({"reset", "--" + mode.toStdString(),
-                               sha.toStdString()},
-                              tr("Reset Failed"),
-                              RepoCommandController::RefreshStatus
-                                  | RepoCommandController::RefreshLog
-                                  | RepoCommandController::RefreshBranches,
-                              dlg);
-                dlg->refreshCurrentRef();
+                repoCmd_->runAsync({"reset", "--" + mode.toStdString(),
+                                    sha.toStdString()},
+                                   tr("Reset Failed"),
+                                   RepoCommandController::RefreshStatus
+                                       | RepoCommandController::RefreshLog
+                                       | RepoCommandController::RefreshBranches,
+                                   tr("Resetting to %1…").arg(sha.left(8)),
+                                   [dlg = QPointer(dlg)](bool) {
+                                       if (dlg) dlg->refreshCurrentRef();
+                                   },
+                                   dlg);
             });
 
             dlg->setRefs(refs);
@@ -1865,9 +1882,10 @@ void MainWindow::buildCommandsMenu()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (ret != QMessageBox::Yes) return;
-            repoCmd_->run({"reset", "--soft", "HEAD~1"},
-                          tr("Undo Failed"),
-                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog);
+            repoCmd_->runAsync({"reset", "--soft", "HEAD~1"},
+                               tr("Undo Failed"),
+                               RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
+                               tr("Undoing the last commit…"));
         });
         cmdMenu->addAction(a);
     }
@@ -1898,7 +1916,7 @@ void MainWindow::buildCommandsMenu()
         runRemoteOp(fetchAction_,
                     tr("Fetching from origin…"),
                     tr("Fetch complete."),
-                    [this]() { gitService_->fetch(); });
+                    [this]() { return gitService_->fetch(); });
     });
     cmdMenu->addAction(fetchAction_);
 
@@ -1913,7 +1931,7 @@ void MainWindow::buildCommandsMenu()
         runRemoteOp(pullAction_,
                     tr("Pulling from origin…"),
                     tr("Pull complete."),
-                    [this]() { gitService_->pull("origin", ""); });
+                    [this]() { return gitService_->pull("origin", ""); });
     });
     cmdMenu->addAction(pullAction_);
 
@@ -1929,7 +1947,7 @@ void MainWindow::buildCommandsMenu()
         runRemoteOp(pushAction_,
                     tr("Pushing to origin…"),
                     tr("Push complete."),
-                    [this]() { gitService_->push("origin", ""); },
+                    [this]() { return gitService_->push("origin", ""); },
                     // A first push publishes the branch and records its
                     // upstream in .git/config, which the file watcher
                     // doesn't cover; refresh so the sidebar shows it.
@@ -2068,9 +2086,10 @@ void MainWindow::buildCommandsMenu()
                     QMessageBox::Cancel);
                 if (ret != QMessageBox::Yes) return;
             }
-            repoCmd_->run({"reset", flag, "HEAD"},
-                          tr("Reset Failed"),
-                          RepoCommandController::RefreshStatus);
+            repoCmd_->runAsync({"reset", flag, "HEAD"},
+                               tr("Reset Failed"),
+                               RepoCommandController::RefreshStatus,
+                               tr("Resetting changes…"));
         });
         cmdMenu->addAction(a);
     }
@@ -2091,9 +2110,10 @@ void MainWindow::buildCommandsMenu()
                 QMessageBox::Yes | QMessageBox::Cancel,
                 QMessageBox::Cancel);
             if (ret != QMessageBox::Yes) return;
-            repoCmd_->run({"clean", "-f", "-d"},
-                          tr("Clean Failed"),
-                          RepoCommandController::RefreshStatus);
+            repoCmd_->runAsync({"clean", "-f", "-d"},
+                               tr("Clean Failed"),
+                               RepoCommandController::RefreshStatus,
+                               tr("Cleaning the working directory…"));
         });
         cmdMenu->addAction(a);
     }
@@ -2271,13 +2291,7 @@ void MainWindow::buildCommandsMenu()
                 tr("Merge which branch into the current one?"),
                 names, 0, /*editable=*/false, &ok);
             if (!ok || picked.isEmpty()) return;
-            const bool merged = repoCmd_->run(
-                {"merge", picked.toStdString()},
-                tr("Merge Failed"),
-                RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
-                    | RepoCommandController::RefreshBranches);
-            if (!merged)
-                offerConflictResolution(tr("merge"));
+            mergeBranch(picked);
         });
         cmdMenu->addAction(a);
     }
@@ -2453,13 +2467,25 @@ void MainWindow::buildCommandsMenu()
                     branchNames << QString::fromStdString(b.name);
             }
             dlg.setBranches(branchNames);
-            if (dlg.exec() == QDialog::Accepted) {
-                gitService_->createTag(dlg.tagName(),
-                                       dlg.targetRef(),
-                                       dlg.message(),
-                                       dlg.isAnnotated(),
-                                       dlg.shouldPush());
-            }
+            if (dlg.exec() != QDialog::Accepted)
+                return;
+            const QString name = dlg.tagName();
+            if (!gitService_->createTag(name, dlg.targetRef(), dlg.message(),
+                                        dlg.isAnnotated()) || !dlg.shouldPush())
+                return;
+            // Pushed as a remote op of its own: on a pool thread (it was
+            // a network round trip on the GUI thread), with its own
+            // outcome. While another remote op runs it's turned down
+            // with the usual note; the tag stays, to be pushed later.
+            // The full ref, because the short name is ambiguous whenever
+            // a branch shares it.
+            runRemoteOp(nullptr,
+                        tr("Pushing tag %1 to origin…").arg(name),
+                        tr("Tag %1 pushed.").arg(name),
+                        [this, name]() {
+                            return gitService_->push(QStringLiteral("origin"),
+                                                     QStringLiteral("refs/tags/") + name);
+                        });
         });
         cmdMenu->addAction(a);
     }
@@ -2615,10 +2641,12 @@ void MainWindow::buildCommandsMenu()
             if (outFile.isEmpty()) return;
             const std::string format = outFile.endsWith(".tar")
                 ? "tar" : "zip";
-            repoCmd_->run({"archive", "--format=" + format,
-                           "-o", outFile.toStdString(),
-                           ref.toStdString()},
-                          tr("Archive Failed"));
+            repoCmd_->runAsync({"archive", "--format=" + format,
+                                "-o", outFile.toStdString(),
+                                ref.toStdString()},
+                               tr("Archive Failed"),
+                               RepoCommandController::RefreshNone,
+                               tr("Archiving %1…").arg(ref));
         });
         cmdMenu->addAction(a);
     }
@@ -2678,13 +2706,16 @@ void MainWindow::buildCommandsMenu()
         // suspect commit.
         auto* sub = cmdMenu->addMenu(menuIcon(QStringLiteral("bisect")),
                                      tr("&Bisect"));
+        // A local op each: every step but Reset checks out the next
+        // commit to test.
         auto runBisect = [this](const QStringList& args,
                                 const QString& failTitle) {
             if (!gitService_ || !gitService_->isOpen()) return;
             std::vector<std::string> stdArgs = {"bisect"};
             for (const auto& a : args) stdArgs.push_back(a.toStdString());
-            repoCmd_->run(stdArgs, failTitle,
-                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog);
+            repoCmd_->runAsync(stdArgs, failTitle,
+                               RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
+                               tr("Bisecting…"));
         };
 
         auto* startA = new QAction(tr("&Start..."), this);
@@ -2764,14 +2795,17 @@ void MainWindow::buildCommandsMenu()
                 this, tr("Choose output directory for patches"),
                 QDir::homePath());
             if (outDir.isEmpty()) return;
-            auto out = gitService_->process().run(
+            repoCmd_->runAsync(
                 {"format-patch", range.trimmed().toStdString(),
-                 "-o", outDir.toStdString()});
-            handleProcessResult(this, tr("Format Patch Failed"), out);
-            if (out.ok() && out.value().success()) {
-                statusBar()->showMessage(
-                    tr("Patches written to %1").arg(outDir), 5000);
-            }
+                 "-o", outDir.toStdString()},
+                tr("Format Patch Failed"),
+                RepoCommandController::RefreshNone,
+                tr("Writing patches…"),
+                [this, outDir](bool written) {
+                    if (written)
+                        statusBar()->showMessage(
+                            tr("Patches written to %1").arg(outDir), 5000);
+                });
         });
         cmdMenu->addAction(a);
     }
@@ -2818,9 +2852,9 @@ void MainWindow::buildCommandsMenu()
             std::vector<std::string> args;
             args.push_back(useAm ? "am" : "apply");
             for (const auto& f : files) args.push_back(f.toStdString());
-            repoCmd_->run(args, tr("Apply Patch Failed"),
-                          RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
-                          nullptr, /*timeoutMs=*/120000);
+            repoCmd_->runAsync(args, tr("Apply Patch Failed"),
+                               RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
+                               tr("Applying patches…"));
         });
         cmdMenu->addAction(a);
     }
@@ -2844,70 +2878,82 @@ void MainWindow::buildPluginsMenu()
         a->setObjectName(QStringLiteral("plugins.delete-obsolete-branches"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"branch", "--merged"});
-            if (!out.ok() || !out.value().success()) {
-                handleProcessResult(this, tr("Delete Obsolete Failed"),
-                                    out);
-                return;
-            }
-            QStringList merged;
-            for (const auto& raw : QString::fromStdString(
-                    out.value().stdoutData).split('\n',
-                        Qt::SkipEmptyParts)) {
-                QString line = raw.trimmed();
-                if (line.startsWith('*')) continue;  // current HEAD
-                if (line.startsWith('+')) line = line.mid(1).trimmed();
-                line = line.trimmed();
-                // Skip detached-HEAD pseudo entries like "(HEAD ...)"
-                if (line.startsWith('(')) continue;
-                if (!line.isEmpty()) merged << line;
-            }
-            if (merged.isEmpty()) {
-                QMessageBox::information(this,
-                    tr("Delete Obsolete Branches"),
-                    tr("No merged branches to clean up."));
-                return;
-            }
+            // Listed as a local op: `git branch --merged` walks the
+            // history of every branch.
+            auto listed = std::make_shared<
+                std::optional<git::Result<git::ProcessOutput>>>();
+            repoCmd_->runJob(
+                tr("Listing merged branches…"),
+                [listed](const git::GitProcess& proc) {
+                    listed->emplace(proc.run({"branch", "--merged"},
+                                             RepoCommandController::kTimeoutMs));
+                },
+                [this, listed]() {
+                    if (!listed->has_value()) return;
+                    const auto& out = **listed;
+                    if (!out.ok() || !out.value().success()) {
+                        handleProcessResult(this, tr("Delete Obsolete Failed"),
+                                            out);
+                        return;
+                    }
+                    QStringList merged;
+                    for (const auto& raw : QString::fromStdString(
+                            out.value().stdoutData).split('\n',
+                                Qt::SkipEmptyParts)) {
+                        QString line = raw.trimmed();
+                        if (line.startsWith('*')) continue;  // current HEAD
+                        if (line.startsWith('+')) line = line.mid(1).trimmed();
+                        line = line.trimmed();
+                        // Skip detached-HEAD pseudo entries like "(HEAD ...)"
+                        if (line.startsWith('(')) continue;
+                        if (!line.isEmpty()) merged << line;
+                    }
+                    if (merged.isEmpty()) {
+                        QMessageBox::information(this,
+                            tr("Delete Obsolete Branches"),
+                            tr("No merged branches to clean up."));
+                        return;
+                    }
 
-            // Multi-select picker. QInputDialog::getItem only
-            // does single-select, so we build a small QDialog
-            // hosting a QListWidget with multi-selection enabled.
-            QDialog dlg(this);
-            dlg.setWindowTitle(tr("Delete Obsolete Branches"));
-            dlg.resize(420, 360);
-            auto* layout = new QVBoxLayout(&dlg);
-            layout->addWidget(new QLabel(
-                tr("Select branches that have been merged into HEAD "
-                   "and should be deleted:"), &dlg));
-            auto* list = new QListWidget(&dlg);
-            list->setSelectionMode(QAbstractItemView::ExtendedSelection);
-            for (const auto& n : merged) list->addItem(n);
-            layout->addWidget(list);
-            auto* buttons = new QDialogButtonBox(
-                QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
-                &dlg);
-            connect(buttons, &QDialogButtonBox::accepted,
-                    &dlg, &QDialog::accept);
-            connect(buttons, &QDialogButtonBox::rejected,
-                    &dlg, &QDialog::reject);
-            layout->addWidget(buttons);
-            if (dlg.exec() != QDialog::Accepted) return;
+                    // Multi-select picker. QInputDialog::getItem only
+                    // does single-select, so we build a small QDialog
+                    // hosting a QListWidget with multi-selection enabled.
+                    QDialog dlg(this);
+                    dlg.setWindowTitle(tr("Delete Obsolete Branches"));
+                    dlg.resize(420, 360);
+                    auto* layout = new QVBoxLayout(&dlg);
+                    layout->addWidget(new QLabel(
+                        tr("Select branches that have been merged into HEAD "
+                           "and should be deleted:"), &dlg));
+                    auto* list = new QListWidget(&dlg);
+                    list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+                    for (const auto& n : merged) list->addItem(n);
+                    layout->addWidget(list);
+                    auto* buttons = new QDialogButtonBox(
+                        QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                        &dlg);
+                    connect(buttons, &QDialogButtonBox::accepted,
+                            &dlg, &QDialog::accept);
+                    connect(buttons, &QDialogButtonBox::rejected,
+                            &dlg, &QDialog::reject);
+                    layout->addWidget(buttons);
+                    if (dlg.exec() != QDialog::Accepted) return;
 
-            QStringList picked;
-            for (auto* it : list->selectedItems())
-                picked << it->text();
-            if (picked.isEmpty()) return;
+                    QStringList picked;
+                    for (auto* it : list->selectedItems())
+                        picked << it->text();
+                    if (picked.isEmpty()) return;
 
-            const auto confirm = QMessageBox::question(this,
-                tr("Delete Obsolete Branches"),
-                tr("Delete %1 merged branch(es)? This cannot be "
-                   "undone from the UI.").arg(picked.size()),
-                QMessageBox::Yes | QMessageBox::Cancel,
-                QMessageBox::Cancel);
-            if (confirm != QMessageBox::Yes) return;
-            for (const auto& n : picked)
-                gitService_->deleteBranch(n);
+                    const auto confirm = QMessageBox::question(this,
+                        tr("Delete Obsolete Branches"),
+                        tr("Delete %1 merged branch(es)? This cannot be "
+                           "undone from the UI.").arg(picked.size()),
+                        QMessageBox::Yes | QMessageBox::Cancel,
+                        QMessageBox::Cancel);
+                    if (confirm != QMessageBox::Yes) return;
+                    for (const auto& n : picked)
+                        gitService_->deleteBranch(n);
+                });
         });
         pluginsMenu->addAction(a);
     }
@@ -2926,154 +2972,136 @@ void MainWindow::buildPluginsMenu()
             if (!gitService_ || !gitService_->isOpen()) return;
 
             // The pipeline runs git twice: first emit object IDs,
-            // then resolve each to (size, type) via cat-file.
-            // We pipe with QProcess channels rather than a shell
-            // because users may not have a POSIX shell on PATH
-            // (Windows CI). Output is small enough to buffer in
-            // memory — a million blobs is ~50 MB of text.
-            //
-            // The work runs on the main thread today and can take
-            // a few seconds on big repos. Show a wait cursor +
-            // status bar message so the user knows the app hasn't
-            // hung. Future improvement: run on QtConcurrent.
-            QApplication::setOverrideCursor(Qt::WaitCursor);
-            statusBar()->showMessage(
-                tr("Walking repository for large blobs..."));
-            // RAII-style guard so the cursor and status bar reset
-            // even if we early-return on error.
-            struct ScopeGuard {
-                QStatusBar* sb;
-                ~ScopeGuard() {
-                    QApplication::restoreOverrideCursor();
-                    if (sb) sb->clearMessage();
-                }
-            } guard{statusBar()};
-
-            // GitService::process() locks internally and returns
-            // the GitProcess by value; shell calls then run without
-            // touching libgit2 state.
-            auto proc = gitService_->process();
-            auto revRes = proc.run(
-                {"rev-list", "--objects", "--all"}, /*timeout=*/120000);
-            if (!revRes.ok() || !revRes.value().success()) {
-                handleProcessResult(this, tr("Find Large Files Failed"),
-                                    revRes);
-                return;
-            }
-
-            // Build the cat-file input: just the SHAs (one per
-            // line). Each rev-list line is "<sha> <path>" with
-            // path optional for non-blob types.
-            QStringList shaLines;
-            QHash<QString, QString> shaToPath;
-            for (const auto& raw : QString::fromStdString(
-                    revRes.value().stdoutData).split('\n',
-                        Qt::SkipEmptyParts)) {
-                const qsizetype sp = raw.indexOf(' ');
-                if (sp <= 0) continue;
-                const QString sha = raw.left(sp);
-                const QString path = raw.mid(sp + 1);
-                shaLines << sha;
-                if (!path.isEmpty()) shaToPath[sha] = path;
-            }
-
-            QProcess cat;
-            cat.setWorkingDirectory(QString::fromStdString(
-                gitService_->withRepository([](git::Repository& r) {
-                    return r.workdir();
-                })));
-            cat.start("git", QStringList{
-                "cat-file", "--batch-check=%(objectname) "
-                            "%(objecttype) %(objectsize)"});
-            if (!cat.waitForStarted(5000)) {
-                QMessageBox::warning(this,
-                    tr("Find Large Files Failed"),
-                    tr("Could not start `git cat-file`."));
-                return;
-            }
-            cat.write(shaLines.join('\n').toUtf8());
-            cat.write("\n");
-            cat.closeWriteChannel();
-            if (!cat.waitForFinished(120000)) {
-                cat.kill();
-                QMessageBox::warning(this,
-                    tr("Find Large Files Failed"),
-                    tr("`git cat-file` timed out."));
-                return;
-            }
-
+            // then resolve each to (size, type) via cat-file, fed on
+            // its stdin rather than through a shell because users may
+            // not have a POSIX shell on PATH (Windows CI). Output is
+            // small enough to buffer in memory — a million blobs is
+            // ~50 MB of text. A local op, on a pool thread: it takes a
+            // while on a big repository, and froze the window
+            // throughout on the main thread.
             struct Entry { QString path; QString sha; qint64 size; };
-            std::vector<Entry> entries;
-            entries.reserve(static_cast<size_t>(shaLines.size()));
-            for (const auto& raw : QString::fromUtf8(
-                    cat.readAllStandardOutput()).split('\n',
-                        Qt::SkipEmptyParts)) {
-                const QStringList p = raw.split(' ');
-                if (p.size() < 3) continue;
-                if (p[1] != QLatin1String("blob")) continue;
-                bool ok = false;
-                const qint64 sz = p[2].toLongLong(&ok);
-                if (!ok) continue;
-                entries.push_back({shaToPath.value(p[0]), p[0], sz});
-            }
-            std::sort(entries.begin(), entries.end(),
-                [](const Entry& lhs, const Entry& rhs) {
-                    return lhs.size > rhs.size;
-                });
-            if (entries.size() > 50) entries.resize(50);
+            struct Found {
+                // The git that failed, if one did.
+                std::optional<git::Result<git::ProcessOutput>> failed;
+                std::vector<Entry> entries;   // the largest, largest first
+            };
+            auto found = std::make_shared<Found>();
+            repoCmd_->runJob(
+                tr("Walking repository for large blobs…"),
+                [found](const git::GitProcess& proc) {
+                    auto revRes = proc.run({"rev-list", "--objects", "--all"},
+                                           RepoCommandController::kTimeoutMs);
+                    if (!revRes.ok() || !revRes.value().success()) {
+                        found->failed.emplace(std::move(revRes));
+                        return;
+                    }
 
-            QDialog dlg(this);
-            dlg.setWindowTitle(tr("Largest Blobs in Repository"));
-            dlg.resize(720, 460);
-            auto* layout = new QVBoxLayout(&dlg);
-            layout->addWidget(new QLabel(tr(
-                "Top %1 largest blobs across all branches and "
-                "history. Sizes are uncompressed object sizes; "
-                "the on-disk pack will be smaller.")
-                    .arg(entries.size()), &dlg));
-            auto* table = new QTableWidget(
-                static_cast<int>(entries.size()), 3, &dlg);
-            table->setHorizontalHeaderLabels(
-                {tr("Size"), tr("Path"), tr("Blob SHA")});
-            table->horizontalHeader()->setStretchLastSection(false);
-            table->horizontalHeader()->setSectionResizeMode(
-                1, QHeaderView::Stretch);
-            table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-            table->setAlternatingRowColors(true);
-            table->verticalHeader()->setVisible(false);
-            for (size_t i = 0; i < entries.size(); ++i) {
-                const auto& e = entries[i];
-                // Human-readable size: KB / MB / GB. Locale-aware
-                // formatting for the number part. The double casts
-                // are exact below 2^53 bytes (~9 PB).
-                QString humanSize;
-                if (e.size >= 1024LL * 1024 * 1024)
-                    humanSize = QStringLiteral("%1 GB").arg(
-                        static_cast<double>(e.size) / (1024.0 * 1024 * 1024), 0, 'f', 2);
-                else if (e.size >= 1024 * 1024)
-                    humanSize = QStringLiteral("%1 MB").arg(
-                        static_cast<double>(e.size) / (1024.0 * 1024), 0, 'f', 2);
-                else if (e.size >= 1024)
-                    humanSize = QStringLiteral("%1 KB").arg(
-                        static_cast<double>(e.size) / 1024.0, 0, 'f', 1);
-                else
-                    humanSize = QStringLiteral("%1 B").arg(e.size);
-                auto* sizeItem = new QTableWidgetItem(humanSize);
-                sizeItem->setData(Qt::UserRole,
-                                  static_cast<qulonglong>(e.size));
-                table->setItem(static_cast<int>(i), 0, sizeItem);
-                table->setItem(static_cast<int>(i), 1,
-                    new QTableWidgetItem(e.path));
-                table->setItem(static_cast<int>(i), 2,
-                    new QTableWidgetItem(e.sha.left(12)));
-            }
-            layout->addWidget(table);
-            auto* close = new QDialogButtonBox(
-                QDialogButtonBox::Close, &dlg);
-            connect(close, &QDialogButtonBox::rejected,
-                    &dlg, &QDialog::accept);
-            layout->addWidget(close);
-            dlg.exec();
+                    // Build the cat-file input: just the SHAs (one per
+                    // line). Each rev-list line is "<sha> <path>" with
+                    // path optional for non-blob types.
+                    QStringList shaLines;
+                    QHash<QString, QString> shaToPath;
+                    for (const auto& raw : QString::fromStdString(
+                            revRes.value().stdoutData).split('\n',
+                                Qt::SkipEmptyParts)) {
+                        const qsizetype sp = raw.indexOf(' ');
+                        if (sp <= 0) continue;
+                        const QString sha = raw.left(sp);
+                        const QString path = raw.mid(sp + 1);
+                        shaLines << sha;
+                        if (!path.isEmpty()) shaToPath[sha] = path;
+                    }
+
+                    auto catRes = proc.runWithInput(
+                        {"cat-file", "--batch-check=%(objectname) "
+                                     "%(objecttype) %(objectsize)"},
+                        (shaLines.join('\n') + QLatin1Char('\n')).toStdString(),
+                        RepoCommandController::kTimeoutMs);
+                    if (!catRes.ok() || !catRes.value().success()) {
+                        found->failed.emplace(std::move(catRes));
+                        return;
+                    }
+
+                    std::vector<Entry>& entries = found->entries;
+                    entries.reserve(static_cast<size_t>(shaLines.size()));
+                    for (const auto& raw : QString::fromStdString(
+                            catRes.value().stdoutData).split('\n',
+                                Qt::SkipEmptyParts)) {
+                        const QStringList p = raw.split(' ');
+                        if (p.size() < 3) continue;
+                        if (p[1] != QLatin1String("blob")) continue;
+                        bool ok = false;
+                        const qint64 sz = p[2].toLongLong(&ok);
+                        if (!ok) continue;
+                        entries.push_back({shaToPath.value(p[0]), p[0], sz});
+                    }
+                    std::sort(entries.begin(), entries.end(),
+                        [](const Entry& lhs, const Entry& rhs) {
+                            return lhs.size > rhs.size;
+                        });
+                    if (entries.size() > 50) entries.resize(50);
+                },
+                [this, found]() {
+                    if (found->failed) {
+                        handleProcessResult(this, tr("Find Large Files Failed"),
+                                            *found->failed);
+                        return;
+                    }
+                    const std::vector<Entry>& entries = found->entries;
+
+                    QDialog dlg(this);
+                    dlg.setWindowTitle(tr("Largest Blobs in Repository"));
+                    dlg.resize(720, 460);
+                    auto* layout = new QVBoxLayout(&dlg);
+                    layout->addWidget(new QLabel(tr(
+                        "Top %1 largest blobs across all branches and "
+                        "history. Sizes are uncompressed object sizes; "
+                        "the on-disk pack will be smaller.")
+                            .arg(entries.size()), &dlg));
+                    auto* table = new QTableWidget(
+                        static_cast<int>(entries.size()), 3, &dlg);
+                    table->setHorizontalHeaderLabels(
+                        {tr("Size"), tr("Path"), tr("Blob SHA")});
+                    table->horizontalHeader()->setStretchLastSection(false);
+                    table->horizontalHeader()->setSectionResizeMode(
+                        1, QHeaderView::Stretch);
+                    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+                    table->setAlternatingRowColors(true);
+                    table->verticalHeader()->setVisible(false);
+                    for (size_t i = 0; i < entries.size(); ++i) {
+                        const auto& e = entries[i];
+                        // Human-readable size: KB / MB / GB. Locale-aware
+                        // formatting for the number part. The double casts
+                        // are exact below 2^53 bytes (~9 PB).
+                        QString humanSize;
+                        if (e.size >= 1024LL * 1024 * 1024)
+                            humanSize = QStringLiteral("%1 GB").arg(
+                                static_cast<double>(e.size) / (1024.0 * 1024 * 1024), 0, 'f', 2);
+                        else if (e.size >= 1024 * 1024)
+                            humanSize = QStringLiteral("%1 MB").arg(
+                                static_cast<double>(e.size) / (1024.0 * 1024), 0, 'f', 2);
+                        else if (e.size >= 1024)
+                            humanSize = QStringLiteral("%1 KB").arg(
+                                static_cast<double>(e.size) / 1024.0, 0, 'f', 1);
+                        else
+                            humanSize = QStringLiteral("%1 B").arg(e.size);
+                        auto* sizeItem = new QTableWidgetItem(humanSize);
+                        sizeItem->setData(Qt::UserRole,
+                                          static_cast<qulonglong>(e.size));
+                        table->setItem(static_cast<int>(i), 0, sizeItem);
+                        table->setItem(static_cast<int>(i), 1,
+                            new QTableWidgetItem(e.path));
+                        table->setItem(static_cast<int>(i), 2,
+                            new QTableWidgetItem(e.sha.left(12)));
+                    }
+                    layout->addWidget(table);
+                    auto* close = new QDialogButtonBox(
+                        QDialogButtonBox::Close, &dlg);
+                    connect(close, &QDialogButtonBox::rejected,
+                            &dlg, &QDialog::accept);
+                    layout->addWidget(close);
+                    dlg.exec();
+                });
         });
         pluginsMenu->addAction(a);
     }
@@ -3539,13 +3567,17 @@ void MainWindow::buildHelpMenu()
 // while a revealed auto-fetch runs, and this used to turn it back on.
 void MainWindow::setRepoOnlyMenusEnabled(bool on)
 {
+    // Off while a local op runs, whatever `on` says; its end turns
+    // them back on if there's a repository (repoActionsEnabled_). The
+    // action of a running remote op stays off until the op ends.
+    on = on && !localOpRunning_;
     const QList<QAction*> shared{refreshAction_, fetchAction_, pullAction_,
                                  pushAction_, commitAction_};
-    auto toggleChildren = [on, &shared](QMenu* m) {
+    auto toggleChildren = [this, on, &shared](QMenu* m) {
         if (!m) return;
         for (QAction* a : m->actions()) {
             if (a->isSeparator() || shared.contains(a)) continue;
-            a->setEnabled(on);
+            a->setEnabled(on && a != remoteOpAction_);
         }
     };
     toggleChildren(navMenu_);
@@ -3562,14 +3594,18 @@ void MainWindow::setRepoActionsEnabled(bool on)
     // action (false), the optimistic phase of an async open (false
     // — ops would hit the previous repo), and the failure revert.
     repoActionsEnabled_ = on;
+    // All off while a local op runs (see setRepoOnlyMenusEnabled).
+    on = on && !localOpRunning_;
     if (refreshAction_) refreshAction_->setEnabled(on);
     // Except Fetch while a revealed auto-fetch runs (an open that
     // failed, or opened its repository again, leaves it running):
     // that is the user's fetch, and it gives Fetch back as it ends.
+    // The same goes for whichever action started the running remote op.
     if (fetchAction_)
-        fetchAction_->setEnabled(on && autoFetch_ != AutoFetch::Shown);
-    if (pullAction_)    pullAction_->setEnabled(on);
-    if (pushAction_)    pushAction_->setEnabled(on);
+        fetchAction_->setEnabled(on && autoFetch_ != AutoFetch::Shown
+                                 && fetchAction_ != remoteOpAction_);
+    if (pullAction_)    pullAction_->setEnabled(on && pullAction_ != remoteOpAction_);
+    if (pushAction_)    pushAction_->setEnabled(on && pushAction_ != remoteOpAction_);
     if (commitAction_)  commitAction_->setEnabled(on);
     if (filterInput_)   filterInput_->setEnabled(on);
     if (branchCombo_)   branchCombo_->setEnabled(on);
@@ -3734,20 +3770,18 @@ void MainWindow::createToolBar()
             statusBar()->showMessage(
                 tr("Switching to %1…").arg(name), 2000);
 
-            // Reset the failure flag before invoking; if the checkout
-            // emits operationFailed (e.g. dirty working tree conflicts
-            // with the target branch's main.cpp), the handler we
-            // registered in setupConnections will flip the flag to
-            // true synchronously, before checkoutBranch returns. We
-            // check it on the way out and choose green ✓ vs red ✗
-            // accordingly. Without this, a failed checkout used to
-            // wrongly show "✓ Switched to feature/work" while the
-            // current branch was unchanged.
-            lastRemoteOpFailed_ = false;
-            gitService_->checkoutBranch(name);
+            // checkoutBranch says whether it worked: green ✓ vs red ✗
+            // (e.g. a dirty working tree conflicts with the target
+            // branch's main.cpp; its operationFailed has put git's
+            // message on the status bar by then). A failed checkout
+            // used to wrongly show "✓ Switched to feature/work" while
+            // the current branch was unchanged. It used to be read
+            // from the remote ops' failure flag, which this then reset
+            // under a running Fetch.
+            const bool switched = gitService_->checkoutBranch(name);
 
             if (opIndicator_) {
-                if (lastRemoteOpFailed_) {
+                if (!switched) {
                     const QString status = statusBar()->currentMessage();
                     QString oneLine = status;
                     oneLine.replace(QChar('\n'), QStringLiteral(" | "));
@@ -3826,6 +3860,8 @@ void MainWindow::createToolBar()
     // while the op runs and "✓ Fetch complete" (or red "✗ failed")
     // afterwards.
     remoteOpLabel_ = new QLabel(toolbar);
+    // For the test bridge, which reports its text in dump-state.
+    remoteOpLabel_->setObjectName(QStringLiteral("toolbar.opIndicator"));
     opIndicator_ = new InlineOpIndicator(remoteOpLabel_, this);
     remoteOpLabel_->setContentsMargins(12, 0, 12, 0);
     remoteOpLabel_->setText(QString());
@@ -4135,7 +4171,7 @@ void MainWindow::setupConnections()
                 if (op == QLatin1String("fetch")
                     && (autoFetch_ == AutoFetch::Quiet
                         || autoFetch_ == AutoFetch::Disowned)) {
-                    lastRemoteOpFailed_ = true;
+                    autoFetchFailed_ = true;
                     if (autoFetch_ == AutoFetch::Disowned)
                         return;
                     // git's first line names the problem; the rest
@@ -4159,10 +4195,12 @@ void MainWindow::setupConnections()
                 // the user never started.
                 if (telemetry_ && err != QLatin1String("Cancelled"))
                     telemetry_->recordError(telemetry::ErrorKind::OperationFailed, op);
-                // Tell the remote-op wrapper to skip its success
-                // message. A remote op's failure stays on the status
-                // bar (timeout 0) until the next op replaces it; the
-                // rest keep the old 5-second message.
+                // A remote op's failure stays on the status bar
+                // (timeout 0) until the next op replaces it; the rest
+                // keep the old 5-second message. Whether the running
+                // remote op failed is its own outcome (startRemoteOp),
+                // not this: a checkout that failed meanwhile turned a
+                // Fetch that went through into a red ✗.
                 const bool remoteOp =
                     op.startsWith(QLatin1String("fetch"),    Qt::CaseInsensitive) ||
                     op.startsWith(QLatin1String("pull"),     Qt::CaseInsensitive) ||
@@ -4171,11 +4209,34 @@ void MainWindow::setupConnections()
                                   Qt::CaseInsensitive);
                 statusBar()->showMessage(op + tr(" failed: ") + err,
                                          remoteOp ? 0 : 5000);
-                if (remoteOp ||
-                    op.startsWith(QLatin1String("checkout"), Qt::CaseInsensitive)) {
-                    lastRemoteOpFailed_ = true;
-                }
             });
+
+    // A local op (repoCmd_: a merge, a reset, a bisect step, …) runs on
+    // a pool thread. Meanwhile the repository's actions and menus are
+    // off, as while an open is in flight, and the op says what it does
+    // on the inline label (unless the user is watching a remote op
+    // there) and the status bar.
+    connect(repoCmd_, &RepoCommandController::busyChanged,
+            this, [this](bool busy, const QString& message) {
+        localOpRunning_ = busy;
+        setRepoActionsEnabled(repoActionsEnabled_);
+        setRepoOnlyMenusEnabled(repoActionsEnabled_);
+        if (busy) {
+            localOpMessage_ = message;
+            localOpNarrated_ = !remoteOpNarrated();
+            if (localOpNarrated_ && opIndicator_)
+                opIndicator_->start(message);
+            statusBar()->showMessage(message);
+            return;
+        }
+        if (localOpNarrated_ && opIndicator_)
+            opIndicator_->clear();
+        if (statusBar()->currentMessage() == localOpMessage_)
+            statusBar()->clearMessage();
+    });
+    connect(repoCmd_, &RepoCommandController::refused, this, [this]() {
+        statusBar()->showMessage(tr("Another operation is still running…"), 3000);
+    });
 
     connect(gitService_, &services::GitService::commitComplete,
             this, [this](bool success, const QString& message) {
@@ -4242,8 +4303,8 @@ void MainWindow::setupConnections()
     // routes through these. createBranch/deleteBranch go through
     // GitService (which emits operationFailed on error); rename /
     // merge / set-upstream have no libgit2 wrapper yet so they run
-    // through the git CLI with the same handleProcessResult feedback
-    // the Commands-menu equivalents use.
+    // through the git CLI as local ops (repoCmd_), with the same
+    // feedback the Commands-menu equivalents use.
     if (auto* branchTree = repoView_->branchTree()) {
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRequested,
                 gitService_, &services::GitService::checkoutBranch);
@@ -4263,7 +4324,7 @@ void MainWindow::setupConnections()
                         tr("Pushing %1 to %2…").arg(branch, remote),
                         tr("Push complete."),
                         [this, remote, branch]() {
-                            gitService_->push(remote, branch);
+                            return gitService_->push(remote, branch);
                         },
                         [this]() { gitService_->refreshBranches(); });
         });
@@ -4274,33 +4335,29 @@ void MainWindow::setupConnections()
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
                 this, [this](const QString& oldName, const QString& newName) {
             if (!gitService_ || !gitService_->isOpen()) return;
-            repoCmd_->run({"branch", "-m", oldName.toStdString(),
-                           newName.toStdString()},
-                          tr("Rename Branch Failed"),
-                          RepoCommandController::RefreshBranches);
+            repoCmd_->runAsync({"branch", "-m", oldName.toStdString(),
+                                newName.toStdString()},
+                               tr("Rename Branch Failed"),
+                               RepoCommandController::RefreshBranches,
+                               tr("Renaming %1…").arg(oldName));
         });
+        // The same local op as Commands > Merge branches: it used to
+        // run on the GUI thread, frozen for as long as git and its
+        // hooks took.
         connect(branchTree, &widgets::BranchTreeWidget::mergeRequested,
                 this, [this](const QString& name) {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"merge", name.toStdString()});
-            const bool merged =
-                handleProcessResult(this, tr("Merge Failed"), out);
-            gitService_->refreshStatus();
-            gitService_->refreshLog();
-            gitService_->refreshBranches();
-            if (!merged)
-                offerConflictResolution(tr("merge"));
+            mergeBranch(name);
         });
         connect(branchTree, &widgets::BranchTreeWidget::setUpstreamRequested,
                 this, [this](const QString& branch, const QString& upstream) {
             if (!gitService_ || !gitService_->isOpen()) return;
-            auto out = gitService_->process().run(
-                {"branch",
-                 "--set-upstream-to=" + upstream.toStdString(),
-                 branch.toStdString()});
-            handleProcessResult(this, tr("Set Upstream Failed"), out);
-            gitService_->refreshBranches();
+            repoCmd_->runAsync({"branch",
+                                "--set-upstream-to=" + upstream.toStdString(),
+                                branch.toStdString()},
+                               tr("Set Upstream Failed"),
+                               RepoCommandController::RefreshBranches,
+                               tr("Setting the upstream of %1…").arg(branch));
         });
     }
 }
@@ -4533,11 +4590,19 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // A fetch a Fetch click revealed is cancelled once its repository
     // has been replaced; not when the open began, since an open that
     // fails, or opens the same repository again, leaves it on screen.
-    if (autoFetch_ == AutoFetch::Shown
-        && gitService_->withRepository([](git::Repository& r) {
-               return r.path();
-           }) != autoFetchRepo_)
+    const std::string gitDir = gitService_->withRepository(
+        [](git::Repository& r) { return r.path(); });
+    if (autoFetch_ == AutoFetch::Shown && gitDir != autoFetchRepo_)
         cancelRevealedAutoFetch();
+    // One that ended while this open was pending reported then, over
+    // the loading screen: its "✗ fetch failed" stuck on the inline
+    // label, over a repository that has no remote to fail. It goes with
+    // its repository, and stays over that one opened again.
+    if (!revealedFetchEndedRepo_.empty()) {
+        if (gitDir != revealedFetchEndedRepo_ && opIndicator_)
+            opIndicator_->clear();
+        revealedFetchEndedRepo_.clear();
+    }
 }
 
 void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int offset)
@@ -4565,6 +4630,9 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
 {
     pendingOpen_.path.clear();
     pendingOpen_.awaitingInitialLog = false;
+    // A revealed fetch's outcome stays: its repository is still the one
+    // on screen.
+    revealedFetchEndedRepo_.clear();
     // No repo_opened for a failed open; the error code's NAME goes
     // instead (openErrorName), never `error`, libgit2's message with
     // the path in it.
@@ -4969,6 +5037,24 @@ void MainWindow::offerConflictResolution(const QString& operation)
         showConflictResolver();
 }
 
+// `git merge <branch>` as a local op. Run on the GUI thread, a slow
+// post-merge hook froze the window until git's 30 s timeout, which then
+// killed git (and orphaned the hook) and reported the merge, done by
+// then, as failed, with an offer to resolve conflicts it never had.
+void MainWindow::mergeBranch(const QString& branch)
+{
+    repoCmd_->runAsync({"merge", branch.toStdString()},
+                       tr("Merge Failed"),
+                       RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
+                           | RepoCommandController::RefreshBranches,
+                       tr("Merging %1…").arg(branch),
+                       [this](bool merged) {
+                           // Only offered where git stopped on conflicts.
+                           if (!merged)
+                               offerConflictResolution(tr("merge"));
+                       });
+}
+
 // Confirm, then `git push <remote> --delete <branch>` via runRemoteOp.
 // `remoteBranch` is the remote-tracking name ("origin/feature/x"); the
 // remote is everything before the first '/', the same assumption the
@@ -4994,7 +5080,7 @@ void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
                 tr("Deleting %1 from %2…").arg(branch, remote),
                 tr("Deleted %1 from %2.").arg(branch, remote),
                 [this, remote, branch]() {
-                    gitService_->deleteRemoteBranch(remote, branch);
+                    return gitService_->deleteRemoteBranch(remote, branch);
                 },
                 [this]() { gitService_->refreshBranches(); });
 }
@@ -5007,15 +5093,16 @@ void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
 //      then "✓ Fetch complete." (green) or "✗ …" (red)
 //   2) the triggering action disables for the duration of the op
 //   3) a status-bar message
-// On failure the operationFailed handler reaches the status bar first
-// and sets lastRemoteOpFailed_; the failure then stays up (label and
-// status bar) until the next remote op starts, rather than vanishing
-// after a few seconds while the user is looking elsewhere.
+// On failure the operationFailed handler reaches the status bar first,
+// and the op's own outcome sets lastRemoteOpFailed_; the failure then
+// stays up (label and status bar) until the next remote op starts,
+// rather than vanishing after a few seconds while the user is looking
+// elsewhere.
 // ---------------------------------------------------------------------------
 void MainWindow::runRemoteOp(QAction* sourceAction,
                              const QString& startMsg,
                              const QString& successMsg,
-                             std::function<void()> op,
+                             std::function<bool()> op,
                              std::function<void()> after)
 {
     // One remote op at a time: the ops mutate the same repo,
@@ -5036,11 +5123,15 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
 
     // start() also cancels any pending auto-clear from a
     // previous op, so a stale timer can't blank this message
-    // mid-run — and replaces a sticky failure from the last op.
+    // mid-run — and replaces a sticky failure from the last op, and
+    // a local op's narration (which then leaves the label alone).
     if (opIndicator_)
         opIndicator_->start(startMsg);
+    localOpNarrated_ = false;
+    revealedFetchEndedRepo_.clear();
     statusBar()->showMessage(startMsg);
     if (sourceAction) sourceAction->setEnabled(false);
+    remoteOpAction_ = sourceAction;
 
     if (hold) {
         heldRemoteOp_ = [this, sourceAction, startMsg, successMsg,
@@ -5055,6 +5146,7 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     startRemoteOp(std::move(op),
                   [this, sourceAction, successMsg,
                    after = std::move(after)]() {
+        remoteOpAction_ = nullptr;
         reenableAfterRemoteOp(sourceAction);
         finishRemoteOpFeedback(successMsg);
         if (after)
@@ -5062,7 +5154,7 @@ void MainWindow::runRemoteOp(QAction* sourceAction,
     });
 }
 
-void MainWindow::startRemoteOp(std::function<void()> op,
+void MainWindow::startRemoteOp(std::function<bool()> op,
                                std::function<void()> finished)
 {
     remoteOpRunning_ = true;
@@ -5077,11 +5169,16 @@ void MainWindow::startRemoteOp(std::function<void()> op,
     // lock and shell out; their failure signals and refresh
     // requests queue onto the GUI thread, ahead of the finished
     // handler below because they're posted first.
-    auto* opWatcher = new QFutureWatcher<void>(this);
-    connect(opWatcher, &QFutureWatcher<void>::finished, this,
+    auto* opWatcher = new QFutureWatcher<bool>(this);
+    connect(opWatcher, &QFutureWatcher<bool>::finished, this,
             [this, opWatcher, finished = std::move(finished)]() {
         opWatcher->deleteLater();
         remoteOpRunning_ = false;
+        // The op's own outcome. It used to be a flag that the
+        // operationFailed handler set for any fetch, pull, push or
+        // checkout failure, so a checkout (or a tag's push) failing
+        // while a Fetch ran turned the Fetch's success into a red ✗.
+        lastRemoteOpFailed_ = !opWatcher->result();
         finished();
     });
     remoteOp_ = QtConcurrent::run(std::move(op));
@@ -5120,6 +5217,7 @@ void MainWindow::runPeriodicFetch()
         return;
 
     autoFetch_ = AutoFetch::Quiet;
+    autoFetchFailed_ = false;
     autoFetchCancel_ = std::make_shared<std::atomic<bool>>(false);
     // By git dir: a bare repository has no work tree to tell it apart.
     autoFetchRepo_ = gitService_->withRepository(
@@ -5129,7 +5227,7 @@ void MainWindow::runPeriodicFetch()
     // sees the updated refs. The flag is passed in now, on this
     // thread, so a disown can't come before the job has taken it.
     startRemoteOp([this, cancel = autoFetchCancel_]() {
-        gitService_->fetch(QString(), cancel);
+        return gitService_->fetch(QString(), cancel);
     }, [this]() {
         const AutoFetch kind = std::exchange(autoFetch_, AutoFetch::None);
         autoFetchCancel_.reset();
@@ -5144,6 +5242,10 @@ void MainWindow::runPeriodicFetch()
             updatePeriodicFetchStatus();
         }
         if (kind == AutoFetch::Shown) {
+            // Ended while another repository opens: whether its outcome
+            // may stay on screen is up to that open's (onRepositoryOpened).
+            if (pendingOpen_.active())
+                revealedFetchEndedRepo_ = autoFetchRepo_;
             reenableAfterRemoteOp(fetchAction_);
             finishRemoteOpFeedback(tr("Fetch complete."));
         }
@@ -5155,7 +5257,7 @@ bool MainWindow::revealAutoFetch()
     // Not once its failure is in (the finished handler is next): the
     // status bar already says so, and finishRemoteOpFeedback would
     // repeat the "Fetching" message below as the failure.
-    if (autoFetch_ != AutoFetch::Quiet || lastRemoteOpFailed_)
+    if (autoFetch_ != AutoFetch::Quiet || autoFetchFailed_)
         return false;
     autoFetch_ = AutoFetch::Shown;
     const QString msg = tr("Fetching from origin…");
@@ -5200,6 +5302,7 @@ void MainWindow::dropHeldRemoteOp()
     if (!heldRemoteOp_)
         return;
     heldRemoteOp_ = nullptr;
+    remoteOpAction_ = nullptr;
     if (opIndicator_)
         opIndicator_->clear();
     statusBar()->clearMessage();
@@ -5209,17 +5312,27 @@ void MainWindow::reenableAfterRemoteOp(QAction* action)
 {
     // Only along with the other repo actions. Close and an open in
     // flight turn those off (GitService still has the op's repository,
-    // so the action would act on the one left behind), and whatever
-    // turns them back on brings this one too. File > Home leaves them
-    // on: the repository stays open.
-    if (action && repoActionsEnabled_)
+    // so the action would act on the one left behind), and so does a
+    // local op while it runs; whatever turns them back on brings this
+    // one too. File > Home leaves them on: the repository stays open.
+    if (action && repoActionsEnabled_ && !localOpRunning_)
         action->setEnabled(true);
 }
 
+bool MainWindow::remoteOpNarrated() const
+{
+    // A quiet auto-fetch says nothing there, and a disowned one is
+    // done saying anything.
+    return remoteOpRunning_ && autoFetch_ != AutoFetch::Quiet
+        && autoFetch_ != AutoFetch::Disowned;
+}
+
 // Completion half of the toolbar fetch/pull/push wrapper: reads
-// lastRemoteOpFailed_ (set by the operationFailed handler, which is
-// always delivered before the worker's finished signal) and paints
-// the inline label + status bar + clear timer accordingly.
+// lastRemoteOpFailed_ (the op's own outcome, set by startRemoteOp) and
+// paints the inline label + status bar + clear timer accordingly; a
+// failure's text is git's, which the operationFailed handler put on
+// the status bar (always delivered before the worker's finished
+// signal).
 void MainWindow::finishRemoteOpFeedback(const QString& successMsg)
 {
     if (opIndicator_) {

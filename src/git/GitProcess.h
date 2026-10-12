@@ -27,7 +27,11 @@ class GitProcess {
 public:
     explicit GitProcess(const std::string& workingDirectory);
 
-    /// Without `timeoutMs`, git gets defaultTimeoutMs().
+    /// Without `timeoutMs`, git gets defaultTimeoutMs(). git runs in a
+    /// process group of its own (a job object on Windows), as clone()
+    /// does: a timeout, or a cancel (addCancelFlag), stops git and
+    /// every process it started, SIGTERM first so git can roll back
+    /// its lockfiles, as on Ctrl-C.
     Result<ProcessOutput> run(const std::vector<std::string>& args,
                               std::optional<int> timeoutMs = std::nullopt) const;
 
@@ -40,10 +44,8 @@ public:
     /// Makes run(), and every command built on it, stoppable. Once
     /// `flag` is set, from any thread, run() stops git and every
     /// process git started within ~50 ms and fails with
-    /// GitErrorCode::User; later runs fail without starting git. git
-    /// then runs in a process group of its own (a job object on
-    /// Windows), as clone() does. Without a flag run() is unchanged.
-    /// Flags add up, and any one of them stops it: every remote op
+    /// GitErrorCode::User; later runs fail without starting git.
+    /// Flags add up, and any one of them stops it: every git command
     /// GitService runs has the flag that quitting sets, and an
     /// auto-fetch one of its own as well, so it can be dropped alone.
     /// A null flag is ignored, so an optional one can be passed on.
@@ -167,11 +169,12 @@ private:
     /// GIT_EDITOR that never waits on anyone (see kEditor).
     static void applyEnvironment(QProcess& process);
 
-    /// run() with a cancel flag added, and commit(): git in a process
-    /// group of its own, which a cancel or the time limit stops whole.
-    /// `stdinData`, when given, is written to git's stdin, then closed.
-    Result<ProcessOutput> runCancellable(const std::vector<std::string>& args, int timeoutMs,
-                                         const std::string* stdinData = nullptr) const;
+    /// What run(), runWithInput() and interactiveRebase() share: git
+    /// in a process tree, fed `stdinData` when given, with `extraEnv`
+    /// on top of applyEnvironment()'s.
+    Result<ProcessOutput> runImpl(const std::vector<std::string>& args, int timeoutMs,
+                                  const std::string* stdinData = nullptr,
+                                  const std::map<std::string, std::string>& extraEnv = {}) const;
     /// Whether any of cancelFlags_ is set.
     bool cancelled() const;
 
