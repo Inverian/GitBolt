@@ -7,6 +7,9 @@
 #include <QWidget>
 #include <vector>
 
+class QEvent;
+class QLabel;
+
 namespace gitbolt::widgets {
 
 class MergeConflictWidget : public QWidget {
@@ -39,6 +42,10 @@ signals:
     void mergeAborted();
     void allConflictsResolved();
 
+protected:
+    /// A theme switch recolours the headings and the panes' tints.
+    void changeEvent(QEvent* event) override;
+
 private slots:
     void onAcceptOurs();
     void onAcceptTheirs();
@@ -50,11 +57,16 @@ private slots:
 
 private:
     void setupUI();
+    void applyColors();
     void showConflict(int index);
     void applyHighlighting(QPlainTextEdit* editor, const QColor& color);
     void updateNavigationState();
 
-    // Three panels + result
+    // Three panels + result, and their headings
+    QLabel* oursLabel_ = nullptr;
+    QLabel* baseLabel_ = nullptr;
+    QLabel* theirsLabel_ = nullptr;
+    QLabel* resultLabel_ = nullptr;
     QPlainTextEdit* oursEditor_ = nullptr;
     QPlainTextEdit* baseEditor_ = nullptr;
     QPlainTextEdit* theirsEditor_ = nullptr;

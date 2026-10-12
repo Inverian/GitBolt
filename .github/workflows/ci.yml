@@ -127,22 +127,24 @@ jobs:
             ForEach-Object { "$($_.Name)=$($_.Value)" } |
             Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
-      # Linux only: macOS and Windows build libgit2 from source (below).
-      # libgl1-mesa-dev: Qt6::Gui links OpenGL on Linux, and the aqt
-      # Qt binaries expect the system GL headers/libs at link time.
-      - name: Install libgit2 (Ubuntu)
+      # Linux only. No libgit2-dev: libgit2 is built from source on every
+      # platform (below). libgl1-mesa-dev: Qt6::Gui links OpenGL on
+      # Linux, and the aqt Qt binaries expect the system GL headers/libs
+      # at link time.
+      - name: Install build dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgit2-dev pkg-config libgl1-mesa-dev
+          sudo apt-get install -y pkg-config libgl1-mesa-dev
 
       # ------------------------------------------------------------------
-      # Configure, build, test. Ninja on every platform. macOS and Windows
-      # use GITBOLT_BUNDLED_LIBGIT2: the pinned libgit2 release
-      # (cmake/Libgit2.cmake), linked statically. Homebrew's bottles need
-      # the runner's macOS (26), and vcpkg's would add DLLs to the
-      # installer. Linux keeps Ubuntu's libgit2-dev, which the DEB then
-      # depends on.
+      # Configure, build, test. Ninja on every platform, and
+      # GITBOLT_BUNDLED_LIBGIT2 on every platform: the pinned libgit2
+      # release (cmake/Libgit2.cmake), linked statically. Homebrew's
+      # bottles need the runner's macOS (26), vcpkg's would add DLLs to
+      # the installer, and Ubuntu's libgit2-dev made the DEB depend on
+      # that release's libgit2 package (libgit2-1.7), which no other
+      # release has: Debian 13 and Ubuntu 25.04 couldn't install it.
       # ------------------------------------------------------------------
       #
       # Usage statistics endpoints (cmake/Telemetry.cmake, PRIVACY.md):
@@ -159,7 +161,7 @@ jobs:
           GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=${{ runner.os == 'Linux' && 'OFF' || 'ON' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON
 
       # Only an official build may carry endpoints: a PR, dry-run or
       # fork build that has them fails here, before it can be tested,
@@ -572,6 +574,10 @@ jobs:
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         run: |
           desktop-file-validate src/app/platform/linux/gitbolt.desktop
+          # The Wayland app_id is desktopFileName ("gitbolt", main.cpp);
+          # shells fall back to StartupWMClass for a renamed copy.
+          grep -qx 'StartupWMClass=gitbolt' src/app/platform/linux/gitbolt.desktop \
+            || { echo "::error::gitbolt.desktop lacks StartupWMClass=gitbolt"; exit 1; }
           appstreamcli validate --no-net --explain src/app/platform/linux/com.gitbolt.app.metainfo.xml
 
       # build/gitbolt_<ver>_amd64.deb (DEB-DEFAULT naming lowercases the
@@ -687,30 +693,44 @@ jobs:
             || { echo "::error::Depends lacks bundled Qt's system deps (shlibdeps didn't scan Qt)"; exit 1; }
           dpkg-deb -f "$deb" Depends | grep -q 'libssl3' \
             || { echo "::error::Depends lacks libssl3 (the TLS plugin dlopen()s it)"; exit 1; }
+          # libgit2 is linked in statically (GITBOLT_BUNDLED_LIBGIT2): a
+          # libgit2 package in Depends ties the DEB to the one release
+          # that has that soname's package.
+          if dpkg-deb -f "$deb" Depends | grep -F libgit2; then
+            echo "::error::Depends names a libgit2 package, but libgit2 is linked in statically"; exit 1
+          fi
           # Plugins must find the private Qt libs on their own: glibc does
           # not apply the exe's RUNPATH to a dlopen'd plugin's deps.
           rm -rf debroot && dpkg-deb -x "$deb" debroot
           readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' | grep -qF '[$ORIGIN/../../lib]' \
             || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
-          # 2) DEB on a stock Ubuntu 24.04 (no aqt LD_LIBRARY_PATH or
-          #    QT_PLUGIN_PATH to mask gaps). The image is pinned by digest
-          #    (the multi-arch index, same as Docker Hub's ubuntu:24.04);
-          #    its apt-get still installs today's noble packages, which is
-          #    what a user's install resolves against.
-          docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
+          # 2) DEB on a stock Ubuntu 24.04 and a stock Debian 13, the
+          #    oldest of each the README names (no aqt LD_LIBRARY_PATH or
+          #    QT_PLUGIN_PATH to mask gaps). Debian 13 catches a Depends
+          #    entry only one release can satisfy, as libgit2-1.7 was.
+          #    Each image is pinned by digest (the multi-arch index, same
+          #    as Docker Hub's; `docker buildx imagetools inspect <image>`
+          #    prints it); its apt-get still installs today's packages,
+          #    which is what a user's install resolves against.
+          for image in \
             public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
-            bash -euo pipefail -c '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
-              export LC_ALL=C.UTF-8   # the stock image has no UTF-8 locale; Qt warns without one
-              out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
-                QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
-              echo "DEB: $out"
-              # xvfb-run merges stderr into stdout, so match the version line
-              # rather than the whole output.
-              grep -qx "GitBolt $VER" <<<"$out"'
+            public.ecr.aws/docker/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
+            echo "DEB on ${image%@*}"
+            docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
+              "$image" \
+              bash -euo pipefail -c '
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
+                export LC_ALL=C.UTF-8   # the stock images have no UTF-8 locale; Qt warns without one
+                out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
+                  QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
+                echo "DEB: $out"
+                # xvfb-run merges stderr into stdout, so match the version line
+                # rather than the whole output.
+                grep -qx "GitBolt $VER" <<<"$out"'
+          done
 
           # 3) AppImage on the runner with install-qt-action's env removed
           chmod +x "$appimage"
@@ -730,6 +750,14 @@ jobs:
           if grep -rlIF --exclude-dir=usr QT_QPA_PLATFORMTHEME squashfs-root; then
             echo "::error::the AppImage sets QT_QPA_PLATFORMTHEME before starting gitbolt"
             ls -l squashfs-root/AppRun
+            exit 1
+          fi
+
+          # 5) No libgit2 in the AppImage: it is linked into gitbolt
+          #    statically, so a copy here means linuxdeploy found a
+          #    shared one the binary links.
+          if find squashfs-root/usr/lib -name 'libgit2*' | grep .; then
+            echo "::error::the AppImage bundles a libgit2, but libgit2 is linked in statically"
             exit 1
           fi
           rm -rf squashfs-root

@@ -8,6 +8,7 @@
 #include <vector>
 
 class QAction;
+class QEvent;
 class QLabel;
 class QPlainTextEdit;
 class QPoint;
@@ -79,6 +80,11 @@ signals:
 public slots:
     void setViewMode(ViewMode mode);
 
+protected:
+    /// A theme switch recolours the highlighter and the file label
+    /// (DiffTextEdit reads its stripes' colours at every paint).
+    void changeEvent(QEvent* event) override;
+
 private slots:
     void syncScrollLeft(int value);
     void syncScrollRight(int value);
@@ -86,6 +92,7 @@ private slots:
 
 private:
     void setupUi();
+    void applyColors();
     void renderUnified(const gitbolt::git::DiffFileEntry& file);
     void renderSideBySide(const gitbolt::git::DiffFileEntry& file);
     void applyViewMode();

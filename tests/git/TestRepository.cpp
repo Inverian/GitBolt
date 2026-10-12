@@ -198,6 +198,61 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // A tag has no signature header: `git tag -s` appends the armored
+    // block to the message, and libgit2 returns that body whole, so
+    // the sidebar tooltip showed the signature. createTag writes the
+    // message verbatim, so these are the bytes a signed tag carries,
+    // with no gpg or ssh-keygen needed.
+    // -----------------------------------------------------------------
+    void tagsDropTheSignatureBlock_data() {
+        QTest::addColumn<QString>("message");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("pgp")
+            << QStringLiteral("release notes\n"
+                              "-----BEGIN PGP SIGNATURE-----\n\n"
+                              "iQEzBAABCAAdFiEEabcdefghijklmnop\n=Ab12\n"
+                              "-----END PGP SIGNATURE-----\n")
+            << QStringLiteral("release notes\n");
+        QTest::newRow("ssh")
+            << QStringLiteral("Release v1\n\nSecond paragraph.\n"
+                              "-----BEGIN SSH SIGNATURE-----\n"
+                              "U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTk=\n"
+                              "-----END SSH SIGNATURE-----\n")
+            << QStringLiteral("Release v1\n\nSecond paragraph.\n");
+        QTest::newRow("x509")
+            << QStringLiteral("release notes\n"
+                              "-----BEGIN SIGNED MESSAGE-----\n"
+                              "MIAGCSqGSIb3DQEHAqCAMIACAQExDTALBglghkgBZQME\n"
+                              "-----END SIGNED MESSAGE-----\n")
+            << QStringLiteral("release notes\n");
+        QTest::newRow("signature only")
+            << QStringLiteral("-----BEGIN PGP SIGNATURE-----\n\n"
+                              "iQEzBAABCAAdFiEE\n-----END PGP SIGNATURE-----\n")
+            << QString();
+        // Only a line that STARTS with a marker begins a signature.
+        QTest::newRow("marker mid-line")
+            << QStringLiteral("Paste it after -----BEGIN PGP SIGNATURE----- here\n")
+            << QStringLiteral("Paste it after -----BEGIN PGP SIGNATURE----- here\n");
+        QTest::newRow("unsigned")
+            << QStringLiteral("release notes\n")
+            << QStringLiteral("release notes\n");
+    }
+
+    void tagsDropTheSignatureBlock() {
+        QFETCH(QString, message);
+        QFETCH(QString, expected);
+        gitbolt::test::TestRepo repo;
+        auto head = repo.writeAndCommit("a.txt", "a\n", "initial");
+        QVERIFY(head.ok());
+        QVERIFY(repo.repo().createTag("v1.0", head.value(), message.toStdString()).ok());
+
+        auto tags = repo.repo().tags();
+        QVERIFY(tags.ok());
+        QCOMPARE(tags->size(), size_t(1));
+        QCOMPARE(QString::fromStdString(tags->front().message), expected);
+    }
+
+    // -----------------------------------------------------------------
     // deleteTag accepts the short name and the full ref name, for
     // both tag kinds, and leaves every other tag alone.
     // -----------------------------------------------------------------

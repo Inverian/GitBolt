@@ -17,6 +17,12 @@ test run can coexist with a real GitBolt session and with other tests:
 - XDG_CONFIG_HOME: a private dir unless the test passes config_home,
   so GitBolt.ini reads/writes never touch the user's real settings —
   one per App even where Apps share a runtime dir (see App).
+- HOME: a private dir too, the same way. ~/.gitbolt (the crash log,
+  which a crashing test would otherwise truncate and the user's next
+  launch would report as theirs), ~/.gitconfig (read by the app's git
+  and libgit2, written by Settings' Git Config page) and
+  QDir::homePath() all hang off it. The harness's own git() keeps the
+  test's HOME: make_repo sets the identity the app's commits need.
 - QT_QPA_PLATFORM=offscreen: no focus stealing, same behavior on
   headless CI. An exported QT_QPA_PLATFORM wins for the apps a test
   drives, so a developer can watch them; never for a second launch,
@@ -54,7 +60,8 @@ def make_runtime_dir() -> str:
 
 def app_env(runtime_dir: str, instance_name: str,
             bridge_name: str | None = None,
-            config_home: str | None = None) -> dict:
+            config_home: str | None = None,
+            home: str | None = None) -> dict:
     """Environment for a GitBolt process isolated into `runtime_dir`."""
     env = os.environ.copy()
     env.pop("GITBOLT_TEST_BRIDGE", None)
@@ -65,6 +72,8 @@ def app_env(runtime_dir: str, instance_name: str,
     env["XDG_RUNTIME_DIR"] = runtime_dir
     env["XDG_CONFIG_HOME"] = (config_home
                               or os.path.join(runtime_dir, "config"))
+    env["HOME"] = home or os.path.join(runtime_dir, "home")
+    os.makedirs(env["HOME"], exist_ok=True)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env["DO_NOT_TRACK"] = "1"
     env["GITBOLT_TELEMETRY"] = "0"
@@ -219,7 +228,8 @@ class App:
                  config_home: str | None = None,
                  instance_name: str | None = None,
                  runtime_dir: str | None = None,
-                 label: str = "app"):
+                 label: str = "app",
+                 home: str | None = None):
         tag = uuid.uuid4().hex[:8]
         self.binary = binary
         self.label = label
@@ -237,11 +247,15 @@ class App:
         # until the lock is 30 s old.
         if config_home is None and not self._owns_runtime_dir:
             config_home = os.path.join(self.runtime_dir, f"config-{tag}")
+        # And a home: two apps writing one ~/.gitbolt/crash.log would
+        # clobber each other's.
+        if home is None and not self._owns_runtime_dir:
+            home = os.path.join(self.runtime_dir, f"home-{tag}")
         self.log_path = os.path.join(self.runtime_dir,
                                      f"{self.bridge_name}.log")
         self.env = app_env(self.runtime_dir, self.instance_name,
                            bridge_name=self.bridge_name,
-                           config_home=config_home)
+                           config_home=config_home, home=home)
 
         args = [binary] + ([repo] if repo else [])
         self._log = open(self.log_path, "w")

@@ -249,6 +249,14 @@ int main(int argc, char* argv[]) {
     app.setApplicationVersion(QStringLiteral(GITBOLT_VERSION));
     app.setOrganizationName(QStringLiteral("GitBolt"));
     app.setOrganizationDomain(QStringLiteral("gitbolt.com"));
+    // The desktop entry is gitbolt.desktop (and the metainfo's
+    // launchable). Unset, Qt's Wayland plugin made up the app_id
+    // "com.gitbolt.gitbolt" from the domain and the executable, which
+    // no desktop file matches: GNOME and KDE gave the window a generic
+    // icon and kept it apart from the launcher and a pinned favorite.
+    // Inert off Linux; set everywhere so dump-state shows it in any
+    // e2e run. Before the askpass branch: its prompt groups too.
+    app.setDesktopFileName(QStringLiteral("gitbolt"));
 
     // App-level window icon. Resolves via the Qt resource system
     // (":/icons/*") which the .qrc at src/app/resources/gitbolt.qrc

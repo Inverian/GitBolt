@@ -145,6 +145,12 @@ target_link_libraries(test_rebase_widgets PRIVATE gitbolt_dialogs)
 # so a local run doesn't flash windows or steal focus (CI runs every test
 # off screen anyway).
 set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The diff viewer's colours, and the other views' coloured text, in the
+# light and dark themes (ThemeService switches them, as in the app). Off
+# screen: it shows and grabs widgets.
+gitbolt_add_test(test_diff_colors widgets/TestDiffColors.cpp)
+target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf)
+set_property(TEST test_diff_colors APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # dialogs/ — Settings › General › Usage statistics and the
 # SettingsService keys behind it. Off screen like test_rebase_widgets:
@@ -159,6 +165,20 @@ set_property(TEST test_usage_statistics_settings APPEND PROPERTY ENVIRONMENT "QT
 gitbolt_add_test(test_commit_dialog dialogs/TestCommitDialog.cpp)
 target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs)
 set_property(TEST test_commit_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Help › About's minimum size versus its wrapped text, on a short
+# off-screen screen (fixtures/short-screen.json). The config file is
+# named relative to the working directory: Qt splits the platform spec
+# at every ':', so an absolute Windows path (C:/...) would break it.
+# With the app's .qrc, for the dialog's real icon.
+gitbolt_add_test(test_about_dialog dialogs/TestAboutDialog.cpp)
+target_sources(test_about_dialog PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
+target_link_libraries(test_about_dialog PRIVATE gitbolt_dialogs)
+set_tests_properties(test_about_dialog PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
+set_property(TEST test_about_dialog APPEND PROPERTY ENVIRONMENT
+    "QT_QPA_PLATFORM=offscreen:configfile=short-screen.json")
 
 # ui/ — the Settings switch reaching usage statistics through a real
 # MainWindow's own SettingsService, against the loopback HttpStub.

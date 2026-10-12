@@ -11,9 +11,11 @@
 # vcpkg + pkgconf), then libgit2's own CMake package (libgit2 >= 1.8,
 # vcpkg). With GITBOLT_BUNDLED_LIBGIT2 -- or when neither is found --
 # the release pinned below is downloaded, built static and linked into
-# the executables. That is what the macOS and Windows installers ship:
-# Homebrew's bottles target the build machine's macOS, and vcpkg's
-# libgit2 would put git2, pcre and zlib DLLs into the installer.
+# the executables. That is what every installer ships: Homebrew's
+# bottles target the build machine's macOS, vcpkg's libgit2 would put
+# git2, pcre and zlib DLLs into the installer, and a distribution's
+# libgit2 would make the DEB depend on the one release that packages
+# its soname.
 # ============================================================================
 
 # GitHub's source tarball for the tag; bump the version and the hash
@@ -81,15 +83,20 @@ function(gitbolt_add_bundled_libgit2)
     # anyway, as the one libgit2 feature GitBolt depends on.
     set(USE_THREADS ON)
     # No network operation goes through libgit2 (see the top), so no SSH
-    # transport. HTTPS stays: on the OS's own TLS stack it costs no
-    # dependency to build or ship.
+    # transport. HTTPS stays where it's the OS's own TLS stack, which
+    # costs no dependency to build or ship. Elsewhere (Linux) it would be
+    # OpenSSL: a library linked for nothing, and one more the AppImage
+    # bundles. Without it SHA-256 uses libgit2's builtin implementation.
     set(USE_SSH OFF)
     if(APPLE)
         set(USE_HTTPS SecureTransport)
     elseif(WIN32)
         set(USE_HTTPS WinHTTP)
     else()
-        set(USE_HTTPS ON)
+        set(USE_HTTPS OFF)
+        # Its default already, without HTTPS: NTLM takes its crypto
+        # from the HTTPS backend.
+        set(USE_NTLMCLIENT OFF)
     endif()
     set(USE_HTTP_PARSER builtin)
     set(REGEX_BACKEND builtin)

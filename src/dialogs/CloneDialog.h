@@ -6,6 +6,7 @@
 #include <atomic>
 #include <memory>
 
+class QEvent;
 class QLineEdit;
 class QProgressBar;
 class QPushButton;
@@ -46,6 +47,8 @@ protected:
     /// clone is cleaned up.
     void reject() override;
     void closeEvent(QCloseEvent* event) override;
+    /// A theme switch recolours the status line.
+    void changeEvent(QEvent* event) override;
 
 private slots:
     /// Triggered by the URL field — auto-fills the destination path
@@ -61,6 +64,7 @@ private slots:
 
 private:
     void setBusy(bool busy, const QString& message = QString());
+    void applyStatusColor();
     void requestCancel();
     void forgetKeptClone();
     static QString defaultParentDir();
@@ -78,6 +82,9 @@ private:
     /// so the URL→path autofill stops overwriting their choice.
     bool    pathEditedByUser_ = false;
     QString clonedPath_;
+
+    /// What the status line shows: progress (blue) or an error (red).
+    bool statusBusy_ = false;
 
     /// Set when a clone fetched but its checkout or post-checkout hook
     /// failed and git kept the repository: the Clone button reads

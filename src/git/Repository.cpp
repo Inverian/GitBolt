@@ -1235,7 +1235,8 @@ Result<std::vector<TagInfo>> Repository::tags() const {
                     git_object_free(peeled);
                 }
                 const char* message = git_tag_message(tag);
-                info.message = message ? message : "";
+                info.message = std::string(
+                    tagMessageWithoutSignature(message ? message : ""));
                 info.tagger = Signature::fromGit(git_tag_tagger(tag));
             }
             git_object_free(obj);

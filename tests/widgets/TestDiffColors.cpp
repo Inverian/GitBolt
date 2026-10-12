@@ -1,0 +1,375 @@
+//
+// TestDiffColors — the diff viewer, and the other views that coloured
+// their text for the light theme only, in both themes:
+//
+//   - dark: the stripes behind added, deleted and hunk-header lines
+//     are dark, and every line reads at 4.5:1 or more on its stripe,
+//     in the unified view (highlighter colours) and in the
+//     side-by-side panes (plain text, no highlighter);
+//   - a theme switch recolours a diff already on screen, highlighter
+//     and file name, and a diff opened in the dark theme starts dark;
+//   - light: the stripes and text colours it always had;
+//   - the merge conflict view's headings, the file tree's preview
+//     heading and the Clone dialog's status line read at 4.5:1 or
+//     more in the dark theme (and the conflict panes' tints follow a
+//     switch), and keep their light colours.
+//
+// Themes switch the way the app switches them, through ThemeService:
+// the application palette, then the application style sheet (whose
+// repolish puts back a widget's palette from its last polish, which
+// is why the views keep these colours in style sheets).
+//
+// Everything is read from what the widgets render or hold, so this
+// builds unchanged against the code before the fix.
+//
+
+#include <QApplication>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QSettings>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QTextBlock>
+#include <QTextLayout>
+
+#include <cmath>
+
+#include "conf/ThemeService.h"
+#include "dialogs/CloneDialog.h"
+#include "widgets/DiffTextEdit.h"
+#include "widgets/DiffViewerWidget.h"
+#include "widgets/FileTreeWidget.h"
+#include "widgets/MergeConflictWidget.h"
+
+using gitbolt::conf::ThemeService;
+using gitbolt::widgets::DiffTextEdit;
+using gitbolt::widgets::DiffViewerWidget;
+
+namespace {
+
+// WCAG 2 relative luminance and contrast ratio.
+double luminance(const QColor& c) {
+    const auto channel = [](int v) {
+        const double s = v / 255.0;
+        return s <= 0.04045 ? s / 12.92 : std::pow((s + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * channel(c.red()) + 0.7152 * channel(c.green())
+         + 0.0722 * channel(c.blue());
+}
+
+double contrast(const QColor& a, const QColor& b) {
+    const double la = luminance(a);
+    const double lb = luminance(b);
+    return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+}
+
+// `top` over the opaque `bottom`.
+QColor over(const QColor& top, const QColor& bottom) {
+    const double a = top.alphaF();
+    const auto mix = [a](int t, int b) { return static_cast<int>(std::lround(t * a + b * (1 - a))); };
+    return QColor(mix(top.red(), bottom.red()), mix(top.green(), bottom.green()),
+                  mix(top.blue(), bottom.blue()));
+}
+
+QString describe(const QColor& fg, const QColor& bg) {
+    return QStringLiteral("%1 on %2: %3:1").arg(fg.name(), bg.name())
+        .arg(contrast(fg, bg), 0, 'f', 2);
+}
+
+// What `edit` shows at the right end of each of its lines, past any
+// text: the line's stripe, or the editor's own background.
+QList<QColor> lineBackgrounds(QPlainTextEdit& edit) {
+    const QImage image = edit.viewport()->grab().toImage();
+    const qreal dpr = image.devicePixelRatio();
+    QList<QColor> colors;
+    for (QTextBlock block = edit.document()->begin(); block.isValid(); block = block.next()) {
+        const int y = edit.cursorRect(QTextCursor(block)).center().y();
+        const int x = edit.viewport()->width() - 3;
+        colors << image.pixelColor(qRound(x * dpr), qRound(y * dpr));
+    }
+    return colors;
+}
+
+// The highlighter's text colour on each line of `edit`; invalid where
+// it set none.
+QList<QColor> lineForegrounds(QPlainTextEdit& edit) {
+    QList<QColor> colors;
+    for (QTextBlock block = edit.document()->begin(); block.isValid(); block = block.next()) {
+        const auto formats = block.layout()->formats();
+        colors << (formats.isEmpty() || !formats.first().format.hasProperty(QTextFormat::ForegroundBrush)
+                       ? QColor()
+                       : formats.first().format.foreground().color());
+    }
+    return colors;
+}
+
+// A modified file with one hunk: a context line, a deletion, an
+// addition.
+gitbolt::git::DiffFileEntry sampleFile() {
+    using gitbolt::git::DiffLineType;
+    gitbolt::git::DiffFileEntry file;
+    file.status = gitbolt::git::DiffStatus::Modified;
+    file.oldPath = file.newPath = "a.txt";
+    gitbolt::git::DiffHunk hunk;
+    hunk.header = "@@ -1,2 +1,2 @@\n";
+    hunk.lines = {
+        {DiffLineType::Context, "same\n"},
+        {DiffLineType::Deletion, "old\n"},
+        {DiffLineType::Addition, "new\n"},
+    };
+    file.hunks = {hunk};
+    return file;
+}
+
+QPlainTextEdit* unifiedEditor(DiffViewerWidget& viewer) {
+    return viewer.findChild<QPlainTextEdit*>(QStringLiteral("diff.unifiedEditor"));
+}
+
+// The label in `parent` showing `text`.
+QLabel* labelWithText(QWidget& parent, const QString& text) {
+    for (QLabel* label : parent.findChildren<QLabel*>()) {
+        if (label->text() == text)
+            return label;
+    }
+    return nullptr;
+}
+
+QColor textColor(QWidget* widget) {
+    widget->ensurePolished();
+    return widget->palette().color(QPalette::WindowText);
+}
+
+} // namespace
+
+class TestDiffColors : public QObject {
+    Q_OBJECT
+
+    ThemeService theme_;
+    QTemporaryDir settings_;
+    // What the dark theme's style sheet gives editors and tool bars.
+    static constexpr QRgb kDarkEditorBase = 0xff1e1e1e;
+    static constexpr QRgb kDarkToolBar = 0xff2d2d2d;
+
+private slots:
+    // As main() sets the app up, and the Clone dialog keeps its size in
+    // settings: a folder of the test's own, not the user's.
+    void initTestCase() {
+        QApplication::setStyle(QStringLiteral("fusion"));
+        QVERIFY(settings_.isValid());
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_.path());
+    }
+
+    void init() { theme_.setTheme(QStringLiteral("Light")); }
+
+    // The diff in the dark theme, both ways it gets there: switched to
+    // with a diff on screen, and opened in it.
+    void unifiedDiffReadsInTheDarkTheme() {
+        DiffViewerWidget switched;
+        switched.resize(600, 300);
+        switched.setDiffForFile(sampleFile());
+        switched.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&switched));
+        QVERIFY(unifiedEditor(switched));
+        const QList<QColor> lightText = lineForegrounds(*unifiedEditor(switched));
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        DiffViewerWidget opened;
+        opened.resize(600, 300);
+        opened.setDiffForFile(sampleFile());
+        opened.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&opened));
+
+        for (DiffViewerWidget* viewer : {&switched, &opened}) {
+            const char* which = viewer == &switched ? "switched to dark" : "opened in dark";
+            QPlainTextEdit* edit = unifiedEditor(*viewer);
+            QVERIFY(edit);
+            const QList<QColor> backgrounds = lineBackgrounds(*edit);
+            const QList<QColor> text = lineForegrounds(*edit);
+            // diff --git, @@, context, deletion, addition.
+            QCOMPARE(backgrounds.size(), 5);
+            for (int line : {1, 3, 4}) {
+                QVERIFY2(backgrounds[line].lightness() < 100,
+                         qPrintable(QStringLiteral("%1: line %2's stripe is %3")
+                                        .arg(QLatin1String(which)).arg(line)
+                                        .arg(backgrounds[line].name())));
+            }
+            for (int line : {1, 2, 3, 4}) {
+                QVERIFY(text[line].isValid());
+                QVERIFY2(contrast(text[line], backgrounds[line]) >= 4.5,
+                         qPrintable(QStringLiteral("%1: line %2, %3")
+                                        .arg(QLatin1String(which)).arg(line)
+                                        .arg(describe(text[line], backgrounds[line]))));
+            }
+            if (viewer == &switched) {
+                QVERIFY2(text[3] != lightText[3], "the switch left the deletion's colour as it was");
+            }
+
+            // The file name over it, on the dark toolbar.
+            QLabel* name = viewer->findChild<QLabel*>();
+            QVERIFY(name);
+            QCOMPARE(name->text(), QStringLiteral("a.txt"));
+            const QColor nameColor = textColor(name);
+            QVERIFY2(contrast(nameColor, QColor(kDarkToolBar)) >= 4.5,
+                     qPrintable(QStringLiteral("%1: file name %2").arg(QLatin1String(which))
+                                    .arg(describe(nameColor, QColor(kDarkToolBar)))));
+        }
+    }
+
+    // The side-by-side panes have no highlighter: the theme's own text
+    // colour has to read on the stripes.
+    void sideBySideReadsInTheDarkTheme() {
+        theme_.setTheme(QStringLiteral("Dark"));
+        DiffTextEdit edit;
+        edit.resize(400, 200);
+        edit.setLineWrapMode(QPlainTextEdit::NoWrap);
+        edit.setPlainText(QStringLiteral("@@ -1 +1 @@\n-old\n+new"));
+        edit.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&edit));
+        const QColor text = edit.palette().color(QPalette::Text);
+        const QList<QColor> backgrounds = lineBackgrounds(edit);
+        QCOMPARE(backgrounds.size(), 3);
+        for (int line = 0; line < 3; ++line) {
+            QVERIFY2(backgrounds[line].lightness() < 100,
+                     qPrintable(QStringLiteral("line %1's stripe is %2")
+                                    .arg(line).arg(backgrounds[line].name())));
+            QVERIFY2(contrast(text, backgrounds[line]) >= 4.5,
+                     qPrintable(QStringLiteral("line %1, %2").arg(line)
+                                    .arg(describe(text, backgrounds[line]))));
+        }
+    }
+
+    // The light theme keeps the colours it always had.
+    void lightThemeKeepsItsColors() {
+        DiffViewerWidget viewer;
+        viewer.resize(600, 300);
+        viewer.setDiffForFile(sampleFile());
+        viewer.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+        QPlainTextEdit* edit = unifiedEditor(viewer);
+        QVERIFY(edit);
+        const QList<QColor> backgrounds = lineBackgrounds(*edit);
+        QCOMPARE(backgrounds.size(), 5);
+        QCOMPARE(backgrounds[1], QColor(220, 230, 255));
+        QCOMPARE(backgrounds[3], QColor(255, 220, 220));
+        QCOMPARE(backgrounds[4], QColor(200, 255, 200));
+        const QList<QColor> text = lineForegrounds(*edit);
+        QCOMPARE(text[1], QColor(0, 102, 204));
+        QCOMPARE(text[2], QColor(128, 128, 128));
+        QCOMPARE(text[3], QColor(180, 0, 0));
+        QCOMPARE(text[4], QColor(0, 140, 0));
+        QLabel* name = viewer.findChild<QLabel*>();
+        QVERIFY(name);
+        QCOMPARE(textColor(name), QColor(0x55, 0x55, 0x55));
+
+        // And gets them back from the dark theme.
+        theme_.setTheme(QStringLiteral("Dark"));
+        theme_.setTheme(QStringLiteral("Light"));
+        QCOMPARE(lineBackgrounds(*edit)[3], QColor(255, 220, 220));
+        QCOMPARE(lineForegrounds(*edit)[3], QColor(180, 0, 0));
+        QCOMPARE(textColor(name), QColor(0x55, 0x55, 0x55));
+    }
+
+    void mergeConflictViewReadsInTheDarkTheme() {
+        gitbolt::widgets::MergeConflictWidget widget;
+        gitbolt::git::MergeConflictEntry conflict;
+        conflict.path = "a.txt";
+        conflict.ancestorContent = "base\n";
+        conflict.oursContent = "ours\n";
+        conflict.theirsContent = "theirs\n";
+        widget.setConflicts({conflict});
+        widget.resize(800, 500);
+        widget.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&widget));
+        const QStringList headings = {
+            gitbolt::widgets::MergeConflictWidget::tr("Ours (Local)"),
+            gitbolt::widgets::MergeConflictWidget::tr("Base (Common Ancestor)"),
+            gitbolt::widgets::MergeConflictWidget::tr("Theirs (Remote)"),
+            gitbolt::widgets::MergeConflictWidget::tr("Merged Result (editable)"),
+        };
+        QList<QColor> lightHeadings;
+        for (const QString& heading : headings) {
+            QLabel* label = labelWithText(widget, heading);
+            QVERIFY2(label, qPrintable(heading));
+            lightHeadings << textColor(label);
+        }
+        QCOMPARE(lightHeadings, (QList<QColor>{QColor(0x41, 0x69, 0xe1), QColor(0x80, 0x80, 0x80),
+                                               QColor(0x22, 0x8b, 0x22), QColor(0x8b, 0x45, 0x13)}));
+        // The three read-only panes: ours, base, theirs.
+        QList<QPlainTextEdit*> panes;
+        for (QPlainTextEdit* edit : widget.findChildren<QPlainTextEdit*>()) {
+            if (edit->isReadOnly())
+                panes << edit;
+        }
+        QCOMPARE(panes.size(), 3);
+        // The background of the pane's first character.
+        const auto tintOf = [](QPlainTextEdit* edit) {
+            QTextCursor cursor(edit->document());
+            cursor.movePosition(QTextCursor::NextCharacter);
+            return cursor.charFormat().background().color();
+        };
+        QList<QColor> lightTints;
+        for (QPlainTextEdit* pane : panes)
+            lightTints << tintOf(pane);
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        const QColor window = QApplication::palette().color(QPalette::Window);
+        for (const QString& heading : headings) {
+            const QColor color = textColor(labelWithText(widget, heading));
+            QVERIFY2(contrast(color, window) >= 4.5,
+                     qPrintable(heading + QStringLiteral(": ") + describe(color, window)));
+        }
+        for (int i = 0; i < panes.size(); ++i) {
+            const QColor tint = tintOf(panes[i]);
+            QVERIFY2(tint != lightTints[i], "the switch left a pane's tint as it was");
+            const QColor behind = over(tint, QColor(kDarkEditorBase));
+            const QColor text = panes[i]->palette().color(QPalette::Text);
+            QVERIFY2(contrast(text, behind) >= 4.5, qPrintable(describe(text, behind)));
+        }
+    }
+
+    void fileTreeHeadingReadsInTheDarkTheme() {
+        gitbolt::widgets::FileTreeWidget tree;
+        tree.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&tree));
+        QLabel* heading = labelWithText(
+            tree, gitbolt::widgets::FileTreeWidget::tr("Select a file to preview its contents"));
+        QVERIFY(heading);
+        QCOMPARE(textColor(heading), QColor(0x44, 0x44, 0x44));
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        const QColor window = QApplication::palette().color(QPalette::Window);
+        const QColor color = textColor(heading);
+        QVERIFY2(contrast(color, window) >= 4.5, qPrintable(describe(color, window)));
+    }
+
+    // The status line's error colour (Clone with no URL), in both
+    // themes, and across a switch while it shows.
+    void cloneStatusReadsInTheDarkTheme() {
+        gitbolt::dialogs::CloneDialog dialog;
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* buttons = dialog.findChild<QDialogButtonBox*>();
+        QVERIFY(buttons);
+        buttons->button(QDialogButtonBox::Ok)->click();
+        const QString message = gitbolt::dialogs::CloneDialog::tr("Please enter a repository URL.");
+        QLabel* status = labelWithText(dialog, message);
+        QVERIFY(status);
+        QVERIFY(status->isVisible());
+        QCOMPARE(textColor(status), QColor(0xd7, 0x3a, 0x49));
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        const QColor window = QApplication::palette().color(QPalette::Window);
+        QColor color = textColor(status);
+        QVERIFY2(contrast(color, window) >= 4.5, qPrintable(describe(color, window)));
+
+        // And shown afresh in the dark theme.
+        buttons->button(QDialogButtonBox::Ok)->click();
+        color = textColor(status);
+        QVERIFY2(contrast(color, window) >= 4.5, qPrintable(describe(color, window)));
+    }
+};
+
+QTEST_MAIN(TestDiffColors)
+#include "TestDiffColors.moc"

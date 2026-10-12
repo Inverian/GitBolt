@@ -25,6 +25,8 @@ set(E2E_TESTS
     test_commit_flow
     test_commit_hooks
     test_crash_box_handoff
+    test_desktop_identity
+    test_home_isolated
     test_instance_lock
     test_local_op_async
     test_quit_during_fetch

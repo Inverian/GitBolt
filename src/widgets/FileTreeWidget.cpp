@@ -7,6 +7,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -63,6 +64,31 @@ FileTreeWidget::FileTreeWidget(QWidget* parent)
     : QWidget(parent)
 {
     setupUi();
+    applyColors();
+}
+
+void FileTreeWidget::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    // A theme switch: the PaletteChange the window passes down
+    // (RepoOperationBar::changeEvent).
+    if (event->type() == QEvent::PaletteChange && previewHeader_)
+        applyColors();
+}
+
+void FileTreeWidget::applyColors()
+{
+    // A dark gray heading on the light theme, a light gray one on the
+    // dark (#444 there read at 1.7:1). In the style sheet, not the
+    // palette: the theme's application style sheet, set right after
+    // its palette, repolishes every widget, and that puts back the
+    // palette a widget had at its last polish.
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    previewHeader_->setStyleSheet(QStringLiteral("QLabel { color: %1; padding: 2px; }")
+                                      .arg(dark ? QStringLiteral("#b4b4b4")
+                                                : QStringLiteral("#444")));
 }
 
 void FileTreeWidget::setupUi()
@@ -113,9 +139,8 @@ void FileTreeWidget::setupUi()
 
     previewHeader_ = new QLabel(tr("Select a file to preview its contents"),
                                 rightPane);
-    previewHeader_->setStyleSheet(QStringLiteral(
-        "QLabel { color: #444; padding: 2px; }"));
-    previewHeader_->setWordWrap(true);
+    previewHeader_->setObjectName(QStringLiteral("fileTree.previewHeader"));
+    previewHeader_->setWordWrap(true);   // styled by applyColors()
     rightLayout->addWidget(previewHeader_);
 
     preview_ = new QPlainTextEdit(rightPane);

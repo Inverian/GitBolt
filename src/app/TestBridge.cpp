@@ -716,6 +716,9 @@ QByteArray TestBridge::cmdDumpState()
     // rendered light, and only this distinction can catch that.
     state[QStringLiteral("paletteWindow")] =
         QApplication::palette().color(QPalette::Window).name();
+    // The Wayland app_id: it must name the shipped desktop entry, or
+    // the window won't group with the launcher (main.cpp).
+    state[QStringLiteral("desktopFileName")] = QGuiApplication::desktopFileName();
     if (auto* logModel = window_->findChild<models::CommitLogModel*>())
         state[QStringLiteral("logRows")] = logModel->rowCount();
     // Where op outcomes land ("Push complete.", "fetch failed: …").

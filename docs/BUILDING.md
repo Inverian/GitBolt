@@ -435,16 +435,18 @@ With `-DGITBOLT_BUNDLED_LIBGIT2=ON`, CMake downloads the libgit2 release
 pinned in [`cmake/Libgit2.cmake`](../cmake/Libgit2.cmake) (1.9.7, checked
 against its SHA-256) at configure time, builds it as part of the project
 and links it statically into GitBolt, so there is no libgit2 library to
-install or ship. It is what CI and the macOS and Windows installers use;
-the Linux packages keep the distribution's libgit2.
+install or ship. It is what CI and every installer use, so the DEB
+depends on no distribution's libgit2 package and the AppImage carries
+no libgit2 library.
 
 - GitBolt uses libgit2 only for local repository access. Clone, fetch,
   pull and push run the `git` CLI, so git's own SSH and credential
   configuration applies to them (`~/.ssh/config`, `core.sshCommand`,
   credential helpers). The bundled libgit2 is therefore built without
-  an SSH transport; HTTPS stays, on the operating system's TLS stack
-  (SecureTransport on macOS, WinHTTP on Windows), so there is no
-  OpenSSL to build or ship.
+  an SSH transport. HTTPS stays where it is the operating system's TLS
+  stack (SecureTransport on macOS, WinHTTP on Windows); on Linux, where
+  it would be OpenSSL, it is left out. Either way there is no OpenSSL
+  to build or ship.
 - Configuring needs network access once per build directory. Offline,
   unpack the release elsewhere and pass
   `-DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<that directory>`.
