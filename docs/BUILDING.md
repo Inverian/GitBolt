@@ -358,7 +358,10 @@ ctest --test-dir build --output-on-failure
 Each suite is its own executable (`test_repository`, `test_revwalk`,
 `test_diff`, `test_status`, `test_clone`, `test_libgit2_features`,
 `test_commit_log_model`, `test_branch_model`, `test_git_service`,
-`test_changelog`, and the Windows terminal's `test_conpty_process` and
+`test_changelog`, the usage statistics suites `test_telemetry`,
+`test_crash_log_parser`, `test_usage_statistics_settings` and
+`test_telemetry_switch`, which only ever talk to a loopback stub, and
+the Windows terminal's `test_conpty_process` and
 `test_terminal_widget`, which skip on other platforms).
 `test_libgit2_features` checks that the linked libgit2 is thread-safe,
 the one feature GitBolt needs from it, and prints its version and
@@ -381,6 +384,10 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | `GITBOLT_BUNDLED_LIBGIT2` | `OFF` | Build the pinned libgit2 from source and link it statically instead of using a system copy (see below). Used automatically when no system libgit2 is found |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
+| `GITBOLT_TELEMETRY_HOST` | empty | Usage statistics ingest origin, `https://<host>`; empty compiles telemetry out (see below) |
+| `GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID` | empty | OpenPanel client id |
+| `GITBOLT_TELEMETRY_OPENPANEL_SECRET` | empty | OpenPanel client secret |
+| `GITBOLT_TELEMETRY_GLITCHTIP_DSN` | empty | GlitchTip DSN for crash and error reports, `https://<key>@<host>/<project>`, on the same host |
 
 Example — debug build with sanitizers:
 
@@ -388,6 +395,37 @@ Example — debug build with sanitizers:
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_SANITIZERS=ON -G Ninja
 cmake --build build-asan --parallel
 ```
+
+### Usage statistics endpoints
+
+The four `GITBOLT_TELEMETRY_*` options are all set, or all empty
+(checked in [`cmake/Telemetry.cmake`](../cmake/Telemetry.cmake)).
+Empty, the default, compiles usage statistics out: the app creates no
+telemetry client and Settings shows no Usage statistics group. Only
+CI's builds of pushes to the upstream `main` branch set them; see
+[PRIVACY.md](../PRIVACY.md) for what those builds send. Each option
+takes its first value from the environment variable of the same name.
+
+To try the client by hand, point a build directory of its own at a
+local stub: plain `http` is accepted for `http://127.0.0.1:<port>` and
+`http://[::1]:<port>` only. Such a build never uploads crash reports,
+and it queues its events in a directory of its own next to
+`GitBolt.ini` (`telemetry-local-<hash of the endpoint>`, not
+`telemetry`), so a release never sends what it recorded, nor it a
+release's.
+
+```bash
+cmake -B build-telemetry-local -G Ninja \
+  -DGITBOLT_TELEMETRY_HOST=http://127.0.0.1:8765 \
+  -DGITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID=local \
+  -DGITBOLT_TELEMETRY_OPENPANEL_SECRET=local \
+  -DGITBOLT_TELEMETRY_GLITCHTIP_DSN=http://0123456789abcdef0123456789abcdef@127.0.0.1:8765/1
+```
+
+A build directory keeps these values until it is configured fresh,
+and its plain launches send, so don't reuse it for everyday builds.
+Launches with the test bridge, `GITBOLT_INSTANCE_NAME`, an offscreen
+platform, `DO_NOT_TRACK=1` or `GITBOLT_TELEMETRY=0` never send.
 
 ### Bundled libgit2
 

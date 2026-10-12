@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QString>
 
 namespace gitbolt::util {
@@ -9,10 +10,41 @@ namespace gitbolt::util {
 ///
 /// Call install() once at application startup.
 /// On the next launch, call hasPendingCrashReport() to check for a log file.
+///
+/// The report (format 2) is a header, then the signal, then one line
+/// per stack frame, newest first:
+///
+///   #<n> <module> +0x<offset> <symbol>+0x<offset>
+///   #<n> <module> +0x<offset> ?           (no symbol)
+///   #<n> ? 0x<address>                    (no module)
+///
+/// <module> is the image's file name only, with blanks made '_' (the
+/// executable's real file name, however it was launched), and the
+/// first offset is the frame's address relative to that image.
+/// Shipped builds are stripped, so their own symbols are unreliable or
+/// missing; image-relative offsets survive ASLR and let a maintainer
+/// symbolize offline. Frames #0 and #1 are the handler and the
+/// kernel's signal trampoline on POSIX. telemetry::CrashLogParser
+/// reads this format; keep the two in step.
 class CrashHandler {
 public:
-    /// Install signal handlers.
-    static void install();
+    /// Install signal handlers. The header pre-rendered here records
+    /// what the next launch needs to decide whether the report may be
+    /// uploaded (CrashLogParser refuses all but official + none +
+    /// user): the version that crashed, whether endpoints were
+    /// compiled in (`officialBuild`), whether the environment opted
+    /// out (`envOptOut`), and whether this is a test session
+    /// (`testSession`). main.cpp passes them: it is the only file that
+    /// sees the endpoints, and nothing else is set up this early.
+    static void install(const char* appVersion, bool officialBuild,
+                        bool envOptOut, bool testSession);
+
+    /// The header install() writes: "Format: 2", the values above,
+    /// then the Qt, OS, kernel and CPU lines. Takes the values instead
+    /// of reading the environment, so a test renders the same header
+    /// under ctest's and CI's environments as anywhere else.
+    static QByteArray renderHeader(const char* appVersion, bool officialBuild,
+                                   bool envOptOut, bool testSession);
 
     /// Returns true if a crash log from a previous session exists.
     static bool hasPendingCrashReport();

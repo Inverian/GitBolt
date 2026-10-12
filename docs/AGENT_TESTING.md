@@ -105,6 +105,18 @@ tools/bridge.py quit                  # MainWindow::close() — clean exit for r
 persisted", "the log loaded", and "the fetch failed" without shelling
 out or screenshotting.
 
+Usage statistics (`src/telemetry`, [PRIVACY.md](../PRIVACY.md)) are
+never sent from a bridge session. `dump-state` reports `telemetry`, the
+gate the session runs under: `compiled-out` in a build without
+endpoints (any build configured without `GITBOLT_TELEMETRY_*`),
+`inert:test-bridge` in one with them;
+the other values are `inert:instance-name`, `inert:headless`,
+`inert:ci`, `off:do-not-track`, `off:env`, `off:setting` and `on`.
+`telemetryIfConfigured` is the gate the same session would get with
+endpoints compiled in. Neither is ever `on` under the bridge
+(`tests/e2e/test_telemetry_inert.py`). Address the Settings switch as
+`settings.usage-statistics`.
+
 `fire-timer` emits a running `QTimer`'s timeout (found by
 `objectName`; a stopped timer is an error, since it could never fire).
 It's how a test reaches work the app only does every few minutes.

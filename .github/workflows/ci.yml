@@ -42,6 +42,13 @@ jobs:
     # 10x-priced macOS runner would burn a Free plan's monthly minutes.
     # Normal legs take 5-25 min including packaging.
     timeout-minutes: 60
+    # Never send usage statistics from CI, on top of the app's own rule
+    # that test, instance-named and CI sessions are inert
+    # (src/telemetry/TelemetryGate.h): every GitBolt this job starts
+    # inherits these. The docker DEB smoke passes them on with -e.
+    env:
+      DO_NOT_TRACK: '1'
+      GITBOLT_TELEMETRY: '0'
 
     steps:
       # v7 = node24. Its fork-PR guard only affects pull_request_target /
@@ -137,8 +144,49 @@ jobs:
       # installer. Linux keeps Ubuntu's libgit2-dev, which the DEB then
       # depends on.
       # ------------------------------------------------------------------
+      #
+      # Usage statistics endpoints (cmake/Telemetry.cmake, PRIVACY.md):
+      # official builds only, i.e. pushes to upstream main. Pull
+      # requests, dry runs and forks configure them empty, which
+      # compiles telemetry out. Literals, not repository variables: the
+      # OpenPanel client can only write events, a GlitchTip DSN key is
+      # public by design, and both are in every shipped binary anyway.
+      # Step env, never the command line; cmake reads each from the
+      # environment on the first configure.
+      # FOLLOW-UP PR: put the real values in the four '' literals right
+      # after `&&` once the server keys exist. Until then every build,
+      # main included, is compiled out.
       - name: Configure
+        env:
+          GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
+          GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=${{ runner.os == 'Linux' && 'OFF' || 'ON' }}
+
+      # Only an official build may carry endpoints: a PR, dry-run or
+      # fork build that has them fails here, before it can be tested,
+      # packaged or uploaded.
+      - name: Check telemetry wiring
+        shell: bash
+        env:
+          OFFICIAL: ${{ github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          # tr: Windows' CMake writes CMakeCache.txt with CRLF, and Git
+          # Bash's sed keeps the CR, which would pass for a value.
+          host=$(sed -n 's/^GITBOLT_TELEMETRY_HOST:[A-Z]*=//p' build/CMakeCache.txt | tr -d '\r')
+          if [ "$OFFICIAL" = true ]; then
+            echo "Official build; telemetry endpoints: ${host:-none yet}"
+            # FOLLOW-UP PR (the one that adds the endpoints): fail an
+            # official build without them, so a lost value can't ship
+            # a release that silently sends nothing. Uncomment then:
+            # [ -n "$host" ] || { echo "::error::official build without telemetry endpoints"; exit 1; }
+          elif [ -n "$host" ]; then
+            echo "::error::telemetry endpoints in a non-official build ($GITHUB_EVENT_NAME, $GITHUB_REPOSITORY, $GITHUB_REF)"
+            exit 1
+          else
+            echo "Not an official build: telemetry compiled out"
+          fi
 
       - name: Build
         run: cmake --build build --parallel
@@ -339,7 +387,13 @@ jobs:
           grep -q '/Security\.framework/' <<<"$deps" \
             || err "GitBolt doesn't load Security.framework: no static libgit2 with SecureTransport?"
 
-          # 4) Exec from the mounted image. --version exits 0 only after dyld
+          # 4) A Qt TLS backend: Qt loads it as a plugin, so nothing
+          #    links it, and without one usage statistics' HTTPS fails
+          #    silently.
+          [ -n "$(ls -A "$app/Contents/PlugIns/tls" 2>/dev/null)" ] \
+            || err "the bundle has no Qt TLS plugin (Contents/PlugIns/tls)"
+
+          # 5) Exec from the mounted image. --version exits 0 only after dyld
           #    loaded every linked image, git_libgit2_init() ran and
           #    QApplication loaded the bundled cocoa plugin.
           if out=$(GITBOLT_INSTANCE_NAME="ci-smoke-$$" "$app/Contents/MacOS/GitBolt" --version 2>&1); then
@@ -434,8 +488,10 @@ jobs:
 
           # 1) Layout + plugins nothing imports directly.
           $bad = @()
+          # plugins\tls: usage statistics' HTTPS (Schannel, the system's TLS).
           foreach ($f in 'bin\GitBolt.exe', 'bin\qt.conf',
-                         'plugins\platforms\qwindows.dll', 'plugins\iconengines\qsvgicon.dll') {
+                         'plugins\platforms\qwindows.dll', 'plugins\iconengines\qsvgicon.dll',
+                         'plugins\tls\qschannelbackend.dll') {
             if (-not (Test-Path (Join-Path $dest $f))) { $bad += "missing $f" }
           }
 
@@ -616,9 +672,12 @@ jobs:
           # 1) DEB shape
           dpkg-deb -f "$deb" Package Version Depends
           dpkg-deb -c "$deb" | awk '{print $6}' > deb.lst
+          # plugins/tls: usage statistics' HTTPS; it dlopen()s the system
+          # libssl, which Depends must name (cmake/Packaging.cmake).
           for f in ./usr/bin/gitbolt ./usr/lib/gitbolt/gitbolt ./usr/lib/gitbolt/qt.conf \
                    ./usr/lib/gitbolt/lib/libQt6Core.so.6 \
                    ./usr/lib/gitbolt/plugins/platforms/libqxcb.so \
+                   ./usr/lib/gitbolt/plugins/tls/libqopensslbackend.so \
                    ./usr/share/applications/gitbolt.desktop \
                    ./usr/share/metainfo/com.gitbolt.app.metainfo.xml \
                    ./usr/share/icons/hicolor/256x256/apps/gitbolt.png; do
@@ -629,6 +688,8 @@ jobs:
           fi
           dpkg-deb -f "$deb" Depends | grep -q 'libxcb-cursor0' \
             || { echo "::error::Depends lacks bundled Qt's system deps (shlibdeps didn't scan Qt)"; exit 1; }
+          dpkg-deb -f "$deb" Depends | grep -q 'libssl3' \
+            || { echo "::error::Depends lacks libssl3 (the TLS plugin dlopen()s it)"; exit 1; }
           # Plugins must find the private Qt libs on their own: glibc does
           # not apply the exe's RUNPATH to a dlopen'd plugin's deps.
           rm -rf debroot && dpkg-deb -x "$deb" debroot
@@ -640,7 +701,7 @@ jobs:
           #    (the multi-arch index, same as Docker Hub's ubuntu:24.04);
           #    its apt-get still installs today's noble packages, which is
           #    what a user's install resolves against.
-          docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" \
+          docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
             public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
             bash -euo pipefail -c '
               export DEBIAN_FRONTEND=noninteractive

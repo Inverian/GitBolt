@@ -133,7 +133,7 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 
 ## Architecture
 
-GitBolt uses an **11-module architecture** following Qt convention with strict single-responsibility:
+GitBolt uses a **12-module architecture** following Qt convention with strict single-responsibility:
 
 ```
 src/
@@ -141,6 +141,7 @@ src/
 ├── conf/       Settings persistence and theme management
 ├── watcher/    File system monitoring
 ├── util/       Threading, caching, performance, crash handling
+├── telemetry/  Usage statistics and crash reports (see PRIVACY.md)
 ├── models/     Qt data models (QAbstractItemModel subclasses)
 ├── services/   Business logic orchestration (GitService, RepoManager)
 ├── editor/     Custom renderers (revision graph delegate, syntax highlighter)
@@ -162,6 +163,7 @@ flowchart TD
     services["<b>services/</b><br/>business logic"]
     models["<b>models/</b><br/>Qt data models"]
     git["<b>git/</b><br/>libgit2 + CLI fallback"]
+    telemetry["<b>telemetry/</b><br/>usage statistics"]
 
     subgraph foundation["Foundation · no internal dependencies"]
         direction LR
@@ -177,6 +179,7 @@ flowchart TD
     services --> watcher
     models --> git --> util
     dialogs --> conf
+    ui --> telemetry --> util
 
     classDef entry fill:#fde68a,stroke:#b45309,color:#1f2937
     classDef presentation fill:#ddd6fe,stroke:#6d28d9,color:#1f2937
@@ -185,7 +188,7 @@ flowchart TD
     classDef base fill:#e5e7eb,stroke:#4b5563,color:#1f2937
     class app entry
     class ui,dialogs,widgets,editor presentation
-    class services logic
+    class services,telemetry logic
     class models,git core
     class util,conf,watcher base
     style foundation fill:none,stroke:#9ca3af,stroke-dasharray:4 4
@@ -263,6 +266,23 @@ Remaining deferred work:
 - **GPG signature verification** — the commit inspector's signature tab
   is an intentional placeholder; signature checking is not implemented
   yet.
+
+---
+
+## Privacy and usage statistics
+
+Official GitBolt builds (releases, and CI's builds of `main`) send
+usage statistics to the GitBolt maintainers' own servers: which
+commands are used and how fast repositories open, under a random
+install ID, and summaries of crashes and errors, which carry no ID.
+Never repository names, paths, branches, commit messages or file
+contents. It is on by default; turn it off in
+**Tools › Settings › General**, or with `DO_NOT_TRACK=1` or
+`GITBOLT_TELEMETRY=0`. A build without a Usage statistics group there,
+such as a build from source or a fork, sends nothing.
+
+[PRIVACY.md](PRIVACY.md) lists exactly what is sent, how long it is
+kept, and how to have it deleted.
 
 ---
 

@@ -29,6 +29,8 @@
 #include "services/GitService.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "telemetry/EventSchema.h"
+#include "telemetry/TelemetryService.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
@@ -61,6 +63,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
+#include <QSet>
 #include <QPlainTextEdit>
 #include <QRegularExpression>
 #include <QProcess>
@@ -4027,6 +4030,20 @@ void MainWindow::setupConnections()
     connect(gitService_, &services::GitService::logReady,
             this, &MainWindow::onLogReady);
 
+    // Usage statistics' repo_opened: the first history page of the
+    // open being timed, and no other (see PendingOpen).
+    connect(gitService_, &services::GitService::initialLogLoaded,
+            this, [this](quint64 generation, int commits) {
+        if (generation != pendingOpen_.generation
+            || !pendingOpen_.started.isValid() || pendingOpen_.openedAfterMs < 0)
+            return;
+        const qint64 openMs = pendingOpen_.openedAfterMs;
+        const qint64 historyMs = pendingOpen_.started.elapsed();
+        pendingOpen_.stopTiming();
+        if (telemetry_)
+            telemetry_->recordRepoOpened(openMs, historyMs, commits);
+    });
+
     connect(gitService_, &services::GitService::branchesReady,
             this, &MainWindow::onBranchesReady);
 
@@ -4102,6 +4119,16 @@ void MainWindow::setupConnections()
                     updatePeriodicFetchStatus();
                     return;
                 }
+                // Usage statistics: the error's KIND only. `op` is one
+                // of GitService's fixed literals (operationName() maps
+                // anything else to "other"); `err` is git's own text,
+                // with paths and remote URLs in it, and never leaves.
+                // Not for a cancel the user asked for (GitProcess's
+                // GitErrorCode::User "Cancelled", compared, not sent),
+                // nor for the quiet auto-fetches handled above, which
+                // the user never started.
+                if (telemetry_ && err != QLatin1String("Cancelled"))
+                    telemetry_->recordError(telemetry::ErrorKind::OperationFailed, op);
                 // Tell the remote-op wrapper to skip its success
                 // message. A remote op's failure stays on the status
                 // bar (timeout 0) until the next op replaces it; the
@@ -4122,10 +4149,14 @@ void MainWindow::setupConnections()
 
     connect(gitService_, &services::GitService::commitComplete,
             this, [this](bool success, const QString& message) {
-                if (success)
+                if (success) {
                     statusBar()->showMessage(message, 3000);
-                else
+                } else {
                     statusBar()->showMessage(tr("Commit failed: ") + message, 5000);
+                    // The kind only; the message never leaves.
+                    if (telemetry_)
+                        telemetry_->recordError(telemetry::ErrorKind::CommitFailed);
+                }
             });
 
     connect(gitService_, &services::GitService::repositoryChanged,
@@ -4331,7 +4362,12 @@ void MainWindow::openRepositoryAtPath(const QString& path)
         repoView_->showLoading(tr("Opening repository…"));
     statusBar()->showMessage(tr("Opening %1…").arg(path));
 
-    gitService_->openRepositoryAsync(path);
+    // Timed for usage statistics from here (see PendingOpen). An open
+    // that supersedes one still in flight restarts the clock: the
+    // earlier one's outcome is dropped.
+    pendingOpen_.stopTiming();
+    pendingOpen_.started.start();
+    pendingOpen_.generation = gitService_->openRepositoryAsync(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -4359,6 +4395,13 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // completed) — no longer pending. The loading overlay stays up
     // until the first commit-log page arrives in onLogReady.
     pendingOpen_.path.clear();
+    // Usage statistics: the open half of repo_opened, if this is the
+    // async open being timed. A sync open (GitService::openRepository)
+    // has a generation of its own, and a superseded open never gets
+    // here.
+    if (pendingOpen_.started.isValid()
+        && pendingOpen_.generation == gitService_->openGeneration())
+        pendingOpen_.openedAfterMs = pendingOpen_.started.elapsed();
 
     // Lead with the repo name (the working-tree directory's
     // basename) instead of the app name. "GitBolt - /path" was
@@ -4487,10 +4530,18 @@ void MainWindow::onLogReady(std::vector<gitbolt::git::CommitData> commits, int o
     }
 }
 
-void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& error)
+void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& error,
+                                        int errorCode)
 {
     pendingOpen_.path.clear();
     pendingOpen_.awaitingInitialLog = false;
+    // No repo_opened for a failed open; the error code's NAME goes
+    // instead (openErrorName), never `error`, libgit2's message with
+    // the path in it.
+    pendingOpen_.stopTiming();
+    if (telemetry_)
+        telemetry_->recordError(telemetry::ErrorKind::RepoOpenFailed,
+                                telemetry::openErrorName(errorCode));
     if (repoView_)
         repoView_->hideLoading();
 
@@ -4609,12 +4660,85 @@ void MainWindow::showSettingsDialog()
             actions.append(a);
     }
     dlg.setShortcutActions(actions, defaultShortcuts_);
+    // Usage statistics: shown unless this build has no endpoints. The
+    // inert test-session gates show the switch as usual; toggling it
+    // there does nothing, as nothing runs.
+    QString usageLockedReason;
+    if (telemetryGate_ == telemetry::Gate::DoNotTrack)
+        usageLockedReason = tr("Turned off by the DO_NOT_TRACK environment variable.");
+    else if (telemetryGate_ == telemetry::Gate::EnvOff)
+        usageLockedReason = tr("Turned off by the GITBOLT_TELEMETRY environment variable.");
+    dlg.setUsageStatistics(telemetryGate_ != telemetry::Gate::CompiledOut, usageLockedReason);
     dlg.exec();
 }
 
 void MainWindow::setThemeService(conf::ThemeService* theme)
 {
     themeService_ = theme;
+}
+
+// ---------------------------------------------------------------------------
+// Usage statistics (src/telemetry, PRIVACY.md)
+// ---------------------------------------------------------------------------
+
+void MainWindow::setTelemetry(telemetry::TelemetryService* service, telemetry::Gate gate)
+{
+    telemetryGate_ = gate;
+    if (telemetry_ || !service)
+        return;   // once only: the action connections below aren't undone
+    telemetry_ = service;
+
+    // The Settings switch. settingsChanged fires once per Apply (the
+    // dialog batches its writes), in the same event-loop turn, so off
+    // stops sending and deletes the queue before anything else runs.
+    // setUserEnabled is idempotent: every unrelated settings change
+    // calls it too, harmlessly.
+    connect(settingsService_, &conf::SettingsService::settingsChanged, this, [this]() {
+        telemetry_->setUserEnabled(settingsService_->usageStatisticsEnabled());
+    });
+
+    instrumentActionsForTelemetry();
+}
+
+telemetry::Gate MainWindow::telemetryGate() const
+{
+    return telemetryGate_;
+}
+
+void MainWindow::instrumentActionsForTelemetry()
+{
+    QSet<QAction*> seen;
+    std::function<void(QWidget*)> walk = [&](QWidget* widget) {
+        for (QAction* a : widget->actions()) {
+            if (!a || a->isSeparator())
+                continue;
+            if (QMenu* sub = a->menu()) {
+                if (sub != recentMenu_)   // rebuilt on every open; see below
+                    walk(sub);
+                continue;
+            }
+            if (seen.contains(a))
+                continue;
+            seen.insert(a);
+            // objectName at trigger time. commandName() drops anything
+            // that isn't a plain identifier, the unnamed included.
+            connect(a, &QAction::triggered, this, [this, a]() {
+                telemetry_->countCommand(a->objectName());
+            });
+        }
+    };
+    walk(menuBar());
+    const auto toolbars = findChildren<QToolBar*>();
+    for (QToolBar* toolbar : toolbars)
+        walk(toolbar);
+
+    // One name for every entry: their texts are paths, and their
+    // file.recent.<n> names only say where in the list they were.
+    if (recentMenu_) {
+        connect(recentMenu_, &QMenu::triggered, this, [this](QAction*) {
+            telemetry_->countCommand(QStringLiteral("file.recent"));
+        });
+    }
 }
 
 void MainWindow::createNewRepository()

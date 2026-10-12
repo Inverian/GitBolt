@@ -46,7 +46,8 @@ namespace gitbolt::app {
 ///                                    out its interval)
 ///   dump-state                       repo path/state/branch/headOid,
 ///                                    conflict count, theme, log row
-///                                    count, status-bar message, windows
+///                                    count, status-bar message, windows,
+///                                    usage statistics gate
 ///   screenshot <path>                grab() active window to PNG
 ///   quit                             queue MainWindow::close() (runs
 ///                                    closeEvent, persists geometry —

@@ -73,13 +73,17 @@ option(GITBOLT_BUNDLED_LIBGIT2
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
+# Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
+# Empty, the default, compiles telemetry out.
+include(Telemetry)
 
 if(GITBOLT_SANITIZERS)
     include(Sanitizers)
 endif()
 
-# Find Qt 6 (Network is for the env-gated agent/test bridge's
-# QLocalServer — see docs/AGENT_TESTING.md)
+# Find Qt 6 (Network: the env-gated agent/test bridge's QLocalServer —
+# see docs/AGENT_TESTING.md — and the usage statistics client's HTTPS,
+# src/telemetry)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg Network)
 qt_standard_project_setup()
 

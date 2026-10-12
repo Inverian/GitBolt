@@ -1,0 +1,32 @@
+=== GitBolt Crash Report ===
+Format: 2
+App version: 0.9.5
+Build: official
+Opt-out: none
+Session: user
+Qt version: 6.10.0 (runtime), 6.10.0 (compile)
+OS: macos 15.6
+Kernel: darwin 24.6.0
+CPU Arch: arm64
+Signal: SIGSEGV (11)
+Epoch: 1760000000
+
+--- Stack Trace ---
+#0 GitBolt +0x1a2b4 _ZN7gitbolt4util12CrashHandler13signalHandlerEi+0x108
+#1 libsystem_platform.dylib +0x36a4 _sigtramp+0x38
+#2 GitBolt +0x5c3f0 _ZN7gitbolt2ui10MainWindow10onLogReadyEv+0x44
+#3 GitBolt +0x5b120 ?
+#4 QtCore +0x2d1a40 _ZN11QMetaObject8activateEP7QObjectPKS_iPPv+0x3a0
+#5 QtWidgets +0x1b2c4 _ZN19QApplicationPrivate13notify_helperEP7QObjectP6QEvent+0x13c
+#6 QtWidgets +0x1c9e8 _ZN12QApplication6notifyEP7QObjectP6QEvent+0x5c8
+#7 QtCore +0x16a0e4 _ZN16QCoreApplication15notifyInternal2EP7QObjectP6QEvent+0xc4
+#8 AliceInputHelper +0x2210 AliceSecretHook+0x20
+#9 libqcocoa.dylib +0x45a10 ?
+#10 CoreFoundation +0x7e2c4 __CFRUNLOOP_IS_CALLING_OUT_TO_A_SOURCE0_PERFORM_FUNCTION__+0x1c
+#11 HIToolbox +0x3a1c8 RunCurrentEventLoopInMode+0x124
+#12 AppKit +0x9b2a0 -[NSApplication run]+0x1d4
+#13 QtCore +0x13a7f0 _ZN10QEventLoop4execE6QFlagsINS_17ProcessEventsFlagEE+0x228
+#14 GitBolt +0x3e10 main+0x9a4
+#15 dyld +0x6b98 start+0x17bc
+
+=== End of Report ===

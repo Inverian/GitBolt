@@ -51,6 +51,7 @@
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
+#include "git/Error.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 
@@ -279,8 +280,58 @@ private slots:
         QCOMPARE(failedSpy.count(), 1);
         QCOMPARE(failedSpy.first().at(0).toString(), notARepo.path());
         QVERIFY(!failedSpy.first().at(1).toString().isEmpty());
+        // The code, for usage statistics' repo_open_failed, which sends
+        // its name and never the message.
+        QCOMPARE(failedSpy.first().at(2).toInt(),
+                 int(gitbolt::git::GitErrorCode::NotFound));
         QCOMPARE(openedSpy.count(), 0);
         QVERIFY(!svc.isOpen());
+    }
+
+    // -----------------------------------------------------------------
+    // initialLogLoaded: the first history page of an async open, tagged
+    // with the generation openRepositoryAsync returned and the page's
+    // size, right behind that page's logReady. A plain refresh, and an
+    // open superseded by a newer one, emit none — so a page of the
+    // previous repository is never taken for the new one's (usage
+    // statistics time an open to it).
+    // -----------------------------------------------------------------
+    void asyncOpenTagsItsFirstLogPage() {
+        auto first = repoWithCommits(2);
+        auto second = repoWithCommits(3);
+        QVERIFY(first && second);
+
+        GitService svc;
+        MainThreadSpy initialSpy(&svc, &GitService::initialLogLoaded);
+        QStringList order;
+        QObject context;
+        QObject::connect(&svc, &GitService::logReady, &context,
+                         [&order](const std::vector<gitbolt::git::CommitData>&, int offset) {
+            order << QStringLiteral("log(%1)").arg(offset);
+        });
+        QObject::connect(&svc, &GitService::initialLogLoaded, &context,
+                         [&order](quint64, int) { order << QStringLiteral("initial"); });
+
+        // Superseded at once: only the second open's page is tagged.
+        const quint64 superseded = svc.openRepositoryAsync(first->path());
+        const quint64 gen = svc.openRepositoryAsync(second->path());
+        QVERIFY(gen > superseded);
+        QCOMPARE(svc.openGeneration(), gen);
+        QVERIFY(initialSpy.waitForAny());
+        QCOMPARE(initialSpy.size(), 1);
+        QCOMPARE(initialSpy.first().at(0).value<quint64>(), gen);
+        QCOMPARE(initialSpy.first().at(1).toInt(), 3);
+        QCOMPARE(order.mid(order.indexOf(QStringLiteral("initial")) - 1, 2),
+                 (QStringList{QStringLiteral("log(0)"), QStringLiteral("initial")}));
+
+        // A refresh of the open repository is no open's first page.
+        const qsizetype logs = order.count(QStringLiteral("log(0)"));
+        svc.refreshLog();
+        QVERIFY(QTest::qWaitFor([&] { return order.count(QStringLiteral("log(0)")) > logs; },
+                                5000));
+        QThreadPool::globalInstance()->waitForDone();
+        QCoreApplication::processEvents();
+        QCOMPARE(initialSpy.size(), 1);
     }
 
     // -----------------------------------------------------------------

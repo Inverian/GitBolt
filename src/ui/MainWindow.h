@@ -3,7 +3,9 @@
 #include "git/Branch.h"
 #include "git/Commit.h"
 #include "git/Status.h"
+#include "telemetry/TelemetryGate.h"
 
+#include <QElapsedTimer>
 #include <QFuture>
 #include <QHash>
 #include <QKeySequence>
@@ -30,6 +32,7 @@ namespace gitbolt::conf     { class SettingsService;}
 namespace gitbolt::conf     { class ThemeService;   }
 namespace gitbolt::dialogs  { class CommitDialog;   }
 namespace gitbolt::dialogs  { class CloneDialog;    }
+namespace gitbolt::telemetry { class TelemetryService; }
 
 namespace gitbolt::ui {
 
@@ -54,6 +57,23 @@ public:
     /// to avoid two instances fighting over the palette.
     void setThemeService(conf::ThemeService* theme);
 
+    /// Hand over main()'s usage statistics client and the gate it was
+    /// created for (TelemetryGate.h). `service` is null when this
+    /// session has none: compiled out, a test session, or turned off
+    /// through the environment. Call once, before show(). With a
+    /// service: menu and toolbar actions are counted by objectName,
+    /// repository opens are timed, error kinds are reported, and the
+    /// Settings switch reaches the service through THIS window's
+    /// SettingsService — the one the Settings dialog writes through;
+    /// settingsChanged is per instance, so main()'s would never hear
+    /// it.
+    void setTelemetry(telemetry::TelemetryService* service, telemetry::Gate gate);
+
+    /// The gate main() evaluated: the Settings dialog shows the Usage
+    /// statistics group unless it is CompiledOut, and the test bridge
+    /// reports it in dump-state.
+    telemetry::Gate telemetryGate() const;
+
 protected:
     void closeEvent(QCloseEvent* e) override;
 
@@ -61,7 +81,7 @@ private slots:
     void openRepository();
     void cloneRepository();
     void onRepositoryOpened(const QString& path);
-    void onRepositoryOpenFailed(const QString& path, const QString& error);
+    void onRepositoryOpenFailed(const QString& path, const QString& error, int errorCode);
     void onLogReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     void onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches);
     void showAbout();
@@ -158,6 +178,13 @@ private:
     /// test bridge can address every action — see the convention
     /// note in CONTRIBUTING.md and docs/AGENT_TESTING.md.
     void assignActionObjectNames(QWidget* widget, const QString& pathPrefix);
+
+    /// Counts every menu and toolbar action's trigger by objectName
+    /// (TelemetryService::countCommand) — never by text or bridge
+    /// slug, which can hold paths and branch names. Each action once
+    /// (the menu and the toolbar share QActions); Recent Repositories
+    /// entries, whose texts are paths, all count as "file.recent".
+    void instrumentActionsForTelemetry();
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();
@@ -208,11 +235,21 @@ private:
     // "RepoSessionController" sketch wanted isolated; the handlers
     // stay on MainWindow because they ARE window manipulation
     // (title, central stack, model clears).
+    //
+    // Usage statistics' repo_opened times an open from its start to
+    // repositoryOpened (openedAfterMs) and on to its first history
+    // page. GitService tags that page with the open's generation
+    // (initialLogLoaded): a page of the previous repository, from a
+    // refresh still walking when the open landed, arrives after
+    // repositoryOpened too and must never be timed instead.
     struct PendingOpen {
         QString  path;                 // non-empty while in flight
         QWidget* widgetBefore = nullptr;  // revert target on failure
         QString  titleBefore;
         bool     awaitingInitialLog = false;  // spinner latch
+        quint64       generation = 0;     // GitService::openRepositoryAsync's
+        QElapsedTimer started;            // invalid: nothing being timed
+        qint64        openedAfterMs = -1; // -1 until repositoryOpened
 
         bool active() const { return !path.isEmpty(); }
         void clear() {
@@ -220,6 +257,11 @@ private:
             widgetBefore = nullptr;
             titleBefore.clear();
             awaitingInitialLog = false;
+            stopTiming();
+        }
+        void stopTiming() {
+            started.invalidate();
+            openedAfterMs = -1;
         }
     } pendingOpen_;
 
@@ -374,6 +416,11 @@ private:
     // Shared guard→run→report→refresh spine for menu actions that
     // shell out to git.
     RepoCommandController* repoCmd_ = nullptr;
+
+    // Usage statistics (setTelemetry). Owned by main(), declared there
+    // before the window, so it outlives this pointer.
+    telemetry::TelemetryService* telemetry_ = nullptr;
+    telemetry::Gate telemetryGate_ = telemetry::Gate::CompiledOut;
 };
 
 } // namespace gitbolt::ui
