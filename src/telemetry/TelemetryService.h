@@ -80,9 +80,10 @@ public:
     /// The Settings switch; idempotent, so MainWindow can call it on
     /// every settingsChanged. Off, in this order and before control
     /// returns to the event loop: the in-flight request is aborted
-    /// (its record is not touched), timers stop, counts and the error
-    /// dedupe are cleared, the queue lock is released with nothing
-    /// written, and the queue file is deleted. On again: the queue is
+    /// (its record is not touched), timers stop, counts are cleared
+    /// (the error dedupe is kept, so "once per session" holds), the
+    /// queue lock is released with nothing written, and the queue file
+    /// is deleted. On again: the queue is
     /// reopened and sending resumes (the next app_launched comes with
     /// the next launch).
     void setUserEnabled(bool enabled);

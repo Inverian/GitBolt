@@ -213,23 +213,29 @@ void reportUnresponsiveInstance()
 
 namespace endpoints = gitbolt::app::telemetry_endpoints;
 
-// Whether this build reports to the GitBolt maintainers: real (https)
-// usage statistics endpoints are compiled in (cmake/Telemetry.cmake).
-// Source builds, forks, PR and dry-run builds have none, and a
-// developer's loopback stub build isn't official either. Its crash
-// reports would otherwise be uploaded by the user's next launch of a
-// release, which reads the same ~/.gitbolt/crash.log.
+// The GitBolt maintainers' usage statistics endpoint, which CI compiles
+// into official builds (.github/workflows/ci.yml).
+constexpr std::string_view kOfficialHost = "https://telemetry.gitbolt.com";
+
+// Whether this build reports to the GitBolt maintainers: their endpoint
+// is compiled in (cmake/Telemetry.cmake). Source builds, forks, PR and
+// dry-run builds have no endpoint; a developer's loopback stub build, or
+// a fork or staging build with an https endpoint of its own, isn't
+// official either. Their crash reports would otherwise be uploaded by
+// the user's next launch of a release, which reads the same
+// ~/.gitbolt/crash.log, or a release's by them.
 constexpr bool isOfficialBuild()
 {
-    return std::string_view(endpoints::kHost).starts_with("https://");
+    return std::string_view(endpoints::kHost) == kOfficialHost;
 }
 
 // The usage statistics queue's directory, next to GitBolt.ini.
 // "telemetry" is an official build's. Any other build that sends — a
-// developer's loopback stub build — keeps one per endpoint: with one
-// shared queue, the next release would upload what the stub build
-// recorded (its events, its errors under its version), and the stub
-// build would drain the release's queue into the stub.
+// developer's loopback stub build, or a fork or staging build — keeps
+// one per endpoint: with one shared queue, the next release would
+// upload what that build recorded (its events, its errors under its
+// version), and that build would drain the release's queue into its
+// own endpoint.
 QString telemetryQueueDir(const QString& settingsFile)
 {
     const QString dir =
