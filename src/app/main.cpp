@@ -548,10 +548,13 @@ int main(int argc, char* argv[]) {
         crashBox.setText(QObject::tr(
             "GitBolt crashed during the last session. "
             "A crash report has been saved."));
+        // Present tense: the summary goes out first and at once, while
+        // the box is still up (the service started above), so the
+        // switch can only stop what comes after it.
         if (crashSummaryQueued) {
             crashBox.setInformativeText(QObject::tr(
-                "A summary of the report, with no repository data, will be sent "
-                "with the usage statistics. You can turn them off in "
+                "A summary of the report, with no repository data, is being sent "
+                "with the usage statistics. You can turn them off for the future in "
                 "Tools › Settings › General."));
         }
         crashBox.setDetailedText(crashReport);

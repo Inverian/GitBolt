@@ -219,10 +219,11 @@ MainWindow::MainWindow(QWidget* parent)
 // its finished handler never runs, and the signals it emits on the way
 // out are dropped with their receivers. The same goes for a local op
 // (a merge, a reset), and for the service's own jobs, which its
-// destructor waits for: a rebase step, a checkout. Their git and hooks
-// are interrupted as by Ctrl-C (SIGTERM on Unix, a Ctrl-C on git's
-// console on Windows; GitProcess::run), no questions asked, as for a
-// fetch: git rolls back its lockfiles, and a rebase stopped mid-step is
+// destructor waits for: a rebase step, a commit, a checkout. Their git
+// and hooks are interrupted as by Ctrl-C (SIGINT on Unix, a Ctrl-C on
+// git's console on Windows; GitProcess::run), no questions asked, as for
+// a fetch: git rolls back its lockfiles, a hook finishes putting back
+// what it set aside, and a rebase stopped mid-step is
 // still in progress next time, with Continue, Skip and Abort on offer.
 MainWindow::~MainWindow()
 {
@@ -634,17 +635,27 @@ void MainWindow::buildRepositoryMenu()
                         widget->setSubmodules(std::move(s));
                     });
 
-            // Row actions → GitService where a wrapper exists;
-            // sync/deinit run through the git CLI (libgit2 has no
-            // first-class equivalent) with the same error dialog
-            // the bulk submodule menu items use.
+            // Row actions: local ops through the git CLI (libgit2 has
+            // no first-class equivalent), with the busy UI and the same
+            // error dialog the bulk submodule menu items use. Init and
+            // update ran on a worker of the service's with neither: an
+            // update clones and checks out, and a second op, or a
+            // commit, met its index.lock meanwhile.
             connect(widget, &widgets::SubmoduleWidget::initRequested,
                     this, [this](const QString& n) {
-                        gitService_->submoduleInit(n);
+                        repoCmd_->runAsync({"submodule", "init", "--", n.toStdString()},
+                                           tr("Submodule Init Failed"),
+                                           RepoCommandController::RefreshSubmodules,
+                                           tr("Initializing submodule %1…").arg(n));
                     });
             connect(widget, &widgets::SubmoduleWidget::updateRequested,
                     this, [this](const QString& n) {
-                        gitService_->submoduleUpdate(n);
+                        repoCmd_->runAsync({"submodule", "update", "--init", "--",
+                                            n.toStdString()},
+                                           tr("Submodule Update Failed"),
+                                           RepoCommandController::RefreshSubmodules
+                                               | RepoCommandController::RefreshStatus,
+                                           tr("Updating submodule %1…").arg(n));
                     });
             connect(widget, &widgets::SubmoduleWidget::syncRequested,
                     this, [this](const QString& n) {
@@ -1552,8 +1563,12 @@ void MainWindow::buildViewMenu()
             // Row context-menu recovery actions. Confirmations
             // live here (not in the dialog) so the wording can
             // reference the actual git consequences.
+            // Turned away before the question, not after it: refused
+            // once confirmed, the answer was thrown away.
             connect(dlg, &dialogs::ReflogDialog::checkoutRequested,
                     this, [this, dlg](const QString& sha) {
+                if (refuseWhileLocalOpRuns())
+                    return;
                 const auto answer = QMessageBox::question(
                     dlg, tr("Checkout Commit"),
                     tr("Checkout %1?\n\nHEAD will be detached — "
@@ -1576,6 +1591,8 @@ void MainWindow::buildViewMenu()
             connect(dlg, &dialogs::ReflogDialog::resetRequested,
                     this, [this, dlg](const QString& sha,
                                       const QString& mode) {
+                if (refuseWhileLocalOpRuns())
+                    return;
                 const QString warning =
                     mode == QLatin1String("hard")
                         ? tr("Reset --hard to %1?\n\nAll uncommitted "
@@ -3599,10 +3616,10 @@ void MainWindow::buildHelpMenu()
 // while a revealed auto-fetch runs, and this used to turn it back on.
 void MainWindow::setRepoOnlyMenusEnabled(bool on)
 {
-    // Off while a local op runs, whatever `on` says; its end turns
-    // them back on if there's a repository (repoActionsEnabled_). The
-    // action of a running remote op stays off until the op ends.
-    on = on && !localOpRunning_;
+    // Off while a local op or a step runs, whatever `on` says; its end
+    // turns them back on if there's a repository (repoActionsEnabled_).
+    // The action of a running remote op stays off until the op ends.
+    on = on && !localOpRunning_ && !gitStepRunning();
     const QList<QAction*> shared{refreshAction_, fetchAction_, pullAction_,
                                  pushAction_, commitAction_};
     auto toggleChildren = [this, on, &shared](QMenu* m) {
@@ -3631,10 +3648,21 @@ void MainWindow::setRepoOnlyMenusEnabled(bool on)
 
 bool MainWindow::refuseWhileLocalOpRuns()
 {
-    if (!repoCmd_ || !repoCmd_->busy())
+    if ((!repoCmd_ || !repoCmd_->busy()) && !gitStepRunning())
         return false;
     statusBar()->showMessage(tr("Another operation is still running…"), 3000);
     return true;
+}
+
+bool MainWindow::gitStepRunning() const
+{
+    return gitService_ && gitService_->rebaseStepRunning();
+}
+
+void MainWindow::reapplyRepoActionLocks()
+{
+    setRepoActionsEnabled(repoActionsEnabled_);
+    setRepoOnlyMenusEnabled(repoActionsEnabled_);
 }
 
 void MainWindow::setRepoActionsEnabled(bool on)
@@ -3645,8 +3673,9 @@ void MainWindow::setRepoActionsEnabled(bool on)
     // action (false), the optimistic phase of an async open (false
     // — ops would hit the previous repo), and the failure revert.
     repoActionsEnabled_ = on;
-    // All off while a local op runs (see setRepoOnlyMenusEnabled).
-    on = on && !localOpRunning_;
+    // All off while a local op or a step runs (see
+    // setRepoOnlyMenusEnabled).
+    on = on && !localOpRunning_ && !gitStepRunning();
     if (refreshAction_) refreshAction_->setEnabled(on);
     // Except Fetch while a revealed auto-fetch runs (an open that
     // failed, or opened its repository again, leaves it running):
@@ -3660,6 +3689,10 @@ void MainWindow::setRepoActionsEnabled(bool on)
     if (commitAction_)  commitAction_->setEnabled(on);
     if (filterInput_)   filterInput_->setEnabled(on);
     if (branchCombo_)   branchCombo_->setEnabled(on);
+    // The sidebar's New Branch and branch menu: they asked for a name or
+    // a confirmation, then threw it away (refuseWhileLocalOpRuns).
+    if (repoView_ && repoView_->branchTree())
+        repoView_->branchTree()->setRepoActionsEnabled(on);
 }
 
 void MainWindow::collectAndApplyShortcuts()
@@ -4026,8 +4059,14 @@ void MainWindow::setupConnections()
     // is offered, as for a cherry-pick. A step can also succeed and
     // leave the rebase going: the plan said `edit`. A cherry-pick's or a
     // revert's sequence of several commits goes on in such steps too.
+    // git's word on a step that went through, for the outcome below.
+    connect(gitService_, &services::GitService::stepWarning,
+            this, [this](const QString&, const QString& warning) { stepWarning_ = warning; });
     connect(gitService_, &services::GitService::rebaseStepFinished,
             this, [this](const QString& step, bool success, bool inProgress) {
+        const QString warning = std::exchange(stepWarning_, QString());
+        // The repository's actions come back (gitStepRunning()).
+        reapplyRepoActionLocks();
         // Still busy if a local op, or a commit, runs meanwhile.
         if (repoView_)
             repoView_->operationBar()->setBusy(localOpRunning_
@@ -4038,11 +4077,25 @@ void MainWindow::setupConnections()
         // A merge's, a cherry-pick's or a revert's Abort runs as a step
         // too (GitService::abortConflictState).
         if (step.endsWith(QLatin1String(" --abort")) && !step.startsWith(QLatin1String("rebase"))) {
-            if (success)
+            // A sequence paused after a commit made during it: git
+            // stops it without rewinding (and says so, as a warning
+            // with exit 0). "Cherry-pick aborted." said the branch was
+            // back where it had been, with the picked commits on it.
+            const bool kept = std::exchange(abortKeepsCommits_, false) && !merge;
+            if (success && kept) {
+                QString message = cherryPick
+                    ? tr("Cherry-pick stopped. The commits picked so far stay on the branch.")
+                    : tr("Revert stopped. The commits reverted so far stay on the branch.");
+                if (!warning.isEmpty())
+                    message += QLatin1Char(' ')
+                               + tr("(git: %1)").arg(warning.section(QLatin1Char('\n'), 0, 0));
+                statusBar()->showMessage(message, 8000);
+            } else if (success) {
                 statusBar()->showMessage(merge        ? tr("Merge aborted.")
                                          : cherryPick ? tr("Cherry-pick aborted.")
                                                       : tr("Revert aborted."),
                                          4000);
+            }
             gitService_->refreshStatus();
             return;
         }
@@ -4085,6 +4138,18 @@ void MainWindow::setupConnections()
         connect(gitService_, &services::GitService::commitComplete, bar, [this, bar]() {
             bar->setBusy(localOpRunning_ || gitService_->rebaseStepRunning());
         });
+    }
+    // The repository's actions and menus are off while a step runs, as
+    // while a local op does: a commit's pre-commit hook took seconds,
+    // and a toolbar branch switch meanwhile moved HEAD under git commit,
+    // which then committed onto that branch. A step ends with
+    // rebaseStepFinished (above), a commit with commitComplete.
+    connect(gitService_, &services::GitService::stepStarted, this,
+            [this]() { reapplyRepoActionLocks(); });
+    connect(gitService_, &services::GitService::commitComplete, this,
+            [this]() { reapplyRepoActionLocks(); });
+    if (repoView_) {
+        auto* bar = repoView_->operationBar();
         connect(bar, &widgets::RepoOperationBar::resolveRequested,
                 this, &MainWindow::showConflictResolver);
         connect(bar, &widgets::RepoOperationBar::continueRequested, this, [this, bar]() {
@@ -4115,9 +4180,22 @@ void MainWindow::setupConnections()
             const bool sequence = bar->state() != git::RepoState::Rebase;
             if (sequence && !bar->sequenceSkippable())
                 return;
+            // Where the commit the rebase stopped at is in the branch
+            // already (an `edit`, a reword a hook turned down), git's
+            // --skip only goes on, and the commit stays. The question
+            // said its changes were left out, and "Rebase complete."
+            // then came with it still there.
+            const QString committed = sequence ? QString() : gitService_->committedRebaseStop();
             const auto answer = QMessageBox::question(
                 this, tr("Skip Commit"),
-                !sequence ? tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
+                committed == QLatin1String("reword")
+                    ? tr("Skip the rest of this commit's reword?\n\nThe commit stays in the "
+                         "rebased branch under its old message, and the rebase goes on with "
+                         "the rest.")
+                : !committed.isEmpty()
+                    ? tr("Skip to the next commit?\n\nThe commit the rebase stopped at stays "
+                         "in the rebased branch as it is, and the rebase goes on with the rest.")
+                : !sequence ? tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
                                "out of the rebased branch.")
                 : bar->state() == git::RepoState::Revert
                           ? tr("Skip the commit the revert stopped at?\n\nIt is left "
@@ -4143,21 +4221,35 @@ void MainWindow::setupConnections()
             case git::RepoState::None:
             case git::RepoState::Other:      return;
             }
+            // A cherry-pick or revert of several commits paused after
+            // a commit made during it (the stopped one, committed): git
+            // won't rewind past it (its rollback_is_safe(), which
+            // sequenceSkippable() is for a paused sequence). The
+            // question said the branch went back, which it never did.
+            const bool keepsCommits = bar->sequencePaused() && !bar->sequenceSkippable()
+                && (bar->state() == git::RepoState::CherryPick
+                    || bar->state() == git::RepoState::Revert);
             const auto answer = QMessageBox::question(
                 this, tr("Abort"),
-                tr("Abort the %1?\n\nThe branch goes back to where it was before "
-                   "the %1 started, and any conflicts resolved so far are lost.")
-                    .arg(operation),
+                keepsCommits
+                    ? tr("Stop the %1?\n\nThe commits it has made so far stay on the branch "
+                         "(git doesn't rewind past a commit made during it); the ones not "
+                         "done yet are left out.")
+                          .arg(operation)
+                    : tr("Abort the %1?\n\nThe branch goes back to where it was before "
+                         "the %1 started, and any conflicts resolved so far are lost.")
+                          .arg(operation),
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
             if (answer != QMessageBox::Yes) return;
             // A step either way (stepStarted makes the bar busy until
             // it reports): a second Abort ran a second git, which failed
             // on index.lock with git's advice to delete it while the
             // first still ran.
+            abortKeepsCommits_ = keepsCommits;
             if (bar->state() == git::RepoState::Rebase)
                 gitService_->rebaseAbort();
-            else
-                gitService_->abortConflictState();
+            else if (!gitService_->abortConflictState())
+                abortKeepsCommits_ = false;     // refused: nothing reports
         });
     }
 
@@ -4395,8 +4487,10 @@ void MainWindow::setupConnections()
     // through the git CLI as local ops (repoCmd_), with the same
     // feedback the Commands-menu equivalents use.
     if (auto* branchTree = repoView_->branchTree()) {
-        // Not while a local op runs (refuseWhileLocalOpRuns): these
-        // run git or libgit2 at once, and a checkout ran under a merge.
+        // Not while a local op or a step runs (refuseWhileLocalOpRuns):
+        // these run git or libgit2 at once, and a checkout ran under a
+        // merge, or under git commit's hooks. (The sidebar's entries are
+        // off then too: BranchTreeWidget::setRepoActionsEnabled.)
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRequested,
                 this, [this](const QString& name) {
             if (!refuseWhileLocalOpRuns())
@@ -4405,7 +4499,7 @@ void MainWindow::setupConnections()
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRemoteRequested,
                 this, [this](const QString& remoteBranch) {
             if (!refuseWhileLocalOpRuns())
-                gitService_->checkoutRemoteBranch(remoteBranch);
+                checkoutAsLocalBranch(remoteBranch);
         });
         connect(branchTree, &widgets::BranchTreeWidget::createBranchRequested,
                 this, [this](const QString& name) {
@@ -5122,7 +5216,10 @@ void MainWindow::showConflictResolver()
 
 void MainWindow::offerConflictResolution(const QString& operation)
 {
-    if (!gitService_ || !gitService_->isOpen())
+    // Not over another repository's "Opening…": the outcome asking is
+    // the repository's on screen (GitService holds outcomes back until
+    // an open lands), and the question is for that one.
+    if (!gitService_ || !gitService_->isOpen() || gitService_->openPending())
         return;
 
     // Only offer when the repo is actually mid-operation with files
@@ -5139,11 +5236,16 @@ void MainWindow::offerConflictResolution(const QString& operation)
     if (!conflicted)
         return;
 
+    // The box turns the event loop: a second launch can hand another
+    // repository over while it is up. A Yes then opened the resolver on
+    // that one, which had no conflicts, and left these as they were.
+    const std::string asked = gitService_->openKey();
     const auto answer = QMessageBox::question(
         this, tr("Conflicts"),
         tr("The %1 stopped on conflicts.\n\nOpen the conflict "
            "resolver now?").arg(operation));
-    if (answer == QMessageBox::Yes)
+    if (answer == QMessageBox::Yes && !gitService_->openPending()
+        && gitService_->openKey() == asked)
         showConflictResolver();
 }
 
@@ -5163,6 +5265,38 @@ void MainWindow::mergeBranch(const QString& branch)
                            if (!merged)
                                offerConflictResolution(tr("merge"));
                        });
+}
+
+// The sidebar's "Checkout as local branch" on `remoteBranch`
+// ("origin/feature/x"): the local branch named for it ("feature/x"),
+// checked out as it is if it exists. This used to check out the bare
+// local name only, which libgit2 resolves to no remote branch, so the
+// one case the entry is for failed with "revspec 'feature' not found".
+// Otherwise git creates it, tracking the remote one, as a local op: a
+// first checkout can take minutes (LFS files, a post-checkout hook, a
+// big tree), and run as a job of GitService's it had no busy state, no
+// word on screen and no lock, so a second click ran a second git, which
+// failed on index.lock with advice to delete it while the first still
+// ran. The remote is everything before the first '/', the assumption
+// Delete remote branch makes too.
+void MainWindow::checkoutAsLocalBranch(const QString& remoteBranch)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+    const qsizetype slash = remoteBranch.indexOf(QLatin1Char('/'));
+    if (slash <= 0 || slash == remoteBranch.size() - 1)
+        return;
+    const QString local = remoteBranch.mid(slash + 1);
+    if (gitService_->localBranchExists(local)) {
+        gitService_->checkoutBranch(local);
+        return;
+    }
+    repoCmd_->runAsync({"checkout", "-b", local.toStdString(), "--track",
+                        remoteBranch.toStdString()},
+                       tr("Checkout Failed"),
+                       RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
+                           | RepoCommandController::RefreshBranches,
+                       tr("Checking out %1…").arg(remoteBranch));
 }
 
 // Confirm, then `git push <remote> --delete <branch>` via runRemoteOp.
@@ -5432,7 +5566,7 @@ void MainWindow::reenableAfterRemoteOp(QAction* action)
     // so the action would act on the one left behind), and so does a
     // local op while it runs; whatever turns them back on brings this
     // one too. File > Home leaves them on: the repository stays open.
-    if (action && repoActionsEnabled_ && !localOpRunning_)
+    if (action && repoActionsEnabled_ && !localOpRunning_ && !gitStepRunning())
         action->setEnabled(true);
 }
 
@@ -5473,6 +5607,29 @@ void MainWindow::finishRemoteOpFeedback(const QString& successMsg)
 
     if (!lastRemoteOpFailed_)
         statusBar()->showMessage(successMsg, 4000);
+
+    // A local op started while this one ran went unnarrated (the label
+    // and the status bar were this op's, localOpNarrated_), and still
+    // runs: once this outcome has been up a while, the local op says
+    // again what it does. Otherwise nothing on screen said why every
+    // repo action stayed off until it ended.
+    if (localOpRunning_ && !localOpNarrated_)
+        QTimer::singleShot(lastRemoteOpFailed_ ? 6000 : 4000, this,
+                           [this] { resumeLocalOpNarration(); });
+}
+
+void MainWindow::resumeLocalOpNarration()
+{
+    if (!localOpRunning_ || localOpNarrated_ || remoteOpNarrated())
+        return;
+    // A failure stays on the label (sticky until the next op), with
+    // git's words in its tooltip; the status bar takes the op back.
+    if (!lastRemoteOpFailed_) {
+        localOpNarrated_ = true;
+        if (opIndicator_)
+            opIndicator_->start(localOpMessage_);
+    }
+    statusBar()->showMessage(localOpMessage_);
 }
 
 } // namespace gitbolt::ui

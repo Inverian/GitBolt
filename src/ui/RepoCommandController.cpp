@@ -27,8 +27,11 @@ bool RepoCommandController::runJob(const QString& busyMessage,
     if (!svc_ || !svc_->isOpen())
         return false;
     // One at a time: two of them would be two gits at one index (a
-    // reset under a merge), and the window can only show one.
-    if (busy_) {
+    // reset under a merge), and the window can only show one. Nor under
+    // a step the service runs (a commit and its hooks, a rebase step):
+    // a checkout then moved HEAD under git commit, which committed onto
+    // the other branch.
+    if (busy_ || svc_->rebaseStepRunning()) {
         emit refused();
         return false;
     }

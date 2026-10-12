@@ -136,11 +136,21 @@ private:
     /// Whether the inline label narrates a running remote op (a quiet
     /// auto-fetch is no such op): a local op then leaves it be.
     bool remoteOpNarrated() const;
+    /// A local op that started under a narrated remote op, and outlived
+    /// it: its message goes back on the label (unless a failure is
+    /// sticky there) and the status bar, a while after the remote op's
+    /// outcome went up (finishRemoteOpFeedback).
+    void resumeLocalOpNarration();
 
     /// Commands > Merge branches and the sidebar's Merge: `git merge
     /// <branch>` as a local op (repoCmd_), offering the conflict
     /// resolver if git stopped on conflicts.
     void mergeBranch(const QString& branch);
+
+    /// The sidebar's "Checkout as local branch" on `remoteBranch`
+    /// ("origin/x"): checks out local "x", created to track it, as a
+    /// local op (repoCmd_), unless it exists.
+    void checkoutAsLocalBranch(const QString& remoteBranch);
 
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
     /// on its remote through runRemoteOp.
@@ -175,11 +185,21 @@ private:
     void setRepoActionsEnabled(bool on);
     /// For entry points that run git or libgit2 on the repository
     /// straight away (the sidebar's checkout, branch create and delete,
-    /// push): while a local op runs, says so on the status bar, as
+    /// push): while a local op runs, or a step of the service's
+    /// (gitStepRunning()), says so on the status bar, as
     /// RepoCommandController's refusal does, and returns true. The
     /// menus and toolbar are off then; these weren't, and a libgit2
     /// checkout ran under a merge.
     bool refuseWhileLocalOpRuns();
+    /// A step runs on the open repository (GitService::
+    /// rebaseStepRunning()): a commit and its hooks, a rebase step, an
+    /// abort. The repo actions and menus are off then, as for a local
+    /// op: a toolbar branch switch during a commit's pre-commit hook
+    /// made the commit land on the other branch.
+    bool gitStepRunning() const;
+    /// Applies localOpRunning_ and gitStepRunning() to the repo actions,
+    /// menus and sidebar again, keeping what repoActionsEnabled_ says.
+    void reapplyRepoActionLocks();
 
     /// Walk every named leaf action under the menu bar, record its
     /// factory-default shortcut, and apply any user override saved
@@ -433,6 +453,13 @@ private:
     bool localOpRunning_ = false;
     QString localOpMessage_;
     bool localOpNarrated_ = false;
+    // GitService::stepWarning of the step about to report: git's
+    // warnings on a step that went through.
+    QString stepWarning_;
+    // The bar's Abort of a cherry-pick or revert sequence paused after a
+    // commit made during it, which git stops without rewinding: its
+    // outcome says so.
+    bool abortKeepsCommits_ = false;
 
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by

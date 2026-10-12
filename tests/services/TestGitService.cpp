@@ -29,10 +29,11 @@
 //   - the askpass git's children get, which an auto-fetch's get in a
 //     mode that never asks, and the kinds of question it tells apart,
 //   - Fetch prunes, unless fetch.prune or remote.<name>.prune says not,
+//     and not where a prune could reach past refs/remotes/, a
+//     submodule's config included (git hands the prune on to it),
 //   - cancelGitOps(), which quitting during a fetch relies on, and
 //     a fetch's own cancel flag, which drops an unwanted auto-fetch
 //     (and which GitProcess ignores when it is null),
-//   - "Checkout as local branch" on a remote branch, a slow one too,
 //   - the rebase steps: the dialog's plan runs as listed, with its
 //     rewords, squashes, fixups and edits, and messages kept whole; a
 //     reword a hook turned down is tried again on Continue, and one
@@ -47,7 +48,10 @@
 //   - quitting (cancelGitOps()) stops a running rebase step, as Ctrl-C
 //     would, and the rebase stays in progress,
 //   - no refresh result of a repository reaches the GUI after another
-//     one has been opened,
+//     one has been opened, nor a rebase step's or a cherry-pick's
+//     outcome, which also waits for an open on its way,
+//   - a commit waiting on its hook leaves the thread pool room for an
+//     open (a job waiting on git lends its thread back),
 //   - the remote ops and checkoutBranch return their own outcome,
 //   - a conflicted merge is aborted off the GUI thread.
 //
@@ -76,9 +80,18 @@
 #include "services/GitService.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <optional>
+#include <thread>
 #include <type_traits>
+
+#ifndef Q_OS_WIN
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 using gitbolt::services::GitService;
 
@@ -297,12 +310,16 @@ private slots:
     void gitChildrenOfAPromptlessProcessCannotAsk() {
         auto repo = repoWithCommits(1);
         QVERIFY(repo);
+        // Whatever GitBolt was started with goes through where prompts
+        // are allowed. Set here, not inherited: GitHub's Windows
+        // runners export GCM_INTERACTIVE=Never to every step.
+        const gitbolt::test::ScopedEnv gcm("GCM_INTERACTIVE", "auto");
         const std::vector<std::string> echoEnv = {
             "-c", "alias.echo-env=!printf '%s|%s|%s|%s' \"${GIT_ASKPASS-unset}\" "
                   "\"$SSH_ASKPASS_REQUIRE\" \"$GITBOLT_ASKPASS_MODE\" \"$GCM_INTERACTIVE\"",
             "echo-env"};
         const QString asking = QCoreApplication::applicationFilePath()
-                               + QStringLiteral("|force|1|");
+                               + QStringLiteral("|force|1|auto");
         const QString promptless = QStringLiteral("|force|refuse|never");
 
         gitbolt::git::GitProcess proc(repo->path().toStdString());
@@ -323,6 +340,9 @@ private slots:
     void autoFetchNeverAsks() {
         auto repo = repoWithCommits(1);
         QVERIFY(repo);
+        // As above: the inherited value goes through where prompts are
+        // allowed, so the test sets it rather than reading the runner's.
+        const gitbolt::test::ScopedEnv gcm("GCM_INTERACTIVE", "auto");
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
         const QString envFile = dir.filePath(QStringLiteral("env.txt"));
@@ -353,7 +373,7 @@ private slots:
         svc.fetch();
         QCOMPARE(failedSpy.count(), 2);
         QCOMPARE(sshGot(), QCoreApplication::applicationFilePath()
-                           + QStringLiteral("|force|1|"));
+                           + QStringLiteral("|force|1|auto"));
     }
 
     // What the askpass shows for a question: a field that shows what is
@@ -809,6 +829,60 @@ private slots:
         QCOMPARE(done.at(0), (QVariantList{false, QStringLiteral("Cancelled")}));
         QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
         QTRY_VERIFY_WITH_TIMEOUT(!gitbolt::test::processAlive(hook), 5000);
+    }
+
+    // -----------------------------------------------------------------
+    // Long git jobs share the global thread pool with the opens and the
+    // refreshes, and the pool is as big as the machine has CPUs. A
+    // commit waiting on its pre-commit hook held a thread throughout:
+    // on a 2-CPU machine two such jobs, here one in a pool of one, left
+    // none, and an open of another repository came in only once the
+    // hook was done. A job waiting on git lends its thread back now.
+    // -----------------------------------------------------------------
+    void aCommitWaitingOnItsHookLeavesRoomForAnOpen() {
+        const IsolatedGitConfig config;
+        auto a = repoWithCommits(1);
+        auto b = repoWithCommits(1);
+        QVERIFY(a && b);
+        QVERIFY(writeHook(a->path() + QStringLiteral("/.git/hooks"), "pre-commit",
+                          ": > .git/hook-started\n"
+                          "i=0; while [ ! -f .git/GO ] && [ $i -lt 300 ]; do"
+                          " sleep 0.05; i=$((i+1)); done\n"));
+        a->writeFile(QStringLiteral("x.txt"), QByteArrayLiteral("x\n"));
+        QVERIFY(a->stageFile(QStringLiteral("x.txt")).ok());
+
+        QThreadPool* pool = QThreadPool::globalInstance();
+        QVERIFY(pool->waitForDone(10000));
+        const int threads = pool->maxThreadCount();
+        const auto restore = qScopeGuard([&] { pool->setMaxThreadCount(threads); });
+        pool->setMaxThreadCount(1);
+
+        GitService committing;
+        QVERIFY(committing.openRepository(a->path()));
+        QVERIFY(pool->waitForDone(10000));   // its refreshes
+        MainThreadSpy done(&committing, &GitService::commitComplete);
+        committing.commitChanges(QStringLiteral("held"));
+        QVERIFY(QTest::qWaitFor([&] {
+            return QFileInfo::exists(a->path() + QStringLiteral("/.git/hook-started"));
+        }, 10000));
+
+        GitService opening;
+        MainThreadSpy opened(&opening, &GitService::repositoryOpened);
+        QElapsedTimer timer;
+        timer.start();
+        opening.openRepositoryAsync(b->path());
+        const bool openedInTime = opened.waitForAny(5000);
+        const qint64 openMs = timer.elapsed();
+        const bool hookStillRan = done.isEmpty();
+        a->writeFile(QStringLiteral(".git/GO"), QByteArray());
+        QVERIFY(done.waitForAny(20000));
+        QVERIFY2(openedInTime && hookStillRan,
+                 qPrintable(QStringLiteral("opened after %1 ms, the commit %2")
+                                .arg(openMs)
+                                .arg(hookStillRan ? QStringLiteral("still running")
+                                                  : QStringLiteral("done first"))));
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QVERIFY(pool->waitForDone(10000));
     }
 
     // -----------------------------------------------------------------
@@ -1288,96 +1362,93 @@ private slots:
         QVERIFY(!has("refs/remotes/origin/gone"));
     }
 
-    // The sidebar's "Checkout as local branch" on origin/feature asked
-    // for a checkout of plain "feature", which only exists once there's
-    // a local branch of that name: for a branch that's only on the
-    // remote, the one case the entry is for, it failed. It now creates
-    // the local branch, tracking origin/feature; an existing one is
-    // checked out as it is.
-    void checkoutRemoteBranchCreatesATrackingBranch() {
-        auto repo = repoWithCommits(1);
-        QVERIFY(repo);
-        QTemporaryDir originDir;
-        QVERIFY(originDir.isValid());
-        auto origin = addBareOrigin(*repo, originDir);
-        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
-        auto& work = repo->repo();
-        gitbolt::git::GitProcess git(repo->path().toStdString());
-        // feature/x is on the server only, one commit ahead of main.
-        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "feature/x"})));
-        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "on feature"})));
-        QVERIFY(succeeded(git.run({"push", "-q", "origin", "feature/x"})));
-        const std::string featureTip = tip(work, "HEAD");
-        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
-        QVERIFY(succeeded(git.run({"branch", "-q", "-D", "feature/x"})));
-        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
-
-        GitService svc;
-        SignalLog log(svc);
-        QVERIFY(svc.openRepository(repo->path()));
-        QVERIFY(log.waitFor({"status", "log", "branches"}));
-        log.clear();
-        svc.checkoutRemoteBranch(QStringLiteral("origin/feature/x"));
-        QVERIFY2(checkedOut(log), qPrintable(log.join(QStringLiteral(", "))));
-        QCOMPARE(output(git.run({"branch", "--show-current"})), QStringLiteral("feature/x"));
-        QCOMPARE(tip(work, "HEAD"), featureTip);
-        QCOMPARE(upstreamOf(work, "feature/x"), std::string("refs/remotes/origin/feature/x"));
-
-        // Already there: checked out, not recreated (nor moved).
-        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "local only"})));
-        const std::string localTip = tip(work, "HEAD");
-        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
-        log.clear();
-        svc.checkoutRemoteBranch(QStringLiteral("origin/feature/x"));
-        QVERIFY2(checkedOut(log), qPrintable(log.join(QStringLiteral(", "))));
-        QCOMPARE(output(git.run({"branch", "--show-current"})), QStringLiteral("feature/x"));
-        QCOMPARE(tip(work, "HEAD"), localTip);
+    // The default prune went on into the submodules: git hands the
+    // fetch's `-c fetch.prune=true` to the fetch it runs in each, where
+    // it outranks the submodule's own config. A submodule with a tags
+    // refspec lost its unpushed tags, and one set not to prune was
+    // pruned, though the superproject's config allowed neither. Its
+    // config counts as the superproject's does now.
+    void fetchDefaultPruneSparesSubmodules_data() {
+        QTest::addColumn<QString>("key");
+        QTest::addColumn<QString>("value");
+        QTest::newRow("submodule tags refspec")
+            << "remote.origin.fetch" << "+refs/tags/*:refs/tags/*";
+        QTest::newRow("submodule fetch.prune=false") << "fetch.prune" << "false";
     }
 
-    // "Checkout as local branch" has git do the checkout, and a first
-    // checkout of a branch can take minutes: LFS files downloaded on
-    // the way, a slow post-checkout hook, a big tree. git was killed
-    // after run()'s default 30 s: in the work tree update that left
-    // index.lock behind and the work tree half switched, and in the
-    // hook it reported a checkout that had gone through as failed.
-    // Here the default is 1 s and the hook takes 3. And git runs on a
-    // worker: the window used to freeze for as long as it took.
-    void checkoutRemoteBranchWaitsForASlowCheckout() {
-        auto repo = repoWithCommits(1);
-        QVERIFY(repo);
-        QTemporaryDir originDir;
-        QVERIFY(originDir.isValid());
-        auto origin = addBareOrigin(*repo, originDir);
-        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
-        gitbolt::git::GitProcess git(repo->path().toStdString());
-        QVERIFY(succeeded(git.run({"push", "-q", "origin", "HEAD:refs/heads/slow"})));
-        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+    void fetchDefaultPruneSparesSubmodules() {
+        QFETCH(QString, key);
+        QFETCH(QString, value);
+        // git's own config only, which lets these local submodules be
+        // cloned and fetched (protocol.file.allow) and commits be made.
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QString globalConfig = home.filePath(QStringLiteral("gitconfig"));
+        QFile configFile(globalConfig);
+        QVERIFY(configFile.open(QIODevice::WriteOnly));
+        configFile.write("[protocol \"file\"]\n\tallow = always\n"
+                         "[user]\n\tname = T\n\temail = t@example.com\n"
+                         "[commit]\n\tgpgSign = false\n"
+                         "[init]\n\tdefaultBranch = main\n");
+        configFile.close();
+        const gitbolt::test::ScopedEnv global("GIT_CONFIG_GLOBAL",
+                                              QFile::encodeName(globalConfig));
+        const gitbolt::test::ScopedEnv noSystem("GIT_CONFIG_NOSYSTEM", "1");
 
-        QTemporaryDir hooks;
-        QVERIFY(hooks.isValid());
-        const QString ran = hooks.filePath(QStringLiteral("ran"));
-        QFile hook(hooks.filePath(QStringLiteral("post-checkout")));
-        QVERIFY(hook.open(QIODevice::WriteOnly));
-        hook.write("#!/bin/sh\nsleep 3\n: > '" + QFile::encodeName(ran) + "'\n");
-        hook.close();
-        QVERIFY(hook.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        QVERIFY(repo->repo().config().setString("core.hooksPath",
-                                                hooks.path().toStdString()).ok());
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const auto git = [](const QString& dir, std::vector<std::string> args) {
+            const auto out = gitbolt::git::GitProcess(dir.toStdString()).run(args);
+            if (!succeeded(out))
+                qWarning("git %s in %s: %s", args.front().c_str(), qPrintable(dir),
+                         out ? out->stderrData.c_str() : out.error().message().c_str());
+            return succeeded(out);
+        };
+        const QString subUp = scratch.filePath(QStringLiteral("sub-upstream"));
+        const QString superUp = scratch.filePath(QStringLiteral("super-upstream"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        const QString workSub = work + QStringLiteral("/sub");
+        QVERIFY(QDir().mkpath(subUp) && QDir().mkpath(superUp));
+        QVERIFY(git(subUp, {"init", "-q"}));
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s1"}));
+        QVERIFY(git(subUp, {"branch", "old"}));
+        QVERIFY(git(superUp, {"init", "-q"}));
+        QVERIFY(git(superUp, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
+        QVERIFY(git(superUp, {"commit", "-q", "-m", "with sub"}));
+        QVERIFY(git(scratch.path(), {"clone", "-q", "--recurse-submodules",
+                                     superUp.toStdString(), "work"}));
+
+        // In the clone's submodule: origin/old, which the server then
+        // deletes; a tag never pushed; and the config under test.
+        QVERIFY(git(workSub, {"rev-parse", "--verify", "-q", "refs/remotes/origin/old"}));
+        QVERIFY(git(subUp, {"branch", "-D", "old"}));
+        QVERIFY(git(workSub, {"tag", "local-unpushed"}));
+        QVERIFY(git(workSub, {"config", "--add", key.toStdString(), value.toStdString()}));
+        // A new submodule commit upstream, so the superproject's fetch
+        // goes on into the submodule (fetch.recurseSubmodules=on-demand).
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s2"}));
+        QVERIFY(git(superUp + QStringLiteral("/sub"), {"pull", "-q", "origin", "HEAD"}));
+        QVERIFY(git(superUp, {"commit", "-q", "-am", "bump sub"}));
+        // The superproject itself allows the default prune.
+        QVERIFY(!succeeded(gitbolt::git::GitProcess(work.toStdString())
+                               .run({"config", "--get", "fetch.prune"})));
 
         GitService svc;
-        SignalLog log(svc);
-        QVERIFY(svc.openRepository(repo->path()));
-        QVERIFY(log.waitFor({"status", "log", "branches"}));
-        log.clear();
-        const gitbolt::test::ScopedEnv shortDefault("GITBOLT_GIT_TIMEOUT_MS", "1000");
-        // On a worker: this thread is free while git and its hook run.
-        QElapsedTimer timer;
-        timer.start();
-        svc.checkoutRemoteBranch(QStringLiteral("origin/slow"));
-        QVERIFY2(timer.elapsed() < 1000, qPrintable(QString::number(timer.elapsed())));
-        QVERIFY2(checkedOut(log), qPrintable(log.join(QStringLiteral(", "))));
-        QVERIFY(QFileInfo::exists(ran));
-        QCOMPARE(output(git.run({"branch", "--show-current"})), QStringLiteral("slow"));
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(work));
+        QVERIFY(svc.fetch());
+        QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.isEmpty()
+                     ? QString() : failedSpy.first().at(1).toString()));
+        // The fetch did go on into the submodule: s2 is there now.
+        const QString s2 =
+            output(gitbolt::git::GitProcess(subUp.toStdString()).run({"rev-parse", "HEAD"}));
+        QVERIFY(!s2.isEmpty());
+        QVERIFY(git(workSub, {"cat-file", "-e", s2.toStdString() + "^{commit}"}));
+        const auto subHas = [&](const char* ref) {
+            return git(workSub, {"rev-parse", "--verify", "-q", ref});
+        };
+        QVERIFY(subHas("refs/tags/local-unpushed"));
+        QVERIFY(subHas("refs/remotes/origin/old"));
     }
 
     // -----------------------------------------------------------------
@@ -2335,6 +2406,191 @@ private slots:
         QVERIFY(!svc.rebaseStepRunning());
     }
 
+    // A step whose outcome was on its way (git done, the report posted)
+    // when another repository was opened: the check is made where the
+    // swap happens, so nothing of it arrives after the open.
+    void rebaseStepPostedBeforeASwapReportsNothing() {
+        auto repo = repoWithCommits(1);
+        auto other = repoWithCommits(1);
+        QVERIFY(repo && other);
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        // Nothing to continue: git fails at once.
+        svc.rebaseContinue();
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        log.clear();
+        QVERIFY(svc.openRepository(other->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        QTest::qWait(100);
+        QVERIFY2(!log.contains(QStringLiteral("rebaseStep")) && !log.hasFailure(),
+                 qPrintable(log.join(QStringLiteral(", "))));
+    }
+
+    // The same for a cherry-pick, whose outcome went out from the worker:
+    // a pick that stopped on conflicts just before another repository
+    // was opened said so over that one ("Cherry-pick produced
+    // conflicts…"), and offered to resolve them there.
+    void cherryPickPostedBeforeASwapReportsNothing() {
+        auto repo = repoWithCommits(1);
+        auto other = repoWithCommits(1);
+        QVERIFY(repo && other);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("side\n"));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-am", "side"})));
+        const auto picked = repo->repo().head();
+        QVERIFY(picked.ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("main\n"));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-am", "main"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.cherryPick(*picked);
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        // The pick stopped on its conflict, its outcome on its way.
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::CherryPick);
+        log.clear();
+        QVERIFY(svc.openRepository(other->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        QTest::qWait(100);
+        QVERIFY2(!log.contains(QStringLiteral("cherryPickComplete")) && !log.hasFailure(),
+                 qPrintable(log.join(QStringLiteral(", "))));
+    }
+
+    // A step that ends while another repository is opening: its outcome
+    // came at once, the open still on its way, so the window said
+    // "rebase --continue failed: … could not apply …" and asked "Open the
+    // conflict resolver now?" over "Opening work-b…", and a Yes once
+    // work-b had landed opened the resolver on it. The outcome now waits
+    // for the open, and goes nowhere once another repository is open.
+    void rebaseStepEndingDuringAnOpenWaitsForIt() {
+#ifdef Q_OS_WIN
+        QSKIP("holds the open with a FIFO");
+#else
+        auto repo = repoWithCommits(2);
+        auto other = repoWithCommits(1);
+        QVERIFY(repo && other);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        // --continue waits at the second exec until there's a "go".
+        QVERIFY(!succeeded(work.run({"rebase", "--exec", "false", "--exec",
+                                     "while [ ! -f go ]; do sleep 0.05; done", "HEAD~1"})));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Rebase);
+
+        // The other repository's open is held: its config includes a
+        // FIFO, which libgit2's open reads, until it is let through.
+        QTemporaryDir gateDir;
+        QVERIFY(gateDir.isValid());
+        const QByteArray fifo = QFile::encodeName(gateDir.filePath(QStringLiteral("gate")));
+        QCOMPARE(::mkfifo(fifo.constData(), 0600), 0);
+        gitbolt::git::GitProcess otherGit(other->path().toStdString());
+        QVERIFY(succeeded(otherGit.run({"config", "include.path", fifo.toStdString()})));
+        std::atomic<bool> gateOpen{false};
+        std::atomic<bool> gateDone{false};
+        std::thread gate([&] {
+            while (!gateDone) {
+                if (gateOpen) {
+                    const int fd = ::open(fifo.constData(), O_WRONLY | O_NONBLOCK);
+                    if (fd >= 0)
+                        ::close(fd);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        });
+
+        GitService svc;
+        SignalLog log(svc);
+        // Let everything through on the way out, should a check fail
+        // first: ~GitService waits for the open and the step.
+        const auto release = qScopeGuard([&] {
+            repo->writeFile(QStringLiteral("go"), QByteArrayLiteral(""));
+            gateOpen = true;
+            QThreadPool::globalInstance()->waitForDone(10000);
+            gateDone = true;
+            gate.join();
+        });
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.rebaseContinue();
+        log.clear();
+        svc.openRepositoryAsync(other->path());
+        QVERIFY(svc.openPending());
+
+        // The step ends, the open still on its way.
+        repo->writeFile(QStringLiteral("go"), QByteArrayLiteral(""));
+        QVERIFY(QTest::qWaitFor([&] { return !svc.rebaseStepRunning(); }, 10000));
+        QTest::qWait(300);
+        QVERIFY(svc.openPending());
+        QVERIFY2(!log.contains(QStringLiteral("rebaseStep")) && !log.hasFailure(),
+                 qPrintable(log.join(QStringLiteral(", "))));
+
+        // Nor once the other repository is open.
+        gateOpen = true;
+        QVERIFY(QTest::qWaitFor([&] { return !svc.openPending(); }, 10000));
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        QTest::qWait(100);
+        QCOMPARE(svc.openKey(), other->repo().path());
+        QVERIFY2(!log.contains(QStringLiteral("rebaseStep")) && !log.hasFailure(),
+                 qPrintable(log.join(QStringLiteral(", "))));
+#endif
+    }
+
+    // The same, in the order the event loop takes: the step's outcome is
+    // posted, and an open starts before it arrives. Once the open is in,
+    // the outcome goes to the repository that is open then: nowhere if
+    // another one landed, and to its own if the open failed and left
+    // that one open (it waited no more than that).
+    void rebaseStepOutcomeArrivingDuringAnOpenWaitsForIt_data() {
+        QTest::addColumn<bool>("openFails");
+        QTest::newRow("another repository opens") << false;
+        QTest::newRow("the open fails") << true;
+    }
+
+    void rebaseStepOutcomeArrivingDuringAnOpenWaitsForIt() {
+        QFETCH(bool, openFails);
+        auto repo = repoWithCommits(1);
+        auto other = repoWithCommits(1);
+        QTemporaryDir notARepo;
+        QVERIFY(repo && other && notARepo.isValid());
+        GitService svc;
+        SignalLog log(svc);
+        QStringList order;
+        QObject context;
+        connect(&svc, &GitService::repositoryOpened, &context,
+                [&](const QString&) { order << QStringLiteral("opened"); });
+        connect(&svc, &GitService::repositoryOpenFailed, &context,
+                [&](const QString&, const QString&, int) { order << QStringLiteral("openFailed"); });
+        connect(&svc, &GitService::rebaseStepFinished, &context,
+                [&](const QString&, bool, bool) { order << QStringLiteral("rebaseStep"); });
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        order.clear();
+        // Nothing to continue: git fails at once, and the outcome is
+        // posted before the open starts.
+        svc.rebaseContinue();
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        svc.openRepositoryAsync(openFails ? notARepo.path() : other->path());
+        QVERIFY(QTest::qWaitFor([&] { return !svc.openPending(); }, 10000));
+        QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+        QTest::qWait(100);
+        if (openFails) {
+            QVERIFY2(order == (QStringList{QStringLiteral("openFailed"),
+                                           QStringLiteral("rebaseStep")}),
+                     qPrintable(order.join(QStringLiteral(", "))));
+        } else {
+            QVERIFY2(order == QStringList{QStringLiteral("opened")},
+                     qPrintable(order.join(QStringLiteral(", "))));
+            QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        }
+    }
+
     // Nothing else goes to git while a rebase step runs on the
     // repository: not another step (two sequencers on one todo list),
     // not the resolver's abort (`git rebase --abort` reset the branch
@@ -2410,7 +2666,7 @@ private slots:
     // for its jobs. A step held up by an exec or a hook that never ended
     // held the quit for as long as it ran; a second launch meanwhile
     // found nobody to hand its path to and gave up. git and what it runs
-    // now get SIGTERM, as on Ctrl-C: the step ends at once, "Cancelled",
+    // now get SIGINT, as on Ctrl-C: the step ends at once, "Cancelled",
     // with the rebase still in progress and no index.lock left behind.
     void quitStopsARunningRebaseStep() {
         auto repo = repoWithCommits(2);
@@ -3329,12 +3585,6 @@ private:
             done.close();
             return waiting;
         }, 10000);
-    }
-
-    // checkoutRemoteBranch runs git on a worker, then asks for the
-    // refreshes: done once its branches arrive, if nothing failed.
-    static bool checkedOut(SignalLog& log) {
-        return log.waitFor({"branches"}, 20000) && !log.hasFailure();
     }
 
     // The branch checked out, as a RebasePlan records it ("" when HEAD

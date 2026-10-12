@@ -3,10 +3,10 @@
 
 1. While a local op runs (Commands > Merge branches, held by its
    post-merge hook), nothing else starts git on the repository: the
-   repository's plugins are off, the sidebar's New Branch is turned
-   down with a note instead of creating the branch under the merge, and
-   an open Commit dialog's Commit and staging are off. They all ran
-   git or libgit2 alongside the merge.
+   repository's plugins are off, the sidebar's New Branch is off (it
+   created the branch under the merge, then asked for a name it threw
+   away with a note), and an open Commit dialog's Commit and staging
+   are off. They all ran git or libgit2 alongside the merge.
 2. A local op's outcome reaches the repository it ran on when that same
    repository is opened again meanwhile (a second launch handing its
    path over): a merge its hook turned down still says so. Any open
@@ -122,19 +122,17 @@ def busy_gate(binary: str, scratch: str, apps: list) -> None:
         if widget_enabled(app, name):
             raise Failure(f"{name} enabled while git merges")
 
-    app.ok("trigger branchTree.newBranch")
-    app.wait_until(lambda s: "New Branch" in s.get("windows", []), "the name box")
-    app.ok("type QLineEdit:0 during-op")
-    app.ok("click OK")
-    app.wait_until(lambda s: "Another operation is still running"
-                   in s.get("statusMessage", ""), "the refusal")
-    if "during-op" in git("branch", "--format=%(refname:short)", cwd=work).split():
-        raise Failure("the sidebar created a branch under the running merge")
+    if app.action_enabled("branchTree.newBranch"):
+        raise Failure("the sidebar's New Branch enabled while git merges")
+    resp = app.cmd("trigger branchTree.newBranch")
+    if resp.get("ok"):
+        raise Failure(f"the sidebar's New Branch ran while git merges: {resp}")
 
     os.remove(hold)
     app.wait_until(lambda s: app.action_enabled("plugins.gitflow")
-                   and widget_enabled(app, "commit.commitBtn"),
-                   "the plugins and Commit back once the merge is in")
+                   and widget_enabled(app, "commit.commitBtn")
+                   and app.action_enabled("branchTree.newBranch"),
+                   "the plugins, Commit and New Branch back once the merge is in")
     if git("log", "-1", "--format=%s", cwd=work) == "during-merge":
         raise Failure("a commit ran under the merge")
     if app.quit() != 0:

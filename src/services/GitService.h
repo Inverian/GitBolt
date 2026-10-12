@@ -15,6 +15,7 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace gitbolt::services {
 
@@ -33,11 +34,17 @@ namespace gitbolt::services {
 /// signal the worker emitted first, so handlers see e.g.
 /// rebaseStepFinished before the statusReady it causes.
 ///
-/// What the refresh workers and the rebase steps read goes out from
-/// the service's thread (deliverFor), and only while their repository
-/// is still the open one: the check on the worker alone let a result
-/// posted just before a swap reach the GUI after it, as the next
-/// repository's.
+/// What the refresh workers read goes out from the service's thread
+/// (deliverFor), and only while their repository is still the open one:
+/// the check on the worker alone let a result posted just before a swap
+/// reach the GUI after it, as the next repository's. A rebase step's or
+/// a cherry-pick's outcome goes the same way (reportTo), and waits for
+/// an open on its way to land or fail first.
+///
+/// While a step runs on the repository (rebaseStepRunning(): a commit
+/// and its hooks, a rebase step, an abort), the mutators that touch
+/// the index, HEAD or the work tree (staging, branches, stashes,
+/// checkout, cherry-pick) refuse with an operationFailed.
 class GitService : public QObject {
     Q_OBJECT
 public:
@@ -237,15 +244,17 @@ public:
 
     void createBranch(const QString& name);
     void deleteBranch(const QString& name);
-    /// False when the checkout failed (reported as an operationFailed)
-    /// or no repository is open.
+    /// False when the checkout failed or was refused while a step runs
+    /// (either reported as an operationFailed), or no repository is
+    /// open.
     bool checkoutBranch(const QString& name);
-    /// The sidebar's "Checkout as local branch" on `remoteBranch`
-    /// ("origin/feature/x"): the local branch named for it
-    /// ("feature/x"), created to track it unless it exists. git runs on
-    /// a worker: a first checkout can take minutes. Reports failure as
-    /// operationFailed("checkout", …).
-    void checkoutRemoteBranch(const QString& remoteBranch);
+    /// Whether the local branch `name` ("feature/x") exists. For the
+    /// sidebar's "Checkout as local branch", which checks an existing
+    /// one out as it is (checkoutBranch) and otherwise has git create
+    /// it, as a local op of MainWindow's: a first checkout can take
+    /// minutes, and as a job of the service's it ran with no busy state,
+    /// so a second one, or a commit, met its index.lock.
+    bool localBranchExists(const QString& name) const;
 
     // The remote ops return false exactly when they reported a failure
     // (operationFailed) or no repository is open: the outcome of the op
@@ -267,7 +276,11 @@ public:
     /// prune could reach further than refs/remotes/ (a remote's fetch
     /// refspec writing tags or branches, a mirror's, or pruneTags set):
     /// that fetch prunes nothing, as a plain `git fetch` doesn't, so
-    /// local tags and branches the server doesn't have stay.
+    /// local tags and branches the server doesn't have stay. The same
+    /// goes for every initialized submodule, which the fetch may go on
+    /// into with the prune (git hands it on): one whose config would
+    /// let it reach further, or that sets fetch.prune itself, and the
+    /// fetch prunes nothing anywhere.
     /// `cancel`, when given, stops this fetch alone: set from any
     /// thread, it ends git the way cancelGitOps() does (which stops
     /// this fetch as well). MainWindow drops an auto-fetch with it.
@@ -282,10 +295,11 @@ public:
     /// rebase step, a commit and its hooks, a checkout, Git Flow,
     /// maintenance, a local op MainWindow runs on a pool thread. They
     /// fail with "Cancelled", and later ones fail at once. git and its
-    /// hooks are interrupted as by Ctrl-C (SIGTERM on Unix, a Ctrl-C on
+    /// hooks are interrupted as by Ctrl-C (SIGINT on Unix, a Ctrl-C on
     /// their console on Windows; see GitProcess::run), so git rolls its
-    /// lockfiles back and a rebase stopped mid-step stays in progress,
-    /// to be carried on later. For shutdown: MainWindow calls it before
+    /// lockfiles back, a hook finishes cleaning up (pre-commit puts the
+    /// unstaged changes back), and a rebase stopped mid-step stays in
+    /// progress, to be carried on later. For shutdown: MainWindow calls it before
     /// waiting for its pool threads, and the destructor before waiting
     /// for the service's own. Thread-safe.
     void cancelGitOps();
@@ -298,6 +312,12 @@ public:
     void rebaseContinue();
     void rebaseAbort();
     void rebaseSkip();
+
+    /// GitProcess::committedRebaseStop() for the open repository: the
+    /// todo verb of the commit the rebase stopped at when that commit
+    /// is already in the branch (an `edit`, a reword a hook turned
+    /// down), where Skip keeps it; empty otherwise. Runs git, briefly.
+    QString committedRebaseStop() const;
 
     /// Why `plan` can't run on the open repository as it is now, or an
     /// empty string when it can: HEAD has moved, or another branch is
@@ -352,11 +372,9 @@ public:
     /// `name` may be short ("v1.0") or the full "refs/tags/v1.0".
     void deleteTag(const QString& name);
 
-    // Submodules. Init and update run git on a worker: an update
-    // clones and checks out.
+    // Submodules. Init and update are MainWindow's local ops (an update
+    // clones and checks out), as sync and deinit are.
     void refreshSubmodules();
-    void submoduleInit(const QString& name);
-    void submoduleUpdate(const QString& name);
 
     // Worktrees
     void refreshWorktrees();
@@ -441,12 +459,22 @@ signals:
     /// rebase step that stopped where the plan said `edit`. Not emitted
     /// for a step whose repository was closed or swapped for another
     /// while git ran: the result would land on another one. (Opened
-    /// again, the same repository still gets it.)
+    /// again, the same repository still gets it.) A step that ends
+    /// while an open is on its way reports once that has landed or
+    /// failed, if its repository is the open one then.
     void rebaseStepFinished(const QString& step, bool success, bool inProgress);
     /// A step started on the open repository (see rebaseStepRunning()):
     /// a rebase step, a sequence's, an abort, or a commit ("commit"). It
     /// ends with rebaseStepFinished, or commitComplete for a commit.
     void stepStarted(const QString& step);
+    /// Just before the rebaseStepFinished of a step that succeeded with
+    /// git's "warning:" lines on stderr (prefix removed, one per line).
+    /// A cherry-pick's or revert's --abort that didn't rewind says so
+    /// only there ("You seem to have moved HEAD. Not rewinding, check
+    /// your HEAD!") and exits 0.
+    void stepWarning(const QString& step, const QString& warning);
+    /// From the service's thread, to the repository the pick was made
+    /// in, as rebaseStepFinished is (reportTo).
     void cherryPickComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
 
@@ -513,6 +541,26 @@ private:
             Qt::QueuedConnection);
     }
 
+    /// True, having reported it as an operationFailed of `operation`,
+    /// when a step runs on the open repository (rebaseStepRunning()):
+    /// the staging, branch, stash and cherry-pick mutators start with
+    /// it.
+    bool refusedWhileAStepRuns(const QString& operation);
+
+    /// The way out for an operation's outcome (a rebase step's, a
+    /// cherry-pick's), on the service's thread: `report` runs if the
+    /// repository `key` (its git dir) is the open one, the same one
+    /// opened again included. While an open is on its way it waits for
+    /// that to land or fail, as a local op's outcome does
+    /// (RepoCommandController::deliver): delivered at once, a step that
+    /// ended while the next repository was opening said so, and offered
+    /// to resolve its conflicts, over that one's "Opening…", and the
+    /// offer outlived the swap. A close drops it.
+    void reportTo(std::string key, std::function<void()> report);
+    /// Runs or drops the reports waiting on an open (reportTo), once no
+    /// open is on its way any more.
+    void settleReports();
+
     /// Runs one rebase step on a worker (`step` names it in
     /// operationFailed and rebaseStepFinished): reports a failure,
     /// emits repoStateReady and rebaseStepFinished, and asks for the
@@ -545,8 +593,12 @@ private:
         std::make_shared<std::atomic<bool>>(false);
 
     // An openRepositoryAsync is in flight (service thread only): no
-    // refresh result is delivered meanwhile (deliverFor).
+    // refresh result is delivered meanwhile (deliverFor), and outcomes
+    // wait in waitingReports_ (reportTo).
     bool openPending_ = false;
+    // reportTo's reports waiting for the open on its way, by the key of
+    // the repository each is for (service thread only).
+    std::vector<std::pair<std::string, std::function<void()>>> waitingReports_;
     // rebaseStepKey() of the open repository, empty when none is
     // (service thread only): a rebase step's outcome is delivered only
     // while it matches the step's.
@@ -579,8 +631,11 @@ private:
 
     // The repositories a rebase step is running on, by git dir
     // (Repository::path(): the same for every open of one). Under
-    // repoMutex_: a step's worker takes its own out when git is done.
+    // stepsMutex_, which the step's worker takes inside repoMutex_ when
+    // it reads the state it reports: a step's worker takes its own out
+    // when git is done. rebaseStepRunning() needs stepsMutex_ alone.
     std::set<std::string> rebaseSteps_;
+    mutable std::mutex stepsMutex_;
 
     LogScope logScope_ = LogScope::Head;
     QStringList selectedBranches_;

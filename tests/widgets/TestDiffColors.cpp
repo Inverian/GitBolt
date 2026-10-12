@@ -465,6 +465,39 @@ private slots:
         QVERIFY2(contrast(color, toolBar) >= 4.5, qPrintable(describe(color, toolBar)));
     }
 
+    // A remote op's failure stays on the label until the next op, so it
+    // must follow a theme switch. Its red was picked once, for the theme
+    // of the moment, and kept in the label's own style sheet: after a
+    // switch it read at 2.7:1 on the dark tool bar, and at 2.2:1 on the
+    // light one the other way round.
+    void stickyOpFailureFollowsAThemeSwitch() {
+        QWidget bar;
+        auto* label = new QLabel(&bar);
+        gitbolt::ui::InlineOpIndicator indicator(label);
+        bar.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&bar));
+        indicator.fail(QStringLiteral("fetch failed: no route"), QStringLiteral("no route"), 0);
+        const QColor lightFailure = textColor(label);
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        const QColor darkBar = QColor::fromRgb(kDarkToolBar);
+        QColor color = textColor(label);
+        QVERIFY2(contrast(color, darkBar) >= 4.5, qPrintable(describe(color, darkBar)));
+        QVERIFY(label->text().startsWith(QStringLiteral("✗ ")));
+
+        theme_.setTheme(QStringLiteral("Light"));
+        color = textColor(label);
+        QCOMPARE(color, lightFailure);
+        const QColor lightBar = QApplication::palette().color(QPalette::Window);
+        QVERIFY2(contrast(color, lightBar) >= 4.5, qPrintable(describe(color, lightBar)));
+
+        // A success, shown until it clears, the same way.
+        indicator.succeed(QStringLiteral("Pushed"), 0);
+        theme_.setTheme(QStringLiteral("Dark"));
+        color = textColor(label);
+        QVERIFY2(contrast(color, darkBar) >= 4.5, qPrintable(describe(color, darkBar)));
+    }
+
     // The status line's error colour (Clone with no URL), in both
     // themes, and across a switch while it shows.
     void cloneStatusReadsInTheDarkTheme() {

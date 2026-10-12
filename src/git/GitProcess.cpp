@@ -12,6 +12,7 @@
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QThread>
+#include <QThreadPool>
 #include <optional>
 #include <algorithm>
 #include <mutex>
@@ -436,9 +437,26 @@ void ProcessTree::terminate(QProcess& process)
 {
     // Ctrl-C first, so that git rolls back its lockfiles; then the job
     // ends whatever is left, or everything at once where no Ctrl-C
-    // could be sent (a lockfile git held then stays behind).
-    if (interruptTree(process))
+    // could be sent (a lockfile git held then stays behind). git exits
+    // within milliseconds of the Ctrl-C, but a hook it ran gets one too
+    // and may have cleaning up to do: pre-commit puts back the unstaged
+    // changes it set aside. Ended with git, the hook lost them from the
+    // work tree. So the job's other processes get the same time to
+    // finish before it is ended.
+    if (interruptTree(process)) {
         process.waitForFinished(kTerminateWaitMs);
+        if (job_) {
+            QElapsedTimer grace;
+            grace.start();
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+            while (grace.elapsed() < kTerminateWaitMs
+                   && QueryInformationJobObject(job_, JobObjectBasicAccountingInformation,
+                                                &info, static_cast<DWORD>(sizeof(info)),
+                                                nullptr)
+                   && info.ActiveProcesses > 0)
+                QThread::msleep(10);
+        }
+    }
     if (job_)
         TerminateJobObject(job_, 1);
     else
@@ -492,13 +510,25 @@ void ProcessTree::terminate(QProcess& process)
         process.waitForFinished(kTerminateWaitMs);
         return;
     }
-    // SIGTERM first: git clone's handler deletes the half-written
-    // destination itself, every git rolls back the lockfiles it holds
-    // (index.lock, HEAD.lock), and ssh closes its connection. SIGKILL then
-    // sweeps the group for anything that ignored SIGTERM or outlived
-    // git (ESRCH once the group is empty).
-    ::kill(-group, SIGTERM);
+    // SIGINT first, what Ctrl-C in a terminal sends: git clone's
+    // handler deletes the half-written destination itself, every git
+    // rolls back the lockfiles it holds (index.lock, HEAD.lock), and ssh
+    // closes its connection. A hook gets it too, and may have cleaning
+    // up to do once git is gone: pre-commit puts back the unstaged
+    // changes it set aside, in a trap or a Python `finally` (which
+    // SIGTERM's default action skips). git exits within milliseconds,
+    // and the SIGKILL that came right after it used to end that cleanup
+    // halfway: quitting during a commit lost the user's unstaged changes
+    // from the work tree. So the whole group gets the time git got
+    // before SIGKILL sweeps it for anything that ignored SIGINT or hung.
+    // kill(…, 0) fails once the group is empty (ESRCH), or holds only
+    // zombies (EPERM, on macOS).
+    ::kill(-group, SIGINT);
     process.waitForFinished(kTerminateWaitMs);
+    QElapsedTimer grace;
+    grace.start();
+    while (::kill(-group, 0) == 0 && grace.elapsed() < kTerminateWaitMs)
+        QThread::msleep(10);
     ::kill(-group, SIGKILL);
     process.waitForFinished(kTerminateWaitMs);
 }
@@ -509,6 +539,35 @@ void ProcessTree::release()
 }
 
 #endif
+
+// A git command on a thread of the global pool, where every long git job
+// runs (a commit and its hooks, a rebase step, a checkout, a local op, a
+// fetch), spends its time waiting on git, and the thread is one of the
+// pool's idealThreadCount() slots all the while. The pool also opens
+// repositories and runs every refresh: on a 2-CPU machine two such jobs
+// held both slots, and an open waited the whole commit out ("Opening…"
+// for as long as a pre-commit hook ran), the window's refreshes with it.
+// While git runs, the slot goes back to the pool, which starts another
+// thread if queued work needs one, and it is taken back once git is
+// done. (QThreadPool::releaseThread, made for a thread that waits.)
+class PoolSlotLent {
+public:
+    PoolSlotLent()
+        : pool_(QThreadPool::globalInstance()->contains(QThread::currentThread())
+                    ? QThreadPool::globalInstance() : nullptr) {
+        if (pool_)
+            pool_->releaseThread();
+    }
+    ~PoolSlotLent() {
+        if (pool_)
+            pool_->reserveThread();
+    }
+    PoolSlotLent(const PoolSlotLent&) = delete;
+    PoolSlotLent& operator=(const PoolSlotLent&) = delete;
+
+private:
+    QThreadPool* const pool_;
+};
 
 // Any entry makes a directory non-empty for git — .DS_Store and other
 // hidden files included — and so it must for us.
@@ -602,8 +661,10 @@ bool GitProcess::cancelled() const
 // every later stage, commit and checkout tripped over, and the hook or
 // filter it was running ran on, orphaned (a merge whose post-merge
 // hook was slow had gone through, and was reported as timed out). Now
-// git is interrupted first (SIGTERM on Unix, Ctrl-C on Windows; see
-// ProcessTree::terminate) and rolls its lockfiles back itself.
+// git is interrupted first (SIGINT, as Ctrl-C sends, on Unix; a Ctrl-C
+// on Windows; see ProcessTree::terminate) and rolls its lockfiles back
+// itself, and a hook gets to finish cleaning up before the rest is
+// killed.
 Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, int timeoutMs,
                                           const std::string* stdinData,
                                           const std::map<std::string, std::string>& extraEnv) const
@@ -655,6 +716,7 @@ Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, 
     // Each wait also moves git's output into QProcess's buffers (and
     // the payload into its stdin), so its pipes can't fill up and
     // stall it between polls.
+    const PoolSlotLent lent;
     while (!process.waitForFinished(kPollMs) && process.state() != QProcess::NotRunning) {
         const bool stop = cancelled();
         if (stop || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
@@ -780,6 +842,7 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     };
 
     bool cancelled = false;
+    const PoolSlotLent lent;
     while (process.state() != QProcess::NotRunning) {
         if (cancelFlag && cancelFlag->load()) {
             cancelled = true;
@@ -980,6 +1043,28 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
     };
     const auto headId = patchId("HEAD");
     return headId && headId == patchId(hash);
+}
+
+std::string GitProcess::committedRebaseStop() const {
+    const QString dir = gitPath(QStringLiteral("rebase-merge"));
+    if (dir.isEmpty())
+        return {};
+    QFile done(dir + QStringLiteral("/done"));
+    if (!done.open(QIODevice::ReadOnly))
+        return {};
+    const QList<QByteArray> words = done.readAll().trimmed().split('\n').last().simplified().split(' ');
+    if (words.size() < 2)
+        return {};
+    std::string verb;
+    if (words[0] == "pick" || words[0] == "p")
+        verb = "pick";
+    else if (words[0] == "reword" || words[0] == "r")
+        verb = "reword";
+    else if (words[0] == "edit" || words[0] == "e")
+        verb = "edit";
+    else
+        return {};
+    return headIsPickOf(words[1].toStdString()) ? verb : std::string();
 }
 
 QString GitProcess::rejectedRewordMessage() const {

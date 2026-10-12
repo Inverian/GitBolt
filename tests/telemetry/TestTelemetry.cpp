@@ -1058,19 +1058,28 @@ private slots:
         Config config = testConfig(*stub_, dir_->path());
         config.firstFlushDelayMs = when == QLatin1String("quit") ? 60000 : 200;
         config.flushIntervalMs = 300;
-        stub_->respond = [](const StubRequest&) { return StubResponse{503, {}}; };
         bool persisted = true;
+        stub_->respond = [](const StubRequest&) { return StubResponse{503, {}}; };
+        qsizetype sent = 0;
+        if (when == QLatin1String("backoff")) {
+            // The first request fails, and the switch goes off elsewhere
+            // while it is answered: the next tick would retry it. Turned
+            // off once the failure showed on disk, it came too late now
+            // and then (CI, 1 run in 40 here): with 300 ms between ticks,
+            // the retry had gone out by the time the poll saw the first
+            // failure, so two requests were made before the switch was
+            // off, as the service rightly reported.
+            stub_->respond = [&persisted](const StubRequest&) {
+                persisted = false;
+                return StubResponse{503, {}};
+            };
+            sent = 1;
+        }
         TelemetryService service(config, provider.fn(), true, [&persisted] { return persisted; });
         service.start();
         service.recordLaunch();
-        qsizetype sent = 0;
-        if (when == QLatin1String("backoff")) {
-            // The first request failed; the next tick would retry it.
-            QTRY_VERIFY(!queueLines(config).isEmpty()
-                        && queueLines(config).first().value(QStringLiteral("attempts")).toInt()
-                               == 1);
-            sent = 1;
-        }
+        if (when == QLatin1String("backoff"))
+            QTRY_COMPARE(stub_->requests().size(), sent);
 
         persisted = false;
         if (when == QLatin1String("quit"))

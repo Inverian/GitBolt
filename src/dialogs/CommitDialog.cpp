@@ -467,6 +467,11 @@ void CommitDialog::wireConnections()
         if (isVisible())
             updateAmend();
     });
+    // A step on the repository (a rebase step, an abort, a commit, this
+    // dialog's own or not) holds the index while it runs: locked until
+    // it reports (commitComplete above, for a commit).
+    connect(svc_, &services::GitService::stepStarted, this, [this] { applyLocks(); });
+    connect(svc_, &services::GitService::rebaseStepFinished, this, [this] { applyLocks(); });
 
     // Branch list refreshes after every checkout / refresh / open. Use it
     // as our "the current branch may have changed" signal so the title
@@ -498,9 +503,20 @@ void CommitDialog::setLocalOpBusy(bool busy)
     applyLocks();
 }
 
+bool CommitDialog::stepRunning() const
+{
+    return svc_ && svc_->rebaseStepRunning();
+}
+
 void CommitDialog::applyLocks()
 {
-    const bool locked = pendingCommit_ || localOpBusy_;
+    // A step running on the repository counts as well as the commit
+    // this dialog waits for: away to another repository and back while
+    // the commit's hook ran, the dialog no longer waited for it (that
+    // open cleared the wait), and unlocked with it still running. A
+    // file staged then went into it, the hook never seeing it.
+    const bool step = stepRunning();
+    const bool locked = pendingCommit_ || localOpBusy_ || step;
     // Both file lists, their filters and buttons; each child keeps its
     // own (selection-driven) state for when the lock goes.
     leftSplitter_->setEnabled(!locked);
@@ -517,6 +533,8 @@ void CommitDialog::applyLocks()
         updateAmend();
     commitBtn_->setToolTip(pendingCommit_ ? tr("Committing… (git runs the repository's hooks)")
                            : localOpBusy_ ? tr("Another operation is still running")
+                           : step         ? tr("Another git operation is still running "
+                                               "on this repository")
                                           : QString());
 }
 
@@ -536,7 +554,8 @@ void CommitDialog::updateAmend()
         : QString();
     if (!problem.isEmpty())
         amendCheck_->setChecked(false);
-    amendCheck_->setEnabled(problem.isEmpty() && !pendingCommit_ && !localOpBusy_);
+    amendCheck_->setEnabled(problem.isEmpty() && !pendingCommit_ && !localOpBusy_
+                            && !stepRunning());
     amendCheck_->setToolTip(problem);
 }
 
@@ -849,7 +868,7 @@ void CommitDialog::onCommitClicked()
 {
     // One commit at a time: Ctrl+Return reached here while one ran,
     // and the first one's outcome was taken for the second's.
-    if (pendingCommit_ || localOpBusy_)
+    if (pendingCommit_ || localOpBusy_ || stepRunning())
         return;
     const QString msg = messageEdit_->toPlainText().trimmed();
     if (msg.isEmpty()) {
@@ -870,7 +889,7 @@ void CommitDialog::onCommitAndPushClicked()
     // Commit, then push. The push half fires as
     // pushAfterCommitRequested once commitComplete reports success —
     // never before, so a failed or rejected commit pushes nothing.
-    if (pendingCommit_ || localOpBusy_)
+    if (pendingCommit_ || localOpBusy_ || stepRunning())
         return;
     pushAfterCommit_ = true;
     onCommitClicked();
@@ -880,7 +899,13 @@ void CommitDialog::onCommitAndPushClicked()
 
 void CommitDialog::onCommitComplete(bool success, const QString& message)
 {
-    if (!pendingCommit_) return;
+    // Not this dialog's commit, or one it stopped waiting for: the step
+    // it locked for is over all the same (the service clears its mark
+    // before it reports).
+    if (!pendingCommit_) {
+        applyLocks();
+        return;
+    }
     pendingCommit_ = false;
     pendingKey_.clear();
     applyLocks();

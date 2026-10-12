@@ -3,17 +3,28 @@
 //
 // Every git command runs in a process group of its own (a job object on
 // Windows), and a timeout stops it the way a cancel does: git is
-// interrupted first, SIGTERM on Unix and a Ctrl-C on its console on
+// interrupted first, SIGINT on Unix and a Ctrl-C on its console on
 // Windows, so it rolls back the lockfiles it holds, then whatever is
 // left is killed. A timeout used to kill git alone: its index.lock
 // stayed behind, which every later stage, commit and checkout tripped
 // over, and the filter or hook it was running ran on, orphaned. On
 // Windows, ending the job alone left the lock behind just the same.
 //
+// The rest of the group gets its time too: a pre-commit hook that set
+// the unstaged changes aside puts them back when it is interrupted, and
+// a cancelled commit (quitting during it) must not end that halfway.
+//
 
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QTest>
+#include <QThread>
+
+#include <atomic>
+#include <memory>
+#include <thread>
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
@@ -86,7 +97,115 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!gitbolt::test::processAlive(filter), 3000);
     }
 
+    // pre-commit's way with unstaged changes (staged_files_only): saved
+    // to a patch and checked out, so the hooks see only what is staged,
+    // and put back when the hook ends, however it ends. Interrupted, the
+    // hook puts them back on its way out: a shell in a trap, Python in a
+    // `finally` (which only SIGINT reaches: SIGTERM's default action
+    // skips it). Cancelled 2 ms after the signal, once git had exited,
+    // the hook was killed halfway, and the edits were gone from the work
+    // tree, kept only in the hook's patch file.
+    void cancelledCommitLetsAHookPutChangesBack_data() {
+        QTest::addColumn<QString>("language");
+        QTest::newRow("sh trap") << QStringLiteral("sh");
+        QTest::newRow("python finally") << QStringLiteral("python");
+    }
+
+    void cancelledCommitLetsAHookPutChangesBack() {
+        QFETCH(QString, language);
+#ifdef Q_OS_WIN
+        // The Ctrl-C reaches Git for Windows' sh as SIGINT, and the job
+        // waits for it the same way; not run here, as the msys2
+        // runtime's handling of a trap under a hidden console is not
+        // what this test is about.
+        QSKIP("Unix process groups");
+#endif
+        QString interpreter = QStringLiteral("/bin/sh");
+        if (language == QLatin1String("python")) {
+            interpreter = QStandardPaths::findExecutable(QStringLiteral("python3"));
+            if (interpreter.isEmpty())
+                QSKIP("no python3");
+        }
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("f.txt"), QByteArrayLiteral("one\n"),
+                                    QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "user.name", "T"})));
+        QVERIFY(succeeded(git.run({"config", "user.email", "t@example.com"})));
+        QVERIFY(succeeded(git.run({"config", "commit.gpgSign", "false"})));
+        QVERIFY(succeeded(git.run({"config", "core.hooksPath", ".git/hooks"})));
+
+        // Staged: "two". Unstaged on top of it: "three".
+        writeFile(repo.path() + QStringLiteral("/f.txt"), "two\n");
+        QVERIFY(succeeded(git.run({"add", "f.txt"})));
+        writeFile(repo.path() + QStringLiteral("/f.txt"), "three\n");
+
+        // The restore takes a moment (a big patch does), so a kill that
+        // comes right behind git always lands in the middle of it.
+        const QByteArray sh =
+            "#!/bin/sh\n"
+            "git diff --binary > .git/unstaged.patch\n"
+            "restore() { sleep 0.3; git apply .git/unstaged.patch && echo done > .git/restored; exit 1; }\n"
+            "trap restore INT TERM\n"
+            "git checkout -- .\n"
+            "echo started > .git/hook-started\n"
+            "sleep 30\n";
+        const QByteArray python =
+            "#!" + QFile::encodeName(interpreter) + "\n"
+            "import subprocess, time\n"
+            "patch = subprocess.run(['git', 'diff', '--binary'], capture_output=True).stdout\n"
+            "open('.git/unstaged.patch', 'wb').write(patch)\n"
+            "subprocess.run(['git', 'checkout', '--', '.'])\n"
+            "try:\n"
+            "    open('.git/hook-started', 'w').write('started')\n"
+            "    time.sleep(30)\n"
+            "finally:\n"
+            "    time.sleep(0.3)\n"
+            "    subprocess.run(['git', 'apply', '.git/unstaged.patch'])\n"
+            "    open('.git/restored', 'w').write('done')\n";
+        const QString hook = repo.path() + QStringLiteral("/.git/hooks/pre-commit");
+        writeFile(hook, language == QLatin1String("sh") ? sh : python);
+        QVERIFY(QFile::setPermissions(hook, QFile::ReadOwner | QFile::WriteOwner
+                                                | QFile::ExeOwner));
+
+        // As quitting cancels it: the service's flag, from another thread.
+        auto cancel = std::make_shared<std::atomic<bool>>(false);
+        gitbolt::git::GitProcess committer(repo.path().toStdString());
+        committer.addCancelFlag(cancel);
+        std::optional<gitbolt::git::Result<gitbolt::git::ProcessOutput>> result;
+        std::thread worker([&] { result.emplace(committer.commit("msg\n", false)); });
+        const QString started = repo.path() + QStringLiteral("/.git/hook-started");
+        const bool hookStarted = QTest::qWaitFor([&] { return QFileInfo::exists(started); }, 10000);
+        cancel->store(true);
+        worker.join();
+        QVERIFY(hookStarted);
+        QVERIFY(result && !result->ok());
+        QCOMPARE(result->error().message(), std::string("Cancelled"));
+
+        // Nothing committed, the index as staged, the edit back.
+        QVERIFY(QFileInfo::exists(repo.path() + QStringLiteral("/.git/restored")));
+        QCOMPARE(readFile(repo.path() + QStringLiteral("/f.txt")), QByteArray("three\n"));
+        const auto log = git.run({"log", "--format=%s"});
+        QVERIFY(succeeded(log));
+        QCOMPARE(QByteArray::fromStdString(log->stdoutData), QByteArray("base\n"));
+        const auto staged = git.run({"show", ":f.txt"});
+        QVERIFY(succeeded(staged));
+        QCOMPARE(QByteArray::fromStdString(staged->stdoutData), QByteArray("two\n"));
+        QVERIFY(!QFileInfo::exists(repo.path() + QStringLiteral("/.git/index.lock")));
+    }
+
 private:
+    static void writeFile(const QString& path, const QByteArray& data) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write(data);
+    }
+
+    static QByteArray readFile(const QString& path) {
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray("(unreadable)");
+    }
+
     static bool succeeded(const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
         return r.ok() && r.value().success();
     }

@@ -13,13 +13,18 @@ switch.
 2. While the dialog's `git rebase` runs (held up here by a post-commit
    hook), the in-progress bar that the watcher's refresh brings up
    offers nothing. Its Continue, Skip and Abort used to be live, each a
-   second git on top of the running one. Nor does the dialog, which
-   stays usable, start another rebase meanwhile: it says so, and stays
-   open.
+   second git on top of the running one. Nor can another rebase be
+   started meanwhile: Commands > Rebase is off with the repository's
+   other commands until git is done (the service turns a second one
+   down too, TestGitService::nothingElseRunsWhileARebaseStepDoes).
 3. A Continue still running when another repository is opened leaves
    that one alone. Its bar is live (it stayed disabled until the step
    finished), and the step's outcome, a conflict here, isn't reported
-   there (GitBolt offered to resolve that repository's conflicts).
+   there (GitBolt offered to resolve that repository's conflicts). Nor
+   while that open is still on its way (held here, as a slow open is):
+   "rebase --continue failed" and the offer to resolve came up over
+   "Opening other…", and a Yes once it had landed opened the resolver
+   on the other repository.
 4. A Continue still running when its own repository is opened again
    (handed over by a second launch, as Recent or the dashboard would)
    keeps that repository's bar quiet, and its outcome is reported. It
@@ -34,7 +39,7 @@ import shlex
 import subprocess
 import time
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import App, Failure, OpenGate, git, make_repo, run
 
 
 def commit(work: str, name: str, content: str, msg: str) -> None:
@@ -192,18 +197,11 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure(f"the bar offers {live} while git is still rebasing")
     if app.state().get("repoState") != "rebase":
         raise Failure("the rebase didn't wait for the hook")
-    #    The dialog, modeless, can still start another: it's turned
-    #    down, staying open, and the bar stays quiet. (git would have
-    #    refused it, and its failure re-enabled the bar.)
-    open_dialog(app, "main")
-    turned_down(app, "the second rebase turned down")
-    live = sorted(b for b, enabled in buttons(app).items()
-                  if b in ("Continue", "Skip", "Abort") and enabled)
-    if live:
-        raise Failure(f"the bar offers {live} while git is still rebasing")
-    app.ok("click Cancel")
-    app.wait_until(lambda s: "Interactive Rebase" not in s.get("windows", []),
-                   "the dialog closed")
+    #    Nor another rebase: the repository's commands are off while
+    #    git rebases, as while a local op runs.
+    for action in ("commands.rebase", "act.commit", "act.pull"):
+        if app.action_enabled(action):
+            raise Failure(f"{action} enabled while git is still rebasing")
     os.remove(hold)
     want = ["slow 1", "main 2", "main 1", "base"]
     app.wait_until(lambda s: s.get("repoState") == "none"
@@ -226,16 +224,21 @@ def test(binary: str, scratch: str, apps: list) -> None:
     app.wait_until(lambda s: buttons(app).get("Continue") is False,
                    "Continue running")
 
+    # The other repository's open is held until the step is over.
+    gate = OpenGate(other, scratch)
     second = app.launch_second(other)
     if second.returncode != 0:
         raise Failure(f"hand-off of the other repository failed: "
                       f"rc={second.returncode} {second.stderr[-400:]!r}")
-    app.wait_until(lambda s: s.get("repoPath", "").rstrip("/").endswith("other")
-                   and s.get("repoState") == "merge",
-                   "the other repository open")
-    app.wait_until(lambda s: buttons(app).get("Abort") is True
-                   and buttons(app).get("Resolve Conflicts") is True,
-                   "the other repository's bar, live")
+
+    def step_reported_here() -> str:
+        # (The offer is a question box: Yes / No.)
+        if "No" in buttons(app):
+            return "the first repository's conflict was offered for resolving"
+        note = app.state().get("statusMessage", "")
+        if "rebase" in note.lower():
+            return f"the first repository's step reported: {note!r}"
+        return ""
 
     os.remove(hold)
     deadline = time.monotonic() + 30
@@ -245,15 +248,23 @@ def test(binary: str, scratch: str, apps: list) -> None:
                           "on its conflict")
         time.sleep(0.2)
     time.sleep(2)       # the step's outcome, had it been sent, is in
-    # (The offer is a question box: Yes / No.)
-    if "No" in buttons(app):
-        raise Failure("the first repository's conflict was offered for "
-                      "resolving in the other one")
-    note = app.state().get("statusMessage", "")
-    if "rebase" in note.lower():
-        raise Failure(f"the first repository's step reported here: {note!r}")
-    if buttons(app).get("Abort") is not True:
-        raise Failure(f"the other repository's bar went dead: {buttons(app)}")
+    if not any(t.startswith("Opening") for t in app.state()["windows"]):
+        raise Failure(f"the other repository's open wasn't held: {app.state()['windows']}")
+    problem = step_reported_here()
+    if problem:
+        raise Failure(f"while the other repository was opening, {problem}")
+
+    gate.release()
+    app.wait_until(lambda s: s.get("repoPath", "").rstrip("/").endswith("other")
+                   and s.get("repoState") == "merge",
+                   "the other repository open")
+    app.wait_until(lambda s: buttons(app).get("Abort") is True
+                   and buttons(app).get("Resolve Conflicts") is True,
+                   "the other repository's bar, live")
+    time.sleep(1)
+    problem = step_reported_here()
+    if problem:
+        raise Failure(f"in the other repository, {problem}")
 
     # 4. Back on the first repository, its conflict resolved: Continue
     #    ("stack 3" waits on the hold), and the same repository handed

@@ -99,11 +99,12 @@ void BranchTreeWidget::setupToolbar() {
     toolbar_->setIconSize(QSize(16, 16));
     toolbar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
 
-    auto* newBranchAction = toolbar_->addAction(
+    newBranchAction_ = toolbar_->addAction(
         QIcon::fromTheme(QStringLiteral("list-add")),
         tr("New Branch"));
-    newBranchAction->setObjectName(QStringLiteral("branchTree.newBranch"));
-    connect(newBranchAction, &QAction::triggered,
+    newBranchAction_->setObjectName(QStringLiteral("branchTree.newBranch"));
+    newBranchAction_->setEnabled(repoActionsEnabled_);
+    connect(newBranchAction_, &QAction::triggered,
             this, &BranchTreeWidget::onNewBranchClicked);
 
     toolbar_->addSeparator();
@@ -114,7 +115,15 @@ void BranchTreeWidget::setupToolbar() {
     toolbar_->addWidget(filterInput_);
 }
 
+void BranchTreeWidget::setRepoActionsEnabled(bool on) {
+    repoActionsEnabled_ = on;
+    if (newBranchAction_)
+        newBranchAction_->setEnabled(on);
+}
+
 void BranchTreeWidget::onDoubleClicked(const QModelIndex& proxyIndex) {
+    if (!repoActionsEnabled_)
+        return;
     QModelIndex sourceIndex = filterProxy_->mapToSource(proxyIndex);
     if (model_->isCategoryIndex(sourceIndex))
         return;
@@ -263,6 +272,13 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         });
     }
 
+    // Every entry runs git on the repository: shown, so the menu still
+    // says what there is, but off while the window's actions are.
+    if (!repoActionsEnabled_) {
+        for (QAction* action : menu.actions())
+            action->setEnabled(false);
+    }
+
     menu.exec(globalPos);
 }
 
@@ -279,6 +295,8 @@ void BranchTreeWidget::onFilterChanged(const QString& text) {
 }
 
 void BranchTreeWidget::onNewBranchClicked() {
+    if (!repoActionsEnabled_)
+        return;
     bool ok = false;
     QString name = QInputDialog::getText(this, tr("New Branch"),
                                           tr("Branch name:"),

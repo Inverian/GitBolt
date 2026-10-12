@@ -34,6 +34,15 @@ public:
 
     models::BranchModel* branchModel() const { return model_; }
 
+    /// Off while the window keeps the repository's actions off (no
+    /// repository, an open on its way, a local op or a step running):
+    /// New Branch and every context-menu entry are disabled, and a
+    /// double-click checks nothing out. They asked for a name or a
+    /// confirmation first, then had it thrown away with a passing
+    /// "Another operation is still running…".
+    void setRepoActionsEnabled(bool on);
+    bool repoActionsEnabled() const { return repoActionsEnabled_; }
+
 signals:
     void branchSelected(const QString& name);
     void checkoutRequested(const QString& name);
@@ -65,6 +74,8 @@ private:
     QSortFilterProxyModel* filterProxy_ = nullptr;
     QToolBar* toolbar_ = nullptr;
     QLineEdit* filterInput_ = nullptr;
+    QAction* newBranchAction_ = nullptr;
+    bool repoActionsEnabled_ = true;
 };
 
 } // namespace gitbolt::widgets

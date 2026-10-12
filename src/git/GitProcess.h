@@ -31,12 +31,14 @@ public:
     /// process group of its own (a job object on Windows), as clone()
     /// does: a timeout, or a cancel (addCancelFlag), stops git and
     /// every process it started. git is interrupted first so it can
-    /// roll back its lockfiles: SIGTERM to the group on Unix; on
-    /// Windows a Ctrl-C to the hidden console git and its children
+    /// roll back its lockfiles: SIGINT (Ctrl-C's) to the group on Unix;
+    /// on Windows a Ctrl-C to the hidden console git and its children
     /// share, which works while GitBolt has no console of its own (the
-    /// app never does). Whatever is left is then killed: SIGKILL, or
-    /// the job ended. Where no Ctrl-C could be sent, the job is ended
-    /// outright, and a lockfile git held stays behind.
+    /// app never does). The group then gets as long again to finish (a
+    /// hook putting back what it set aside), and whatever is left is
+    /// killed: SIGKILL, or the job ended. Where no Ctrl-C could be
+    /// sent, the job is ended outright, and a lockfile git held stays
+    /// behind.
     Result<ProcessOutput> run(const std::vector<std::string>& args,
                               std::optional<int> timeoutMs = std::nullopt) const;
 
@@ -148,6 +150,15 @@ public:
     Result<ProcessOutput> rebaseContinue() const;
     Result<ProcessOutput> rebaseAbort() const;
     Result<ProcessOutput> rebaseSkip() const;
+
+    /// The todo verb ("pick", "reword" or "edit") of the commit the
+    /// rebase in progress stopped at, when that commit is in the branch
+    /// already: an `edit` stops once it has picked it, and a reword
+    /// whose new message a hook turned down stops with it picked under
+    /// its old one (see headIsPickOf()). rebaseSkip() then only goes
+    /// on, and the commit stays. Empty where the stop has nothing
+    /// committed (a conflict), and with no rebase in progress.
+    std::string committedRebaseStop() const;
 
     /// `git cherry-pick --continue`, or `git revert --continue` when
     /// `revert`: carries on with a sequence of several commits (see

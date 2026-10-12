@@ -131,8 +131,13 @@ void RepoOperationBar::refresh() {
             : sequencePaused_
             ? tr("A cherry-pick of several commits is paused. Continue to pick the rest.")
             : tr("A cherry-pick is in progress. Commit to finish it.");
-        abortTip = tr("Stop the cherry-pick and put the branch back where it was "
-                      "(git cherry-pick --abort)");
+        // Paused after a commit made during it, git stops it without
+        // rewinding (sequenceSkippable() is its rollback_is_safe()).
+        abortTip = sequencePaused_ && !sequenceSkippable_
+            ? tr("Stop the cherry-pick; the commits picked so far stay on the branch "
+                 "(git cherry-pick --abort)")
+            : tr("Stop the cherry-pick and put the branch back where it was "
+                 "(git cherry-pick --abort)");
         break;
     case git::RepoState::Revert:
         text = conflicted
@@ -141,7 +146,10 @@ void RepoOperationBar::refresh() {
             : sequencePaused_
             ? tr("A revert of several commits is paused. Continue to revert the rest.")
             : tr("A revert is in progress. Commit to finish it.");
-        abortTip = tr("Stop the revert and put the branch back where it was (git revert --abort)");
+        abortTip = sequencePaused_ && !sequenceSkippable_
+            ? tr("Stop the revert; the commits reverted so far stay on the branch "
+                 "(git revert --abort)")
+            : tr("Stop the revert and put the branch back where it was (git revert --abort)");
         break;
     case git::RepoState::None:
     case git::RepoState::Other:

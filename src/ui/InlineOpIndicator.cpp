@@ -1,6 +1,7 @@
 #include "ui/InlineOpIndicator.h"
 
 #include <QApplication>
+#include <QEvent>
 #include <QPalette>
 
 #include <QFontMetrics>
@@ -21,11 +22,14 @@ constexpr int kMaxTextWidth = 360;
 InlineOpIndicator::InlineOpIndicator(QLabel* label, QObject* parent)
     : QObject(parent), label_(label)
 {
+    if (label_)
+        label_->installEventFilter(this);
 }
 
 void InlineOpIndicator::start(const QString& msg)
 {
     cancelPendingClear();
+    outcome_ = Outcome::None;
     if (!label_)
         return;
     label_->setStyleSheet(QStringLiteral(
@@ -43,15 +47,38 @@ QString outcomeColor(bool success)
                       > app.color(QPalette::Window).lightness();
     if (success)
         return dark ? QStringLiteral("#3fb950") : QStringLiteral("#2e9c36");
-    return dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c43c3c");
+    // #c03a3a, not #c43c3c: that one read at 4.4997:1 on the light
+    // tool bar (#efefef), a shade under 4.5.
+    return dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c03a3a");
 }
 } // namespace
 
+void InlineOpIndicator::applyOutcomeStyle()
+{
+    if (!label_ || outcome_ == Outcome::None)
+        return;
+    const QString sheet = QStringLiteral("QLabel { color: %1; font-weight: bold; }")
+                              .arg(outcomeColor(outcome_ == Outcome::Success));
+    // Setting it changes the label's palette, which comes back here:
+    // only a sheet that differs is set.
+    if (label_->styleSheet() != sheet)
+        label_->setStyleSheet(sheet);
+}
+
+bool InlineOpIndicator::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == label_ && outcome_ != Outcome::None
+        && (event->type() == QEvent::ApplicationPaletteChange
+            || event->type() == QEvent::PaletteChange))
+        applyOutcomeStyle();
+    return QObject::eventFilter(watched, event);
+}
+
 void InlineOpIndicator::succeed(const QString& msg, int clearAfterMs)
 {
+    outcome_ = Outcome::Success;
     if (label_) {
-        label_->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-weight: bold; }").arg(outcomeColor(true)));
+        applyOutcomeStyle();
         setText(QStringLiteral("✓ %1").arg(msg));
     }
     scheduleClear(clearAfterMs);
@@ -60,9 +87,9 @@ void InlineOpIndicator::succeed(const QString& msg, int clearAfterMs)
 void InlineOpIndicator::fail(const QString& oneLine,
                              const QString& fullTooltip, int clearAfterMs)
 {
+    outcome_ = Outcome::Failure;
     if (label_) {
-        label_->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; font-weight: bold; }").arg(outcomeColor(false)));
+        applyOutcomeStyle();
         setText(QStringLiteral("✗ %1").arg(oneLine), fullTooltip);
     }
     if (clearAfterMs > 0)
@@ -73,6 +100,7 @@ void InlineOpIndicator::fail(const QString& oneLine,
 
 void InlineOpIndicator::flash(const QString& msg, int clearAfterMs)
 {
+    outcome_ = Outcome::None;
     if (label_) {
         label_->setStyleSheet(QString());
         setText(msg);
@@ -119,6 +147,7 @@ void InlineOpIndicator::scheduleClear(int ms)
 
 void InlineOpIndicator::clearNow()
 {
+    outcome_ = Outcome::None;
     if (label_) {
         label_->clear();
         label_->setStyleSheet(QString());

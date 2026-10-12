@@ -113,6 +113,9 @@ private:
     /// Unstage All made it empty; a second Commit (Ctrl+Return) started
     /// a second git commit.
     void applyLocks();
+    /// A step runs on the repository (GitService::rebaseStepRunning()):
+    /// a commit, this dialog's or another's, a rebase step, an abort.
+    bool stepRunning() const;
 
     QStringList selectedUnstagedPaths() const;
     QStringList selectedStagedPaths() const;

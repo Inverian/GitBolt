@@ -22,6 +22,7 @@
 #include <QPlainTextEdit>
 #include <QFileInfo>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalSpy>
@@ -242,6 +243,58 @@ private slots:
 
         release(repo);
         QTRY_COMPARE_WITH_TIMEOUT(pushes.count(), 1, 15000);
+    }
+
+    // Away to another repository and back while the hook runs: the
+    // other one's open ended the dialog's wait for its commit (that
+    // commit reports nowhere then), and nothing brought it back, so the
+    // dialog unlocked with the commit still running. A file staged then
+    // went into it, the hook never seeing it. The dialog stays locked
+    // while a step runs on its repository, whoever's, and the service
+    // turns staging away meanwhile too.
+    void awayAndBackDuringTheCommitStaysLocked() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::test::TestRepo other;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("a")).ok());
+        QVERIFY(other.writeAndCommit(QStringLiteral("o.txt"), "o\n", QStringLiteral("o")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(holdCommitsAtTheHook(repo));
+        repo.writeFile(QStringLiteral("x.txt"), "x\n");
+        QVERIFY(repo.stageFile(QStringLiteral("x.txt")).ok());
+        repo.writeFile(QStringLiteral("y.txt"), "y\n");
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        QSignalSpy completed(&svc, &GitService::commitComplete);
+        CommitDialog dialog(&svc, nullptr);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const auto release = qScopeGuard([&] { TestCommitDialog::release(repo); });
+        QTRY_VERIFY(child<QPushButton>(dialog, "commit.stageAllBtn")->isEnabled());
+        child<QPlainTextEdit>(dialog, "commit.message")->setPlainText(QStringLiteral("only-x"));
+        child<QPushButton>(dialog, "commit.commitBtn")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(hookStarted(repo), 15000);
+
+        QVERIFY(svc.openRepository(other.path()));
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(svc.rebaseStepRunning());
+        for (const char* name : {"commit.stageAllBtn", "commit.unstageAllBtn",
+                                 "commit.commitBtn", "commit.commitPushBtn",
+                                 "commit.amendCheck"})
+            QVERIFY2(!child<QWidget>(dialog, name)->isEnabled(), name);
+        QSignalSpy failed(&svc, &GitService::operationFailed);
+        svc.stageAll();
+        QCOMPARE(failed.count(), 1);
+        QCOMPARE(failed.first().at(0).toString(), QStringLiteral("stage all"));
+
+        TestCommitDialog::release(repo);
+        QTRY_COMPARE_WITH_TIMEOUT(completed.count(), 1, 15000);
+        QVERIFY2(completed.first().at(0).toBool(), qPrintable(completed.first().at(1).toString()));
+        QCOMPARE(output(git.run({"show", "--name-only", "--format=%s", "HEAD"})),
+                 QStringLiteral("only-x\n\nx.txt"));
+        // Over, and the dialog's own again.
+        QTRY_VERIFY(child<QPushButton>(dialog, "commit.stageAllBtn")->isEnabled());
+        QVERIFY(child<QPushButton>(dialog, "commit.commitBtn")->isEnabled());
     }
 
 private:

@@ -59,8 +59,10 @@ public:
     /// again (GitService::openKey()) still gets it, and while an open
     /// is on its way, `finished` waits for it to land or fail. The
     /// refresh set runs either way, after `finished` unless that waits.
-    /// False, starting nothing, when no repository is open or another
-    /// local op still runs (then with refused()).
+    /// False, starting nothing, when no repository is open, or another
+    /// local op or a step of the service's (GitService::
+    /// rebaseStepRunning(): a commit, a rebase step) still runs (then
+    /// with refused()).
     bool runJob(const QString& busyMessage,
                 std::function<void(const git::GitProcess&)> work,
                 std::function<void()> finished,
