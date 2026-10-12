@@ -3,6 +3,7 @@
 #include "ui/MainWindow.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "git/Askpass.h"
 #include "telemetry/EventQueue.h"
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
@@ -42,12 +43,28 @@ namespace {
 // wired up in GitProcess::applyEnvironment). Show one modal field,
 // print the answer to stdout, exit. Cancel exits nonzero, which makes
 // git abort the operation with a normal auth error instead of hanging.
+// ssh's yes-or-no questions (a new host key) get Yes / No instead.
 int runAskpass(const QString& prompt)
 {
-    // "Username for 'https://…'" wants visible text; everything else
-    // (Password for…, Enter passphrase for key…) is a secret.
-    const bool secret =
-        !prompt.contains(QStringLiteral("username"), Qt::CaseInsensitive);
+    const auto kind =
+        gitbolt::git::askpassKind(prompt, qgetenv("SSH_ASKPASS_PROMPT"));
+    if (kind == gitbolt::git::AskpassKind::YesNo) {
+        // Plain text: the host key's fingerprint is to be read, and
+        // the prompt is ssh's, not markup. No, unless the user says
+        // yes: ssh's confirm() and ask_permission() take the word.
+        QMessageBox box(QMessageBox::Question, QStringLiteral("GitBolt"),
+                        prompt.trimmed(), QMessageBox::Yes | QMessageBox::No);
+        box.setTextFormat(Qt::PlainText);
+        box.setDefaultButton(QMessageBox::No);
+        box.setWindowFlag(Qt::WindowStaysOnTopHint);
+        box.show();
+        box.raise();
+        box.activateWindow();
+        const bool yes = box.exec() == QMessageBox::Yes;
+        QTextStream(stdout) << (yes ? "yes" : "no") << "\n";
+        return 0;
+    }
+    const bool secret = kind == gitbolt::git::AskpassKind::Secret;
 
     QInputDialog dialog;
     dialog.setWindowTitle(QStringLiteral("GitBolt"));
@@ -251,6 +268,13 @@ QString telemetryQueueDir(const QString& settingsFile)
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // An askpass for a git command nobody is waiting on (the periodic
+    // auto-fetch, GitProcess::forbidPrompts): no, at once, before
+    // anything could show a window or a Dock icon. Fails the question,
+    // which fails git or ssh with its own reason.
+    if (qgetenv(gitbolt::git::kAskpassModeEnv) == gitbolt::git::kAskpassRefuse)
+        return 1;
+
     // Install crash handler before anything else. Its report header
     // says whether a later launch may upload the report: official
     // build, no environment opt-out, not a test session. There is no
@@ -296,7 +320,7 @@ int main(int argc, char* argv[]) {
     // window and exit 0 — git would read empty stdout as an empty
     // password. ssh passes no identifying flag, so the env marker set
     // by GitProcess::applyEnvironment is the switch.
-    if (qEnvironmentVariableIsSet("GITBOLT_ASKPASS_MODE")) {
+    if (qEnvironmentVariableIsSet(gitbolt::git::kAskpassModeEnv)) {
         return runAskpass(argc > 1 ? QString::fromLocal8Bit(argv[1])
                                    : QString());
     }

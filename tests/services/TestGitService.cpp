@@ -26,6 +26,9 @@
 //     goes out as such, and Continue / Skip carry it on,
 //   - tag create / delete as the Commands menu drives them,
 //   - branch checkout when a tag shares the branch's name,
+//   - the askpass git's children get, which an auto-fetch's get in a
+//     mode that never asks, and the kinds of question it tells apart,
+//   - Fetch prunes, unless fetch.prune or remote.<name>.prune says not,
 //   - cancelGitOps(), which quitting during a fetch relies on, and
 //     a fetch's own cancel flag, which drops an unwanted auto-fetch
 //     (and which GitProcess ignores when it is null),
@@ -67,6 +70,7 @@
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
+#include "git/Askpass.h"
 #include "git/Error.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
@@ -279,6 +283,124 @@ private slots:
         QCOMPARE(result.value().exitCode, 0);
         QCOMPARE(QString::fromStdString(result.value().stdoutData).trimmed(),
                  QCoreApplication::applicationFilePath());
+    }
+
+    // Except where nobody is there to answer: the auto-fetch popped a
+    // "Username for …" dialog at every tick. A GitProcess with prompts
+    // forbidden gives git an empty GIT_ASKPASS, which outranks
+    // core.askPass and SSH_ASKPASS, so git fails at once with "terminal
+    // prompts disabled"; ssh gets GitBolt's askpass in refuse mode,
+    // which says no without a window; and Git Credential Manager is
+    // told not to open its own. ${GIT_ASKPASS-unset} tells an empty
+    // value, which survived the trip, from a missing one. Through the
+    // cancellable run() too, which is the one the auto-fetch takes.
+    void gitChildrenOfAPromptlessProcessCannotAsk() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        const std::vector<std::string> echoEnv = {
+            "-c", "alias.echo-env=!printf '%s|%s|%s|%s' \"${GIT_ASKPASS-unset}\" "
+                  "\"$SSH_ASKPASS_REQUIRE\" \"$GITBOLT_ASKPASS_MODE\" \"$GCM_INTERACTIVE\"",
+            "echo-env"};
+        const QString asking = QCoreApplication::applicationFilePath()
+                               + QStringLiteral("|force|1|");
+        const QString promptless = QStringLiteral("|force|refuse|never");
+
+        gitbolt::git::GitProcess proc(repo->path().toStdString());
+        QCOMPARE(output(proc.run(echoEnv)), asking);
+        proc.forbidPrompts();
+        QCOMPARE(output(proc.run(echoEnv)), promptless);
+        proc.addCancelFlag(std::make_shared<std::atomic<bool>>(false));
+        QCOMPARE(output(proc.run(echoEnv)), promptless);
+
+        gitbolt::git::GitProcess cancellable(repo->path().toStdString());
+        cancellable.addCancelFlag(std::make_shared<std::atomic<bool>>(false));
+        QCOMPARE(output(cancellable.run(echoEnv)), asking);
+    }
+
+    // The same through GitService, down to ssh: the auto-fetch's
+    // fetch(…, allowPrompts=false) and the toolbar Fetch's fetch().
+    // core.sshCommand stands in for ssh, and writes down what it got.
+    void autoFetchNeverAsks() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString envFile = dir.filePath(QStringLiteral("env.txt"));
+        const QString sshCommand = QStringLiteral(
+            "printf '%s|%s|%s|%s' \"${GIT_ASKPASS-unset}\" \"$SSH_ASKPASS_REQUIRE\" "
+            "\"$GITBOLT_ASKPASS_MODE\" \"$GCM_INTERACTIVE\" > '%1'; false").arg(envFile);
+        auto config = repo->repo().config();
+        QVERIFY(repo->repo().addRemote("origin", "ssh://gitbolt.invalid/r.git").ok());
+        QVERIFY(config.setString("core.sshCommand", sshCommand.toStdString()).ok());
+        // No `<command> -G` first to find out which ssh it is.
+        QVERIFY(config.setString("ssh.variant", "simple").ok());
+        const auto sshGot = [&envFile] {
+            QFile file(envFile);
+            return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll())
+                                                  : QStringLiteral("(no %1)").arg(envFile);
+        };
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        svc.fetch(QString(), nullptr, /*allowPrompts=*/false);
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(failedSpy.at(0).at(0).toString(), QStringLiteral("fetch"));
+        QCOMPARE(sshGot(), QStringLiteral("|force|refuse|never"));
+
+        QVERIFY(QFile::remove(envFile));
+        svc.fetch();
+        QCOMPARE(failedSpy.count(), 2);
+        QCOMPARE(sshGot(), QCoreApplication::applicationFilePath()
+                           + QStringLiteral("|force|1|"));
+    }
+
+    // What the askpass shows for a question: a field that shows what is
+    // typed for a user name, a masked one for a secret, and Yes / No
+    // for ssh's yes-or-no questions. A new host key's was a masked
+    // field, so the user had to type "yes" blind. ssh gives no hint
+    // for that one (SSH_ASKPASS_PROMPT is unset), so its text decides.
+    void askpassKindTellsTheQuestionsApart_data() {
+        QTest::addColumn<QString>("prompt");
+        QTest::addColumn<QByteArray>("sshHint");
+        QTest::addColumn<int>("kind");
+        using gitbolt::git::AskpassKind;
+        // OpenSSH 9.9, verbatim.
+        QTest::newRow("host key")
+            << QStringLiteral(
+                   "The authenticity of host 'fakehost (<no hostip for proxy command>)' "
+                   "can't be established.\n"
+                   "ED25519 key fingerprint is SHA256:i+zYdBS33CCsmOP/uQ3ovFF4uD74kMFd9bDRbPhXuQ0.\n"
+                   "This key is not known by any other names.\n"
+                   "Are you sure you want to continue connecting (yes/no/[fingerprint])? ")
+            << QByteArray() << int(AskpassKind::YesNo);
+        // OpenSSH before 8.0.
+        QTest::newRow("host key, older ssh")
+            << QStringLiteral(
+                   "The authenticity of host 'example.com (192.0.2.1)' can't be established.\n"
+                   "RSA key fingerprint is SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8.\n"
+                   "Are you sure you want to continue connecting (yes/no)? ")
+            << QByteArray() << int(AskpassKind::YesNo);
+        QTest::newRow("ssh confirm")
+            << QStringLiteral("Allow shared connection to example.com? ")
+            << QByteArray("confirm") << int(AskpassKind::YesNo);
+        QTest::newRow("user name")
+            << QStringLiteral("Username for 'https://github.com': ")
+            << QByteArray() << int(AskpassKind::Text);
+        QTest::newRow("password")
+            << QStringLiteral("Password for 'https://u@github.com': ")
+            << QByteArray() << int(AskpassKind::Secret);
+        QTest::newRow("passphrase")
+            << QStringLiteral("Enter passphrase for key '/x/id_ed25519': ")
+            << QByteArray() << int(AskpassKind::Secret);
+    }
+
+    void askpassKindTellsTheQuestionsApart() {
+        QFETCH(QString, prompt);
+        QFETCH(QByteArray, sshHint);
+        QFETCH(int, kind);
+        QCOMPARE(int(gitbolt::git::askpassKind(prompt, sshHint)), kind);
     }
 
     // -----------------------------------------------------------------
@@ -1015,6 +1137,83 @@ private slots:
         svc.closeRepository();
         QVERIFY(!svc.fetch());
         QVERIFY(!svc.checkoutBranch(QStringLiteral("other")));
+    }
+
+    // Fetch prunes: a branch deleted on the server (merged and deleted
+    // on GitHub, say) kept its remote-tracking ref, as plain `git
+    // fetch` does, in the sidebar for good. Unless git config says not
+    // to: fetch.prune set either way is the user's call, and a remote's
+    // own remote.<name>.prune outranks it, as in git.
+    void fetchPrunesUnlessConfigSaysNot() {
+        // git's own config only: a fetch.prune of the developer's would
+        // decide the first case. (TestRepoHelper isolates libgit2's.)
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QString globalConfig = home.filePath(QStringLiteral("gitconfig"));
+        QFile empty(globalConfig);
+        QVERIFY(empty.open(QIODevice::WriteOnly));
+        empty.close();
+        const gitbolt::test::ScopedEnv global("GIT_CONFIG_GLOBAL",
+                                              QFile::encodeName(globalConfig));
+        const gitbolt::test::ScopedEnv noSystem("GIT_CONFIG_NOSYSTEM", "1");
+
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        auto& work = repo->repo();
+        gitbolt::git::GitProcess workGit(repo->path().toStdString());
+        auto config = work.config();
+
+        const auto tracked = [&work] {
+            return work.resolveRef("refs/remotes/origin/gone").ok();
+        };
+        // "gone" pushed, which makes origin/gone here too, then deleted
+        // on the server.
+        const auto deletedOnServer = [&] {
+            return succeeded(workGit.run({"push", "-q", "origin", "HEAD:refs/heads/gone"}))
+                && tracked()
+                && origin->deleteBranch("gone").ok();
+        };
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        // Nothing set: pruned, by the toolbar's Fetch and by the
+        // auto-fetch's alike.
+        QVERIFY(deletedOnServer());
+        svc.fetch();
+        QCOMPARE(failedSpy.count(), 0);
+        QVERIFY(!tracked());
+        QVERIFY(deletedOnServer());
+        svc.fetch(QString(), std::make_shared<std::atomic<bool>>(false),
+                  /*allowPrompts=*/false);
+        QCOMPARE(failedSpy.count(), 0);
+        QVERIFY(!tracked());
+
+        // fetch.prune=false: kept.
+        QVERIFY(config.setBool("fetch.prune", false).ok());
+        QVERIFY(deletedOnServer());
+        svc.fetch();
+        QVERIFY(tracked());
+
+        // remote.origin.prune=false, fetch.prune unset: kept.
+        QVERIFY(config.remove("fetch.prune").ok());
+        QVERIFY(config.setBool("remote.origin.prune", false).ok());
+        QVERIFY(deletedOnServer());
+        svc.fetch();
+        QVERIFY(tracked());
+
+        // remote.origin.prune=true outranks fetch.prune=false: pruned.
+        QVERIFY(config.setBool("fetch.prune", false).ok());
+        QVERIFY(config.setBool("remote.origin.prune", true).ok());
+        QVERIFY(deletedOnServer());
+        svc.fetch();
+        QVERIFY(!tracked());
+        QCOMPARE(failedSpy.count(), 0);
     }
 
     // The sidebar's "Checkout as local branch" on origin/feature asked

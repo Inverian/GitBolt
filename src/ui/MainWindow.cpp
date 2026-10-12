@@ -5226,8 +5226,15 @@ void MainWindow::runPeriodicFetch()
     // same refreshes: branches here, and the log once the watcher
     // sees the updated refs. The flag is passed in now, on this
     // thread, so a disown can't come before the job has taken it.
+    //
+    // Except that it asks nothing: a credential or a new ssh host key
+    // it needs popped a dialog at every tick, nobody having clicked
+    // anything. It fails instead, with git's reason in its note, and
+    // a toolbar Fetch asks (a credential helper then keeps the
+    // answer for the ticks after). A Fetch clicked while a tick runs
+    // shows that tick, so it doesn't ask either; the next one does.
     startRemoteOp([this, cancel = autoFetchCancel_]() {
-        return gitService_->fetch(QString(), cancel);
+        return gitService_->fetch(QString(), cancel, /*allowPrompts=*/false);
     }, [this]() {
         const AutoFetch kind = std::exchange(autoFetch_, AutoFetch::None);
         autoFetchCancel_.reset();

@@ -6,6 +6,11 @@ The toolbar Push on a branch that has never been pushed used to fail
 publishes the branch with --set-upstream. Commands > Delete remote
 branch then removes it on the server (behind a confirmation) and drops
 the local remote-tracking ref. Asserted against a local bare origin.
+
+A branch deleted on the server by someone else (merged and deleted on
+GitHub, say) used to stay in the sidebar for good: Fetch kept its
+remote-tracking ref, as plain `git fetch` does. Fetch now prunes it,
+unless git config says not to (fetch.prune or remote.<name>.prune).
 """
 
 from __future__ import annotations
@@ -16,6 +21,10 @@ from e2elib import App, Failure, git, make_repo, run
 
 
 def test(binary: str, scratch: str, apps: list) -> None:
+    # git's own config only: a fetch.prune of the user's would decide
+    # step 3.
+    os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
     work = make_repo(os.path.join(scratch, "work"))
     origin = os.path.join(scratch, "origin.git")
     git("init", "-q", "--bare", origin, cwd=scratch)
@@ -62,6 +71,18 @@ def test(binary: str, scratch: str, apps: list) -> None:
         "local remote-tracking ref to go")
     if git("rev-parse", "HEAD", cwd=work) != head:
         raise Failure("deleting the remote branch touched the local one")
+
+    # 3. A branch deleted on the server by someone else: Fetch prunes
+    # its remote-tracking ref, and only that one.
+    git("push", "-q", "origin", "main", "feature:other", cwd=work)
+    git("update-ref", "-d", "refs/heads/other", cwd=origin)
+    app.ok("trigger act.fetch")
+    app.wait_until(lambda s: s.get("statusMessage") == "Fetch complete.",
+                   "the fetch", timeout=30)
+    if _local_rev(work, "refs/remotes/origin/other"):
+        raise Failure("Fetch kept origin/other, deleted on the server")
+    if not _local_rev(work, "refs/remotes/origin/main"):
+        raise Failure("Fetch pruned origin/main, still on the server")
 
     rc = app.quit()
     if rc != 0:

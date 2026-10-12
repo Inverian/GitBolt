@@ -244,11 +244,18 @@ public:
     /// the GUI thread.
     bool deleteRemoteBranch(const QString& remote, const QString& branch);
     bool pull(const QString& remote, const QString& branch);
+    /// Prunes the remote-tracking refs of branches deleted on the
+    /// server where git config doesn't say: with fetch.prune or
+    /// remote.<name>.prune set, git's own rules decide.
     /// `cancel`, when given, stops this fetch alone: set from any
     /// thread, it ends git the way cancelGitOps() does (which stops
     /// this fetch as well). MainWindow drops an auto-fetch with it.
+    /// Without `allowPrompts` git and ssh ask the user nothing, and a
+    /// fetch that needs an answer fails (GitProcess::forbidPrompts):
+    /// for the auto-fetch, which nobody is waiting on.
     bool fetch(const QString& remote = "",
-               std::shared_ptr<std::atomic<bool>> cancel = nullptr);
+               std::shared_ptr<std::atomic<bool>> cancel = nullptr,
+               bool allowPrompts = true);
     /// Stops every git command the service, or anyone with a process()
     /// of it, runs: a push, pull, fetch or remote-branch delete, a
     /// rebase step, a commit and its hooks, a checkout, Git Flow,

@@ -54,6 +54,14 @@ public:
             cancelFlags_.push_back(std::move(flag));
     }
 
+    /// For a git command nobody is waiting on (the periodic auto-fetch):
+    /// a question git or ssh has for the user fails it at once instead
+    /// of popping up GitBolt's askpass, which every git child gets
+    /// otherwise (see applyEnvironment). git then reports "terminal
+    /// prompts disabled", ssh "Host key verification failed." or
+    /// "Permission denied". Credential helpers still answer.
+    void forbidPrompts() { promptsForbidden_ = true; }
+
     /// Like run(), but feeds `stdinData` to the child's stdin and
     /// closes the write channel. Needed for commands that read a
     /// payload from stdin, e.g. `git apply --cached -` with a patch
@@ -72,7 +80,10 @@ public:
     Result<ProcessOutput> push(const std::string& remote, const std::string& branch,
                                bool force = false, bool setUpstream = false) const;
     Result<ProcessOutput> pull(const std::string& remote, const std::string& branch) const;
-    Result<ProcessOutput> fetch(const std::string& remote = "", bool prune = false) const;
+    /// pruneByDefault prunes the remote-tracking refs of branches gone
+    /// from the server, as fetch.prune=true does, unless the remote's
+    /// own remote.<name>.prune says otherwise.
+    Result<ProcessOutput> fetch(const std::string& remote = "", bool pruneByDefault = false) const;
 
     /// `git clone --progress -- <url> <path>`: the same CLI path push /
     /// pull / fetch take, so credential helpers, ssh config / agent /
@@ -166,8 +177,10 @@ private:
     /// Shared child-process environment: inherits the session env
     /// and sets GIT_TERMINAL_PROMPT=0 so a promptless child fails
     /// fast instead of hanging until the timeout kills it, and a
-    /// GIT_EDITOR that never waits on anyone (see kEditor).
-    static void applyEnvironment(QProcess& process);
+    /// GIT_EDITOR that never waits on anyone (see kEditor). With
+    /// `allowPrompts`, GitBolt is git's and ssh's askpass; without,
+    /// nothing asks (forbidPrompts()).
+    static void applyEnvironment(QProcess& process, bool allowPrompts = true);
 
     /// What run(), runWithInput() and interactiveRebase() share: git
     /// in a process tree, fed `stdinData` when given, with `extraEnv`
@@ -208,6 +221,7 @@ private:
     std::string workDir_;
     std::string gitPath_;
     std::vector<std::shared_ptr<std::atomic<bool>>> cancelFlags_;
+    bool promptsForbidden_ = false;
 };
 
 } // namespace gitbolt::git

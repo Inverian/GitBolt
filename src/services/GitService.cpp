@@ -1011,11 +1011,20 @@ bool GitService::pull(const QString& remote, const QString& branch) {
 }
 
 bool GitService::fetch(const QString& remote,
-                       std::shared_ptr<std::atomic<bool>> cancel) {
-    const auto snapshot = processIfOpen(std::move(cancel));
+                       std::shared_ptr<std::atomic<bool>> cancel,
+                       bool allowPrompts) {
+    auto snapshot = processIfOpen(std::move(cancel));
     if (!snapshot) return false;
+    if (!allowPrompts)
+        snapshot->forbidPrompts();
     const git::GitProcess& proc = *snapshot;
-    auto result = proc.fetch(remote.toStdString());
+    // fetch.prune unset: prune, as most Git GUIs' Fetch does, so a
+    // branch deleted on the server leaves the sidebar too. Set either
+    // way, it is the user's call; remote.<name>.prune outranks both,
+    // as in git.
+    const auto pruneSetting = proc.run({"config", "--get", "fetch.prune"});
+    const bool pruneByDefault = pruneSetting && pruneSetting->exitCode == 1;  // 1 = not set
+    auto result = proc.fetch(remote.toStdString(), pruneByDefault);
     if (!result) {
         emit operationFailed("fetch", QString::fromStdString(result.error().message()));
         return false;

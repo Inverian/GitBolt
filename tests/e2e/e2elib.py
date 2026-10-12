@@ -31,9 +31,11 @@ test run can coexist with a real GitBolt session and with other tests:
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -161,6 +163,53 @@ class OpenGate:
 
     def release(self) -> None:
         self._released.set()
+
+
+class AuthServer:
+    """An http:// git "server" on 127.0.0.1 that wants a user name and
+    password: every request without credentials is answered 401 with a
+    Basic challenge, so git asks for them. One with credentials gets a
+    404, which ends the fetch."""
+
+    def __init__(self) -> None:
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.headers.get("Authorization"):
+                    self.send_response(404)
+                else:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="e2e"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:
+                pass    # keep the test's output to its verdict
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.origin = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.url = f"{self.origin}/repo.git"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def askpass_children(self) -> list[str]:
+        """The askpass processes asking for a user name for this server:
+        git passes its question as the argument, and it names the server
+        ("Username for 'http://127.0.0.1:<port>': ")."""
+        out = subprocess.run(["ps", "-A", "-o", "pid=,args="],
+                             capture_output=True, text=True).stdout
+        question = f"Username for '{self.origin}'"
+        return [line.strip() for line in out.splitlines()
+                if question in line]
+
+    def close(self) -> None:
+        """Stop serving, and end any askpass still asking (a failed test
+        must not leave one behind)."""
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        for line in self.askpass_children():
+            try:
+                os.kill(int(line.split()[0]), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
 
 
 class App:

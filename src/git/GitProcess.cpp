@@ -1,4 +1,5 @@
 #include "git/GitProcess.h"
+#include "git/Askpass.h"
 #include "git/GitProcessLog.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -102,7 +103,7 @@ char commentCharFor(const std::vector<std::string>& messages) {
 GitProcess::GitProcess(const std::string& workingDirectory)
     : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
 
-void GitProcess::applyEnvironment(QProcess& process) {
+void GitProcess::applyEnvironment(QProcess& process, bool allowPrompts) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     // The child has no tty, so a git that decides to prompt (HTTPS
     // remote with no cached credential, ssh host-key confirmation)
@@ -125,17 +126,32 @@ void GitProcess::applyEnvironment(QProcess& process) {
     // When git (or ssh underneath it) does need a credential and no
     // helper supplies one, route the question to a GUI prompt: the
     // GitBolt binary re-invoked in askpass mode (see main.cpp, keyed
-    // on GITBOLT_ASKPASS_MODE — ssh passes no flags, so an env marker
-    // is the only reliable switch). SSH_ASKPASS_REQUIRE=force makes
+    // on kAskpassModeEnv — ssh passes no flags, so an env marker is
+    // the only reliable switch). SSH_ASKPASS_REQUIRE=force makes
     // OpenSSH ≥ 8.4 use the askpass even when a TTY exists.
+    //
+    // Without prompts (forbidPrompts), git gets an empty GIT_ASKPASS:
+    // it outranks core.askPass and SSH_ASKPASS, and with
+    // GIT_TERMINAL_PROMPT=0 git fails at once, saying "terminal
+    // prompts disabled". (A failing askpass would block it too, but
+    // git's first line would then blame the askpass.) ssh still gets
+    // GitBolt, in refuse mode, which says no without a window: an ssh
+    // older than 8.4 ignores SSH_ASKPASS_REQUIRE=never, and could run
+    // a distro ssh-askpass instead. Git Credential Manager opens a
+    // sign-in window of its own unless told not to.
     const QString self = QCoreApplication::applicationFilePath();
+    if (!allowPrompts) {
+        env.insert(QStringLiteral("GIT_ASKPASS"), QString());
+        env.insert(QStringLiteral("GCM_INTERACTIVE"), QStringLiteral("never"));
+    }
     if (!self.isEmpty()) {
-        env.insert(QStringLiteral("GIT_ASKPASS"), self);
+        if (allowPrompts)
+            env.insert(QStringLiteral("GIT_ASKPASS"), self);
         env.insert(QStringLiteral("SSH_ASKPASS"), self);
         env.insert(QStringLiteral("SSH_ASKPASS_REQUIRE"),
                    QStringLiteral("force"));
-        env.insert(QStringLiteral("GITBOLT_ASKPASS_MODE"),
-                   QStringLiteral("1"));
+        env.insert(QLatin1String(kAskpassModeEnv),
+                   QLatin1String(allowPrompts ? kAskpassAsk : kAskpassRefuse));
     }
     process.setProcessEnvironment(env);
 }
@@ -219,12 +235,20 @@ Result<ProcessOutput> GitProcess::pull(const std::string& remote, const std::str
     return run(args, 120000);
 }
 
-Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) const {
+Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool pruneByDefault) const {
+    // `-c fetch.prune=true`, not --prune: a remote's own
+    // remote.<name>.prune outranks fetch.prune even from -c, so a
+    // remote set not to prune keeps its refs, where --prune would
+    // override it. It also needs no remote name: an empty `remote` is
+    // whichever one git picks.
     std::vector<std::string> args;
-    args.reserve(3);
+    args.reserve(4);
+    if (pruneByDefault) {
+        args.emplace_back("-c");
+        args.emplace_back("fetch.prune=true");
+    }
     args.emplace_back("fetch");
     if (!remote.empty()) args.push_back(remote);
-    if (prune) args.emplace_back("--prune");
     return run(args, 120000);
 }
 
@@ -549,7 +573,7 @@ Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, 
     ProcessTree tree;
     QProcess process;
     process.setWorkingDirectory(workDir);
-    applyEnvironment(process);
+    applyEnvironment(process, !promptsForbidden_);
     if (!extraEnv.empty()) {
         QProcessEnvironment env = process.processEnvironment();
         for (const auto& [name, value] : extraEnv)
