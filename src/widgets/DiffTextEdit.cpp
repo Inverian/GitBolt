@@ -11,15 +11,19 @@
 namespace gitbolt::widgets {
 
 namespace {
+// Every line these editors show is a hunk's (prefixed '+', '-' or
+// ' '), a hunk header, or the "diff --git" line: never git's "--- a/"
+// and "+++ b/" file headers. Those were told apart by their first
+// three characters, so a removed "--" line (Markdown and YAML front
+// matter's "---", an SQL or Lua comment) or an added "++i;" got no
+// stripe, and read as unchanged.
 QColor lineBackground(const QString& text, const editor::DiffColors& colors)
 {
     if (text.startsWith(QLatin1String("@@")))
         return colors.hunkBg;
-    if (text.startsWith(QLatin1Char('+'))
-        && !text.startsWith(QLatin1String("+++")))
+    if (text.startsWith(QLatin1Char('+')))
         return colors.addBg;
-    if (text.startsWith(QLatin1Char('-'))
-        && !text.startsWith(QLatin1String("---")))
+    if (text.startsWith(QLatin1Char('-')))
         return colors.delBg;
     return QColor();
 }

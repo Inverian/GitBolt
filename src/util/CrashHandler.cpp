@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #if defined(Q_OS_MACOS)
+#include <mach/mach.h>
 #include <sys/ucontext.h>
 #endif
 #elif defined(Q_OS_WIN)
@@ -280,8 +281,38 @@ QByteArray CrashHandler::renderHeader(const char* appVersion,
         .toUtf8();
 }
 
+#if defined(Q_OS_MACOS)
+namespace {
+// Keeps macOS's crash reporter out of a test session's crash. With a
+// task-level port of its own for EXC_CRASH (and corpse notifications),
+// the kernel hands those to this dying task instead of ReportCrash: a
+// test that crashes GitBolt on purpose (offscreen under the bridge, in
+// CI) put the "GitBolt quit unexpectedly" box on the user's screen and
+// left a GitBolt-*.ips in ~/Library/Logs/DiagnosticReports, though the
+// handler had already written crash-test.log. The signal handler still
+// runs first, and the process still dies of its signal. A user's
+// session keeps the system's crash reporting.
+void keepCrashReporterOut() {
+    mach_port_t port = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS)
+        return;
+    if (mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND)
+        != KERN_SUCCESS) {
+        mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+        return;
+    }
+    task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY, port,
+                             EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+}
+} // namespace
+#endif
+
 void CrashHandler::install(const char* appVersion, bool officialBuild,
                            bool envOptOut, bool testSession) {
+#if defined(Q_OS_MACOS)
+    if (testSession)
+        keepCrashReporterOut();
+#endif
     // Pre-render the path (this also creates ~/.gitbolt — mkpath is
     // NOT signal-safe, so it must happen here) and the static system
     // header the handler will write verbatim. A test session writes a

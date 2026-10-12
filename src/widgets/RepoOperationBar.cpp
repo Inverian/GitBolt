@@ -128,6 +128,9 @@ void RepoOperationBar::refresh() {
         text = conflicted
             ? tr("Cherry-pick stopped on conflicts in %n file(s). Resolve them, then commit.",
                  nullptr, conflicts_)
+            : sequencePaused_ && sequenceSkippable_
+            ? tr("A cherry-pick of several commits stopped before picking a commit. Skip "
+                 "leaves that commit out and picks the rest; Abort goes back.")
             : sequencePaused_
             ? tr("A cherry-pick of several commits is paused. Continue to pick the rest.")
             : tr("A cherry-pick is in progress. Commit to finish it.");
@@ -143,6 +146,9 @@ void RepoOperationBar::refresh() {
         text = conflicted
             ? tr("Revert stopped on conflicts in %n file(s). Resolve them, then commit.",
                  nullptr, conflicts_)
+            : sequencePaused_ && sequenceSkippable_
+            ? tr("A revert of several commits stopped before reverting a commit. Skip "
+                 "leaves that commit out and reverts the rest; Abort goes back.")
             : sequencePaused_
             ? tr("A revert of several commits is paused. Continue to revert the rest.")
             : tr("A revert is in progress. Commit to finish it.");
@@ -180,6 +186,12 @@ void RepoOperationBar::refresh() {
     abortButton_->setToolTip(abortTip);
 
     resolveButton_->setVisible(conflicted);
+    // Paused with HEAD where git left it, the commit it stopped at was
+    // never picked (git refused it over a dirty index, or its pick was
+    // reset): git's --continue leaves it out, as --skip does, and the
+    // "Continue to pick the rest" offered there dropped it without a
+    // word. Skip says what happens.
+    continueButton_->setVisible(!(sequencePaused_ && sequenceSkippable_));
     // A sequence's Skip only where git takes it: offered once the
     // stopped commit had been committed, it only ever failed with
     // "there is nothing to skip"; at the stop itself (an empty pick,

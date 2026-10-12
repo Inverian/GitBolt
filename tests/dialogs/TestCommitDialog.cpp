@@ -9,13 +9,14 @@
 //     dialog stays open with its message;
 //   - while the commit runs, nothing stages, unstages or commits, the
 //     button clicked says "Committing…", and Commit & Push still pushes
-//     once it's in.
+//     once it's in; the file lists and the diff stay live to review;
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is an empty file there: a developer's
 // core.hooksPath or commit.gpgSign stays out of it.
 //
 
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QCheckBox>
 #include <QFile>
@@ -32,6 +33,7 @@
 
 #include "../TestRepoHelper.h"
 #include "dialogs/CommitDialog.h"
+#include "widgets/DiffViewerWidget.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 
@@ -185,11 +187,30 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(hookStarted(repo), 15000);
 
         for (const char* name : {"commit.stageAllBtn", "commit.unstageAllBtn",
-                                 "commit.commitBtn", "commit.commitPushBtn",
-                                 "commit.amendCheck"})
+                                 "commit.stageBtn", "commit.unstageBtn",
+                                 "commit.discardBtn", "commit.commitBtn",
+                                 "commit.commitPushBtn", "commit.amendCheck"})
             QVERIFY2(!child<QWidget>(dialog, name)->isEnabled(), name);
-        for (const char* name : {"commit.unstagedList", "commit.stagedList"})
-            QVERIFY2(!child<QWidget>(dialog, name)->isEnabled(), name);
+        // The lists and the diff stay live, to scroll and review: they
+        // were disabled outright, the diff unscrollable while the hook
+        // ran. What they do that stages is off: a double-click or Enter
+        // on a row, and the diff's hunk and line actions.
+        auto* unstaged = child<QAbstractItemView>(dialog, "commit.unstagedList");
+        auto* diff = dialog.findChild<gitbolt::widgets::DiffViewerWidget*>();
+        QVERIFY(unstaged && diff);
+        for (QWidget* live : {static_cast<QWidget*>(unstaged),
+                              child<QWidget>(dialog, "commit.stagedList"),
+                              static_cast<QWidget*>(diff)})
+            QVERIFY2(live->isEnabled(), qPrintable(live->objectName()));
+        QVERIFY(diff->stagingLocked());
+        QCOMPARE(unstaged->model()->rowCount(), 1);
+        const QModelIndex secret = unstaged->model()->index(0, 0);
+        unstaged->setCurrentIndex(secret);
+        QVERIFY(!child<QWidget>(dialog, "commit.stageBtn")->isEnabled());
+        QVERIFY(!child<QWidget>(dialog, "commit.discardBtn")->isEnabled());
+        emit unstaged->activated(secret);
+        QTest::qWait(200);
+        QCOMPARE(output(git.run({"diff", "--cached", "--name-only"})), QStringLiteral("b.txt"));
         // And it says so where it shows, greyed out or not: a tooltip on
         // the disabled button was all there was while the hook ran.
         QCOMPARE(commit->text(), QStringLiteral("Committing…"));
@@ -209,6 +230,7 @@ private slots:
         QVERIFY(child<QPushButton>(dialog, "commit.stageAllBtn")->isEnabled());
         QVERIFY(commit->isEnabled());
         QCOMPARE(commit->text(), QStringLiteral("Commit"));
+        QVERIFY(!diff->stagingLocked());
     }
 
     // Commit & Push pushes once the commit is in. A stage that failed

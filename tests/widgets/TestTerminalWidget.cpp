@@ -108,10 +108,15 @@ protected:
 // widget.
 namespace {
 
-constexpr int kTimeoutMs = 30000;
-// A flood takes longer, but stays inside QtTest's per-function
-// watchdog (QTEST_FUNCTION_TIMEOUT), so a slow one fails cleanly.
-constexpr int kFloodTimeoutMs = 50000;
+// A QTRY that runs out waits twice as long again before it fails (to
+// report how long the condition took, if it ever came true), so it
+// takes three times its timeout. Each stays under a third of QtTest's
+// per-function watchdog (QTEST_FUNCTION_TIMEOUT, 60 s): a wait that
+// never comes true then fails with the terminal's text, rather than
+// the watchdog aborting the whole binary and the tests after it.
+constexpr int kTimeoutMs = 15000;
+// A flood takes longer, within the same bound.
+constexpr int kFloodTimeoutMs = 19000;
 
 QStringList rows(const TerminalWidget& terminal)
 {
@@ -205,10 +210,15 @@ constexpr Qt::KeyboardModifier kTerminalCtrl = Qt::ControlModifier;
 #endif
 
 // A shell the tests can rely on, whoever runs them: /bin/sh rather than
-// the user's $SHELL, with a prompt the tests know, no rc file, and HOME
-// a throwaway directory for any history it saves. start() hands the
-// shell this process's environment, so that is where it goes; the
-// destructor puts it back.
+// the user's $SHELL, with a prompt the tests know, no rc file of the
+// user's, and HOME a throwaway directory for any history it saves.
+// start() hands the shell this process's environment, so that is where
+// it goes; the destructor puts it back.
+//
+// A test that runs bash instead gets the prompt from HOME's .bashrc as
+// well: Debian's and Ubuntu's bash read /etc/bash.bashrc first, which
+// sets a PS1 of its own over the one in the environment, and ~/.bashrc
+// after it. dash, and bash run as sh, don't read it.
 class PlainShell {
 public:
     PlainShell()
@@ -219,6 +229,9 @@ public:
         set("ENV", {});
         set("BASH_ENV", {});
         set("HISTFILE", {});
+        QFile bashrc(home_.path() + QStringLiteral("/.bashrc"));
+        if (home_.isValid() && bashrc.open(QIODevice::WriteOnly))
+            bashrc.write("PS1='" + kShPrompt.toLatin1() + " '\n");
     }
 
     ~PlainShell()

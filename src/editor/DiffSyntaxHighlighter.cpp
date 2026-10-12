@@ -51,18 +51,14 @@ void DiffSyntaxHighlighter::highlightBlock(const QString& text)
     } else if (text.startsWith(QLatin1String("@@"))) {
         setFormat(0, len, hunkHeaderFmt_);
     } else if (text.startsWith(QLatin1Char('+'))) {
-        // Distinguish file-level headers like +++ from additions
-        if (text.startsWith(QLatin1String("+++"))) {
-            setFormat(0, len, fileHeaderFmt_);
-        } else {
-            setFormat(0, len, additionFmt_);
-        }
+        // An addition, "+++" and all: the diff shown never has git's
+        // "+++ b/" and "--- a/" file headers (DiffViewerWidget renders
+        // hunks under its own "diff --git" line), and an added "++i;"
+        // or a removed "---" (front matter, an SQL comment) came out
+        // as a bold header, as if unchanged.
+        setFormat(0, len, additionFmt_);
     } else if (text.startsWith(QLatin1Char('-'))) {
-        if (text.startsWith(QLatin1String("---"))) {
-            setFormat(0, len, fileHeaderFmt_);
-        } else {
-            setFormat(0, len, deletionFmt_);
-        }
+        setFormat(0, len, deletionFmt_);
     } else if (text.startsWith(QLatin1String("index "))
                || text.startsWith(QLatin1String("new file"))
                || text.startsWith(QLatin1String("deleted file"))

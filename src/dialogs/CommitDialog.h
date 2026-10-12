@@ -180,6 +180,9 @@ private:
     std::string pendingKey_;
     // setLocalOpBusy()
     bool localOpBusy_ = false;
+    // applyLocks(): nothing stages, unstages or discards (a commit's
+    // hooks, a local op or a step run); the lists and the diff stay live.
+    bool stagingLocked_ = false;
 
     // Geometry restore guard
     bool restored_ = false;

@@ -1293,6 +1293,18 @@ bool GitService::hasTrackedChanges() const {
     return proc && proc->hasTrackedChanges();
 }
 
+void GitService::inspectStop(std::function<void(const StopFacts&)> done) {
+    auto proc = processIfOpen();
+    if (!proc) return;
+    runner_.run([this, key = openKey_, proc = std::move(*proc), done = std::move(done)]() mutable {
+        StopFacts facts;
+        facts.committedRebaseStop = QString::fromStdString(proc.committedRebaseStop());
+        facts.trackedChanges = proc.hasTrackedChanges();
+        facts.stagedWithoutPick = proc.stagedWorkWithoutPick();
+        postReport(std::move(key), [done = std::move(done), facts] { done(facts); });
+    });
+}
+
 // These all reported success whenever git could be started: a rebase
 // that stopped on a conflict, or never began, said "Rebase complete."
 // A step that succeeds can still leave the rebase in progress — an

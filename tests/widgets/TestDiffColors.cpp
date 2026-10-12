@@ -9,6 +9,8 @@
 //   - a theme switch recolours a diff already on screen, highlighter
 //     and file name, and a diff opened in the dark theme starts dark;
 //   - light: the stripes and text colours it always had;
+//   - a removed line starting "--" or an added one starting "++" is
+//     striped and coloured as the change it is, not as a file header;
 //   - the merge conflict view's headings, the file tree's preview
 //     heading and the Clone dialog's status line read at 4.5:1 or
 //     more in the dark theme (and the conflict panes' tints follow a
@@ -16,8 +18,14 @@
 //   - so do the Commit tab's labels, links and "Contained in" lines
 //     (rendered again on a switch), the Commit dialog's file-status
 //     colours, and the toolbar's outcome of an op;
-//   - the Commit tab's separator is drawn in the theme's rule colour
-//     (#ddd, #3c3c3c), not in the text's (black, near-white);
+//   - the Commit tab's separators (its message's rule, and the frame
+//     over the message) are drawn in the theme's rule colour (#ddd,
+//     #3c3c3c), not in the text's (black, near-white) or #ccc;
+//   - secondary text (Settings' notes, the Commit dialog's ⓘ, the GPG
+//     placeholder, the home screen's cards) reads at 4.5:1 or more in
+//     both themes: it was palette(mid), a border's grey;
+//   - so do the light theme's own colours of the merge conflict
+//     headings, the Commit tab, the Clone status and an op's outcome;
 //   - the home screen's card descriptions, and the Submodules and
 //     Worktrees windows' status colours, read at 4.5:1 or more in the
 //     dark theme too.
@@ -49,9 +57,12 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "dialogs/CloneDialog.h"
+#include "dialogs/CommitDialog.h"
+#include "dialogs/SettingsDialog.h"
 #include "git/Status.h"
 #include "models/CommitLogModel.h"
 #include "models/FileStatusModel.h"
+#include "services/GitService.h"
 #include "ui/DashboardView.h"
 #include "ui/InlineOpIndicator.h"
 #include "ui/RepositoryView.h"
@@ -306,6 +317,61 @@ private slots:
         QCOMPARE(textColor(name), QColor(0x55, 0x55, 0x55));
     }
 
+    // A removed line that starts with "--" (Markdown's or YAML's "---"
+    // front matter, an SQL or Lua comment) or an added one that starts
+    // with "++" ("++i;") is a change like any other: its stripe and
+    // colour. They were told from git's "--- a/" and "+++ b/" file
+    // headers, which these views never show, by their first three
+    // characters, and came out bold and unstriped, as if unchanged.
+    void linesThatLookLikeFileHeadersAreChanges() {
+        using gitbolt::git::DiffLineType;
+        gitbolt::git::DiffFileEntry file;
+        file.status = gitbolt::git::DiffStatus::Modified;
+        file.oldPath = file.newPath = "post.md";
+        gitbolt::git::DiffHunk hunk;
+        hunk.header = "@@ -1,4 +1,2 @@\n";
+        hunk.lines = {
+            {DiffLineType::Deletion, "---\n"},
+            {DiffLineType::Deletion, "-- sql comment\n"},
+            {DiffLineType::Addition, "++i;\n"},
+            {DiffLineType::Addition, "+\n"},
+        };
+        file.hunks = {hunk};
+        DiffViewerWidget viewer;
+        viewer.resize(600, 300);
+        viewer.setDiffForFile(file);
+        viewer.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&viewer));
+        QPlainTextEdit* edit = unifiedEditor(viewer);
+        QVERIFY(edit);
+        // diff --git, @@, "----", "--- sql comment", "+++i;", "++".
+        const QList<QColor> backgrounds = lineBackgrounds(*edit);
+        const QList<QColor> text = lineForegrounds(*edit);
+        QCOMPARE(backgrounds.size(), 6);
+        QCOMPARE(edit->document()->findBlockByNumber(2).text(), QStringLiteral("----"));
+        QCOMPARE(edit->document()->findBlockByNumber(4).text(), QStringLiteral("+++i;"));
+        for (int line : {2, 3}) {
+            QCOMPARE(backgrounds[line], QColor(255, 220, 220));
+            QCOMPARE(text[line], QColor(180, 0, 0));
+        }
+        for (int line : {4, 5}) {
+            QCOMPARE(backgrounds[line], QColor(200, 255, 200));
+            QCOMPARE(text[line], QColor(0, 140, 0));
+        }
+
+        // The side-by-side panes' stripes too.
+        DiffTextEdit pane;
+        pane.resize(400, 200);
+        pane.setLineWrapMode(QPlainTextEdit::NoWrap);
+        pane.setPlainText(QStringLiteral("----\n+++i;"));
+        pane.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&pane));
+        const QList<QColor> stripes = lineBackgrounds(pane);
+        QCOMPARE(stripes.size(), 2);
+        QCOMPARE(stripes[0], QColor(255, 220, 220));
+        QCOMPARE(stripes[1], QColor(200, 255, 200));
+    }
+
     void mergeConflictViewReadsInTheDarkTheme() {
         gitbolt::widgets::MergeConflictWidget widget;
         gitbolt::git::MergeConflictEntry conflict;
@@ -329,8 +395,15 @@ private slots:
             QVERIFY2(label, qPrintable(heading));
             lightHeadings << textColor(label);
         }
-        QCOMPARE(lightHeadings, (QList<QColor>{QColor(0x41, 0x69, 0xe1), QColor(0x80, 0x80, 0x80),
-                                               QColor(0x22, 0x8b, 0x22), QColor(0x8b, 0x45, 0x13)}));
+        // At 4.5:1 or more on the light window too: royal blue, gray and
+        // forest green read at 3.4:1 to 4.2:1 there.
+        const QColor lightWindow = QApplication::palette().color(QPalette::Window);
+        for (int i = 0; i < lightHeadings.size(); ++i) {
+            QVERIFY2(contrast(lightHeadings[i], lightWindow) >= 4.5,
+                     qPrintable(headings[i] + QStringLiteral(": ")
+                                + describe(lightHeadings[i], lightWindow)));
+        }
+        QCOMPARE(lightHeadings.last(), QColor(0x8b, 0x45, 0x13));
         // The three read-only panes: ours, base, theirs.
         QList<QPlainTextEdit*> panes;
         for (QPlainTextEdit* edit : widget.findChildren<QPlainTextEdit*>()) {
@@ -402,6 +475,18 @@ private slots:
         QCOMPARE(fragmentColor(view, QStringLiteral("Author:")), QColor(0x66, 0x66, 0x66));
         QCOMPARE(fragmentColor(view, QStringLiteral("Contained in no tag")),
                  QColor(0x44, 0x44, 0x44));
+        // Every one at 4.5:1 or more on the light window the browsers
+        // show through, the link ("ada@example.com") and the muted
+        // "(none — root commit)" too (#1f6feb and #888: 4.0:1, 3.1:1).
+        {
+            const QColor base = QApplication::palette().color(QPalette::Window);
+            for (const QString& text : texts) {
+                const QColor color = fragmentColor(view, text);
+                QVERIFY2(color.isValid(), qPrintable(text));
+                QVERIFY2(contrast(color, base) >= 4.5,
+                         qPrintable(text + QStringLiteral(": ") + describe(color, base)));
+            }
+        }
 
         // Switched to with the commit on show, and shown afresh.
         theme_.setTheme(QStringLiteral("Dark"));
@@ -498,9 +583,89 @@ private slots:
             }
             return false;
         };
+        // The full-width frame between the details and the message: it
+        // stayed #ccc, a bright line across the dark theme's panel.
+        auto* frame = view.findChild<QFrame*>(QStringLiteral("commit.separator"));
+        if (!frame) {
+            for (QFrame* candidate : view.findChildren<QFrame*>()) {
+                if (candidate->frameShape() == QFrame::HLine)
+                    frame = candidate;
+            }
+        }
+        QVERIFY(frame);
+        const auto frameColor = [frame] {
+            QApplication::processEvents();
+            const QImage image = frame->grab().toImage();
+            return image.pixelColor(image.width() / 2, image.height() / 2);
+        };
         QVERIFY2(drawsRule(QColor(0xdd, 0xdd, 0xdd)), "no #ddd rule in the light theme");
+        QCOMPARE(frameColor(), QColor(0xdd, 0xdd, 0xdd));
         theme_.setTheme(QStringLiteral("Dark"));
         QVERIFY2(drawsRule(QColor(0x3c, 0x3c, 0x3c)), "no #3c3c3c rule in the dark theme");
+        QCOMPARE(frameColor(), QColor(0x3c, 0x3c, 0x3c));
+        theme_.setTheme(QStringLiteral("Light"));
+        QCOMPARE(frameColor(), QColor(0xdd, 0xdd, 0xdd));
+    }
+
+    // Secondary text was palette(mid), a border's grey: 1.7:1 on the
+    // light theme's window and 2.1:1 on the dark one's. Settings' notes
+    // (the usage statistics' among them), the Commit dialog's ⓘ, the
+    // Commit tab's GPG placeholder and the home screen's card text read
+    // at 4.5:1 or more now, in both themes and across a switch.
+    void secondaryTextReadsInBothThemes() {
+        gitbolt::conf::SettingsService settings;
+        gitbolt::dialogs::SettingsDialog settingsDialog(&settings, nullptr);
+        settingsDialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&settingsDialog));
+        gitbolt::services::GitService svc;
+        gitbolt::dialogs::CommitDialog commitDialog(&svc, &settings);
+        commitDialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&commitDialog));
+        gitbolt::ui::RepositoryView view;
+        view.resize(900, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        gitbolt::ui::DashboardView home(&settings);
+        home.resize(1100, 800);
+        home.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&home));
+
+        QList<QLabel*> labels;
+        for (QLabel* label : settingsDialog.findChildren<QLabel*>()) {
+            // Text in the dialog's own colours (not a link's, nor an
+            // image's), shown or shown once the page is.
+            if (!label->text().isEmpty() && label->textFormat() != Qt::RichText
+                && !label->text().contains(QLatin1Char('<')))
+                labels << label;
+        }
+        QVERIFY(labels.size() > 5);
+        QLabel* info = labelWithText(commitDialog, QStringLiteral("ⓘ"));
+        QVERIFY(info);
+        labels << info;
+        QLabel* gpg = labelWithText(
+            view, gitbolt::ui::RepositoryView::tr("GPG signature verification — coming soon"));
+        QVERIFY(gpg);
+        labels << gpg;
+        QLabel* card = labelWithText(
+            home, gitbolt::ui::DashboardView::tr("Open an existing local repository"));
+        QVERIFY(card);
+
+        for (const char* themeName : {"Light", "Dark", "Light"}) {
+            theme_.setTheme(QString::fromLatin1(themeName));
+            const QColor window = QApplication::palette().color(QPalette::Window);
+            for (QLabel* label : std::as_const(labels)) {
+                const QColor color = textColor(label);
+                QVERIFY2(contrast(color, window) >= 4.5,
+                         qPrintable(QStringLiteral("%1: \"%2\": %3")
+                                        .arg(QLatin1String(themeName),
+                                             label->text().left(40),
+                                             describe(color, window))));
+            }
+        }
+        // The cards' own surface in the light theme is the window's.
+        const QColor window = QApplication::palette().color(QPalette::Window);
+        QVERIFY2(contrast(textColor(card), window) >= 4.5,
+                 qPrintable(describe(textColor(card), window)));
     }
 
     // The home screen's cards: their descriptions were palette(mid),
@@ -592,6 +757,17 @@ private slots:
         indicator.succeed(QStringLiteral("Pushed"), 0);
         color = textColor(label);
         QVERIFY2(contrast(color, toolBar) >= 4.5, qPrintable(describe(color, toolBar)));
+
+        // And the light theme's on its own tool bar (the window's
+        // colour): its green, #2e9c36, read at 3.1:1.
+        theme_.setTheme(QStringLiteral("Light"));
+        const QColor lightBar = QApplication::palette().color(QPalette::Window);
+        indicator.succeed(QStringLiteral("Pushed"), 0);
+        color = textColor(label);
+        QVERIFY2(contrast(color, lightBar) >= 4.5, qPrintable(describe(color, lightBar)));
+        indicator.fail(QStringLiteral("Push failed"), QStringLiteral("rejected"), 0);
+        color = textColor(label);
+        QVERIFY2(contrast(color, lightBar) >= 4.5, qPrintable(describe(color, lightBar)));
     }
 
     // A remote op's failure stays on the label until the next op, so it
@@ -640,7 +816,12 @@ private slots:
         QLabel* status = labelWithText(dialog, message);
         QVERIFY(status);
         QVERIFY(status->isVisible());
-        QCOMPARE(textColor(status), QColor(0xd7, 0x3a, 0x49));
+        // At 4.5:1 on the light window too (its #d73a49 read at 4.0:1).
+        {
+            const QColor window = QApplication::palette().color(QPalette::Window);
+            const QColor color = textColor(status);
+            QVERIFY2(contrast(color, window) >= 4.5, qPrintable(describe(color, window)));
+        }
 
         theme_.setTheme(QStringLiteral("Dark"));
         const QColor window = QApplication::palette().color(QPalette::Window);

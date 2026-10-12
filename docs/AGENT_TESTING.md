@@ -138,6 +138,14 @@ window once the bridge and the single-instance listener are up, so
 `list-widgets` finds it by its `objectName`, `app.crashDetected`
 (macOS message boxes have no title), and `click OK` dismisses it.
 
+A test session that crashes writes its report to
+`~/.gitbolt/crash-test.log`, never `crash.log`, and nothing reads or
+deletes it. On macOS it also stays out of the system's crash reporter:
+no "GitBolt quit unexpectedly" box on the screen and no `GitBolt-*.ips`
+in `~/Library/Logs/DiagnosticReports`, since the handler of a test
+session takes `EXC_CRASH` itself (`util::CrashHandler::install`). A
+user's session keeps macOS's crash reporting.
+
 Addressing:
 - **Actions** by `objectName` (every action has one — see below), by
   menu-path slug (`commands/merge-branches`), or trailing suffix

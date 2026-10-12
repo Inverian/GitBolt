@@ -39,14 +39,15 @@ void InlineOpIndicator::start(const QString& msg)
 
 namespace {
 // The theme's green or red for an outcome: the light ones read at 2.7:1
-// to 3.9:1 on the dark theme's toolbar.
+// to 3.9:1 on the dark theme's toolbar. Each reads at 4.5:1 or more on
+// its own theme's (the light green, #2e9c36, was 3.1:1 there).
 QString outcomeColor(bool success)
 {
     const QPalette app = QApplication::palette();
     const bool dark = app.color(QPalette::WindowText).lightness()
                       > app.color(QPalette::Window).lightness();
     if (success)
-        return dark ? QStringLiteral("#3fb950") : QStringLiteral("#2e9c36");
+        return dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
     // #c03a3a, not #c43c3c: that one read at 4.4997:1 on the light
     // tool bar (#efefef), a shade under 4.5.
     return dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c03a3a");

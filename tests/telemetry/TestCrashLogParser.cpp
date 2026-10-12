@@ -18,7 +18,8 @@
 //     when it was started through a link of another name (an
 //     AppImage's AppRun), and a fault's newest frame is the faulting
 //     function itself; a test session's crash leaves the user's
-//     crash.log alone
+//     crash.log alone, and on macOS stays out of the system's crash
+//     reporter
 //
 // Synthetic reports pin their "OS:" line (CrashHeader.h): the parser's
 // frame rules follow it, and the Windows runner would otherwise write
@@ -647,6 +648,35 @@ private slots:
                  qPrintable(log));
         QVERIFY(log.contains(QStringLiteral("\n--- Stack Trace ---\n#0 ")));
         QVERIFY(!CrashLogParser::parse(log));
+#endif
+    }
+
+    // macOS: a test session's crash (the bridge's, CI's, a death test's)
+    // went to ReportCrash too, which put the "GitBolt quit unexpectedly"
+    // box on the user's screen and a GitBolt-*.ips in their
+    // DiagnosticReports, crash-test.log written already. The handler of
+    // a test session takes EXC_CRASH itself; a user's session leaves it
+    // to the system.
+    void testSessionKeepsTheCrashReporterOut() {
+#if !defined(GITBOLT_CRASH_HELPER) || !defined(Q_OS_MACOS)
+        QSKIP("macOS only: its crash reporter is what is kept out");
+#else
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const auto crashPort = [&](const QStringList& args) {
+            QProcess helper;
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("HOME"), home.path());
+            helper.setProcessEnvironment(env);
+            helper.start(QStringLiteral(GITBOLT_CRASH_HELPER), args);
+            if (!helper.waitForFinished(60000) || helper.exitStatus() != QProcess::NormalExit
+                || helper.exitCode() != 0)
+                return QStringLiteral("<helper failed>");
+            return QString::fromUtf8(helper.readAllStandardOutput()).trimmed();
+        };
+        QCOMPARE(crashPort({QStringLiteral("test-session"), QStringLiteral("check-ports")}),
+                 QStringLiteral("crash port: set"));
+        QCOMPARE(crashPort({QStringLiteral("check-ports")}), QStringLiteral("crash port: none"));
 #endif
     }
 };

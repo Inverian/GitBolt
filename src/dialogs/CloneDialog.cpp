@@ -458,8 +458,10 @@ void CloneDialog::applyStatusColor()
     const QPalette app = QApplication::palette();
     const bool dark = app.color(QPalette::WindowText).lightness()
                       > app.color(QPalette::Window).lightness();
-    const char* color = statusBusy_ ? (dark ? "#58a6ff" : "#1f6feb")
-                                    : (dark ? "#ff7b72" : "#d73a49");
+    // The light ones at 4.5:1 or more on the light window (#efefef), as
+    // the dark ones are on theirs: #1f6feb and #d73a49 read at 4.0:1.
+    const char* color = statusBusy_ ? (dark ? "#58a6ff" : "#0969da")
+                                    : (dark ? "#ff7b72" : "#cf222e");
     statusLabel_->setStyleSheet(
         QStringLiteral("QLabel { color: %1; }").arg(QLatin1String(color)));
 }

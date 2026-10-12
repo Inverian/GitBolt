@@ -19,6 +19,15 @@
 
 namespace gitbolt::services {
 
+/// What the in-progress bar's Skip and Abort need to know before they
+/// ask (GitService::inspectStop()): GitProcess::committedRebaseStop(),
+/// hasTrackedChanges() and stagedWorkWithoutPick().
+struct StopFacts {
+    QString committedRebaseStop;
+    bool trackedChanges = false;
+    bool stagedWithoutPick = false;
+};
+
 /// Threading rule. A GitService's state belongs to the thread it lives
 /// on (the GUI thread): repo_ is swapped there, the log scope and
 /// branch selection are set there, and only that thread submits work
@@ -319,12 +328,23 @@ public:
     /// GitProcess::committedRebaseStop() for the open repository: the
     /// todo verb of the commit the rebase stopped at when that commit
     /// is already in the branch (an `edit`, a reword a hook turned
-    /// down), where Skip keeps it; empty otherwise. Runs git, briefly.
+    /// down), where Skip keeps it; empty otherwise. Runs git there and
+    /// then (patch-ids, seconds on a big commit): not for the GUI
+    /// thread, where inspectStop() is the way.
     QString committedRebaseStop() const;
     /// GitProcess::hasTrackedChanges() for the open repository: whether
     /// a tracked file has changes, staged or not, that a reset would
-    /// throw away (true when git can't tell). Runs git, briefly.
+    /// throw away (true when git can't tell). Runs git status there and
+    /// then: not for the GUI thread either.
     bool hasTrackedChanges() const;
+
+    /// Finds the StopFacts of the open repository on a worker, and hands
+    /// them to `done` on the service's thread while that repository is
+    /// still the open one (reportTo; dropped otherwise). They run git:
+    /// git status, and two patch-ids at a reword's stop, which take
+    /// seconds on a big commit, and froze the window when the bar's
+    /// buttons asked on the GUI thread.
+    void inspectStop(std::function<void(const StopFacts&)> done);
 
     /// Why `plan` can't run on the open repository as it is now, or an
     /// empty string when it can: HEAD has moved, or another branch is

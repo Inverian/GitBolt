@@ -1054,10 +1054,10 @@ QString GitProcess::stoppedRewordMessage(std::string* hash) const {
 // reword's own was made (an untracked file in the way, a conflict
 // resolved to nothing) left an earlier commit with the same message
 // there ("wip", "wip"), and Continue renamed that one.
-bool GitProcess::headIsPickOf(const std::string& hash) const {
+std::optional<bool> GitProcess::headIsPickOf(const std::string& hash) const {
     const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
     if (!ids || !ids->success())
-        return false;
+        return std::nullopt;
     const QStringList both = QString::fromStdString(ids->stdoutData)
                                  .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     if (both.size() == 2 && both[0] == both[1])
@@ -1073,12 +1073,19 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
     };
     const auto now = commit("HEAD", "%an%n%ae%n%ad");
     const auto before = commit(hash, "%an%n%ae%n%ad");
-    if (!now || !before || !now->success() || !before->success()
-        || now->stdoutData != before->stdoutData)
+    if (!now || !before || !now->success() || !before->success())
+        return std::nullopt;
+    if (now->stdoutData != before->stdoutData)
         return false;
     // The change: the same patch-id, whatever base it was picked onto.
+    // Without context lines (-U0): a clean pick onto a base that
+    // changed lines near the commit's has other context around the
+    // same change, and with it another patch-id. The pick then didn't
+    // count as the commit, and Skip at an `edit` stop on a rebase onto
+    // an updated branch ran git's reset --hard over the changes made
+    // there.
     const auto patchId = [&](const std::string& rev) -> std::optional<std::string> {
-        const auto patch = run({"diff-tree", "--root", "-p", "--no-commit-id", rev});
+        const auto patch = run({"diff-tree", "--root", "-p", "-U0", "--no-commit-id", rev});
         if (!patch || !patch->success())
             return std::nullopt;
         if (patch->stdoutData.empty())
@@ -1089,7 +1096,10 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
         return id->stdoutData.substr(0, id->stdoutData.find(' '));
     };
     const auto headId = patchId("HEAD");
-    if (!headId || headId != patchId(hash))
+    const auto hashId = patchId(hash);
+    if (!headId || !hashId)
+        return std::nullopt;
+    if (*headId != *hashId)
         return false;
     if (!headId->empty())
         return true;
@@ -1098,7 +1108,7 @@ bool GitProcess::headIsPickOf(const std::string& hash) const {
     const auto nowMessage = commit("HEAD", "%B");
     const auto beforeMessage = commit(hash, "%B");
     if (!nowMessage || !beforeMessage || !nowMessage->success() || !beforeMessage->success())
-        return false;
+        return std::nullopt;
     const QString was = QString::fromStdString(beforeMessage->stdoutData).trimmed();
     return QString::fromStdString(nowMessage->stdoutData).trimmed().startsWith(was);
 }
@@ -1122,7 +1132,47 @@ std::string GitProcess::committedRebaseStop() const {
         verb = "edit";
     else
         return {};
-    return headIsPickOf(words[1].toStdString()) ? verb : std::string();
+    // git's own word for it: it writes rebase-merge/amend where it stops
+    // with the commit made, to be amended (every `edit`, and a reword
+    // turned down after a fast-forward), and removes it when the rebase
+    // goes on. It stays through whatever the user does there: an amend
+    // of the commit, or a split of it, leaves HEAD a commit that is no
+    // pick of the stopped one, and Skip then ran git's reset --hard over
+    // the work made since.
+    if (QFileInfo::exists(dir + QStringLiteral("/amend")))
+        return verb;
+    // A pick git has yet to commit (a conflict, or a change that came
+    // out empty): HEAD is the commit before it, which may be the same
+    // change picked earlier (the branch's copy of it).
+    if (QFileInfo::exists(gitPath(QStringLiteral("CHERRY_PICK_HEAD"))))
+        return {};
+    // Where git can't tell (a patch-id that timed out on a huge commit),
+    // as made: rebaseSkip() then refuses while there is work to lose,
+    // rather than letting a reset --hard through.
+    const std::optional<bool> picked = headIsPickOf(words[1].toStdString());
+    return !picked || *picked ? verb : std::string();
+}
+
+// The message git turned down is to be tried again where HEAD is still
+// the commit the stop left: the stopped commit itself (a fast-forward),
+// or git's own pick of it. Anything since (the user's amend of the
+// message at the stop, "commit (amend): ...") is the user's: the plan's
+// message, still turned down by the hook, came back on every Continue,
+// and replaced theirs where the hook took it.
+bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
+    const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
+    if (!ids || !ids->success())
+        return false;
+    const QStringList both = QString::fromStdString(ids->stdoutData)
+                                 .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (both.size() == 2 && both[0] == both[1])
+        return true;
+    const auto entry = run({"log", "-g", "-1", "--format=%gs", "HEAD"});
+    if (!entry || !entry->success())
+        return false;
+    const QString subject = QString::fromStdString(entry->stdoutData).trimmed();
+    return subject.startsWith(QLatin1String("rebase (reword)"))
+        || subject.startsWith(QLatin1String("rebase -i (reword)"));
 }
 
 QString GitProcess::rejectedRewordMessage() const {
@@ -1130,10 +1180,18 @@ QString GitProcess::rejectedRewordMessage() const {
     const QString message = stoppedRewordMessage(&hash);
     if (message.isEmpty())
         return {};
+    // A pick git has yet to commit (a conflict, or one that came out
+    // empty on top of the branch's own copy of the change): that copy at
+    // HEAD looked like the pick, and the retry's commit --amend failed
+    // there ("cannot amend") on every Continue. git's --continue
+    // commits, or drops, the pick.
+    if (QFileInfo::exists(gitPath(QStringLiteral("CHERRY_PICK_HEAD"))))
+        return {};
     const auto staged = run({"diff", "--cached", "--quiet"});
     if (!staged || staged->exitCode != 0)
         return {};
-    if (!headIsPickOf(hash))
+    const std::optional<bool> picked = headIsPickOf(hash);
+    if (!picked || !*picked || !headIsTheRewordStop(hash))
         return {};
     return message;
 }
@@ -1208,7 +1266,26 @@ Result<ProcessOutput> GitProcess::sequenceContinue(bool revert) const {
     return run({revert ? "revert" : "cherry-pick", "--continue"}, kRebaseTimeoutMs);
 }
 
+bool GitProcess::stagedWorkWithoutPick() const {
+    for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+        const QString path = gitPath(QString::fromLatin1(pending));
+        if (path.isEmpty())
+            return true;    // git can't say: as if there were
+        if (QFileInfo::exists(path))
+            return false;
+    }
+    const auto staged = run({"--no-optional-locks", "diff", "--cached", "--quiet",
+                             "--ignore-submodules=dirty"});
+    return !staged || staged->exitCode != 0;
+}
+
 Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {
+    // A sequence git stopped before it picked anything for the commit
+    // (a pick it refused over a dirty index): there's no pick to drop,
+    // and git's --skip runs `reset --merge HEAD`, which put every staged
+    // change back to HEAD's, with "Cherry-pick complete.".
+    if (stagedWorkWithoutPick())
+        return GitError(GitErrorCode::Uncommitted, kSequenceSkipWouldDiscard);
     return run({revert ? "revert" : "cherry-pick", "--skip"}, kRebaseTimeoutMs);
 }
 

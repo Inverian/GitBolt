@@ -27,14 +27,19 @@ namespace gitbolt::widgets {
 ///   of several commits:     [Resolve Conflicts…] [Commit…]  [Skip] [Abort]
 ///   Cherry-pick / revert of
 ///   several commits, paused
-///   between two:                                 [Continue] [Skip] [Abort]
+///   between two:                                 [Continue]        [Abort]
+///   …paused before picking
+///   the commit it stopped at:                               [Skip] [Abort]
 ///
 /// Resolve Conflicts… shows only while files are conflicted, and
 /// Continue / Commit… wait until none are. Skip shows for a rebase, and
 /// for a sequence of several cherry-picks or reverts only where git's
 /// --skip would work (Repository::sequenceSkippable()): at a commit the
 /// sequence stopped at, conflicted or empty, but not once that commit
-/// has been committed, where git has "nothing to skip".
+/// has been committed, where git has "nothing to skip". Paused with
+/// the commit it stopped at never picked (sequenceSkippable() while
+/// paused), git's --continue would leave that commit out just as --skip
+/// does, so only Skip is offered.
 class RepoOperationBar : public QFrame {
     Q_OBJECT
 public:

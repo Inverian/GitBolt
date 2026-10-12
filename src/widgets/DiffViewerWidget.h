@@ -62,6 +62,13 @@ public:
     void setHunkActionMode(HunkAction mode) { hunkAction_ = mode; }
     HunkAction hunkActionMode() const { return hunkAction_; }
 
+    /// While the host can't stage (its commit's hooks run, a local op
+    /// does), the context menu offers no hunk or line action; the diff
+    /// stays live to scroll, select and copy. (Disabled outright, it
+    /// could not even be scrolled.)
+    void setStagingLocked(bool locked) { stagingLocked_ = locked; }
+    bool stagingLocked() const { return stagingLocked_; }
+
     /// The file entry currently displayed — hosts use this to
     /// build hunk/line patches for the staging requests below.
     bool hasFile() const { return hasFile_; }
@@ -126,6 +133,7 @@ private:
     // index within that hunk); (-1,-1) for the file header and
     // (h,-1) for hunk header rows. Rebuilt by renderUnified.
     HunkAction hunkAction_ = HunkAction::None;
+    bool stagingLocked_ = false;
     std::vector<std::pair<int, int>> blockHunkLine_;
 };
 

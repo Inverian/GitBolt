@@ -49,6 +49,8 @@ signals:
     /// "Checkout as local branch" on a remote branch ("origin/x").
     void checkoutRemoteRequested(const QString& remoteBranch);
     void createBranchRequested(const QString& name);
+    /// The context menu's Delete on a local branch. Not asked here:
+    /// the receiver confirms first.
     void deleteBranchRequested(const QString& name);
     void renameBranchRequested(const QString& oldName, const QString& newName);
     void mergeRequested(const QString& name);

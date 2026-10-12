@@ -58,9 +58,9 @@ private:
     void probeAndPopulate(const QString& path);
     QPushButton* createActionCard(const QString& title, const QString& iconText,
                                   const QString& description);
-    /// The cards' descriptions in the theme's colour. palette(mid) was
-    /// the light theme's grey: on the dark theme's cards (#3c3c3c) it
-    /// read at 1.4:1.
+    /// The cards' descriptions in the theme's colour. palette(mid), a
+    /// border's grey, read at 1.4:1 on the dark theme's cards (#3c3c3c)
+    /// and at 1.7:1 on the light theme's window.
     void applyCardColors();
     QList<QLabel*> cardDescriptions_;
 

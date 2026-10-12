@@ -28,6 +28,8 @@ class QTimer;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
+namespace gitbolt::services { struct StopFacts;     }
+namespace gitbolt::widgets  { class RepoOperationBar; }
 namespace gitbolt::conf     { class SettingsService;}
 namespace gitbolt::conf     { class ThemeService;   }
 namespace gitbolt::dialogs  { class CommitDialog;   }
@@ -153,9 +155,13 @@ private:
     void checkoutAsLocalBranch(const QString& remoteBranch);
 
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
-    /// on its remote through runRemoteOp.
+    /// on its remote through runRemoteOp, if the repository open is
+    /// still the one with `key` (taken before any picker that came
+    /// first: GitService::openKey(), copied; the reference it returns
+    /// follows the open repository).
     void confirmAndDeleteRemoteBranch(const QString& remoteBranch,
-                                      QAction* sourceAction);
+                                      QAction* sourceAction,
+                                      std::string key);
 
 
 private:
@@ -210,6 +216,17 @@ private:
     /// open then, and Edit patterns applied one repository's sparse
     /// patterns to another, whose files went.
     bool repositoryChangedSince(const std::string& key, const QString& notDone);
+    /// For the in-progress bar's Skip and Abort: finds the stop's
+    /// GitService::StopFacts on a worker, the bar busy meanwhile, then
+    /// calls `ask` with them and the open repository's key (for
+    /// repositoryChangedSince() after its question), if that repository
+    /// is still open and nothing else has started on it.
+    /// Closes `window`, a modeless one of the repository with `key`,
+    /// once another repository is open (or none is).
+    void closeWithRepository(QWidget* window, const std::string& key);
+    void inspectStopThen(
+        widgets::RepoOperationBar* bar,
+        std::function<void(const services::StopFacts&, const std::string&)> ask);
     /// Keeps `apply` told whether the repository is busy (a local op or
     /// a step runs), for as long as `context` lives: the modeless
     /// windows' buttons (stashes, submodules) went to git under the op.
@@ -427,8 +444,9 @@ private:
     // The running auto-fetch's own stop flag (GitService::fetch's
     // `cancel`), which disowning it sets.
     std::shared_ptr<std::atomic<bool>> autoFetchCancel_;
-    // The git dir of the repository the running auto-fetch fetches,
-    // for onRepositoryOpened to tell whether a revealed one's is gone.
+    // The key (GitService::openKey(), its git dir) of the repository
+    // the running auto-fetch fetches, for onRepositoryOpened to tell
+    // whether a revealed one's is gone.
     std::string autoFetchRepo_;
     // A remote op clicked while a disowned auto-fetch wound down
     // (runRemoteOp); that fetch's finished handler starts it.
@@ -439,9 +457,10 @@ private:
     // The running auto-fetch has failed, as a quiet one: its failure is
     // in, so a Fetch click no longer reveals it (revealAutoFetch).
     bool autoFetchFailed_ = false;
-    // The git dir of a revealed auto-fetch that ended while an open was
-    // pending: its outcome went up over the loading screen, and goes
-    // once another repository is open (onRepositoryOpened).
+    // The repository key (autoFetchRepo_) of a revealed auto-fetch
+    // that ended while an open was pending: its outcome went up over
+    // the loading screen, and goes once another repository is open
+    // (onRepositoryOpened).
     std::string revealedFetchEndedRepo_;
 
     // Whether the last remote op failed: its own outcome, from what
@@ -465,6 +484,9 @@ private:
     // off until it ends. What it says it does, and whether it says so
     // on the inline label (not over a remote op's narration).
     bool localOpRunning_ = false;
+    // A repoStateReady came while a local op ran, and the in-progress
+    // bar didn't take it: a status refresh follows the op's end.
+    bool barStateHeld_ = false;
     QString localOpMessage_;
     bool localOpNarrated_ = false;
     // GitService::stepWarning of the step about to report: git's
@@ -474,6 +496,10 @@ private:
     // commit made during it, which git stops without rewinding: its
     // outcome says so.
     bool abortKeepsCommits_ = false;
+    // A Skip or an Abort of the in-progress bar is looking at the stop
+    // (inspectStopThen()); each look, and each open, a generation.
+    bool inspectingStop_ = false;
+    quint64 stopInspection_ = 0;
 
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by

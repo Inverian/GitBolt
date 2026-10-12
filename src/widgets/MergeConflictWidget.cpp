@@ -36,10 +36,11 @@ ConflictColors conflictColorsFor(const QPalette& palette) {
                 QColor(0x79, 0xc0, 0xff), QColor(0x9e, 0x9e, 0x9e), QColor(0x7e, 0xe7, 0x87),
                 QColor(0xf0, 0x88, 0x3e)};
     }
-    // Light blue, light gray and light green; royal blue, gray,
-    // forest green and saddle brown.
+    // Light blue, light gray and light green; a blue, a gray, a green
+    // and saddle brown, the headings' at 4.5:1 or more on the window
+    // (royal blue, gray and forest green read at 3.4:1 to 4.2:1).
     return {QColor(173, 216, 230, 60), QColor(211, 211, 211, 60), QColor(144, 238, 144, 60),
-            QColor(0x41, 0x69, 0xe1), QColor(0x80, 0x80, 0x80), QColor(0x22, 0x8b, 0x22),
+            QColor(0x35, 0x58, 0xc8), QColor(0x6a, 0x6a, 0x6a), QColor(0x1c, 0x7a, 0x1c),
             QColor(0x8b, 0x45, 0x13)};
 }
 

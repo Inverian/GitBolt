@@ -167,11 +167,14 @@ public:
 
     /// The todo verb ("pick", "reword" or "edit") of the commit the
     /// rebase in progress stopped at, when that commit is in the branch
-    /// already: an `edit` stops once it has picked it, and a reword
-    /// whose new message a hook turned down stops with it picked under
-    /// its old one (see headIsPickOf()). rebaseSkip() then only goes
-    /// on, and the commit stays. Empty where the stop has nothing
-    /// committed (a conflict), and with no rebase in progress.
+    /// already: an `edit` stops once it has picked it (git's
+    /// rebase-merge/amend says so, whatever the user has done there
+    /// since: an amend, a split), and a reword whose new message a hook
+    /// turned down stops with it picked under its old one (see
+    /// headIsPickOf(); where that can't be told, the verb too).
+    /// rebaseSkip() then only goes on, and the commit stays. Empty where
+    /// the stop has nothing committed (a conflict, CHERRY_PICK_HEAD),
+    /// and with no rebase in progress.
     std::string committedRebaseStop() const;
 
     /// `git cherry-pick --continue`, or `git revert --continue` when
@@ -179,7 +182,20 @@ public:
     /// Repository::sequencePaused()). Skip leaves out the commit the
     /// sequence stopped at first. As long as a rebase step may take.
     Result<ProcessOutput> sequenceContinue(bool revert) const;
+    /// Refused (GitErrorCode::Uncommitted, with kSequenceSkipWouldDiscard)
+    /// where it would throw away staged work (stagedWorkWithoutPick()).
     Result<ProcessOutput> sequenceSkip(bool revert) const;
+    static constexpr const char* kSequenceSkipWouldDiscard =
+        "Skipping would discard your staged changes: git stopped before it picked "
+        "the commit, and its --skip resets the index to HEAD. Commit them or stash "
+        "them first.";
+
+    /// Changes are staged, and no pick or revert is pending
+    /// (CHERRY_PICK_HEAD, REVERT_HEAD): a sequence stopped before it
+    /// picked the commit, where its --skip and --abort reset the index
+    /// to HEAD (`reset --merge`) and the staged changes are the user's.
+    /// True when git can't tell: it's asked before throwing work away.
+    bool stagedWorkWithoutPick() const;
 
     /// `git commit -F -` (`--amend` too when `amend`), the message on
     /// stdin: the commit a terminal's git would make. The repository's
@@ -250,16 +266,26 @@ private:
     QString stoppedRewordMessage(std::string* hash = nullptr) const;
 
     /// stoppedRewordMessage() when git hasn't given the commit that
-    /// message: nothing is staged, and HEAD is that commit as git
-    /// picked it, under its old message (a hook turned the new one
-    /// down; see headIsPickOf()). Empty otherwise.
+    /// message: nothing is staged, no pick is pending (CHERRY_PICK_HEAD),
+    /// and HEAD is that commit as git picked it, under its old message
+    /// (a hook turned the new one down; see headIsPickOf()), with
+    /// nothing committed since (headIsTheRewordStop()). Empty otherwise.
     QString rejectedRewordMessage() const;
 
     /// Whether HEAD is the commit `hash` as a rebase picked it: that
-    /// commit, or one with its author, date and patch-id. Not its
-    /// message, which a prepare-commit-msg hook may have added to; a
-    /// commit with no change at all has to start with it.
-    bool headIsPickOf(const std::string& hash) const;
+    /// commit, or one with its author, date and patch-id (without
+    /// context lines, so a pick onto a base that changed nearby lines
+    /// still counts). Not its message, which a prepare-commit-msg hook
+    /// may have added to; a commit with no change at all has to start
+    /// with it. nullopt where git couldn't say (a command failed or
+    /// timed out).
+    std::optional<bool> headIsPickOf(const std::string& hash) const;
+
+    /// HEAD is still what the stop at the reword of `hash` left: that
+    /// commit (a fast-forward), or the newest entry of HEAD's reflog is
+    /// git's pick for the reword ("rebase (reword): ..."), not a commit
+    /// of the user's since, such as an amend of the message.
+    bool headIsTheRewordStop(const std::string& hash) const;
 
     /// Where the rebase stopped at a reword, puts its new message where
     /// git keeps the message of the commit it stopped at

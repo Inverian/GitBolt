@@ -288,31 +288,52 @@ private slots:
     // commit was committed (the bar's own Commit…), git has "nothing to
     // skip", and the Skip offered there only ever failed. At the stop
     // itself, an empty pick that Commit… can't conclude had no Skip.
+    //
+    // Paused with HEAD where git left it, the stopped commit was never
+    // picked, and git's --continue leaves it out just as --skip does:
+    // "Continue to pick the rest" dropped it without a word. Only Skip,
+    // which says so, is offered there.
     void barOffersContinueForAPausedSequence() {
         RepoOperationBar bar;
+        auto* message = bar.findChild<QLabel*>();
+        QVERIFY(message);
         for (const auto state : {gitbolt::git::RepoState::CherryPick,
                                  gitbolt::git::RepoState::Revert}) {
-            // Paused with HEAD where git left it (a reset at the stop).
+            const bool revert = state == gitbolt::git::RepoState::Revert;
+            // Paused with HEAD where git left it (a pick git refused, or
+            // a reset at the stop).
             bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/true);
             QVERIFY(!bar.isHidden());
             QVERIFY(bar.sequencePaused());
             QVERIFY(!button(bar, label("Commit…")));
-            QVERIFY(button(bar, label("Continue"))->isEnabled());
+            QVERIFY(button(bar, label("Continue"))->isHidden());
             QVERIFY(!button(bar, label("Skip"))->isHidden());
+            QVERIFY(button(bar, label("Skip"))->isEnabled());
             QVERIFY(button(bar, label("Skip"))->toolTip().contains(
-                state == gitbolt::git::RepoState::Revert ? QLatin1String("git revert --skip")
-                                                         : QLatin1String("git cherry-pick --skip")));
+                revert ? QLatin1String("git revert --skip")
+                       : QLatin1String("git cherry-pick --skip")));
+            QCOMPARE(message->text(),
+                     revert ? QStringLiteral("A revert of several commits stopped before "
+                                             "reverting a commit. Skip leaves that commit out "
+                                             "and reverts the rest; Abort goes back.")
+                            : QStringLiteral("A cherry-pick of several commits stopped before "
+                                             "picking a commit. Skip leaves that commit out "
+                                             "and picks the rest; Abort goes back."));
             QSignalSpy continued(&bar, &RepoOperationBar::continueRequested);
             QSignalSpy skipped(&bar, &RepoOperationBar::skipRequested);
-            button(bar, label("Continue"))->click();
             button(bar, label("Skip"))->click();
-            QCOMPARE(continued.count(), 1);
             QCOMPARE(skipped.count(), 1);
 
             // Paused after the stopped commit was committed.
             bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/false);
+            QVERIFY(!button(bar, label("Continue"))->isHidden());
             QVERIFY(button(bar, label("Continue"))->isEnabled());
             QVERIFY(button(bar, label("Skip"))->isHidden());
+            QVERIFY2(message->text().contains(revert ? QLatin1String("Continue to revert the rest")
+                                                     : QLatin1String("Continue to pick the rest")),
+                     qPrintable(message->text()));
+            button(bar, label("Continue"))->click();
+            QCOMPARE(continued.count(), 1);
 
             // Stopped at a commit of the sequence, conflicted or empty.
             bar.setState(state, 1, /*sequencePaused=*/false, /*sequenceSkippable=*/true);

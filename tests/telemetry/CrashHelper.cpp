@@ -12,6 +12,13 @@
 //   fault         die of a real fault in a leaf function instead of
 //                 raise(), after printing that function's offset in
 //                 the executable ("faultNow +0x<hex>") to stdout
+//   check-ports   (macOS) don't crash: print whether a task-level port
+//                 takes EXC_CRASH ("crash port: set" or "crash port:
+//                 none") once the handler is installed, and exit 0
+//
+// A user session's crash keeps macOS's crash reporter out of it here,
+// as the helper's own doing (keepCrashReporterOut). A test session's
+// leaves that to CrashHandler::install(), which does it for the app.
 //
 // Built as "gitbolt" (in a directory of its own) so the parser counts
 // its frames as GitBolt's, as it would the app's.
@@ -87,20 +94,51 @@ void printFaultNowOffset() {
     std::fflush(stdout);
 }
 
+#ifdef Q_OS_MACOS
+// Whether a task-level port takes EXC_CRASH.
+bool crashPortSet() {
+    exception_mask_t masks[EXC_TYPES_COUNT];
+    mach_msg_type_number_t count = EXC_TYPES_COUNT;
+    exception_handler_t handlers[EXC_TYPES_COUNT];
+    exception_behavior_t behaviors[EXC_TYPES_COUNT];
+    thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+    if (task_get_exception_ports(mach_task_self(), EXC_MASK_CRASH, masks, &count, handlers,
+                                 behaviors, flavors) != KERN_SUCCESS)
+        return false;
+    for (mach_msg_type_number_t i = 0; i < count; ++i) {
+        if ((masks[i] & EXC_MASK_CRASH) && MACH_PORT_VALID(handlers[i]))
+            return true;
+    }
+    return false;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[]) {
-#ifdef Q_OS_MACOS
-    keepCrashReporterOut();
-#endif
     bool testSession = false;
     bool fault = false;
+    bool checkPorts = false;
     for (int i = 1; i < argc; ++i) {
         testSession = testSession || std::strcmp(argv[i], "test-session") == 0;
         fault = fault || std::strcmp(argv[i], "fault") == 0;
+        checkPorts = checkPorts || std::strcmp(argv[i], "check-ports") == 0;
     }
+#ifdef Q_OS_MACOS
+    if (!testSession && !checkPorts)
+        keepCrashReporterOut();
+#endif
     gitbolt::util::CrashHandler::install("1.2.3", /*officialBuild=*/true,
                                          /*envOptOut=*/false, testSession);
+    if (checkPorts) {
+#ifdef Q_OS_MACOS
+        std::printf("crash port: %s\n", crashPortSet() ? "set" : "none");
+#else
+        std::printf("crash port: n/a\n");
+#endif
+        std::fflush(stdout);
+        return 0;
+    }
     if (fault) {
         printFaultNowOffset();
         faultSoon();

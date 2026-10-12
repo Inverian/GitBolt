@@ -1,5 +1,6 @@
 #include "ui/DashboardView.h"
 #include "conf/SettingsService.h"
+#include "conf/ThemeService.h"
 #include "services/RecentRepoProbe.h"
 #include "widgets/BoltLogoWidget.h"
 
@@ -298,14 +299,13 @@ void DashboardView::setupUi()
 void DashboardView::applyCardColors()
 {
     // Dark: lighter than the card (#3c3c3c, #323232 hovered), at 5:1 or
-    // more. Light: the grey it always had.
-    const QPalette app = QApplication::palette();
-    const bool dark = app.color(QPalette::WindowText).lightness()
-                      > app.color(QPalette::Window).lightness();
+    // more. Light: the muted text grey (4.7:1 on the window); the
+    // palette(mid) it had is a border's grey, at 1.7:1.
+    const bool dark = conf::ThemeService::paletteIsDark();
     const QString sheet = QStringLiteral(
         "QLabel { font-size: 13pt; color: %1;"
         "         background: transparent; border: none; }")
-        .arg(dark ? QStringLiteral("#b4b4b4") : QStringLiteral("palette(mid)"));
+        .arg(dark ? QStringLiteral("#b4b4b4") : conf::ThemeService::mutedTextColor().name());
     for (QLabel* label : std::as_const(cardDescriptions_)) {
         if (label->styleSheet() != sheet)
             label->setStyleSheet(sheet);

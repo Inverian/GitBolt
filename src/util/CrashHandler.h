@@ -40,6 +40,9 @@ public:
     /// out (`envOptOut`), and whether this is a test session
     /// (`testSession`). main.cpp passes them: it is the only file that
     /// sees the endpoints, and nothing else is set up this early.
+    /// On macOS a test session's crash also stays out of the system's
+    /// crash reporter (no "quit unexpectedly" box, no .ips report):
+    /// its task-level EXC_CRASH port is one of its own.
     static void install(const char* appVersion, bool officialBuild,
                         bool envOptOut, bool testSession);
 

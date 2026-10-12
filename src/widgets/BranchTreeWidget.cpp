@@ -3,7 +3,6 @@
 #include <QAction>
 #include <QHBoxLayout>
 #include <QInputDialog>
-#include <QMessageBox>
 #include <QVBoxLayout>
 
 namespace gitbolt::widgets {
@@ -236,13 +235,11 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Delete
         auto* deleteAction = menu.addAction(QIcon::fromTheme(QStringLiteral("edit-delete")),
                                             tr("Delete '%1'").arg(branchName));
+        // MainWindow asks, as for the remote Delete below: it knows the
+        // repository the question is about, and that it's still open
+        // once the answer comes.
         connect(deleteAction, &QAction::triggered, this, [this, branchName]() {
-            auto answer = QMessageBox::question(
-                this, tr("Delete Branch"),
-                tr("Are you sure you want to delete branch '%1'?").arg(branchName),
-                QMessageBox::Yes | QMessageBox::No);
-            if (answer == QMessageBox::Yes)
-                emit deleteBranchRequested(branchName);
+            emit deleteBranchRequested(branchName);
         });
     }
 

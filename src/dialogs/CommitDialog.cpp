@@ -1,6 +1,7 @@
 #include "dialogs/CommitDialog.h"
 
 #include "conf/SettingsService.h"
+#include "conf/ThemeService.h"
 #include "git/Config.h"
 #include "git/Diff.h"
 #include "git/PatchBuilder.h"
@@ -161,9 +162,9 @@ void CommitDialog::setupUi()
         info->setCursor(Qt::WhatsThisCursor);
         // Muted gray so it doesn't compete with the bold title;
         // slightly larger so the glyph is easy to hit and read.
-        info->setStyleSheet(QStringLiteral(
-            "QLabel { color: palette(mid); font-size: 15px; "
-            "padding: 0 2px; }"));
+        // (Not palette(mid), a border's grey: 1.7:1 on the window.)
+        conf::ThemeService::keepMutedText(info, QStringLiteral(
+            "QLabel { color: %1; font-size: 15px; padding: 0 2px; }"));
         row->addWidget(info);
         return row;
     };
@@ -392,8 +393,12 @@ void CommitDialog::wireConnections()
     connect(unstageBtn_,  &QPushButton::clicked, this, &CommitDialog::onUnstageSelected);
     connect(discardBtn_,  &QPushButton::clicked, this, &CommitDialog::onDiscardSelected);
 
-    connect(stageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::stageAll);
-    connect(unstageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::unstageAll);
+    connect(stageAllBtn_, &QPushButton::clicked, this, [this] {
+        if (!stagingLocked_) svc_->stageAll();
+    });
+    connect(unstageAllBtn_, &QPushButton::clicked, this, [this] {
+        if (!stagingLocked_) svc_->unstageAll();
+    });
 
     // ---- Hunk / line staging from the diff pane ----------------------------
     // The diff viewer's context menu emits these; the verb (stage
@@ -403,7 +408,7 @@ void CommitDialog::wireConnections()
     // `git apply --cached` and surfaces via operationFailed.
     connect(diffView_, &widgets::DiffViewerWidget::hunkActionRequested,
             this, [this](int hunkIdx) {
-        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        if (!diffView_->hasFile() || hunkIdx < 0 || stagingLocked_) return;
         const bool reverse =
             diffView_->hunkActionMode()
             == widgets::DiffViewerWidget::HunkAction::Unstage;
@@ -421,7 +426,7 @@ void CommitDialog::wireConnections()
     });
     connect(diffView_, &widgets::DiffViewerWidget::linesActionRequested,
             this, [this](int hunkIdx, QList<int> lineIdxs) {
-        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        if (!diffView_->hasFile() || hunkIdx < 0 || stagingLocked_) return;
         const bool reverse =
             diffView_->hunkActionMode()
             == widgets::DiffViewerWidget::HunkAction::Unstage;
@@ -517,11 +522,19 @@ void CommitDialog::applyLocks()
     // file staged then went into it, the hook never seeing it.
     const bool step = stepRunning();
     const bool locked = pendingCommit_ || localOpBusy_ || step;
-    // Both file lists, their filters and buttons; each child keeps its
-    // own (selection-driven) state for when the lock goes.
-    leftSplitter_->setEnabled(!locked);
-    // Hunk and line staging (its context menu).
-    diffView_->setEnabled(!locked);
+    // What stages, unstages or discards: the lists' buttons, their
+    // double-click and Enter (the activation handlers), and the diff's
+    // hunk and line actions. The lists and the diff themselves stay
+    // live, to scroll, select and read while a hook runs: disabled
+    // outright, neither could even be scrolled.
+    stagingLocked_ = locked;
+    const bool unstagedSelected = !selectedUnstagedPaths().isEmpty();
+    stageBtn_->setEnabled(!locked && unstagedSelected);
+    discardBtn_->setEnabled(!locked && unstagedSelected);
+    unstageBtn_->setEnabled(!locked && !selectedStagedPaths().isEmpty());
+    stageAllBtn_->setEnabled(!locked);
+    unstageAllBtn_->setEnabled(!locked);
+    diffView_->setStagingLocked(locked);
     // The message the commit took stays as it was until it's in.
     messageEdit_->setReadOnly(pendingCommit_);
     commitBtn_->setEnabled(!locked);
@@ -719,8 +732,8 @@ void CommitDialog::onUnstagedSelectionChanged()
 {
     const QStringList paths = selectedUnstagedPaths();
     const bool hasSel = !paths.isEmpty();
-    stageBtn_->setEnabled(hasSel);
-    discardBtn_->setEnabled(hasSel);
+    stageBtn_->setEnabled(hasSel && !stagingLocked_);
+    discardBtn_->setEnabled(hasSel && !stagingLocked_);
 
     // When a single file is selected, show its diff. Multi-select
     // leaves the previous diff in place — picking the "right" one to
@@ -741,7 +754,7 @@ void CommitDialog::onStagedSelectionChanged()
 {
     const QStringList paths = selectedStagedPaths();
     const bool hasSel = !paths.isEmpty();
-    unstageBtn_->setEnabled(hasSel);
+    unstageBtn_->setEnabled(hasSel && !stagingLocked_);
 
     if (paths.size() == 1)
         showDiffForStaged(paths.first());
@@ -754,7 +767,7 @@ void CommitDialog::onStagedSelectionChanged()
 
 void CommitDialog::onUnstagedActivated(const QModelIndex& index)
 {
-    if (!index.isValid()) return;
+    if (!index.isValid() || stagingLocked_) return;
     const auto srcIdx = unstagedProxy_->mapToSource(index);
     const QString path = unstagedModel_->pathAt(srcIdx.row());
     if (!path.isEmpty())
@@ -763,7 +776,7 @@ void CommitDialog::onUnstagedActivated(const QModelIndex& index)
 
 void CommitDialog::onStagedActivated(const QModelIndex& index)
 {
-    if (!index.isValid()) return;
+    if (!index.isValid() || stagingLocked_) return;
     const auto srcIdx = stagedProxy_->mapToSource(index);
     const QString path = stagedModel_->pathAt(srcIdx.row());
     if (!path.isEmpty())
@@ -835,12 +848,14 @@ void CommitDialog::clearDiff()
 
 void CommitDialog::onStageSelected()
 {
+    if (stagingLocked_) return;
     for (const QString& p : selectedUnstagedPaths())
         svc_->stageFile(p);
 }
 
 void CommitDialog::onUnstageSelected()
 {
+    if (stagingLocked_) return;
     for (const QString& p : selectedStagedPaths())
         svc_->unstageFile(p);
 }
@@ -848,7 +863,7 @@ void CommitDialog::onUnstageSelected()
 void CommitDialog::onDiscardSelected()
 {
     const QStringList paths = selectedUnstagedPaths();
-    if (paths.isEmpty()) return;
+    if (paths.isEmpty() || stagingLocked_) return;
 
     const QString detail = paths.size() == 1
         ? tr("Discard all uncommitted changes to %1?\n\nThis cannot be undone.")

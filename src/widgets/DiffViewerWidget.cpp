@@ -425,7 +425,7 @@ void DiffViewerWidget::onUnifiedContextMenu(const QPoint& pos)
     QMenu* menu = unifiedEditor_->createStandardContextMenu();
 
     const bool stagingEligible =
-        hunkAction_ != HunkAction::None && hasFile_
+        hunkAction_ != HunkAction::None && hasFile_ && !stagingLocked_
         && currentFile_.status == git::DiffStatus::Modified;
 
     if (stagingEligible) {
