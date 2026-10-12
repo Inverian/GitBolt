@@ -108,7 +108,8 @@ GitBolt sends nothing until its window is open. Events are sent about
 can't be reached, they wait on your computer and GitBolt tries again
 every 15 minutes; events still waiting when GitBolt quits are sent
 the next time it starts. They are kept in a file next to GitBolt's
-settings file: at most 500 events, for at most 14 days.
+settings file: at most 500 events, for at most 14 days, and an event
+that fails to send 5 times is dropped.
 
 ## Where it goes
 

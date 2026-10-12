@@ -4,6 +4,66 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.5] — 2026-10-12
+
+Usage statistics and crash reports, which show the maintainers which
+features are used and what goes wrong, and a history that loads past
+its first 256 commits.
+
+### Added
+
+- **Usage statistics and crash reports**: official GitBolt builds
+  (releases, and CI's builds of `main`) now send usage statistics, and
+  summaries of crashes and errors, to the GitBolt maintainers' own
+  servers. They are on by default, with no pop-up, and
+  [PRIVACY.md](https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md),
+  linked from the About GitBolt dialog, the README and Settings, says
+  exactly what is sent.
+  - **Usage statistics**, under a random install ID and a device ID
+    derived from it: each start (with the version, OS, CPU
+    architecture, Qt version and system language), which menu and
+    toolbar commands are used and how often, and how long repositories
+    take to open and to show the first page of their history, with a
+    rough count of that page's commits (0, 1-99, 100-255 or 256+).
+  - **Crash and error reports**, without your install ID (each carries
+    only a random report ID): which Git operation failed (such as
+    fetch or push), that a commit failed, or the error code of a
+    repository that would not open (such as not_found); and, after a
+    crash, its kind (such as SIGSEGV) and its call stack, reduced to
+    positions in GitBolt, Qt, libgit2 and the system's own libraries,
+    with function names for those libraries only. Any other library
+    shows as `<other>`.
+  - **Never sent**: repository names or paths, branch, tag or remote
+    names, remote URLs, commit messages or hashes, the names or
+    contents of your files, email addresses and user names.
+- **Tools › Settings › General › Usage statistics**, in official
+  builds, turns them off: sending stops at once and anything still
+  waiting is deleted. It also shows your install ID, with a Copy
+  button, for deletion requests, and links to what is collected.
+  `DO_NOT_TRACK=1` or `GITBOLT_TELEMETRY=0` turn them off too. Builds
+  from source and forks contain no server addresses and send nothing,
+  and GitBolt sends nothing when run by tests or in CI.
+
+### Changed
+
+- **Crash Detected**: when a summary of the crash report will be sent,
+  the dialog says so, and that it can be turned off in Settings. The
+  report GitBolt saves now names the version that crashed instead of
+  "unknown".
+- **Linux packages**: the .deb now depends on OpenSSL 3 (libssl3t64,
+  or libssl3 on older releases), which GitBolt needs to send usage
+  statistics over HTTPS, and its AppStream content rating now declares
+  that GitBolt sends usage statistics under a persistent install ID
+  (OARS social-info: intense).
+- **README**: the Project Status section is gone, and a Privacy and
+  usage statistics section is new.
+
+### Fixed
+
+- **History**: scrolling past a repository's first 256 commits added
+  those same 256 again, so older commits never appeared. Each page now
+  continues where the last one stopped.
+
 ## [0.9.4] — 2026-10-10
 
 Tighter spacing around the toolbar's Commit and Stash buttons in dark
