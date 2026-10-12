@@ -148,20 +148,17 @@ jobs:
       # Usage statistics endpoints (cmake/Telemetry.cmake, PRIVACY.md):
       # official builds only, i.e. pushes to upstream main. Pull
       # requests, dry runs and forks configure them empty, which
-      # compiles telemetry out. Literals, not repository variables: the
-      # OpenPanel client can only write events, a GlitchTip DSN key is
-      # public by design, and both are in every shipped binary anyway.
+      # compiles telemetry out. The keys are repository secrets, so they
+      # stay out of this public source and fork builds can't read them;
+      # they can only send events, not read any. The host is public.
       # Step env, never the command line; cmake reads each from the
       # environment on the first configure.
-      # FOLLOW-UP PR: put the real values in the four '' literals right
-      # after `&&` once the server keys exist. Until then every build,
-      # main included, is compiled out.
       - name: Configure
         env:
-          GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
-          GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
-          GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
-          GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && '' || '' }}
+          GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
+          GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=${{ runner.os == 'Linux' && 'OFF' || 'ON' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
@@ -176,11 +173,11 @@ jobs:
           # Bash's sed keeps the CR, which would pass for a value.
           host=$(sed -n 's/^GITBOLT_TELEMETRY_HOST:[A-Z]*=//p' build/CMakeCache.txt | tr -d '\r')
           if [ "$OFFICIAL" = true ]; then
-            echo "Official build; telemetry endpoints: ${host:-none yet}"
-            # FOLLOW-UP PR (the one that adds the endpoints): fail an
-            # official build without them, so a lost value can't ship
-            # a release that silently sends nothing. Uncomment then:
-            # [ -n "$host" ] || { echo "::error::official build without telemetry endpoints"; exit 1; }
+            # A lost secret must not ship a release that silently sends
+            # nothing. (A partial set already fails cmake's all-or-none
+            # check.)
+            [ -n "$host" ] || { echo "::error::official build without telemetry endpoints (check the GITBOLT_TELEMETRY_* repository secrets)"; exit 1; }
+            echo "Official build; telemetry endpoints: $host"
           elif [ -n "$host" ]; then
             echo "::error::telemetry endpoints in a non-official build ($GITHUB_EVENT_NAME, $GITHUB_REPOSITORY, $GITHUB_REF)"
             exit 1

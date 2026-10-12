@@ -402,7 +402,9 @@ The four `GITBOLT_TELEMETRY_*` options are all set, or all empty
 (checked in [`cmake/Telemetry.cmake`](../cmake/Telemetry.cmake)).
 Empty, the default, compiles usage statistics out: the app creates no
 telemetry client and Settings shows no Usage statistics group. Only
-CI's builds of pushes to the upstream `main` branch set them; see
+CI's builds of pushes to the upstream `main` branch set them, from the
+repository's `GITBOLT_TELEMETRY_*` Actions secrets (the host is in
+`ci.yml`); see
 [PRIVACY.md](../PRIVACY.md) for what those builds send. Each option
 takes its first value from the environment variable of the same name.
 
