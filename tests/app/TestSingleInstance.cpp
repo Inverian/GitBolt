@@ -24,7 +24,7 @@
 //   - nobody listening, or an owner that hangs up unanswered, is told
 //     apart from a delivery;
 //   - the caller of a hand-off has its say every 100 ms and can stop
-//     the wait (the busy window's Cancel);
+//     the wait (the busy window's Cancel), which takes the path back;
 //   - a free lock is taken; one nobody listens for is given up on after
 //     the patience;
 //   - the pipe name is the lock directory's on Windows, case and all;
@@ -341,6 +341,14 @@ private slots:
                                              cancelSoon),
                  Claim::Cancelled);
         QVERIFY(!lock.isLocked());
+
+        // Once free, the owner opens neither: the cancelled launches
+        // took their path back. (On Unix the socket had buffered it, and
+        // the owner switched to the repository regardless.) A path
+        // handed over after them comes first.
+        LaunchProcess after(dir.path(), name, QStringLiteral("/repo/after"));
+        QCOMPARE(after.outcome(), QStringLiteral("delivered"));
+        QCOMPARE(owner.waitForLine(QStringLiteral("path:")), QStringLiteral("path:/repo/after"));
     }
 
     void claimsAFreeLock()

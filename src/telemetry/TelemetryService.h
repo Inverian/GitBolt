@@ -145,6 +145,7 @@ private:
     std::unique_ptr<EventQueue> queue_;
     QNetworkAccessManager* network_ = nullptr;   // child, created at the first flush
     QNetworkReply* reply_ = nullptr;             // the one request in flight
+    bool replySent_ = false;                     // any of it written (classify())
 
     QTimer flushTimer_;   // single shot: firstFlushDelayMs after a record
     QTimer retryTimer_;   // flushIntervalMs: retries and the request budget

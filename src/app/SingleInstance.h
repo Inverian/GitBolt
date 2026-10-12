@@ -55,18 +55,20 @@ using HandoffWait = std::function<bool(qint64 waitedMs)>;
 ///   lock is about to come free. The caller retries, and so takes its
 ///   place.
 /// - NoListener: nothing took the connection. The caller retries.
-/// - Cancelled: `wait` said to stop.
+/// - Cancelled: `wait` said to stop. The path is taken back: a
+///   "cancel" line follows it, and the owner, once free, drops it.
 ///
 /// It waits for as long as the connection lasts, which proves the
-/// owner alive: its end dies with it. An owner can be busy for minutes
-/// — submodule commands, sparse checkout and Find Large Files run git
-/// synchronously on its GUI thread — and acts on the line once it is
-/// free. On Windows even the write waits for that: Qt's pipes have no
-/// buffer, so a write completes only once the owner's event loop has
-/// accepted the connection, and is cancelled if this process exits
-/// first; a Unix socket buffers the line at once. A deadline on the
-/// write used to turn an owner that was merely busy for longer into
-/// "not responding", and one on the answer (Unix) left the path with an
+/// owner alive: its end dies with it. An owner can be busy for a long
+/// time (a libgit2 checkout of a large tree still runs on its GUI
+/// thread, and a modal dialog can hold up the hand-off as long as it is
+/// open) and acts on the line once it is free. On Windows even the
+/// write waits for that: Qt's pipes have no buffer, so a write
+/// completes only once the owner's event loop has accepted the
+/// connection, and is cancelled if this process exits first; a Unix
+/// socket buffers the line at once. A deadline on the write used to
+/// turn an owner that was merely busy for longer into "not
+/// responding", and one on the answer (Unix) left the path with an
 /// owner that might never read it, if it died busy.
 Handoff handOffToRunningInstance(const QString& serverName, const QString& path,
                                  const HandoffWait& wait = {});
@@ -92,7 +94,9 @@ Claim claimInstance(QLockFile& lock, const QString& serverName, const QString& p
                     int patienceMs = 10000, const HandoffWait& wait = {});
 
 /// The lock holder's end of the hand-off: one line in from each launch,
-/// empty for a bare relaunch, answered with one line out. Only the lock
+/// empty for a bare relaunch, answered with one line out. A path that a
+/// "cancel" line follows, its launch having given up the wait, is
+/// answered and dropped. Only the lock
 /// holder listens, so clearing a socket left by a killed instance can
 /// never take a live one's. UserAccessOption keeps other local users
 /// from driving our window.

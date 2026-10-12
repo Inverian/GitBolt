@@ -54,10 +54,13 @@ public:
     /// One local op. `work` runs on a pool thread with a GitProcess for
     /// the open repository (stopped by GitService::cancelGitOps()) and
     /// must touch nothing else; `finished` runs on the GUI thread once
-    /// it's done, unless another repository was opened meanwhile (the
-    /// outcome is that one's no more). The refresh set runs either way,
-    /// after `finished`. False, starting nothing, when no repository is
-    /// open or another local op still runs (then with refused()).
+    /// it's done, unless another repository (or none) is open by then:
+    /// the outcome is that one's no more. The same repository opened
+    /// again (GitService::openKey()) still gets it, and while an open
+    /// is on its way, `finished` waits for it to land or fail. The
+    /// refresh set runs either way, after `finished` unless that waits.
+    /// False, starting nothing, when no repository is open or another
+    /// local op still runs (then with refused()).
     bool runJob(const QString& busyMessage,
                 std::function<void(const git::GitProcess&)> work,
                 std::function<void()> finished,
@@ -95,6 +98,9 @@ signals:
 
 private:
     void refreshAfter(RefreshSet refresh);
+    /// Runs `finished` if the repository `key` names is the open one,
+    /// waiting for an open on its way first (see runJob()).
+    void deliver(const std::string& key, std::function<void()> finished);
 
     services::GitService* svc_;
     QWidget* dialogParent_;

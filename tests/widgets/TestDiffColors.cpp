@@ -12,7 +12,10 @@
 //   - the merge conflict view's headings, the file tree's preview
 //     heading and the Clone dialog's status line read at 4.5:1 or
 //     more in the dark theme (and the conflict panes' tints follow a
-//     switch), and keep their light colours.
+//     switch), and keep their light colours;
+//   - so do the Commit tab's labels, links and "Contained in" lines
+//     (rendered again on a switch), the Commit dialog's file-status
+//     colours, and the toolbar's outcome of an op.
 //
 // Themes switch the way the app switches them, through ThemeService:
 // the application palette, then the application style sheet (whose
@@ -32,12 +35,18 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextLayout>
 
 #include <cmath>
 
 #include "conf/ThemeService.h"
 #include "dialogs/CloneDialog.h"
+#include "git/Status.h"
+#include "models/CommitLogModel.h"
+#include "models/FileStatusModel.h"
+#include "ui/InlineOpIndicator.h"
+#include "ui/RepositoryView.h"
 #include "widgets/DiffTextEdit.h"
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
@@ -139,6 +148,22 @@ QLabel* labelWithText(QWidget& parent, const QString& text) {
 QColor textColor(QWidget* widget) {
     widget->ensurePolished();
     return widget->palette().color(QPalette::WindowText);
+}
+
+// The colour the browsers of `view` render `text` in (the first
+// fragment that contains it).
+QColor fragmentColor(QWidget& view, const QString& text) {
+    for (QTextBrowser* browser : view.findChildren<QTextBrowser*>()) {
+        for (QTextBlock block = browser->document()->begin(); block.isValid();
+             block = block.next()) {
+            for (auto it = block.begin(); !it.atEnd(); ++it) {
+                const QTextFragment fragment = it.fragment();
+                if (fragment.isValid() && fragment.text().contains(text))
+                    return fragment.charFormat().foreground().color();
+            }
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -342,6 +367,102 @@ private slots:
         const QColor window = QApplication::palette().color(QPalette::Window);
         const QColor color = textColor(heading);
         QVERIFY2(contrast(color, window) >= 4.5, qPrintable(describe(color, window)));
+    }
+
+    // The Commit tab: label greys, links and the "Contained in" lines
+    // were the light theme's (1.7:1 to 3.6:1 on the dark one), and a
+    // theme switch renders the commit on show again.
+    void commitDetailsReadInTheDarkTheme() {
+        gitbolt::models::CommitLogModel model;
+        gitbolt::git::CommitData commit;
+        commit.id = gitbolt::git::ObjectId::fromHex("0123456789abcdef0123456789abcdef01234567");
+        commit.author.name = commit.committer.name = "Ada";
+        commit.author.email = commit.committer.email = "ada@example.com";
+        commit.summary = commit.message = "A commit";
+        model.setCommits({commit});
+        gitbolt::ui::RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(900, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        view.onCommitSelected(QString::fromStdString(commit.id.toHex()));
+        const QStringList texts = {QStringLiteral("Author:"), QStringLiteral("ada@example.com"),
+                                   QStringLiteral("Contained in no tag"),
+                                   QStringLiteral("(none — root commit)")};
+        QCOMPARE(fragmentColor(view, QStringLiteral("Author:")), QColor(0x66, 0x66, 0x66));
+        QCOMPARE(fragmentColor(view, QStringLiteral("Contained in no tag")),
+                 QColor(0x44, 0x44, 0x44));
+
+        // Switched to with the commit on show, and shown afresh.
+        theme_.setTheme(QStringLiteral("Dark"));
+        for (int pass = 0; pass < 2; ++pass) {
+            // The browsers are transparent over the panel's window colour.
+            const QColor base = QApplication::palette().color(QPalette::Window);
+            for (const QString& text : texts) {
+                const QColor color = fragmentColor(view, text);
+                QVERIFY2(color.isValid(), qPrintable(text));
+                QVERIFY2(contrast(color, base) >= 4.5,
+                         qPrintable(text + QStringLiteral(": ") + describe(color, base)));
+            }
+            view.onCommitSelected(QString::fromStdString(commit.id.toHex()));
+        }
+    }
+
+    // The Commit dialog's file lists: modified (blue), deleted and
+    // conflicted (red), new (green, gray) at 4.5:1 or more on the dark
+    // theme's list background; the light colours as they were.
+    void fileStatusColorsReadInTheDarkTheme() {
+        using FS = gitbolt::git::FileStatus;
+        std::vector<gitbolt::git::StatusEntry> entries = {
+            {"modified.txt", "", FS::WtModified | FS::IndexModified},
+            {"deleted.txt", "", FS::WtDeleted | FS::IndexDeleted},
+            {"new.txt", "", FS::WtNew},
+            {"added.txt", "", FS::IndexNew},
+            {"conflicted.txt", "", FS::Conflicted},
+        };
+        gitbolt::models::FileStatusModel unstaged;
+        unstaged.setEntries(entries);
+        gitbolt::models::FileStatusModel staged;
+        staged.setStagedFilter(true);
+        staged.setEntries(entries);
+        const auto colors = [](const gitbolt::models::FileStatusModel& model) {
+            QList<QColor> list;
+            for (int row = 0; row < model.rowCount(); ++row)
+                list << model.data(model.index(row, gitbolt::models::FileStatusModel::Path),
+                                   Qt::ForegroundRole).value<QColor>();
+            return list;
+        };
+        QVERIFY(colors(unstaged).contains(QColor(0, 102, 204)));
+        QVERIFY(colors(unstaged).contains(QColor(204, 0, 0)));
+
+        theme_.setTheme(QStringLiteral("Dark"));
+        // The lists alternate their rows' colours.
+        for (const QColor& base : {QApplication::palette().color(QPalette::Base),
+                                   QApplication::palette().color(QPalette::AlternateBase)}) {
+            for (const auto* model : {&unstaged, &staged}) {
+                const QList<QColor> list = colors(*model);
+                QVERIFY(!list.isEmpty());
+                for (const QColor& color : list)
+                    QVERIFY2(contrast(color, base) >= 4.5, qPrintable(describe(color, base)));
+            }
+        }
+    }
+
+    // The toolbar's word on an op's outcome, on the dark tool bar.
+    void opOutcomeReadsInTheDarkTheme() {
+        theme_.setTheme(QStringLiteral("Dark"));
+        QWidget bar;
+        auto* label = new QLabel(&bar);
+        gitbolt::ui::InlineOpIndicator indicator(label);
+        bar.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&bar));
+        const QColor toolBar = QColor::fromRgb(kDarkToolBar);
+        indicator.fail(QStringLiteral("Push failed"), QStringLiteral("rejected"), 0);
+        QColor color = textColor(label);
+        QVERIFY2(contrast(color, toolBar) >= 4.5, qPrintable(describe(color, toolBar)));
+        indicator.succeed(QStringLiteral("Pushed"), 0);
+        color = textColor(label);
+        QVERIFY2(contrast(color, toolBar) >= 4.5, qPrintable(describe(color, toolBar)));
     }
 
     // The status line's error colour (Clone with no URL), in both

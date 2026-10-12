@@ -23,12 +23,18 @@ namespace gitbolt::widgets {
 ///   Rebase:                 [Resolve Conflicts…] [Continue] [Skip] [Abort]
 ///   Merge / cherry-pick /
 ///   revert:                 [Resolve Conflicts…] [Commit…]         [Abort]
+///   …stopped in a sequence
+///   of several commits:     [Resolve Conflicts…] [Commit…]  [Skip] [Abort]
 ///   Cherry-pick / revert of
 ///   several commits, paused
 ///   between two:                                 [Continue] [Skip] [Abort]
 ///
 /// Resolve Conflicts… shows only while files are conflicted, and
-/// Continue / Commit… wait until none are.
+/// Continue / Commit… wait until none are. Skip shows for a rebase, and
+/// for a sequence of several cherry-picks or reverts only where git's
+/// --skip would work (Repository::sequenceSkippable()): at a commit the
+/// sequence stopped at, conflicted or empty, but not once that commit
+/// has been committed, where git has "nothing to skip".
 class RepoOperationBar : public QFrame {
     Q_OBJECT
 public:
@@ -37,11 +43,14 @@ public:
     /// From GitService::repoStateReady: shows, updates or hides the
     /// bar. RepoState::Other (am, bisect) has nothing to offer here.
     /// `sequencePaused`: a cherry-pick or revert of several commits is
-    /// paused between two, with nothing to commit; Continue and Skip
-    /// carry it on, as for a rebase.
-    void setState(git::RepoState state, int conflicts, bool sequencePaused = false);
+    /// paused between two, with nothing to commit; Continue carries it
+    /// on, as for a rebase. `sequenceSkippable`: such a sequence, paused
+    /// or stopped at a commit, can leave that commit out (Skip).
+    void setState(git::RepoState state, int conflicts, bool sequencePaused = false,
+                  bool sequenceSkippable = false);
     git::RepoState state() const { return state_; }
     bool sequencePaused() const { return sequencePaused_; }
+    bool sequenceSkippable() const { return sequenceSkippable_; }
 
     /// While a step runs, every button is off, so that a second click
     /// can't start another git command on top of it.
@@ -54,7 +63,7 @@ signals:
     /// --continue. Otherwise: commit, which concludes the merge /
     /// cherry-pick / revert.
     void continueRequested();
-    /// Rebase, or a paused sequence: its --skip.
+    /// Rebase, or a sequence that can skip: its --skip.
     void skipRequested();
     void abortRequested();
 
@@ -69,6 +78,7 @@ private:
     git::RepoState state_ = git::RepoState::None;
     int conflicts_ = 0;
     bool sequencePaused_ = false;
+    bool sequenceSkippable_ = false;
     bool busy_ = false;
     bool applyingColors_ = false;
     QColor border_;

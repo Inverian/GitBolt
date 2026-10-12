@@ -12,8 +12,8 @@
 // it didn't, the action could expand or collapse a directory of the new
 // tree that the user never picked.
 //
-// Its header counts the commit's files and directories in English:
-// "1 file, 1 directory", not "1 files, 1 directories".
+// Its header counts the commit's files and folders in English:
+// "1 file, 1 folder", not "1 files, 1 directories".
 //
 
 #include <QAbstractItemModel>
@@ -99,7 +99,7 @@ private slots:
         auto* header = tree.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
         QVERIFY(header);
         tree.setCommit(*only);
-        QVERIFY2(header->text().startsWith(QStringLiteral("1 file, 1 directory — ")),
+        QVERIFY2(header->text().startsWith(QStringLiteral("1 file, 1 folder — ")),
                  qPrintable(header->text()));
 
         // dir/, dir/sub/, dir/sub/file.txt and dir/other.txt
@@ -107,7 +107,7 @@ private slots:
         QVERIFY(other.openRepository(repo_.path()));
         tree.setGitService(&other);
         tree.setCommit(first_);
-        QVERIFY2(header->text().startsWith(QStringLiteral("2 files, 2 directories — ")),
+        QVERIFY2(header->text().startsWith(QStringLiteral("2 files, 2 folders — ")),
                  qPrintable(header->text()));
     }
 

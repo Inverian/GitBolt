@@ -1,5 +1,8 @@
 #include "ui/InlineOpIndicator.h"
 
+#include <QApplication>
+#include <QPalette>
+
 #include <QFontMetrics>
 #include <QLabel>
 #include <QMargins>
@@ -30,11 +33,25 @@ void InlineOpIndicator::start(const QString& msg)
     setText(msg);
 }
 
+namespace {
+// The theme's green or red for an outcome: the light ones read at 2.7:1
+// to 3.9:1 on the dark theme's toolbar.
+QString outcomeColor(bool success)
+{
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    if (success)
+        return dark ? QStringLiteral("#3fb950") : QStringLiteral("#2e9c36");
+    return dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c43c3c");
+}
+} // namespace
+
 void InlineOpIndicator::succeed(const QString& msg, int clearAfterMs)
 {
     if (label_) {
         label_->setStyleSheet(QStringLiteral(
-            "QLabel { color: #2e9c36; font-weight: bold; }"));
+            "QLabel { color: %1; font-weight: bold; }").arg(outcomeColor(true)));
         setText(QStringLiteral("✓ %1").arg(msg));
     }
     scheduleClear(clearAfterMs);
@@ -45,7 +62,7 @@ void InlineOpIndicator::fail(const QString& oneLine,
 {
     if (label_) {
         label_->setStyleSheet(QStringLiteral(
-            "QLabel { color: #c43c3c; font-weight: bold; }"));
+            "QLabel { color: %1; font-weight: bold; }").arg(outcomeColor(false)));
         setText(QStringLiteral("✗ %1").arg(oneLine), fullTooltip);
     }
     if (clearAfterMs > 0)

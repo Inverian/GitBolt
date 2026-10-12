@@ -110,8 +110,11 @@ server can't be reached, they wait on your computer and GitBolt tries
 again every 15 minutes; events still waiting when GitBolt quits are
 sent the next time it starts. They are kept in a file next to
 GitBolt's settings file: at most 500 events, for at most 14 days, and
-an event that fails to send 5 times is dropped. Tries that never reach
-the server, such as while your computer is offline, don't count.
+an event that fails to send 5 times is dropped. A try that fails
+before any of it reaches the server doesn't count: the server's name
+can't be looked up, the connection is refused, or there is no route to
+it, as while your computer is offline. A try that times out, or fails
+in any other way, does.
 
 ## Where it goes
 

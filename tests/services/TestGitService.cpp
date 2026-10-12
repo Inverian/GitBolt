@@ -1216,6 +1216,78 @@ private slots:
         QCOMPARE(failedSpy.count(), 0);
     }
 
+    // Fetch's default prune reached past refs/remotes/: with a tags
+    // refspec, a mirror's +refs/*:refs/*, or pruneTags set, it deleted
+    // local tags and branches the server doesn't have (unpushed ones),
+    // which a plain `git fetch` keeps, the silent auto-fetch included.
+    // There, unless fetch.prune or remote.<name>.prune asks for it,
+    // GitBolt's Fetch prunes nothing.
+    void fetchDefaultPruneKeepsLocalRefs_data() {
+        QTest::addColumn<QString>("key");
+        QTest::addColumn<QString>("value");
+        QTest::newRow("tags refspec")
+            << "remote.origin.fetch" << "+refs/tags/*:refs/tags/*";
+        QTest::newRow("mirror refspec") << "remote.origin.fetch" << "+refs/*:refs/*";
+        QTest::newRow("branches refspec")
+            << "remote.origin.fetch" << "+refs/heads/*:refs/heads/*";
+        QTest::newRow("fetch.pruneTags") << "fetch.pruneTags" << "true";
+        QTest::newRow("remote pruneTags") << "remote.origin.pruneTags" << "true";
+    }
+
+    void fetchDefaultPruneKeepsLocalRefs() {
+        QFETCH(QString, key);
+        QFETCH(QString, value);
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QString globalConfig = home.filePath(QStringLiteral("gitconfig"));
+        QFile empty(globalConfig);
+        QVERIFY(empty.open(QIODevice::WriteOnly));
+        empty.close();
+        const gitbolt::test::ScopedEnv global("GIT_CONFIG_GLOBAL",
+                                              QFile::encodeName(globalConfig));
+        const gitbolt::test::ScopedEnv noSystem("GIT_CONFIG_NOSYSTEM", "1");
+
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        gitbolt::git::GitProcess workGit(repo->path().toStdString());
+        QVERIFY(succeeded(workGit.run({"push", "-q", "origin", "HEAD:refs/heads/main",
+                                       "HEAD:refs/heads/gone"})));
+        QVERIFY(succeeded(workGit.run({"fetch", "-q", "origin"})));
+        QVERIFY(origin->deleteBranch("gone").ok());
+        // Never pushed: on this side only.
+        QVERIFY(succeeded(workGit.run({"tag", "local-tag"})));
+        QVERIFY(succeeded(workGit.run({"branch", "local-branch"})));
+        // git won't fetch into a branch that is checked out.
+        QVERIFY(succeeded(workGit.run({"checkout", "-q", "--detach"})));
+        QVERIFY(succeeded(workGit.run({"config", "--add", key.toStdString(),
+                                       value.toStdString()})));
+        const auto has = [&](const char* ref) {
+            return succeeded(workGit.run({"rev-parse", "--verify", "-q", ref}));
+        };
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(svc.fetch());
+        QVERIFY(svc.fetch(QString(), std::make_shared<std::atomic<bool>>(false),
+                          /*allowPrompts=*/false));
+        QVERIFY2(failedSpy.isEmpty(), qPrintable(failedSpy.isEmpty()
+                     ? QString() : failedSpy.first().at(1).toString()));
+        QVERIFY(has("refs/tags/local-tag"));
+        QVERIFY(has("refs/heads/local-branch"));
+        // As plain `git fetch` leaves it: not pruned at all.
+        QVERIFY(has("refs/remotes/origin/gone"));
+
+        // Asked for in config, git prunes as it would in a terminal.
+        QVERIFY(succeeded(workGit.run({"config", "remote.origin.prune", "true"})));
+        QVERIFY(svc.fetch());
+        QVERIFY(!has("refs/remotes/origin/gone"));
+    }
+
     // The sidebar's "Checkout as local branch" on origin/feature asked
     // for a checkout of plain "feature", which only exists once there's
     // a local branch of that name: for a branch that's only on the
@@ -1878,6 +1950,68 @@ private slots:
                  QStringLiteral("two\none, reworded\ncommit 0"));
     }
 
+    // Continue's retry of a reword knew the commit it was for by its
+    // message alone. A stop before the reword's commit was made (here
+    // an untracked file in its way, which git reschedules) left the
+    // commit before it at HEAD, and with the same message ("wip") that
+    // one was renamed: two commits came out "feature X". The retry is
+    // for the reword's own commit only now; Continue then rewords it.
+    void rewordRetryAmendsOnlyTheRewordsCommit() {
+        const IsolatedGitConfig config;
+        auto repo = repoWithCommits(1);     // commit 0
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        const auto base = repo->repo().resolveRef("HEAD");
+        const auto w1 = repo->writeAndCommit(QStringLiteral("a.txt"), QByteArrayLiteral("a\n"),
+                                             QStringLiteral("wip"));
+        const auto w2 = repo->writeAndCommit(QStringLiteral("x.txt"), QByteArrayLiteral("x\n"),
+                                             QStringLiteral("wip"));
+        QVERIFY(succeeded(work.run({"rm", "-q", "x.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "rm x"})));
+        const auto w3 = repo->repo().resolveRef("HEAD");
+        QVERIFY(base.ok() && w1.ok() && w2.ok() && w3.ok());
+        // In the way of W2's x.txt.
+        repo->writeFile(QStringLiteral("x.txt"), QByteArrayLiteral("untracked\n"));
+
+        using Type = gitbolt::git::RebaseOperationType;
+        gitbolt::git::RebasePlan plan;
+        plan.onto = *base;
+        plan.head = *w3;
+        plan.branch = branchOf(work);
+        plan.operations = {{Type::Pick, *w3, "rm x"},
+                           {Type::Reword, *w2, "wip", "feature X\n"},
+                           {Type::Pick, *w1, "wip"}};
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy steps(&svc, &GitService::rebaseStepFinished);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        const auto step = [&](const std::function<void()>& run) {
+            log.clear();
+            steps.clear();
+            run();
+            return log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"})
+                && steps.size() == 1;
+        };
+        QVERIFY2(step([&] { svc.interactiveRebase(plan); }),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("rebase"), false, true}));
+        // Stopped with W1 at HEAD, W2 still to come.
+        QCOMPARE(output(work.run({"rev-parse", "HEAD"})), QString::fromStdString(w1->toHex()));
+
+        QVERIFY(QFile::remove(repo->path() + QStringLiteral("/x.txt")));
+        QVERIFY2(step([&] { svc.rebaseContinue(); }),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("rebase --continue"), true, false}));
+        QCOMPARE(output(work.run({"log", "--format=%s"})),
+                 QStringLiteral("rm x\nfeature X\nwip\ncommit 0"));
+        QCOMPARE(output(work.run({"log", "-1", "--format=%H", "HEAD~2"})),
+                 QString::fromStdString(w1->toHex()));
+    }
+
     // A reword that stopped on a conflict, carried on from a terminal:
     // `git rebase --continue` there commits with the message git kept
     // for the stop (rebase-merge/message; MERGE_MSG for a `git
@@ -1924,9 +2058,15 @@ private slots:
         QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}),
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("rebase"), false, true}));
-        QFile mergeMsg(repo->path() + QStringLiteral("/.git/MERGE_MSG"));
-        QVERIFY(mergeMsg.open(QIODevice::ReadOnly));
-        QVERIFY2(mergeMsg.readAll().startsWith("clash, reworded"), "MERGE_MSG");
+        {
+            // Closed before git goes on: Windows lets nobody replace a
+            // file another process has open (QFile shares no delete), and
+            // the terminal's git then failed to write MERGE_MSG for the
+            // next pick ("failed to finalize '.git/MERGE_MSG'").
+            QFile mergeMsg(repo->path() + QStringLiteral("/.git/MERGE_MSG"));
+            QVERIFY(mergeMsg.open(QIODevice::ReadOnly));
+            QVERIFY2(mergeMsg.readAll().startsWith("clash, reworded"), "MERGE_MSG");
+        }
 
         repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("resolved\n"));
         QVERIFY(succeeded(work.run({"add", "f0.txt"})));
@@ -2235,9 +2375,17 @@ private slots:
         svc.rebaseAbort();
         QVERIFY(!svc.abortConflictState());
         QVERIFY(!svc.resolveConflicts({{QStringLiteral("f1.txt"), QStringLiteral("resolved\n")}}));
+        // Nor a commit: it is a step of its own.
+        MainThreadSpy commits(&svc, &GitService::commitComplete);
+        svc.commitChanges(QStringLiteral("during the step"));
+        QVERIFY(commits.waitForAny());
+        QCOMPARE(commits.at(0), (QVariantList{false, QStringLiteral(
+            "Another git operation is still running on this repository; "
+            "try again when it's done.")}));
         for (const char* op : {"rebase --skip", "rebase --abort", "abort", "resolve conflicts"})
-            QVERIFY2(log.contains(QStringLiteral("operationFailed(%1: A rebase step is still "
-                                                 "running; try again when it's done.)")
+            QVERIFY2(log.contains(QStringLiteral("operationFailed(%1: Another git operation is "
+                                                 "still running on this repository; try "
+                                                 "again when it's done.)")
                                       .arg(QLatin1String(op))),
                      qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Rebase);
@@ -2314,14 +2462,17 @@ private slots:
         QVERIFY(succeeded(work.run({"checkout", "-q", "side"})));
 
         // Picked onto main, "side change" is committed anew, and the
-        // hook notes its pid and waits for a "go".
+        // hook notes its pid (Git for Windows' sh: the Windows pid,
+        // which processAlive() looks up; its own $$ is an MSYS2 one)
+        // and waits for a "go".
         QTemporaryDir hooks;
         QVERIFY(hooks.isValid());
         const QString pidFile = hooks.filePath(QStringLiteral("hook.pid"));
         const QString go = hooks.filePath(QStringLiteral("go"));
         QFile hook(hooks.filePath(QStringLiteral("post-commit")));
         QVERIFY(hook.open(QIODevice::WriteOnly));
-        hook.write("#!/bin/sh\necho $$ > '" + QFile::encodeName(pidFile) + "'\n"
+        hook.write("#!/bin/sh\n{ cat /proc/$$/winpid 2>/dev/null || echo $$; } > '"
+                   + QFile::encodeName(pidFile) + "'\n"
                    "while [ ! -f '" + QFile::encodeName(go) + "' ]; do sleep 0.05; done\n");
         hook.close();
         QVERIFY(hook.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
@@ -2358,6 +2509,140 @@ private slots:
                               QStringLiteral("rebaseStep")}),
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Rebase);
+    }
+
+    // A commit and a rebase step are one git at a time. A Continue
+    // clicked while an amend's pre-commit hook ran finished the rebase
+    // under it, and the amend then had nothing to amend: the new
+    // message was lost. Continue is refused while the commit runs, and
+    // goes on with the amended commit after.
+    void commitAndStepsTakeTurns() {
+        const IsolatedGitConfig config;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        const auto one = repo->writeAndCommit(QStringLiteral("one.txt"), QByteArrayLiteral("one\n"),
+                                              QStringLiteral("one"));
+        const auto two = repo->writeAndCommit(QStringLiteral("two.txt"), QByteArrayLiteral("two\n"),
+                                              QStringLiteral("two"));
+        const auto onto = repo->repo().resolveRef("HEAD~2");
+        QVERIFY(one.ok() && two.ok() && onto.ok());
+
+        using Type = gitbolt::git::RebaseOperationType;
+        gitbolt::git::RebasePlan plan;
+        plan.onto = *onto;
+        plan.head = *two;
+        plan.branch = branchOf(work);
+        plan.operations = {{Type::Pick, *two, "two"}, {Type::Edit, *one, "one"}};
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy steps(&svc, &GitService::rebaseStepFinished);
+        MainThreadSpy started(&svc, &GitService::stepStarted);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        svc.interactiveRebase(plan);
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("rebase"), true, true}));
+
+        // Stopped at "one": a change staged, and an amend whose hook
+        // waits for a "go".
+        repo->writeFile(QStringLiteral("one.txt"), QByteArrayLiteral("one, amended\n"));
+        QVERIFY(succeeded(work.run({"add", "one.txt"})));
+        QVERIFY(writeHook(repo->path() + QStringLiteral("/.git/hooks"), "pre-commit",
+                          "touch .git/hook-started\n"
+                          "while [ ! -f .git/go ]; do sleep 0.05; done\n"));
+        const auto release = qScopeGuard(
+            [&] { repo->writeFile(QStringLiteral(".git/go"), QByteArray()); });
+        log.clear();
+        steps.clear();
+        started.clear();
+        MainThreadSpy commits(&svc, &GitService::commitComplete);
+        svc.commitChanges(QStringLiteral("one, reworded"), /*amend=*/true);
+        QVERIFY(started.waitForAny());
+        QCOMPARE(started.at(0), (QVariantList{QStringLiteral("commit")}));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            QFileInfo::exists(repo->path() + QStringLiteral("/.git/hook-started")), 10000);
+        QVERIFY(svc.rebaseStepRunning());
+
+        svc.rebaseContinue();
+        QVERIFY2(log.waitFor({QStringLiteral("operationFailed(rebase --continue: Another git "
+                                             "operation is still running on this repository; "
+                                             "try again when it's done.)")}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Rebase);
+
+        repo->writeFile(QStringLiteral(".git/go"), QByteArray());
+        QVERIFY(commits.waitForAny(15000));
+        QVERIFY2(commits.at(0).at(0).toBool(), qPrintable(commits.at(0).at(1).toString()));
+        QVERIFY(!svc.rebaseStepRunning());
+        QVERIFY(steps.isEmpty());
+
+        log.clear();
+        svc.rebaseContinue();
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(steps.last(), (QVariantList{QStringLiteral("rebase --continue"), true, false}));
+        QCOMPARE(output(work.run({"log", "--format=%s"})),
+                 QStringLiteral("two\none, reworded\ncommit 0"));
+        QCOMPARE(output(work.run({"show", "HEAD~1:one.txt"})), QStringLiteral("one, amended"));
+    }
+
+    // A merge's, cherry-pick's or revert's Abort is a step too: while it
+    // puts the work tree back, a second Abort, a Continue or a commit is
+    // refused rather than run as a second git (which failed on
+    // index.lock, telling the user to delete it). It reports as
+    // "merge --abort".
+    void abortIsAStep() {
+        const IsolatedGitConfig config;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo->writeAndCommit(QStringLiteral("f0.txt"), QByteArrayLiteral("side\n"),
+                                     QStringLiteral("side change")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(repo->writeAndCommit(QStringLiteral("f0.txt"), QByteArrayLiteral("main\n"),
+                                     QStringLiteral("main change")).ok());
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        QVERIFY(succeeded(work.run({"config", "filter.slow.smudge", "sleep 2; cat"})));
+        QFile attributes(repo->path() + QStringLiteral("/.git/info/attributes"));
+        QVERIFY(attributes.open(QIODevice::WriteOnly));
+        attributes.write("f0.txt filter=slow\n");
+        attributes.close();
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy steps(&svc, &GitService::rebaseStepFinished);
+        MainThreadSpy started(&svc, &GitService::stepStarted);
+        MainThreadSpy commits(&svc, &GitService::commitComplete);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+
+        QVERIFY(svc.abortConflictState());
+        QVERIFY(started.waitForAny());
+        QCOMPARE(started.at(0), (QVariantList{QStringLiteral("merge --abort")}));
+        QVERIFY(svc.rebaseStepRunning());
+        QVERIFY(!svc.abortConflictState());
+        svc.commitChanges(QStringLiteral("during the abort"));
+        QVERIFY2(log.waitFor({QStringLiteral("operationFailed(abort: Another git operation is "
+                                             "still running on this repository; try again "
+                                             "when it's done.)"),
+                              QStringLiteral("commitComplete")}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY(!commits.at(0).at(0).toBool());
+
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}, 15000),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(steps.size(), 1);
+        QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("merge --abort"), true, false}));
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+        QVERIFY(!QFileInfo::exists(repo->path() + QStringLiteral("/.git/index.lock")));
     }
 
     // The resolver's and the in-progress bar's Abort of a merge: git
@@ -2481,16 +2766,21 @@ private slots:
     // git commit, the sequence is paused between commits: the state
     // goes out as such, and Continue runs git's --continue, which picks
     // C. Nothing ran it, and with nothing to commit the bar's Commit…
-    // led nowhere. Skip leaves B out, after a `git reset --hard` there.
+    // led nowhere. Skip leaves B out, after a `git reset --hard` there,
+    // or at the stop itself. Once B is committed, git's --skip has
+    // "nothing to skip": the state says so, and the bar offers none.
     // -----------------------------------------------------------------
     void sequenceStepsPickTheRest_data() {
         QTest::addColumn<bool>("skip");
-        QTest::newRow("continue after committing") << false;
-        QTest::newRow("skip after a reset") << true;
+        QTest::addColumn<bool>("atTheStop");
+        QTest::newRow("continue after committing") << false << false;
+        QTest::newRow("skip after a reset") << true << false;
+        QTest::newRow("skip at the stop") << true << true;
     }
 
     void sequenceStepsPickTheRest() {
         QFETCH(bool, skip);
+        QFETCH(bool, atTheStop);
         const IsolatedGitConfig config;
         auto repo = repoWithCommits(1);
         QVERIFY(repo);
@@ -2517,19 +2807,23 @@ private slots:
         QVERIFY(svc.openRepository(repo->path()));
         QVERIFY(log.waitFor({"status", "log", "branches"}));
         QVERIFY(states.waitForAny());
-        // repoStateReady's state, conflicts and sequencePaused.
+        // repoStateReady's state, conflicts, sequencePaused and
+        // sequenceSkippable.
         const auto lastState = [&] {
             const QVariantList& s = states.last();
-            return QStringLiteral("%1 %2 %3")
+            return QStringLiteral("%1 %2 %3 %4")
                 .arg(static_cast<int>(s.at(0).value<gitbolt::git::RepoState>()))
                 .arg(s.at(1).toInt())
-                .arg(s.at(2).toBool() ? QStringLiteral("paused") : QStringLiteral("-"));
+                .arg(s.at(2).toBool() ? QStringLiteral("paused") : QStringLiteral("-"))
+                .arg(s.at(3).toBool() ? QStringLiteral("skippable") : QStringLiteral("-"));
         };
         const int cherryPick = static_cast<int>(gitbolt::git::RepoState::CherryPick);
-        // Stopped at B, which waits for its commit.
-        QCOMPARE(lastState(), QStringLiteral("%1 1 -").arg(cherryPick));
+        // Stopped at B, which waits for its commit, or can be left out.
+        QCOMPARE(lastState(), QStringLiteral("%1 1 - skippable").arg(cherryPick));
 
-        if (skip) {
+        if (atTheStop) {
+            // Skipped from there.
+        } else if (skip) {
             QVERIFY(succeeded(work.run({"reset", "-q", "--hard"})));
             svc.refreshStatus();
         } else {
@@ -2540,9 +2834,23 @@ private slots:
             QVERIFY(done.waitForAny(15000));
             QVERIFY2(done.at(0).at(0).toBool(), qPrintable(done.at(0).at(1).toString()));
         }
-        const QString paused = QStringLiteral("%1 0 paused").arg(cherryPick);
-        QVERIFY2(QTest::qWaitFor([&] { return lastState() == paused; }, 10000),
-                 qPrintable(lastState()));
+        if (!atTheStop) {
+            // Committed, B is past skipping: HEAD moved on from where
+            // git's sequencer left it (git: "there is nothing to skip").
+            const QString paused = QStringLiteral("%1 0 paused %2")
+                                       .arg(cherryPick)
+                                       .arg(skip ? QStringLiteral("skippable")
+                                                 : QStringLiteral("-"));
+            QVERIFY2(QTest::qWaitFor([&] { return lastState() == paused; }, 10000),
+                     qPrintable(lastState()));
+            if (!skip) {
+                const auto refused = work.run({"cherry-pick", "--skip"});
+                QVERIFY(refused.ok() && !refused->success());
+                QVERIFY2(QString::fromStdString(refused->stderrData)
+                             .contains(QLatin1String("nothing to skip")),
+                         refused->stderrData.c_str());
+            }
+        }
 
         log.clear();
         skip ? svc.sequenceSkip() : svc.sequenceContinue();

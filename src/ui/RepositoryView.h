@@ -5,7 +5,10 @@
 #include "git/Stash.h"
 #include "git/Submodule.h"
 #include "git/Tag.h"
+#include <QSet>
+#include <QString>
 #include <QWidget>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -114,12 +117,21 @@ private slots:
 
 protected:
     void showEvent(QShowEvent* e) override;
+    void changeEvent(QEvent* e) override;
 
 private:
     // Monotonic token for the async "contained in branches" query —
     // a reply older than the latest request is dropped instead of
     // overwriting the newer commit's details.
     quint64 containsQueryToken_ = 0;
+
+    // The files whose history showFileHistory is loading.
+    QSet<QString> historyLoading_;
+
+    // The commit the Commit tab shows, rendered again in the colours of
+    // a theme switched to (changeEvent).
+    std::optional<git::CommitData> shownCommit_;
+    bool renderingDetails_ = false;
 
     /// showFileHistory's dialog, for `git log`'s output on `path`.
     void showFileHistoryDialog(const QString& path, const QString& stdoutText);

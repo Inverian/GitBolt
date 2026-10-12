@@ -205,6 +205,14 @@ void TelemetryService::sendFront() {
     QNetworkReply* reply =
         network_->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     reply_ = reply;
+    // Whether any of the request got onto a connection: an error with
+    // nothing sent never reached a server (classify()). Delivered ahead
+    // of finished(), from the same thread.
+    replySent_ = false;
+    connect(reply, &QNetworkReply::uploadProgress, this, [this, reply](qint64 sent, qint64) {
+        if (reply == reply_ && sent > 0)
+            replySent_ = true;
+    });
     // By id, not "the front": a record appended meanwhile can push the
     // queue over its caps, which may drop this very record.
     connect(reply, &QNetworkReply::finished, this,
@@ -223,7 +231,7 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
         return;
 
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    switch (classify(status, reply->error())) {
+    switch (classify(status, reply->error(), replySent_)) {
     case Outcome::Sent:
     case Outcome::Drop:
         queue_->remove(recordId);

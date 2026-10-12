@@ -92,6 +92,12 @@ protected:
     /// than private so tests can feed it without a PTY.
     void appendOutput(const QByteArray& bytes);
 
+    /// Each read of the shell's terminal (the PTY, or ConPTY), as it
+    /// came, just before appendOutput() draws it. Does nothing; a test
+    /// overrides it to tell what the terminal sent from what the widget
+    /// made of it.
+    virtual void outputRead(const QByteArray& bytes) { Q_UNUSED(bytes); }
+
     /// How much of `run` (text that starts where a character does) goes
     /// on a screen row with `room` columns left, in UTF-16 units, which
     /// is how the Windows screen model counts columns: as much as fits

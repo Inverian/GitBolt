@@ -1151,6 +1151,74 @@ private slots:
         QCOMPARE(output(git.run({"log", "-3", "--format=%s"})).split('\n').at(1),
                  QStringLiteral("second"));
     }
+
+    // -----------------------------------------------------------------
+    // sequenceSkippable() says what git's --skip will do. At the stop
+    // (CHERRY_PICK_HEAD / REVERT_HEAD) it skips; paused after a reset
+    // there, it skips; paused because the stopped commit was committed,
+    // HEAD has moved past sequencer/abort-safety and git refuses
+    // ("there is nothing to skip"), which the bar's Skip used to run
+    // into every time.
+    // -----------------------------------------------------------------
+    void sequenceSkippableAsGitSkips_data() {
+        QTest::addColumn<bool>("revert");
+        QTest::addColumn<QString>("then");
+        QTest::addColumn<bool>("skippable");
+        for (const bool revert : {false, true}) {
+            const char* op = revert ? "revert" : "cherry-pick";
+            QTest::addRow("%s at the stop", op) << revert << "stop" << true;
+            QTest::addRow("%s committed", op) << revert << "commit" << false;
+            QTest::addRow("%s reset at the stop", op) << revert << "reset" << true;
+        }
+    }
+
+    void sequenceSkippableAsGitSkips() {
+        QFETCH(bool, revert);
+        QFETCH(QString, then);
+        QFETCH(bool, skippable);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        const char* op = revert ? "revert" : "cherry-pick";
+        if (revert) {
+            QVERIFY(repo.writeAndCommit("p.txt", "p\n", "p").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "q\n", "q").ok());
+            QVERIFY(repo.writeAndCommit("r.txt", "r\n", "r").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "later\n", "later").ok());
+            QVERIFY(!succeeded(git.run({"revert", "--no-edit", "HEAD~1", "HEAD~2", "HEAD~3"})));
+        } else {
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+            QVERIFY(repo.writeAndCommit("x.txt", "x\n", "A").ok());
+            QVERIFY(repo.writeAndCommit("a.txt", "side\n", "B").ok());
+            QVERIFY(repo.writeAndCommit("c.txt", "c\n", "C").ok());
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+            QVERIFY(repo.writeAndCommit("a.txt", "main\n", "main").ok());
+            QVERIFY(!succeeded(git.run({"cherry-pick", "side~2", "side~1", "side"})));
+        }
+        QVERIFY(!repo.repo().sequencePaused());
+        QVERIFY(repo.repo().sequenceSkippable());
+        if (then == QLatin1String("commit")) {
+            repo.writeFile("a.txt", "resolved\n");
+            QVERIFY(succeeded(git.run({"add", "a.txt"})));
+            QVERIFY(succeeded(git.run({"commit", "-q", "--no-edit"})));
+            QVERIFY(repo.repo().sequencePaused());
+        } else if (then == QLatin1String("reset")) {
+            QVERIFY(succeeded(git.run({"reset", "-q", "--hard"})));
+            QVERIFY(repo.repo().sequencePaused());
+        }
+        QCOMPARE(repo.repo().sequenceSkippable(), skippable);
+
+        const auto skipped = git.run({op, "--skip"});
+        QVERIFY(skipped.ok());
+        QVERIFY2(skipped->success() == skippable, skipped->stderrData.c_str());
+
+        // Nothing to skip once the sequence is over, nor without one.
+        if (skippable) {
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+            QVERIFY(!repo.repo().sequenceSkippable());
+        }
+    }
 };
 
 QTEST_MAIN(TestRepository)

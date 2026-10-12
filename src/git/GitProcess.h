@@ -30,8 +30,13 @@ public:
     /// Without `timeoutMs`, git gets defaultTimeoutMs(). git runs in a
     /// process group of its own (a job object on Windows), as clone()
     /// does: a timeout, or a cancel (addCancelFlag), stops git and
-    /// every process it started, SIGTERM first so git can roll back
-    /// its lockfiles, as on Ctrl-C.
+    /// every process it started. git is interrupted first so it can
+    /// roll back its lockfiles: SIGTERM to the group on Unix; on
+    /// Windows a Ctrl-C to the hidden console git and its children
+    /// share, which works while GitBolt has no console of its own (the
+    /// app never does). Whatever is left is then killed: SIGKILL, or
+    /// the job ended. Where no Ctrl-C could be sent, the job is ended
+    /// outright, and a lockfile git held stays behind.
     Result<ProcessOutput> run(const std::vector<std::string>& args,
                               std::optional<int> timeoutMs = std::nullopt) const;
 
@@ -80,9 +85,11 @@ public:
     Result<ProcessOutput> push(const std::string& remote, const std::string& branch,
                                bool force = false, bool setUpstream = false) const;
     Result<ProcessOutput> pull(const std::string& remote, const std::string& branch) const;
-    /// pruneByDefault prunes the remote-tracking refs of branches gone
-    /// from the server, as fetch.prune=true does, unless the remote's
-    /// own remote.<name>.prune says otherwise.
+    /// pruneByDefault prunes as fetch.prune=true does, unless the
+    /// remote's own remote.<name>.prune says otherwise: every ref the
+    /// remote's fetch refspecs write to that the server no longer has,
+    /// tags too with pruneTags set. GitService asks for it only where
+    /// those are remote-tracking refs alone.
     Result<ProcessOutput> fetch(const std::string& remote = "", bool pruneByDefault = false) const;
 
     /// `git clone --progress -- <url> <path>`: the same CLI path push /
@@ -208,9 +215,14 @@ private:
     QString stoppedRewordMessage(std::string* hash = nullptr) const;
 
     /// stoppedRewordMessage() when git hasn't given the commit that
-    /// message: nothing is staged, and HEAD still has the commit's old
-    /// one (a hook turned the new one down). Empty otherwise.
+    /// message: nothing is staged, and HEAD is that commit as git
+    /// picked it, under its old message (a hook turned the new one
+    /// down; see headIsPickOf()). Empty otherwise.
     QString rejectedRewordMessage() const;
+
+    /// Whether HEAD is the commit `hash` as a rebase picked it: that
+    /// commit, or one with its author, date, message and patch-id.
+    bool headIsPickOf(const std::string& hash) const;
 
     /// Where the rebase stopped at a reword, puts its new message where
     /// git keeps the message of the commit it stopped at

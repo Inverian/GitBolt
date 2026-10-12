@@ -475,16 +475,49 @@ void CommitDialog::wireConnections()
             [this](std::vector<gitbolt::git::BranchInfo>) { updateTitle(); });
     connect(svc_, &services::GitService::repositoryOpened, this,
             [this](const QString&) {
-                // A commit still running for the repository before
-                // reports nowhere (see GitService::commitChanges): its
-                // wait would have kept Commit off for good.
-                pendingCommit_ = false;
-                pushAfterCommit_ = false;
-                commitBtn_->setEnabled(true);
-                commitPushBtn_->setEnabled(true);
+                // A commit still running for another repository reports
+                // nowhere (see GitService::commitChanges): its wait
+                // would have kept Commit off for good. One for this
+                // repository, opened again, still reports here, and a
+                // Commit & Push still pushes once it's in: cleared, the
+                // push was dropped.
+                if (pendingCommit_ && svc_->openKey() != pendingKey_) {
+                    pendingCommit_ = false;
+                    pushAfterCommit_ = false;
+                    pendingKey_.clear();
+                }
+                applyLocks();
                 readCommitterFromConfig();
                 updateTitle();
             });
+}
+
+void CommitDialog::setLocalOpBusy(bool busy)
+{
+    localOpBusy_ = busy;
+    applyLocks();
+}
+
+void CommitDialog::applyLocks()
+{
+    const bool locked = pendingCommit_ || localOpBusy_;
+    // Both file lists, their filters and buttons; each child keeps its
+    // own (selection-driven) state for when the lock goes.
+    leftSplitter_->setEnabled(!locked);
+    // Hunk and line staging (its context menu).
+    diffView_->setEnabled(!locked);
+    // The message the commit took stays as it was until it's in.
+    messageEdit_->setReadOnly(pendingCommit_);
+    commitBtn_->setEnabled(!locked);
+    commitPushBtn_->setEnabled(!locked);
+    commitShortcut_->setEnabled(!locked);
+    if (locked)
+        amendCheck_->setEnabled(false);
+    else
+        updateAmend();
+    commitBtn_->setToolTip(pendingCommit_ ? tr("Committing… (git runs the repository's hooks)")
+                           : localOpBusy_ ? tr("Another operation is still running")
+                                          : QString());
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +536,7 @@ void CommitDialog::updateAmend()
         : QString();
     if (!problem.isEmpty())
         amendCheck_->setChecked(false);
-    amendCheck_->setEnabled(problem.isEmpty());
+    amendCheck_->setEnabled(problem.isEmpty() && !pendingCommit_ && !localOpBusy_);
     amendCheck_->setToolTip(problem);
 }
 
@@ -814,6 +847,10 @@ void CommitDialog::onDiscardSelected()
 
 void CommitDialog::onCommitClicked()
 {
+    // One commit at a time: Ctrl+Return reached here while one ran,
+    // and the first one's outcome was taken for the second's.
+    if (pendingCommit_ || localOpBusy_)
+        return;
     const QString msg = messageEdit_->toPlainText().trimmed();
     if (msg.isEmpty()) {
         errorLabel_->setText(tr("Commit message cannot be empty."));
@@ -822,9 +859,10 @@ void CommitDialog::onCommitClicked()
     }
     errorLabel_->hide();
     pendingCommit_ = true;
-    commitBtn_->setEnabled(false);
-    commitPushBtn_->setEnabled(false);
-    svc_->commitChanges(msg, amendCheck_->isChecked());
+    pendingKey_ = svc_->openKey();
+    const bool amend = amendCheck_->isChecked();
+    applyLocks();
+    svc_->commitChanges(msg, amend);
 }
 
 void CommitDialog::onCommitAndPushClicked()
@@ -832,6 +870,8 @@ void CommitDialog::onCommitAndPushClicked()
     // Commit, then push. The push half fires as
     // pushAfterCommitRequested once commitComplete reports success —
     // never before, so a failed or rejected commit pushes nothing.
+    if (pendingCommit_ || localOpBusy_)
+        return;
     pushAfterCommit_ = true;
     onCommitClicked();
     if (!pendingCommit_)
@@ -842,8 +882,8 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
 {
     if (!pendingCommit_) return;
     pendingCommit_ = false;
-    commitBtn_->setEnabled(true);
-    commitPushBtn_->setEnabled(true);
+    pendingKey_.clear();
+    applyLocks();
 
     if (success) {
         const bool pushRequested = pushAfterCommit_;
@@ -863,16 +903,22 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
 
 void CommitDialog::onOperationFailed(const QString& op, const QString& err)
 {
-    if (op.startsWith(QLatin1String("commit"),  Qt::CaseInsensitive) ||
+    const bool commit = op.startsWith(QLatin1String("commit"), Qt::CaseInsensitive);
+    if (commit ||
         op.startsWith(QLatin1String("stage"),   Qt::CaseInsensitive) ||
         op.startsWith(QLatin1String("unstage"), Qt::CaseInsensitive) ||
         op.startsWith(QLatin1String("discard"), Qt::CaseInsensitive)) {
         errorLabel_->setText(op + tr(" failed: ") + err);
         errorLabel_->show();
-        commitBtn_->setEnabled(true);
-        commitPushBtn_->setEnabled(true);
+        // A stage, unstage or discard that failed says so, and that's
+        // all: it ended the wait for a commit still running, whose
+        // outcome was then dropped, a requested push with it.
+        if (!commit)
+            return;
         pendingCommit_ = false;
         pushAfterCommit_ = false;
+        pendingKey_.clear();
+        applyLocks();
     }
 }
 

@@ -51,13 +51,24 @@ Handoff handOffToRunningInstance(const QString& serverName, const QString& path,
     QElapsedTimer waited;
     waited.start();
     const auto goOn = [&wait, &waited]() { return !wait || wait(waited.elapsed()); };
+    // A cancel takes the path back: on Unix the socket has buffered the
+    // line already, and the owner acted on it once free, opening the
+    // repository of a launch the user had cancelled. The owner drops a
+    // path that a "cancel" line follows (InstanceServer). On Windows
+    // both lines are still waiting to be written, and closing the pipe
+    // drops them.
+    const auto cancel = [&sock]() {
+        sock.write(QByteArrayLiteral("cancel\n"));
+        sock.waitForBytesWritten(100);
+        return Handoff::Cancelled;
+    };
 
     sock.write(path.toUtf8() + '\n');
     while (sock.bytesToWrite() > 0) {
         if (sock.state() != QLocalSocket::ConnectedState)
             return Handoff::HungUp;
         if (!goOn())
-            return Handoff::Cancelled;
+            return cancel();
         sock.waitForBytesWritten(100);
     }
 
@@ -65,7 +76,7 @@ Handoff handOffToRunningInstance(const QString& serverName, const QString& path,
         if (sock.state() != QLocalSocket::ConnectedState)
             return Handoff::HungUp;
         if (!goOn())
-            return Handoff::Cancelled;
+            return cancel();
         sock.waitForReadyRead(100);
     }
     return Handoff::Delivered;
@@ -113,12 +124,17 @@ InstanceServer::InstanceServer(QObject* parent)
                 if (!sock->canReadLine())
                     return;  // rest of the path in flight
                 const QString path = QString::fromUtf8(sock->readLine()).trimmed();
+                // A launch whose user cancelled the wait while this was
+                // busy took its path back (handOffToRunningInstance).
+                const bool cancelled = sock->canReadLine()
+                    && sock->readLine().trimmed() == QByteArrayLiteral("cancel");
                 // The sender's receipt, flushed now: opening the repo
                 // may sit in a dialog for a while.
                 sock->write("ok\n");
                 sock->flush();
                 sock->disconnectFromServer();
-                emit pathReceived(path);
+                if (!cancelled)
+                    emit pathReceived(path);
             });
             connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
         }

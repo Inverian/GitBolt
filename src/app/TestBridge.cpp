@@ -684,6 +684,8 @@ QByteArray TestBridge::cmdDumpState()
         // A cherry-pick or revert of several commits, between two of
         // them: the bar's Continue runs git's --continue.
         state[QStringLiteral("sequencePaused")] = repo->sequencePaused();
+        // Whether git's --skip would take the commit it stopped at.
+        state[QStringLiteral("sequenceSkippable")] = repo->sequenceSkippable();
         if (auto branch = repo->headBranchName())
             state[QStringLiteral("branch")] =
                 QString::fromStdString(*branch);

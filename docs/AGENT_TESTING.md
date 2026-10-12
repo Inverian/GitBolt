@@ -107,7 +107,9 @@ harness can assert "HEAD moved", "Dark persisted", "the log loaded",
 "the fetch failed" and "the merge is still running" without shelling
 out or screenshotting, and `sequencePaused`: a cherry-pick or revert
 of several commits is paused between two of them (`repoState` is then
-`cherry-pick` or `revert`). `desktopFileName` is the desktop entry the app
+`cherry-pick` or `revert`), with `sequenceSkippable` saying whether
+git's `--skip` would leave out the commit it stopped at (the in-progress
+bar offers Skip only then). `desktopFileName` is the desktop entry the app
 claims, its app_id on Wayland (`tests/e2e/test_desktop_identity.py`).
 
 Usage statistics (`src/telemetry`, [PRIVACY.md](../PRIVACY.md)) are

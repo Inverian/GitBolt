@@ -64,9 +64,19 @@ function(gitbolt_add_bundled_libgit2)
     set(CMAKE_POLICY_DEFAULT_CMP0126 NEW)
     # CMake >= 3.31 warns that 3.5.1 compatibility is going away. CMake
     # 4 can instead treat that cmake_minimum_required as 3.10, which
-    # silences it; the 3.6-3.10 policies (try_compile flags, IPO, RPATH
-    # details) leave libgit2's configure results and build unchanged.
+    # silences it. One of the 3.6-3.10 policies does change a configure
+    # result: CMP0067 has try_compile() honour libgit2's C standard,
+    # c90 without extensions, and glibc's <sys/stat.h> hides st_mtim
+    # under a strict -std=c90. libgit2's FindStatNsec runs before its
+    # DefaultCFlags adds the -D_GNU_SOURCE its own sources compile with
+    # (every compiler but MSVC), so on Linux it found no nanosecond
+    # field, left USE_NSEC on regardless, and the build stopped at
+    # "GIT_USE_NSEC defined but unknown struct stat nanosecond type".
+    # The checks get the -D_GNU_SOURCE the build has.
     set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
+    if(NOT MSVC)
+        list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE)
+    endif()
     # Ours (root CMakeLists.txt, qt_standard_project_setup()) and
     # inherited by libgit2's directories: they would give every libgit2
     # target an _autogen step and a C++ mocs_compilation.cpp object.
@@ -111,6 +121,16 @@ function(gitbolt_add_bundled_libgit2)
     endif()
 
     add_subdirectory(${libgit2_SOURCE_DIR} ${libgit2_BINARY_DIR} EXCLUDE_FROM_ALL)
+
+    # Say so at configure time, not as an #error deep in the build: a
+    # Unix libgit2 with nanosecond times needs one of these fields.
+    if(NOT WIN32 AND USE_NSEC AND NOT (HAVE_STRUCT_STAT_ST_MTIM OR HAVE_STRUCT_STAT_ST_MTIMESPEC
+                                       OR HAVE_STRUCT_STAT_MTIME_NSEC))
+        message(FATAL_ERROR "bundled libgit2: USE_NSEC is on, but no struct stat nanosecond "
+            "field was found (st_mtim, st_mtimespec, st_mtime_nsec); see "
+            "CMakeConfigureLog.yaml for the checks' compiler flags. A build directory "
+            "configured before keeps failed checks cached: configure a fresh one.")
+    endif()
 
     # Its backend selectors are set(CACHE) entries: created (empty) even
     # though the variables above win. Hide them, since editing them in

@@ -93,10 +93,10 @@
         </translation>
     </message>
     <message numerus="yes">
-        <source>%n directories</source>
+        <source>%n folder(s)</source>
         <translation>
-            <numerusform>%n directory</numerusform>
-            <numerusform>%n directories</numerusform>
+            <numerusform>%n folder</numerusform>
+            <numerusform>%n folders</numerusform>
         </translation>
     </message>
 </context>

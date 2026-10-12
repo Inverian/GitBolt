@@ -22,13 +22,18 @@ bool isUnreachable(QNetworkReply::NetworkError error) {
 
 } // namespace
 
-Outcome classify(int httpStatus, QNetworkReply::NetworkError error) {
+Outcome classify(int httpStatus, QNetworkReply::NetworkError error, bool requestSent) {
     if (httpStatus >= 200 && httpStatus < 300)
         return Outcome::Sent;
     if (httpStatus == 408 || httpStatus == 429 || (httpStatus >= 500 && httpStatus < 600))
         return Outcome::Retry;
     if (httpStatus > 0)
         return Outcome::Drop;
+    // EHOSTUNREACH / ENETUNREACH come as Qt's catch-all, which a broken
+    // pipe mid-request shares: told apart by whether any of the request
+    // got onto a connection.
+    if (error == QNetworkReply::UnknownNetworkError && !requestSent)
+        return Outcome::Unreachable;
     return isUnreachable(error) ? Outcome::Unreachable : Outcome::Retry;
 }
 

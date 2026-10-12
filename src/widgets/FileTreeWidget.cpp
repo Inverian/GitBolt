@@ -357,11 +357,13 @@ void FileTreeWidget::rebuildTree()
     }
 
     // Header summary mirrors GitExtensions' "(N) Tree at <hex>:
-    // <files>, <dirs>, <total size>" line.
+    // <files>, <dirs>, <total size>" line. Every count text has a
+    // "(s)" source like the rest: without the English plural forms
+    // (built without LinguistTools) "%n directories" read "1 directories".
     previewHeader_->setText(
         tr("%1, %2 — %3 total")
             .arg(tr("%n file(s)", nullptr, fileCount),
-                 tr("%n directories", nullptr, dirCount),
+                 tr("%n folder(s)", nullptr, dirCount),
                  formatSize(totalBytes)));
 
     // Auto-expand the root level so users see top-level structure

@@ -280,14 +280,20 @@ private slots:
     }
 
     // A cherry-pick or revert of several commits, paused between two of
-    // them, has nothing to commit: Continue and Skip carry it on, as for
-    // a rebase. Commit… led nowhere there. Stopped at a commit that
-    // waits for its own, it's Commit… still.
+    // them, has nothing to commit: Continue carries it on, as for a
+    // rebase. Commit… led nowhere there. Stopped at a commit that waits
+    // for its own, it's Commit… still.
+    //
+    // Skip only where git's --skip takes it. Paused because the stopped
+    // commit was committed (the bar's own Commit…), git has "nothing to
+    // skip", and the Skip offered there only ever failed. At the stop
+    // itself, an empty pick that Commit… can't conclude had no Skip.
     void barOffersContinueForAPausedSequence() {
         RepoOperationBar bar;
         for (const auto state : {gitbolt::git::RepoState::CherryPick,
                                  gitbolt::git::RepoState::Revert}) {
-            bar.setState(state, 0, /*sequencePaused=*/true);
+            // Paused with HEAD where git left it (a reset at the stop).
+            bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/true);
             QVERIFY(!bar.isHidden());
             QVERIFY(bar.sequencePaused());
             QVERIFY(!button(bar, label("Commit…")));
@@ -303,8 +309,23 @@ private slots:
             QCOMPARE(continued.count(), 1);
             QCOMPARE(skipped.count(), 1);
 
-            bar.setState(state, 0, /*sequencePaused=*/false);
+            // Paused after the stopped commit was committed.
+            bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/false);
+            QVERIFY(button(bar, label("Continue"))->isEnabled());
+            QVERIFY(button(bar, label("Skip"))->isHidden());
+
+            // Stopped at a commit of the sequence, conflicted or empty.
+            bar.setState(state, 1, /*sequencePaused=*/false, /*sequenceSkippable=*/true);
             QVERIFY(!bar.sequencePaused());
+            QVERIFY(button(bar, label("Commit…")));
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+            QVERIFY(button(bar, label("Skip"))->isEnabled());
+            bar.setState(state, 0, /*sequencePaused=*/false, /*sequenceSkippable=*/true);
+            QVERIFY(button(bar, label("Commit…"))->isEnabled());
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+
+            // A single cherry-pick or revert: Commit… or Abort.
+            bar.setState(state, 0, /*sequencePaused=*/false);
             QVERIFY(button(bar, label("Commit…"))->isEnabled());
             QVERIFY(button(bar, label("Skip"))->isHidden());
         }

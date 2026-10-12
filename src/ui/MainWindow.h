@@ -173,6 +173,13 @@ private:
     /// async repository open is in flight (so Pull/Commit can't
     /// fire against the previous repo mid-open).
     void setRepoActionsEnabled(bool on);
+    /// For entry points that run git or libgit2 on the repository
+    /// straight away (the sidebar's checkout, branch create and delete,
+    /// push): while a local op runs, says so on the status bar, as
+    /// RepoCommandController's refusal does, and returns true. The
+    /// menus and toolbar are off then; these weren't, and a libgit2
+    /// checkout ran under a merge.
+    bool refuseWhileLocalOpRuns();
 
     /// Walk every named leaf action under the menu bar, record its
     /// factory-default shortcut, and apply any user override saved
@@ -312,6 +319,9 @@ private:
     QMenu*     navMenu_        = nullptr;
     QMenu*     viewMenu_       = nullptr;
     QMenu*     cmdMenu_        = nullptr;
+    // Its repository actions are off with the others'; Periodic
+    // background fetch (a setting) and Plugin Manager stay on.
+    QMenu*     pluginsMenu_    = nullptr;
     QAction*   refreshAction_  = nullptr;  // repo-dependent
     QAction*   fetchAction_    = nullptr;  // repo-dependent
     QAction*   pullAction_     = nullptr;  // repo-dependent

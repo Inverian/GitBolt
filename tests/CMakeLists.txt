@@ -44,8 +44,8 @@ gitbolt_add_test(test_repository     git/TestRepository.cpp)
 gitbolt_add_test(test_revwalk        git/TestRevWalk.cpp)
 gitbolt_add_test(test_diff           git/TestDiff.cpp)
 gitbolt_add_test(test_status         git/TestStatus.cpp)
-# GitProcess::run(): a timeout stops git's whole process group, gently
-# first (Unix; a QSKIP on Windows, where git runs in a job object)
+# GitProcess::run(): a timeout stops git's whole process group (a job
+# object on Windows), gently first, so git rolls back its index.lock
 gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
@@ -157,7 +157,7 @@ set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 # light and dark themes (ThemeService switches them, as in the app). Off
 # screen: it shows and grabs widgets.
 gitbolt_add_test(test_diff_colors widgets/TestDiffColors.cpp)
-target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf)
+target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf gitbolt_ui)
 set_property(TEST test_diff_colors APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # dialogs/ — Settings › General › Usage statistics and the
@@ -202,6 +202,11 @@ set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# File History: one load per file at a time, with a busy cursor and a
+# status-bar note until its dialog comes up.
+gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)
+target_link_libraries(test_file_history PRIVATE gitbolt_ui)
+set_property(TEST test_file_history APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.

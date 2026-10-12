@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QString>
 #include <QStringList>
+#include <string>
 #include <vector>
 
 class QAction;
@@ -61,6 +62,11 @@ public:
     /// working-tree state. Called on show().
     void refresh();
 
+    /// While a local operation (a merge, a reset, `git am`) runs on the
+    /// repository: no commit, and no staging, starts on top of it.
+    /// MainWindow follows its busy state with this.
+    void setLocalOpBusy(bool busy);
+
 signals:
     /// Emitted after a "Commit & Push" commit lands successfully.
     /// MainWindow triggers its toolbar Push action in response, so
@@ -99,6 +105,14 @@ private:
     /// Amend is off, with the reason as its tooltip, while the
     /// repository has a merge, cherry-pick or revert to commit.
     void updateAmend();
+
+    /// What can be clicked while a commit, or a local operation, runs:
+    /// nothing that stages, unstages, discards or commits. git commit
+    /// reads the index again after the pre-commit hook, so a file
+    /// staged while the hook ran went into the commit unchecked, and an
+    /// Unstage All made it empty; a second Commit (Ctrl+Return) started
+    /// a second git commit.
+    void applyLocks();
 
     QStringList selectedUnstagedPaths() const;
     QStringList selectedStagedPaths() const;
@@ -159,6 +173,10 @@ private:
     // Commit completion handshake
     bool pendingCommit_ = false;
     bool pushAfterCommit_ = false;
+    // GitService::openKey() of the repository the pending commit is for.
+    std::string pendingKey_;
+    // setLocalOpBusy()
+    bool localOpBusy_ = false;
 
     // Geometry restore guard
     bool restored_ = false;

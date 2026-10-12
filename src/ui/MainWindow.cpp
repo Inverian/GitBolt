@@ -220,9 +220,10 @@ MainWindow::MainWindow(QWidget* parent)
 // out are dropped with their receivers. The same goes for a local op
 // (a merge, a reset), and for the service's own jobs, which its
 // destructor waits for: a rebase step, a checkout. Their git and hooks
-// get SIGTERM as on Ctrl-C, no questions asked, as for a fetch; a
-// rebase stopped mid-step is still in progress next time, with
-// Continue, Skip and Abort on offer.
+// are interrupted as by Ctrl-C (SIGTERM on Unix, a Ctrl-C on git's
+// console on Windows; GitProcess::run), no questions asked, as for a
+// fetch: git rolls back its lockfiles, and a rebase stopped mid-step is
+// still in progress next time, with Continue, Skip and Abort on offer.
 MainWindow::~MainWindow()
 {
     if (!remoteOp_.isFinished() || repoCmd_->busy() || gitService_->workRunning())
@@ -2425,7 +2426,8 @@ void MainWindow::buildCommandsMenu()
                 // checkout moved HEAD away from what the plan lists.
                 auto* bar = repoView_ ? repoView_->operationBar() : nullptr;
                 if (bar && bar->isBusy()) {
-                    dlg->refuse(tr("A rebase step is still running; try again when it's done."));
+                    dlg->refuse(tr("Another git operation is still running on this "
+                                   "repository; try again when it's done."));
                     return;
                 }
                 if (const QString problem = gitService_->rebasePlanProblem(plan);
@@ -2871,6 +2873,7 @@ void MainWindow::buildPluginsMenu()
 
     // ---- Plugins ----
     auto* pluginsMenu = menuBar()->addMenu(tr("&Plugins"));
+    pluginsMenu_ = pluginsMenu;
     {
         // "Delete obsolete branches" — show every local branch
         // that has been merged into the current HEAD (so deleting
@@ -2896,6 +2899,10 @@ void MainWindow::buildPluginsMenu()
                 },
                 [this, listed]() {
                     if (!listed->has_value()) return;
+                    // The repository the list is of. The picker and the
+                    // confirmation wait in nested event loops, where a
+                    // second launch's hand-off can open another one.
+                    const std::string listedKey = gitService_->openKey();
                     const auto& out = **listed;
                     if (!out.ok() || !out.value().success()) {
                         handleProcessResult(this, tr("Delete Obsolete Failed"),
@@ -2958,8 +2965,26 @@ void MainWindow::buildPluginsMenu()
                         QMessageBox::Yes | QMessageBox::Cancel,
                         QMessageBox::Cancel);
                     if (confirm != QMessageBox::Yes) return;
+                    // Opened meanwhile, another repository's branches of
+                    // those names went, merged or not.
+                    if (!gitService_->isOpen() || gitService_->openPending()
+                        || gitService_->openKey() != listedKey) {
+                        statusBar()->showMessage(
+                            tr("Another repository was opened; no branch was deleted."),
+                            5000);
+                        return;
+                    }
+                    // `git branch -d`, which deletes a branch only while
+                    // it is merged: one the list said was, and is no
+                    // more by now (HEAD moved meanwhile), is kept, and
+                    // git says so.
+                    std::vector<std::string> args{"branch", "-d", "--"};
                     for (const auto& n : picked)
-                        gitService_->deleteBranch(n);
+                        args.push_back(n.toStdString());
+                    repoCmd_->runAsync(args, tr("Delete Obsolete Failed"),
+                                       RepoCommandController::RefreshBranches
+                                           | RepoCommandController::RefreshLog,
+                                       tr("Deleting merged branches…"));
                 });
         });
         pluginsMenu->addAction(a);
@@ -3591,6 +3616,25 @@ void MainWindow::setRepoOnlyMenusEnabled(bool on)
     toggleChildren(viewMenu_);
     toggleChildren(cmdMenu_);
     toggleChildren(repoMenu_);
+    // The plugins that work on the repository: GitFlow, Find Large
+    // Files and the rest ran git (or libgit2) under a running local op.
+    if (pluginsMenu_) {
+        for (QAction* a : pluginsMenu_->actions()) {
+            const QString name = a->objectName();
+            if (a->isSeparator() || name == QLatin1String("plugins.plugin-manager")
+                || name == QLatin1String("plugins.periodic-background-fetch"))
+                continue;
+            a->setEnabled(on);
+        }
+    }
+}
+
+bool MainWindow::refuseWhileLocalOpRuns()
+{
+    if (!repoCmd_ || !repoCmd_->busy())
+        return false;
+    statusBar()->showMessage(tr("Another operation is still running…"), 3000);
+    return true;
 }
 
 void MainWindow::setRepoActionsEnabled(bool on)
@@ -3984,10 +4028,24 @@ void MainWindow::setupConnections()
     // revert's sequence of several commits goes on in such steps too.
     connect(gitService_, &services::GitService::rebaseStepFinished,
             this, [this](const QString& step, bool success, bool inProgress) {
+        // Still busy if a local op, or a commit, runs meanwhile.
         if (repoView_)
-            repoView_->operationBar()->setBusy(false);
+            repoView_->operationBar()->setBusy(localOpRunning_
+                                               || gitService_->rebaseStepRunning());
         const bool cherryPick = step.startsWith(QLatin1String("cherry-pick"));
         const bool revert = step.startsWith(QLatin1String("revert"));
+        const bool merge = step.startsWith(QLatin1String("merge"));
+        // A merge's, a cherry-pick's or a revert's Abort runs as a step
+        // too (GitService::abortConflictState).
+        if (step.endsWith(QLatin1String(" --abort")) && !step.startsWith(QLatin1String("rebase"))) {
+            if (success)
+                statusBar()->showMessage(merge        ? tr("Merge aborted.")
+                                         : cherryPick ? tr("Cherry-pick aborted.")
+                                                      : tr("Revert aborted."),
+                                         4000);
+            gitService_->refreshStatus();
+            return;
+        }
         if (cherryPick || revert) {
             if (success && !inProgress)
                 statusBar()->showMessage(cherryPick ? tr("Cherry-pick complete.")
@@ -4004,7 +4062,6 @@ void MainWindow::setupConnections()
         }
         gitService_->refreshLog();
         gitService_->refreshStatus();
-        gitService_->refreshBranches();
         if (!success && inProgress)
             offerConflictResolution(cherryPick ? tr("cherry-pick")
                                     : revert   ? tr("revert")
@@ -4018,6 +4075,16 @@ void MainWindow::setupConnections()
         auto* bar = repoView_->operationBar();
         connect(gitService_, &services::GitService::repoStateReady,
                 bar, &widgets::RepoOperationBar::setState);
+        // Every step makes it busy, whoever started it (the resolver's
+        // Abort, the Commit dialog's commit): a Continue or an Abort
+        // clicked meanwhile was a second git on the same operation. A
+        // step ends with rebaseStepFinished, a commit with commitComplete.
+        connect(gitService_, &services::GitService::stepStarted, bar, [bar]() {
+            bar->setBusy(true);
+        });
+        connect(gitService_, &services::GitService::commitComplete, bar, [this, bar]() {
+            bar->setBusy(localOpRunning_ || gitService_->rebaseStepRunning());
+        });
         connect(bar, &widgets::RepoOperationBar::resolveRequested,
                 this, &MainWindow::showConflictResolver);
         connect(bar, &widgets::RepoOperationBar::continueRequested, this, [this, bar]() {
@@ -4041,7 +4108,13 @@ void MainWindow::setupConnections()
             gitService_->rebaseContinue();
         });
         connect(bar, &widgets::RepoOperationBar::skipRequested, this, [this, bar]() {
-            const bool sequence = bar->sequencePaused();
+            // The bar offers Skip outside a rebase only where git's
+            // --skip takes it: a sequence of several cherry-picks or
+            // reverts, stopped at a commit (conflicted or empty) or
+            // paused with that commit not committed.
+            const bool sequence = bar->state() != git::RepoState::Rebase;
+            if (sequence && !bar->sequenceSkippable())
+                return;
             const auto answer = QMessageBox::question(
                 this, tr("Skip Commit"),
                 !sequence ? tr("Skip the commit the rebase stopped at?\n\nIts changes are left "
@@ -4077,12 +4150,14 @@ void MainWindow::setupConnections()
                     .arg(operation),
                 QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
             if (answer != QMessageBox::Yes) return;
-            if (bar->state() == git::RepoState::Rebase) {
-                bar->setBusy(true);
+            // A step either way (stepStarted makes the bar busy until
+            // it reports): a second Abort ran a second git, which failed
+            // on index.lock with git's advice to delete it while the
+            // first still ran.
+            if (bar->state() == git::RepoState::Rebase)
                 gitService_->rebaseAbort();
-            } else {
+            else
                 gitService_->abortConflictState();
-            }
         });
     }
 
@@ -4228,6 +4303,13 @@ void MainWindow::setupConnections()
         localOpRunning_ = busy;
         setRepoActionsEnabled(repoActionsEnabled_);
         setRepoOnlyMenusEnabled(repoActionsEnabled_);
+        // Nor the Commit dialog, nor the in-progress bar: a commit or
+        // a Continue ran git on the index under the op's. The bar of a
+        // step that's still running stays busy until it reports.
+        if (commitDialog_)
+            commitDialog_->setLocalOpBusy(busy);
+        if (repoView_)
+            repoView_->operationBar()->setBusy(busy || gitService_->rebaseStepRunning());
         if (busy) {
             localOpMessage_ = message;
             localOpNarrated_ = !remoteOpNarrated();
@@ -4313,20 +4395,35 @@ void MainWindow::setupConnections()
     // through the git CLI as local ops (repoCmd_), with the same
     // feedback the Commands-menu equivalents use.
     if (auto* branchTree = repoView_->branchTree()) {
+        // Not while a local op runs (refuseWhileLocalOpRuns): these
+        // run git or libgit2 at once, and a checkout ran under a merge.
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRequested,
-                gitService_, &services::GitService::checkoutBranch);
+                this, [this](const QString& name) {
+            if (!refuseWhileLocalOpRuns())
+                gitService_->checkoutBranch(name);
+        });
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRemoteRequested,
-                gitService_, &services::GitService::checkoutRemoteBranch);
+                this, [this](const QString& remoteBranch) {
+            if (!refuseWhileLocalOpRuns())
+                gitService_->checkoutRemoteBranch(remoteBranch);
+        });
         connect(branchTree, &widgets::BranchTreeWidget::createBranchRequested,
-                gitService_, &services::GitService::createBranch);
+                this, [this](const QString& name) {
+            if (!refuseWhileLocalOpRuns())
+                gitService_->createBranch(name);
+        });
         connect(branchTree, &widgets::BranchTreeWidget::deleteBranchRequested,
-                gitService_, &services::GitService::deleteBranch);
+                this, [this](const QString& name) {
+            if (!refuseWhileLocalOpRuns())
+                gitService_->deleteBranch(name);
+        });
         // Through runRemoteOp like the toolbar Push: this used to call
         // GitService::push directly on the GUI thread, freezing the
         // window for the whole network round trip, with no feedback.
         connect(branchTree, &widgets::BranchTreeWidget::pushRequested,
                 this, [this](const QString& remote, const QString& branch) {
             if (!gitService_ || !gitService_->isOpen()) return;
+            if (refuseWhileLocalOpRuns()) return;
             runRemoteOp(nullptr,
                         tr("Pushing %1 to %2…").arg(branch, remote),
                         tr("Push complete."),
@@ -4337,6 +4434,7 @@ void MainWindow::setupConnections()
         });
         connect(branchTree, &widgets::BranchTreeWidget::deleteRemoteBranchRequested,
                 this, [this](const QString& remoteBranch) {
+            if (refuseWhileLocalOpRuns()) return;
             confirmAndDeleteRemoteBranch(remoteBranch, nullptr);
         });
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
@@ -4524,7 +4622,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
         // previous one reports nothing here (GitService drops it), so
         // nothing would ever turn this repository's buttons back on.
         repoView_->operationBar()->setState(git::RepoState::None, 0);
-        repoView_->operationBar()->setBusy(gitService_->rebaseStepRunning());
+        repoView_->operationBar()->setBusy(gitService_->rebaseStepRunning() || localOpRunning_);
         repoView_->resetInspectorTabs();
         repoView_->setRepositoryPath(path);
 
@@ -4879,6 +4977,7 @@ void MainWindow::showCommitDialog()
     if (!commitDialog_) {
         commitDialog_ = new dialogs::CommitDialog(
             gitService_, settingsService_, this);
+        commitDialog_->setLocalOpBusy(localOpRunning_);
         // Commit & Push: the dialog asks for the push half only
         // after the commit lands. Triggering the toolbar action
         // (instead of calling GitService::push directly) reuses the

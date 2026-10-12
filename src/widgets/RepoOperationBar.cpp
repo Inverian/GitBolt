@@ -62,10 +62,12 @@ RepoOperationBar::RepoOperationBar(QWidget* parent)
     refresh();
 }
 
-void RepoOperationBar::setState(git::RepoState state, int conflicts, bool sequencePaused) {
+void RepoOperationBar::setState(git::RepoState state, int conflicts, bool sequencePaused,
+                                bool sequenceSkippable) {
     state_ = state;
     conflicts_ = conflicts;
     sequencePaused_ = sequencePaused;
+    sequenceSkippable_ = sequenceSkippable;
     refresh();
 }
 
@@ -170,7 +172,11 @@ void RepoOperationBar::refresh() {
     abortButton_->setToolTip(abortTip);
 
     resolveButton_->setVisible(conflicted);
-    skipButton_->setVisible(steps);
+    // A sequence's Skip only where git takes it: offered once the
+    // stopped commit had been committed, it only ever failed with
+    // "there is nothing to skip"; at the stop itself (an empty pick,
+    // which Commit… can't conclude) it was missing.
+    skipButton_->setVisible(rebase || sequenceSkippable_);
     resolveButton_->setEnabled(!busy_);
     continueButton_->setEnabled(!busy_ && !conflicted);
     skipButton_->setEnabled(!busy_);

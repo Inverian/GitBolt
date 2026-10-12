@@ -9,11 +9,12 @@
 namespace gitbolt::services {
 
 namespace {
-// Why a git command that would work on the index or the rebase's
-// state isn't run: a rebase step is at them already (see
-// rebaseStepRunning()).
+// Why a git command that would work on the index or the operation's
+// state isn't run: a step (a rebase's, a sequence's, an abort, a
+// commit) is at them already (see rebaseStepRunning()).
 QString rebaseStepStillRunning() {
-    return GitService::tr("A rebase step is still running; try again when it's done.");
+    return GitService::tr("Another git operation is still running on this repository; "
+                          "try again when it's done.");
 }
 
 // Which repository a rebase step runs on: its git dir, which libgit2
@@ -230,10 +231,11 @@ void GitService::refreshStatus() {
                 [](const git::StatusEntry& e) { return e.isConflicted(); }));
         }
         deliverFor(r, [this, result = std::move(result), state = r->state(),
-                       conflicts, paused = r->sequencePaused()]() mutable {
+                       conflicts, paused = r->sequencePaused(),
+                       skippable = r->sequenceSkippable()]() mutable {
             if (result)
                 emit statusReady(std::move(*result));
-            emit repoStateReady(state, conflicts, paused);
+            emit repoStateReady(state, conflicts, paused, skippable);
         });
     });
 }
@@ -456,23 +458,16 @@ bool GitService::abortConflictState() {
     }
 
     // On a worker: an abort puts the work tree back, which can take as
-    // long as a checkout, and it froze the window meanwhile.
-    runner_.run([this, proc = process(), args]() {
-        auto result = proc.run(args, /*timeoutMs=*/300000);
-        if (!result) {
-            emit operationFailed(QStringLiteral("abort"),
-                QString::fromStdString(result.error().message()));
-        } else if (!result->success()) {
-            QString detail =
-                QString::fromStdString(result->stderrData).trimmed();
-            if (detail.isEmpty())
-                detail = QString::fromStdString(result->stdoutData).trimmed();
-            emit operationFailed(QStringLiteral("abort"), detail);
-        }
-        refreshStatus();
-        refreshLog();
-        refreshBranches();
-    });
+    // long as a checkout, and it froze the window meanwhile. As a step
+    // (runRebaseStep), one git at a time: a Continue, a second Abort or
+    // a commit started while it ran was a second git on the same
+    // operation, and a second Abort failed on index.lock with git's
+    // advice to delete it. Reported on rebaseStepFinished as
+    // "merge --abort", "cherry-pick --abort" or "revert --abort".
+    const QString step = QString::fromStdString(args[0]) + QStringLiteral(" --abort");
+    runRebaseStep(step, [args](const git::GitProcess& proc) {
+        return proc.run(args, /*timeoutMs=*/300000);
+    }, {}, state);
     return true;
 }
 
@@ -680,14 +675,38 @@ void GitService::commitChanges(const QString& message, bool amend) {
     std::string gitDir;
     std::optional<git::GitProcess> process;
     {
+        // A step of its own (rebaseSteps_): a rebase step, a sequence's
+        // or an abort started while git commits, or a commit while one
+        // of them runs, was a second git on the same index. A Continue
+        // clicked during an amend's hook finished the rebase, and the
+        // amend then found nothing to amend: its message was lost.
         std::lock_guard<std::mutex> lock(repoMutex_);
         gitDir = rebaseStepKey(*r);
-        process = r->process();
+        if (rebaseSteps_.insert(gitDir).second)
+            process = r->process();
     }
+    if (!process) {
+        emit commitComplete(false, rebaseStepStillRunning());
+        return;
+    }
+    emit stepStarted(QStringLiteral("commit"));
     // Quitting stops git, and a hook that hangs with it: ~GitService
     // waits for this worker.
     process->addCancelFlag(opsCancelled_);
     runner_.run([this, r, gitDir, proc = std::move(*process), message, amend]() {
+        // Whatever happens, the mark goes; the normal paths take it out
+        // themselves, before they report, so that a step started on the
+        // strength of the report is never refused.
+        bool cleared = false;
+        const auto clearMark = [&] {
+            if (cleared) return;
+            rebaseSteps_.erase(gitDir);
+            cleared = true;
+        };
+        const auto clearOnExit = qScopeGuard([&] {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            clearMark();
+        });
         // The repository the commit is for, opened again or not. A
         // result reported while another is open reads as its own.
         const auto stillOpen = [&] { return repo_ && rebaseStepKey(*repo_) == gitDir; };
@@ -701,6 +720,8 @@ void GitService::commitChanges(const QString& message, bool amend) {
                 refusal = QString::fromStdString(r->amendProblem());
             if (auto stash = r->resolveRef("MERGE_AUTOSTASH"))
                 autostash = *stash;
+            if (!refusal.isEmpty())
+                clearMark();
         }
         if (!refusal.isEmpty()) {
             emit commitComplete(false, refusal);
@@ -713,6 +734,7 @@ void GitService::commitChanges(const QString& message, bool amend) {
         bool autostashKept = false;
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
+            clearMark();
             if (!stillOpen())
                 return;
             if (ok) {
@@ -1010,6 +1032,56 @@ bool GitService::pull(const QString& remote, const QString& branch) {
     return true;
 }
 
+namespace {
+// Whether a pruning fetch could delete nothing but remote-tracking
+// refs (refs/remotes/…). git prunes every ref a fetch refspec writes
+// to, and a plain `git fetch` prunes nothing: a tags refspec
+// (+refs/tags/*:refs/tags/*), a mirror's +refs/*:refs/*, or
+// fetch.pruneTags / remote.<name>.pruneTags made GitBolt's Fetch, and
+// the silent auto-fetch, delete local tags and branches the server
+// doesn't have (unpushed ones), which `git fetch` keeps. Every remote
+// counts, as a fetch with no remote named may pick any of them.
+bool pruneOnlyTouchesRemoteTracking(const git::GitProcess& proc) {
+    const auto config = proc.run({"config", "--get-regexp",
+                                  "^(fetch\\.prunetags|remote\\..*\\.(prunetags|fetch))$"});
+    if (!config)
+        return false;
+    if (config->exitCode == 1)
+        return true;    // none of them set
+    if (config->exitCode != 0)
+        return false;
+    const QStringList lines =
+        QString::fromStdString(config->stdoutData).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString& line : lines) {
+        const qsizetype space = line.indexOf(QLatin1Char(' '));
+        const QString key = (space < 0 ? line : line.left(space)).toLower();
+        const QString value = space < 0 ? QString() : line.mid(space + 1).trimmed();
+        if (key.endsWith(QLatin1String(".prunetags"))) {
+            // A key with no value is true, as git reads it.
+            static const QStringList no = {QStringLiteral("false"), QStringLiteral("no"),
+                                           QStringLiteral("off"), QStringLiteral("0")};
+            if (space < 0 || !no.contains(value.toLower()))
+                return false;
+            continue;
+        }
+        // remote.<name>.fetch: [+]<src>[:<dst>]. One with no
+        // destination, or a negative one (^…), writes no ref to prune.
+        QString refspec = value;
+        if (refspec.startsWith(QLatin1Char('+')))
+            refspec.remove(0, 1);
+        if (refspec.startsWith(QLatin1Char('^')))
+            continue;
+        const qsizetype colon = refspec.indexOf(QLatin1Char(':'));
+        if (colon < 0)
+            continue;
+        const QString destination = refspec.mid(colon + 1);
+        if (!destination.isEmpty() && !destination.startsWith(QLatin1String("refs/remotes/")))
+            return false;
+    }
+    return true;
+}
+} // namespace
+
 bool GitService::fetch(const QString& remote,
                        std::shared_ptr<std::atomic<bool>> cancel,
                        bool allowPrompts) {
@@ -1021,9 +1093,11 @@ bool GitService::fetch(const QString& remote,
     // fetch.prune unset: prune, as most Git GUIs' Fetch does, so a
     // branch deleted on the server leaves the sidebar too. Set either
     // way, it is the user's call; remote.<name>.prune outranks both,
-    // as in git.
+    // as in git. Only where pruning can delete nothing but
+    // remote-tracking refs, though (pruneOnlyTouchesRemoteTracking).
     const auto pruneSetting = proc.run({"config", "--get", "fetch.prune"});
-    const bool pruneByDefault = pruneSetting && pruneSetting->exitCode == 1;  // 1 = not set
+    const bool pruneByDefault = pruneSetting && pruneSetting->exitCode == 1  // 1 = not set
+                                && pruneOnlyTouchesRemoteTracking(proc);
     auto result = proc.fetch(remote.toStdString(), pruneByDefault);
     if (!result) {
         emit operationFailed("fetch", QString::fromStdString(result.error().message()));
@@ -1159,6 +1233,7 @@ void GitService::runRebaseStep(
         emit operationFailed(step, rebaseStepStillRunning());
         return;
     }
+    emit stepStarted(step);
     runner_.run([this, r, gitDir, step, proc = std::move(*process), command = std::move(command),
                  refusal = std::move(refusal), operation]() {
         // Whatever happens, the repository mustn't stay marked busy:
@@ -1182,12 +1257,14 @@ void GitService::runRebaseStep(
         git::RepoState state = git::RepoState::None;
         int conflicts = 0;
         bool paused = false;
+        bool skippable = false;
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
             rebaseSteps_.erase(gitDir);
             cleared = true;
             state = r->state();
             paused = r->sequencePaused();
+            skippable = r->sequenceSkippable();
             // Counted from the index alone: the resolver reads the
             // blobs, if it's asked to.
             if (state != git::RepoState::None) {
@@ -1207,15 +1284,17 @@ void GitService::runRebaseStep(
         // waits for it. Not held back while an open is pending, as
         // refreshes are: an open that fails leaves the bar waiting.
         QMetaObject::invokeMethod(this, [this, gitDir, step, failure, state, conflicts,
-                                         paused, operation]() {
+                                         paused, skippable, operation]() {
             if (openKey_ != gitDir)
                 return;
             if (!failure.isEmpty())
                 emit operationFailed(step, failure);
-            emit repoStateReady(state, conflicts, paused);
+            emit repoStateReady(state, conflicts, paused, skippable);
             emit rebaseStepFinished(step, failure.isEmpty(), state == operation);
             refreshStatus();
             refreshLog();
+            // A rebase moves the branch, and an abort puts it back.
+            refreshBranches();
         }, Qt::QueuedConnection);
     });
 }

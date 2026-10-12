@@ -93,6 +93,12 @@ public:
     using TerminalWidget::appendOutput;
     using TerminalWidget::gridSize;
     using TerminalWidget::rowChunk;
+
+    // Everything the shell's terminal sent, as it came.
+    QByteArray read;
+
+protected:
+    void outputRead(const QByteArray& bytes) override { read += bytes; }
 };
 
 } // namespace
@@ -598,6 +604,12 @@ private slots:
     // reordered. conhost itself may give a combining mark a cell of its
     // own, and so paint it at the start of the next row, which the
     // widget can only show as it comes: that is reported, not failed.
+    // So is an astral character conhost doesn't send whole: build 26100
+    // gives each half of the surrogate pair a cell, and ConPTY sends
+    // the halves on either side of the wrap, as bytes that aren't
+    // UTF-8 (the widget shows U+FFFD for them). Whether the character
+    // came whole is read off what ConPTY sent (outputRead); one that
+    // did must show whole.
     void conhostWrapKeepsCharactersWhole()
     {
 #ifndef Q_OS_WIN
@@ -626,6 +638,7 @@ private slots:
             // `type` copies the file's bytes; code page 65001 makes
             // conhost read them as the UTF-8 they are.
             const qsizetype before = prompts(terminal);
+            terminal.read.clear();
             QTest::keyClicks(&terminal, QStringLiteral("chcp 65001>nul & type \"%1\"")
                                             .arg(QDir::toNativeSeparators(file.fileName())));
             QTest::keyClick(&terminal, Qt::Key_Return);
@@ -638,8 +651,25 @@ private slots:
                 if (!row.isEmpty() && row.front() == QChar(u'́'))
                     qInfo("conhost put the combining mark at the start of a row");
             }
-            QVERIFY2(rows(terminal).join(QString()).contains(line),
-                     qPrintable(terminal.toPlainText()));
+            const QString shown = rows(terminal).join(QString());
+            if (!terminal.read.contains(character.toUtf8())) {
+                // Broken before the widget got it: what came after the
+                // x's, in hex, for the record.
+                const QByteArray xs(columns - 1, 'x');
+                const qsizetype at = terminal.read.lastIndexOf(xs);
+                qInfo("conhost didn't send U+%04X whole; after the x's it sent: %s",
+                      character.toUcs4().value(0),
+                      at < 0 ? "(no row of x's)"
+                             : terminal.read.mid(at + xs.size(), 24).toHex(' ').constData());
+                // The rest came, in order.
+                QVERIFY2(shown.contains(QString(columns - 1, QLatin1Char('x')))
+                             && shown.indexOf(QLatin1Char('y'),
+                                              shown.indexOf(QString(columns - 1, QLatin1Char('x'))))
+                                    > 0,
+                         qPrintable(terminal.toPlainText()));
+                continue;
+            }
+            QVERIFY2(shown.contains(line), qPrintable(terminal.toPlainText()));
         }
 #endif
     }

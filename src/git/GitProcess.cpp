@@ -14,6 +14,7 @@
 #include <QThread>
 #include <optional>
 #include <algorithm>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -278,8 +279,9 @@ constexpr int kTerminateWaitMs = 2000;
 //   Windows: git is created inside a job object (the attribute is
 //            applied by CreateProcess itself, so not even a child
 //            spawned in git's first microseconds escapes);
-//            terminate() ends the job, and KILL_ON_JOB_CLOSE kills
-//            whatever is left if GitBolt itself dies mid-clone.
+//            terminate() sends Ctrl-C to git's console where it can
+//            (interruptTree), then ends the job, and KILL_ON_JOB_CLOSE
+//            kills whatever is left if GitBolt itself dies mid-clone.
 //
 // Only while git runs, though. Once git has exited on its own,
 // release() lets the tree go, and whatever git or a helper started
@@ -313,6 +315,43 @@ private:
 };
 
 #if defined(Q_OS_WIN)
+
+// GitBolt's answer to the Ctrl-C it sends git (see interruptTree):
+// GenerateConsoleCtrlEvent reaches every process on the console, the
+// sender attached to it included, and the default handler would end
+// GitBolt. A handler function rather than SetConsoleCtrlHandler(nullptr,
+// TRUE): that flag is inherited, and every git started after it would
+// ignore Ctrl-C.
+BOOL WINAPI ignoreCtrlC(DWORD type)
+{
+    return (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) ? TRUE : FALSE;
+}
+
+// Ctrl-C for git and everything it started, as in a terminal: they all
+// share the hidden console that Qt's CREATE_NO_WINDOW gives git, and
+// GitBolt attaches to it just long enough to send one. git's handler
+// rolls back the lockfiles it holds (index.lock, HEAD.lock) and git
+// exits; sh, a hook, a filter and ssh get it too. TerminateJobObject
+// alone, like any TerminateProcess, runs none of that: git's
+// index.lock stayed behind, and every later stage, commit and checkout
+// failed on it. False when no Ctrl-C can be sent: GitBolt has a
+// console of its own (a console test does; the app never has), which
+// git then shares with whatever else runs there, or git is gone.
+bool interruptTree(const QProcess& process)
+{
+    static const bool ignoring = SetConsoleCtrlHandler(ignoreCtrlC, TRUE) != 0;
+    const auto pid = static_cast<DWORD>(process.processId());
+    if (!ignoring || pid == 0)
+        return false;
+    // A process has one console at a time: two cancels take turns.
+    static std::mutex consoleMutex;
+    const std::lock_guard<std::mutex> lock(consoleMutex);
+    if (!AttachConsole(pid))
+        return false;
+    const bool sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+    FreeConsole();
+    return sent;
+}
 
 ProcessTree::ProcessTree()
 {
@@ -395,6 +434,11 @@ bool ProcessTree::dropHook(QProcess& process)
 
 void ProcessTree::terminate(QProcess& process)
 {
+    // Ctrl-C first, so that git rolls back its lockfiles; then the job
+    // ends whatever is left, or everything at once where no Ctrl-C
+    // could be sent (a lockfile git held then stays behind).
+    if (interruptTree(process))
+        process.waitForFinished(kTerminateWaitMs);
     if (job_)
         TerminateJobObject(job_, 1);
     else
@@ -557,7 +601,9 @@ bool GitProcess::cancelled() const
 // used to SIGKILL git alone: git left its index.lock behind, which
 // every later stage, commit and checkout tripped over, and the hook or
 // filter it was running ran on, orphaned (a merge whose post-merge
-// hook was slow had gone through, and was reported as timed out).
+// hook was slow had gone through, and was reported as timed out). Now
+// git is interrupted first (SIGTERM on Unix, Ctrl-C on Windows; see
+// ProcessTree::terminate) and rolls its lockfiles back itself.
 Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, int timeoutMs,
                                           const std::string* stdinData,
                                           const std::map<std::string, std::string>& extraEnv) const
@@ -599,15 +645,9 @@ Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, 
         GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
     }
-    // Closed once written, so that git reading it (`-F -`) sees the end.
+    // Fed once and closed, so that git reading it (`commit -F -`,
+    // `apply -`) sees the end: they block until the channel closes.
     if (stdinData) {
-        process.write(stdinData->data(), static_cast<qint64>(stdinData->size()));
-        process.closeWriteChannel();
-    }
-
-    if (stdinData) {
-        // Feed the payload and close stdin so git sees EOF — commands
-        // like `git apply -` block until the write channel closes.
         process.write(stdinData->data(), static_cast<qint64>(stdinData->size()));
         process.closeWriteChannel();
     }
@@ -903,6 +943,45 @@ QString GitProcess::stoppedRewordMessage(std::string* hash) const {
     return message;
 }
 
+// HEAD is the reword's commit as git picked it, before the message:
+// the commit itself (git fast-forwards where it can), or a copy that
+// keeps its author, date and message, and its change (patch-id). The
+// message alone said so of whichever commit HEAD was: a stop before the
+// reword's own was made (an untracked file in the way, a conflict
+// resolved to nothing) left an earlier commit with the same message
+// there ("wip", "wip"), and Continue renamed that one.
+bool GitProcess::headIsPickOf(const std::string& hash) const {
+    const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
+    if (!ids || !ids->success())
+        return false;
+    const QStringList both = QString::fromStdString(ids->stdoutData)
+                                 .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (both.size() == 2 && both[0] == both[1])
+        return true;
+    const auto commit = [&](const std::string& rev) {
+        return run({"log", "-1", "--date=raw", "--format=%an%n%ae%n%ad%n%B", rev});
+    };
+    const auto now = commit("HEAD");
+    const auto before = commit(hash);
+    if (!now || !before || !now->success() || !before->success()
+        || now->stdoutData != before->stdoutData)
+        return false;
+    // The change: the same patch-id, whatever base it was picked onto.
+    const auto patchId = [&](const std::string& rev) -> std::optional<std::string> {
+        const auto patch = run({"diff-tree", "--root", "-p", "--no-commit-id", rev});
+        if (!patch || !patch->success())
+            return std::nullopt;
+        if (patch->stdoutData.empty())
+            return std::string();   // no change at all
+        const auto id = runWithInput({"patch-id", "--stable"}, patch->stdoutData);
+        if (!id || !id->success() || id->stdoutData.empty())
+            return std::nullopt;
+        return id->stdoutData.substr(0, id->stdoutData.find(' '));
+    };
+    const auto headId = patchId("HEAD");
+    return headId && headId == patchId(hash);
+}
+
 QString GitProcess::rejectedRewordMessage() const {
     std::string hash;
     const QString message = stoppedRewordMessage(&hash);
@@ -911,10 +990,7 @@ QString GitProcess::rejectedRewordMessage() const {
     const auto staged = run({"diff", "--cached", "--quiet"});
     if (!staged || staged->exitCode != 0)
         return {};
-    const auto now = run({"log", "-1", "--format=%B", "HEAD"});
-    const auto before = run({"log", "-1", "--format=%B", hash});
-    if (!now || !before || !now->success() || !before->success()
-        || now->stdoutData != before->stdoutData)
+    if (!headIsPickOf(hash))
         return {};
     return message;
 }

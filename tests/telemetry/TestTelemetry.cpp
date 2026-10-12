@@ -447,6 +447,7 @@ private slots:
             {"abort", "abort"}, {"addWorktree", "add_worktree"}, {"autostash", "autostash"},
             {"blame", "blame"},
             {"checkout", "checkout"}, {"cherryPick", "cherry_pick"},
+            {"cherry-pick --abort", "cherry_pick_abort"},
             {"cherry-pick --continue", "cherry_pick_continue"},
             {"cherry-pick --skip", "cherry_pick_skip"}, {"conflicts", "conflicts"},
             {"create branch", "create_branch"}, {"createTag", "create_tag"},
@@ -455,12 +456,14 @@ private slots:
             {"featureFinish", "feature_finish"}, {"featureStart", "feature_start"},
             {"fetch", "fetch"}, {"fsck", "fsck"}, {"gc", "gc"}, {"gitFlowInit", "git_flow_init"},
             {"hotfixFinish", "hotfix_finish"}, {"hotfixStart", "hotfix_start"},
-            {"lockWorktree", "lock_worktree"}, {"prune", "prune"}, {"pull", "pull"},
+            {"lockWorktree", "lock_worktree"}, {"merge --abort", "merge_abort"},
+            {"prune", "prune"}, {"pull", "pull"},
             {"push", "push"}, {"rebase", "rebase"}, {"rebase --abort", "rebase_abort"},
             {"rebase --continue", "rebase_continue"}, {"rebase --skip", "rebase_skip"},
             {"releaseFinish", "release_finish"}, {"releaseStart", "release_start"},
             {"removeWorktree", "remove_worktree"}, {"repack", "repack"},
             {"resolve conflicts", "resolve_conflicts"},
+            {"revert --abort", "revert_abort"},
             {"revert --continue", "revert_continue"}, {"revert --skip", "revert_skip"},
             {"stage", "stage"},
             {"stage all", "stage_all"}, {"stage hunk", "stage_hunk"},
@@ -565,44 +568,57 @@ private slots:
         QTest::addColumn<int>("status");
         QTest::addColumn<QNetworkReply::NetworkError>("error");
         QTest::addColumn<Outcome>("expected");
+        QTest::addColumn<bool>("requestSent");
         using E = QNetworkReply::NetworkError;
-        QTest::newRow("200") << 200 << E::NoError << Outcome::Sent;
-        QTest::newRow("202") << 202 << E::NoError << Outcome::Sent;
-        QTest::newRow("301") << 301 << E::NoError << Outcome::Drop;
-        QTest::newRow("302") << 302 << E::NoError << Outcome::Drop;
-        QTest::newRow("400") << 400 << E::ProtocolInvalidOperationError << Outcome::Drop;
-        QTest::newRow("401") << 401 << E::AuthenticationRequiredError << Outcome::Drop;
-        QTest::newRow("404") << 404 << E::ContentNotFoundError << Outcome::Drop;
-        QTest::newRow("408") << 408 << E::UnknownContentError << Outcome::Retry;
-        QTest::newRow("413") << 413 << E::UnknownContentError << Outcome::Drop;
-        QTest::newRow("429") << 429 << E::UnknownContentError << Outcome::Retry;
-        QTest::newRow("500") << 500 << E::InternalServerError << Outcome::Retry;
-        QTest::newRow("503") << 503 << E::ServiceUnavailableError << Outcome::Retry;
-        QTest::newRow("transfer timeout") << 0 << E::TimeoutError << Outcome::Retry;
-        QTest::newRow("cancel not ours") << 0 << E::OperationCanceledError << Outcome::Retry;
-        QTest::newRow("tls") << 0 << E::SslHandshakeFailedError << Outcome::Retry;
-        QTest::newRow("closed") << 0 << E::RemoteHostClosedError << Outcome::Retry;
-        QTest::newRow("unknown network error") << 0 << E::UnknownNetworkError << Outcome::Retry;
+        // Nothing of the request sent: Qt's catch-all is how a connect
+        // that found no route ("Host unreachable", "Network
+        // unreachable") comes; a TLS failure or a timeout still counts.
+        QTest::newRow("no route") << 0 << E::UnknownNetworkError << Outcome::Unreachable << false;
+        QTest::newRow("tls, nothing sent") << 0 << E::SslHandshakeFailedError << Outcome::Retry
+                                           << false;
+        QTest::newRow("timeout, nothing sent") << 0 << E::TimeoutError << Outcome::Retry << false;
+        QTest::newRow("closed, nothing sent") << 0 << E::RemoteHostClosedError << Outcome::Retry
+                                              << false;
+        QTest::newRow("refused, nothing sent") << 0 << E::ConnectionRefusedError
+                                               << Outcome::Unreachable << false;
+        QTest::newRow("200") << 200 << E::NoError << Outcome::Sent << true;
+        QTest::newRow("202") << 202 << E::NoError << Outcome::Sent << true;
+        QTest::newRow("301") << 301 << E::NoError << Outcome::Drop << true;
+        QTest::newRow("302") << 302 << E::NoError << Outcome::Drop << true;
+        QTest::newRow("400") << 400 << E::ProtocolInvalidOperationError << Outcome::Drop << true;
+        QTest::newRow("401") << 401 << E::AuthenticationRequiredError << Outcome::Drop << true;
+        QTest::newRow("404") << 404 << E::ContentNotFoundError << Outcome::Drop << true;
+        QTest::newRow("408") << 408 << E::UnknownContentError << Outcome::Retry << true;
+        QTest::newRow("413") << 413 << E::UnknownContentError << Outcome::Drop << true;
+        QTest::newRow("429") << 429 << E::UnknownContentError << Outcome::Retry << true;
+        QTest::newRow("500") << 500 << E::InternalServerError << Outcome::Retry << true;
+        QTest::newRow("503") << 503 << E::ServiceUnavailableError << Outcome::Retry << true;
+        QTest::newRow("transfer timeout") << 0 << E::TimeoutError << Outcome::Retry << true;
+        QTest::newRow("cancel not ours") << 0 << E::OperationCanceledError << Outcome::Retry << true;
+        QTest::newRow("tls") << 0 << E::SslHandshakeFailedError << Outcome::Retry << true;
+        QTest::newRow("closed") << 0 << E::RemoteHostClosedError << Outcome::Retry << true;
+        QTest::newRow("unknown network error") << 0 << E::UnknownNetworkError << Outcome::Retry << true;
         // Never reached a server: offline, DNS down, nothing listening.
-        QTest::newRow("refused") << 0 << E::ConnectionRefusedError << Outcome::Unreachable;
-        QTest::newRow("dns") << 0 << E::HostNotFoundError << Outcome::Unreachable;
+        QTest::newRow("refused") << 0 << E::ConnectionRefusedError << Outcome::Unreachable << true;
+        QTest::newRow("dns") << 0 << E::HostNotFoundError << Outcome::Unreachable << true;
         QTest::newRow("network down") << 0 << E::TemporaryNetworkFailureError
-                                      << Outcome::Unreachable;
+                                      << Outcome::Unreachable << true;
         QTest::newRow("network session") << 0 << E::NetworkSessionFailedError
-                                         << Outcome::Unreachable;
-        QTest::newRow("proxy not found") << 0 << E::ProxyNotFoundError << Outcome::Unreachable;
+                                         << Outcome::Unreachable << true;
+        QTest::newRow("proxy not found") << 0 << E::ProxyNotFoundError << Outcome::Unreachable << true;
         QTest::newRow("proxy refused") << 0 << E::ProxyConnectionRefusedError
-                                       << Outcome::Unreachable;
+                                       << Outcome::Unreachable << true;
         // A status always means a server answered.
         QTest::newRow("503 with a refused error") << 503 << E::ConnectionRefusedError
-                                                  << Outcome::Retry;
+                                                  << Outcome::Retry << true;
     }
 
     void classifyOutcomes() {
         QFETCH(int, status);
         QFETCH(QNetworkReply::NetworkError, error);
         QFETCH(Outcome, expected);
-        QCOMPARE(classify(status, error), expected);
+        QFETCH(bool, requestSent);
+        QCOMPARE(classify(status, error, requestSent), expected);
     }
 
     // ---- what goes on the wire ----------------------------------------
@@ -858,7 +874,17 @@ private slots:
     // down for real) ends the cycle like a Retry, but counts no attempt
     // and writes nothing: attempts are for a server that keeps refusing
     // a record, and time offline used to drop one every few ticks.
+    void unreachableCostsNoAttempt_data() {
+        QTest::addColumn<bool>("noRoute");
+        QTest::newRow("connection refused") << false;
+        // 0.0.0.1: no route, so the connect fails at once ("Host
+        // unreachable"), and Qt says UnknownNetworkError. Such tries
+        // used to count, offline with a cached DNS answer.
+        QTest::newRow("no route") << true;
+    }
+
     void unreachableCostsNoAttempt() {
+        QFETCH(bool, noRoute);
         Provider provider;
         Config config = testConfig(*stub_, dir_->path());
         config.flushIntervalMs = 300;
@@ -868,6 +894,28 @@ private slots:
         const int port = closedPort();
         config.trackUrl.setPort(port);
         config.storeUrl.setPort(port);
+        if (noRoute) {
+            // https: plain http goes to loopback only (Config). The
+            // connect fails before any TLS.
+            for (QUrl* url : {&config.trackUrl, &config.storeUrl}) {
+                url->setScheme(QStringLiteral("https"));
+                url->setHost(QStringLiteral("0.0.0.1"));
+                url->setPort(9);
+            }
+            // Where the platform reports it otherwise (a route after
+            // all, which times out), this row has nothing to show.
+            QNetworkAccessManager probe;
+            QNetworkRequest request(config.trackUrl);
+            request.setTransferTimeout(3000);
+            request.setHeader(QNetworkRequest::ContentTypeHeader, QByteArrayLiteral("text/plain"));
+            QNetworkReply* reply = probe.post(request, QByteArrayLiteral("{}"));
+            QTRY_VERIFY_WITH_TIMEOUT(reply->isFinished(), 10000);
+            const auto error = reply->error();
+            delete reply;
+            if (error != QNetworkReply::UnknownNetworkError)
+                QSKIP(qPrintable(QStringLiteral("0.0.0.1 gives network error %1 here, not "
+                                                "UnknownNetworkError").arg(error)));
+        }
 
         auto service = makeService(config, provider);
         service->recordRepoOpened(1, 1, 1);

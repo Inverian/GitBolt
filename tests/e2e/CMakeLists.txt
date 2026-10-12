@@ -29,6 +29,7 @@ set(E2E_TESTS
     test_home_isolated
     test_instance_lock
     test_local_op_async
+    test_local_op_guards
     test_quit_during_fetch
     test_quit_during_rebase
     test_rebase_dialog

@@ -139,6 +139,16 @@ public:
     /// `git cherry-pick --continue` (or revert's) carries on.
     bool sequencePaused() const;
 
+    /// Whether `git cherry-pick --skip` (or revert's) would leave out
+    /// the commit a sequence of several stopped at, rather than refuse:
+    /// at a stop that waits for its commit (CHERRY_PICK_HEAD or
+    /// REVERT_HEAD, conflicted or empty), or paused with HEAD where the
+    /// sequencer last left it (.git/sequencer/abort-safety, as git's
+    /// own check reads it: a `git reset --hard` at the stop). Once the
+    /// stopped commit has been committed, HEAD has moved on from there
+    /// and git says "there is nothing to skip": Continue is what's left.
+    bool sequenceSkippable() const;
+
     /// Three-way payloads for every conflicted index entry:
     /// ancestor / ours / theirs content (empty for sides that
     /// don't exist, e.g. add/add has no ancestor). Works for any

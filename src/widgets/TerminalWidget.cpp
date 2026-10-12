@@ -519,8 +519,11 @@ void TerminalWidget::takeConPtyOutput()
     if (!conpty_)
         return;
     const std::string output = conpty_->takeOutput();
-    if (!output.empty())
-        appendOutput(QByteArray(output.data(), static_cast<qsizetype>(output.size())));
+    if (!output.empty()) {
+        const QByteArray bytes(output.data(), static_cast<qsizetype>(output.size()));
+        outputRead(bytes);
+        appendOutput(bytes);
+    }
 }
 #endif
 
@@ -557,8 +560,10 @@ void TerminalWidget::onPtyReadable()
         break;
     }
     slice.truncate(got);
-    if (!slice.isEmpty())
+    if (!slice.isEmpty()) {
+        outputRead(slice);
         appendOutput(slice);
+    }
     if (exited) {
         stopShell();
         appendPlainText(tr("\n[gitbolt] shell exited"));
@@ -837,6 +842,14 @@ qsizetype TerminalWidget::rowChunk(QStringView run, qsizetype room)
 //     never cut: it is one UTF-8 character, which the decoder holds
 //     back until it is whole.) Rare, and only drawn wrong, so left as
 //     it is.
+//   - What conhost itself breaks stays broken. Windows' conhost (seen
+//     on build 26100) gives each half of a surrogate pair a cell of its
+//     own, so an astral character printed in the last column comes out
+//     of ConPTY split over the wrap: something else in that cell, and
+//     the low half alone, as invalid UTF-8 (three U+FFFD here), at the
+//     start of the next row. The bytes are wrong before they get here;
+//     TestTerminalWidget::conhostWrapKeepsCharactersWhole tells the two
+//     apart by what ConPTY sent (outputRead).
 // ---------------------------------------------------------------------------
 
 // A fresh screen below the output so far. conhost clears the screen

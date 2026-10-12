@@ -1071,6 +1071,43 @@ bool Repository::sequencePaused() const {
         && sequenceState(repo_) != RepoState::None;
 }
 
+// git's sequencer_skip(): with CHERRY_PICK_HEAD (or REVERT_HEAD) there
+// is a commit to drop. Without, it skips only while rollback_is_safe():
+// HEAD equals the id in sequencer/abort-safety, a missing file counting
+// as the null id. Committing the stopped commit moves HEAD past it, and
+// the Skip offered then only ever failed.
+bool Repository::sequenceSkippable() const {
+    switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+        return sequenceState(repo_) != RepoState::None;
+    case GIT_REPOSITORY_STATE_NONE:
+        if (sequenceState(repo_) == RepoState::None)
+            return false;
+        break;
+    default:
+        return false;
+    }
+    QFile safety(QString::fromUtf8(git_repository_path(repo_))
+                 + QLatin1String("sequencer/abort-safety"));
+    std::string expected;
+    if (safety.open(QIODevice::ReadOnly))
+        expected = safety.read(256).trimmed().toLower().toStdString();
+    else if (safety.exists())
+        return false;   // git dies on a file it can't read
+    git_oid head;
+    std::string actual;
+    if (git_reference_name_to_id(&head, repo_, "HEAD") == 0)
+        actual = git_oid_tostr_s(&head);
+    // The null id, either way round, matches only the other null id.
+    const auto isNull = [](const std::string& id) {
+        return id.empty() || id.find_first_not_of('0') == std::string::npos;
+    };
+    if (isNull(expected) || isNull(actual))
+        return isNull(expected) && isNull(actual);
+    return expected == actual;
+}
+
 Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
     git_index* index = nullptr;
     int err = git_repository_index(&index, repo_);

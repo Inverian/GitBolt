@@ -34,21 +34,20 @@ bool RepoCommandController::runJob(const QString& busyMessage,
     }
 
     // Snapshotted here, on the GUI thread; the job touches nothing of
-    // the service's. The generation tells whether the repository the
-    // op ran on is still the open one when it ends.
+    // the service's. The key tells whether the repository the op ran on
+    // is still the open one when it ends.
     const git::GitProcess proc = svc_->process();
-    const quint64 generation = svc_->openGeneration();
+    const std::string key = svc_->openKey();
     busy_ = true;
     emit busyChanged(true, busyMessage);
 
     auto* watcher = new QFutureWatcher<void>(this);
     connect(watcher, &QFutureWatcher<void>::finished, this,
-            [this, watcher, generation, refresh, finished = std::move(finished)]() {
+            [this, watcher, key, refresh, finished = std::move(finished)]() mutable {
         watcher->deleteLater();
         busy_ = false;
         emit busyChanged(false, QString());
-        if (finished && generation == svc_->openGeneration())
-            finished();
+        deliver(key, std::move(finished));
         refreshAfter(refresh);
     });
     job_ = QtConcurrent::run([proc, work = std::move(work)]() { work(proc); });
@@ -99,6 +98,39 @@ bool RepoCommandController::runAsync(const std::vector<std::string>& args,
                 done(ok);
         },
         refresh);
+}
+
+// The outcome goes to the repository the op ran on, opened again or
+// not: it was dropped on any open, the same repository's included (a
+// second launch handing over its path, Recent), and on one that failed
+// and left it open. Only another repository, or none, drops it now.
+// Once an open is on its way, its outcome decides.
+void RepoCommandController::deliver(const std::string& key, std::function<void()> finished)
+{
+    if (!finished)
+        return;
+    if (!svc_->openPending()) {
+        if (!key.empty() && key == svc_->openKey())
+            finished();
+        return;
+    }
+    auto* waiting = new QObject(this);
+    const auto settle = [this, waiting, key, finished = std::move(finished)]() {
+        // Once only (repositoryOpened or repositoryOpenFailed); a newer
+        // open still on its way waits in turn.
+        if (svc_->openPending())
+            return;
+        waiting->deleteLater();
+        disconnect(svc_, nullptr, waiting, nullptr);
+        if (!key.empty() && key == svc_->openKey())
+            finished();
+    };
+    connect(svc_, &services::GitService::repositoryOpened, waiting, settle);
+    connect(svc_, &services::GitService::repositoryOpenFailed, waiting, settle);
+    connect(svc_, &services::GitService::repositoryClosed, waiting, [this, waiting]() {
+        disconnect(svc_, nullptr, waiting, nullptr);
+        waiting->deleteLater();
+    });
 }
 
 void RepoCommandController::waitForFinished()
