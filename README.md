@@ -126,8 +126,7 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
   - Repository statistics summary
 
 ### Platform Integration
-- macOS Finder Sync extension ("Open in GitBolt" context menu)
-- Windows Explorer shell extension
+- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
 - Linux Nautilus extension and `.desktop` file
 - Cross-platform installers (DMG, NSIS, DEB, AppImage)
 
