@@ -165,15 +165,11 @@ void TelemetryService::beginCycle() {
         return;
     // Every cycle, the first flush's and each retry tick's, idle or
     // not: the switch may have been turned off in another process.
-    if (switchedOffElsewhere())
-        return;
+    // (With records to send, sendFront() reads it, before each one.)
     if (queue_->isEmpty()) {
-        queue_->sync();
+        if (!switchedOffElsewhere())
+            queue_->sync();
         return;
-    }
-    if (!network_) {
-        network_ = new QNetworkAccessManager(this);
-        network_->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     }
     inCycle_ = true;
     sendFront();
@@ -182,9 +178,19 @@ void TelemetryService::beginCycle() {
 void TelemetryService::sendFront() {
     if (!isActive() || !inCycle_)
         return;
+    // At every step of the cycle, before each request, not just as it
+    // starts: a cycle paces up to maxPerFlush of them (a minute's
+    // worth, shipped), and the switch turned off in another process
+    // meanwhile let the rest go out all the same.
+    if (switchedOffElsewhere())
+        return;
     if (queue_->isEmpty() || sentThisTick_ >= config_.maxPerFlush) {
         endCycle();
         return;
+    }
+    if (!network_) {
+        network_ = new QNetworkAccessManager(this);
+        network_->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     }
 
     const QueuedRecord& record = queue_->front();

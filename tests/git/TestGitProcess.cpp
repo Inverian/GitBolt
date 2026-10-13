@@ -15,6 +15,7 @@
 // a cancelled commit (quitting during it) must not end that halfway.
 //
 
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -192,6 +193,59 @@ private slots:
         QVERIFY(succeeded(staged));
         QCOMPARE(QByteArray::fromStdString(staged->stdoutData), QByteArray("two\n"));
         QVERIFY(!QFileInfo::exists(repo.path() + QStringLiteral("/.git/index.lock")));
+    }
+
+    // The prepare-commit-msg hook git would run, found where git looks:
+    // in .git/hooks or core.hooksPath, executable on Unix. Git for
+    // Windows runs any file of that name, and one named with ".exe" too
+    // (find_hook()'s STRIP_EXTENSION retry), as a compiled hook is.
+    // That one was missed, and with no HEAD reflog a reword a hook
+    // turned down was dropped on Continue, with "Rebase complete.".
+    void prepareCommitMsgHookAsGitFindsIt_data() {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<bool>("executable");
+        QTest::addColumn<bool>("found");
+        QTest::newRow("none") << QString() << true << false;
+        QTest::newRow("a script") << QStringLiteral("prepare-commit-msg") << true << true;
+        QTest::newRow("in core.hooksPath")
+            << QStringLiteral("hooksPath/prepare-commit-msg") << true << true;
+        QTest::newRow("a sample") << QStringLiteral("prepare-commit-msg.sample") << true << false;
+#ifdef Q_OS_WIN
+        QTest::newRow("a compiled one, .exe")
+            << QStringLiteral("prepare-commit-msg.exe") << true << true;
+        QTest::newRow("a compiled one, .exe, in core.hooksPath")
+            << QStringLiteral("hooksPath/prepare-commit-msg.exe") << true << true;
+#else
+        // git on Unix tries the name alone, and runs it only when it
+        // can be executed.
+        QTest::newRow("a .exe") << QStringLiteral("prepare-commit-msg.exe") << true << false;
+        QTest::newRow("not executable") << QStringLiteral("prepare-commit-msg") << false << false;
+#endif
+    }
+
+    void prepareCommitMsgHookAsGitFindsIt() {
+        QFETCH(QString, name);
+        QFETCH(bool, executable);
+        QFETCH(bool, found);
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QString dir = repo.path() + QStringLiteral("/.git/hooks");
+        QString file = name;
+        if (name.startsWith(QLatin1String("hooksPath/"))) {
+            dir = repo.path() + QStringLiteral("/elsewhere");
+            QVERIFY(succeeded(git.run({"config", "core.hooksPath", dir.toStdString()})));
+            file = name.section(QLatin1Char('/'), 1);
+        }
+        QVERIFY(QDir().mkpath(dir));
+        if (!file.isEmpty()) {
+            const QString path = dir + QLatin1Char('/') + file;
+            writeFile(path, "#!/bin/sh\nexit 0\n");
+            QFile::Permissions permissions = QFile::ReadOwner | QFile::WriteOwner;
+            if (executable)
+                permissions |= QFile::ExeOwner;
+            QVERIFY(QFile::setPermissions(path, permissions));
+        }
+        QCOMPARE(git.hasPrepareCommitMsgHook(), found);
     }
 
 private:

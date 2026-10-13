@@ -1224,6 +1224,144 @@ private slots:
             QVERIFY(!repo.repo().sequenceSkippable());
         }
     }
+
+    // The message the Commit dialog starts from where a merge, a
+    // cherry-pick or a revert waits for its commit (MERGE_MSG):
+    //   - a pick's is the picked commit's own, line for line, as a clean
+    //     `git cherry-pick` commits it. Every line that started with
+    //     '#' went: a "#42 Fix login" subject, a "# Notes" heading;
+    //   - only git's (or libgit2's) note of the conflicts at the end
+    //     goes, and a scissors line with it, with the comment prefix
+    //     git wrote it with: core.commentChar, or core.commentString
+    //     (git 2.45 and later take either, and a string), which was
+    //     never read, so its "// Conflicts:" lines were committed;
+    //   - a merge's and a revert's are git's own, and their comment
+    //     lines (a signed tag's "gpg:" lines) are git's notes: they go,
+    //     as a terminal's `git commit` drops them;
+    //   - a message written with CRLF line ends comes without the CRs.
+    void preparedMessageIsGitsWithoutItsNotes_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::addColumn<QStringList>("config");
+        QTest::addColumn<QByteArray>("written");    // over git's MERGE_MSG, when set
+        QTest::addColumn<QString>("expected");
+
+        const QByteArray picked = "#42 Fix login\n\nDetails of the fix.\n\n"
+                                  "# Notes\nKeep the session cookie.";
+        const QString message = QString::fromUtf8(picked);
+        const QStringList none;
+        QTest::newRow("GitBolt's pick") << QStringLiteral("pick") << none << QByteArray()
+                                        << message;
+        QTest::newRow("GitBolt's pick, conflicted (#Conflicts:)")
+            << QStringLiteral("pick conflict") << none << QByteArray() << message;
+        QTest::newRow("git's pick, conflicted (# Conflicts:)")
+            << QStringLiteral("git pick conflict") << none << QByteArray() << message;
+        QTest::newRow("git's pick, conflicted, core.commentChar ;")
+            << QStringLiteral("git pick conflict") << QStringList{QStringLiteral("core.commentChar=;")}
+            << QByteArray() << message;
+        QTest::newRow("git's pick, conflicted, the note after a scissors line")
+            << QStringLiteral("git pick conflict") << none
+            << picked + "\n\n# ------------------------ >8 ------------------------\n"
+                        "# Do not modify or remove the line above.\n"
+                        "# Everything below it will be ignored.\n#\n# Conflicts:\n#\ta.txt\n"
+            << message;
+        // What git 2.45 and later write (the git here may be older).
+        QTest::newRow("core.commentString //")
+            << QStringLiteral("git pick conflict")
+            << QStringList{QStringLiteral("core.commentString=//")}
+            << QByteArray("side change\n\n// Conflicts:\n//\ta.txt\n")
+            << QStringLiteral("side change");
+        QTest::newRow("core.commentChar ; and core.commentString //, as git's docs advise")
+            << QStringLiteral("git pick conflict")
+            << QStringList{QStringLiteral("core.commentChar=;"),
+                           QStringLiteral("core.commentString=//")}
+            << QByteArray("side change\n\n// Conflicts:\n//\ta.txt\n")
+            << QStringLiteral("side change");
+        QTest::newRow("CRLF line ends")
+            << QStringLiteral("git pick conflict") << none
+            << QByteArray("Fix\r\n\r\nBody line\r\n\r\n# Conflicts:\r\n#\ta.txt\r\n")
+            << QStringLiteral("Fix\n\nBody line");
+        QTest::newRow("git's merge, conflicted") << QStringLiteral("git merge conflict") << none
+                                                 << QByteArray()
+                                                 << QStringLiteral("Merge branch 'side'");
+        QTest::newRow("a signed tag's merge: git's gpg lines")
+            << QStringLiteral("git merge conflict") << none
+            << QByteArray("Merge tag 'v1'\n\nRelease one\n\n# gpg: Signature made today\n"
+                          "# gpg: Good signature from \"Someone\"\n\n# Conflicts:\n#\ta.txt\n")
+            << QStringLiteral("Merge tag 'v1'\n\nRelease one");
+        QTest::newRow("a merge, core.commentString //")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentString=//")}
+            << QByteArray("Merge branch 'side'\n\n// Conflicts:\n//\ta.txt\n")
+            << QStringLiteral("Merge branch 'side'");
+        QTest::newRow("git's revert, conflicted")
+            << QStringLiteral("git revert conflict") << none << QByteArray()
+            << QStringLiteral("Revert \"main change\"\n\nThis reverts commit %1.");
+    }
+
+    void preparedMessageIsGitsWithoutItsNotes() {
+        QFETCH(QString, operation);
+        QFETCH(QStringList, config);
+        QFETCH(QByteArray, written);
+        QFETCH(QString, expected);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        const std::string picked = "#42 Fix login\n\nDetails of the fix.\n\n"
+                                   "# Notes\nKeep the session cookie.\n";
+        // side: a commit of b.txt alone, and one of a.txt that clashes
+        // with main's, both with the message above, kept as it is.
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--cleanup=verbatim", "-m", picked})));
+        const QString clean = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile("a.txt", "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "--cleanup=verbatim", "-m", picked})));
+        const QString clash = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("a.txt", "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+        const QString mainChange = output(git.run({"rev-parse", "HEAD"}));
+        for (const QString& setting : config) {
+            QVERIFY(succeeded(git.run({"config", setting.section(QLatin1Char('='), 0, 0).toStdString(),
+                                       setting.section(QLatin1Char('='), 1).toStdString()})));
+        }
+
+        // A Repository of its own, as GitBolt opens one: the fixture's
+        // copy of the index is from before git's checkouts.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        gitbolt::git::Repository& own = *opened;
+        if (operation.startsWith(QLatin1String("pick"))) {
+            const bool conflict = operation == QLatin1String("pick conflict");
+            const auto pick = own.cherryPick(
+                gitbolt::git::ObjectId::fromHex((conflict ? clash : clean).toStdString()));
+            QVERIFY2(pick.ok(), pick.ok() ? "" : pick.error().message().c_str());
+            QCOMPARE(pick->hasConflicts, conflict);
+        } else if (operation == QLatin1String("git pick conflict")) {
+            QVERIFY(!succeeded(git.run({"cherry-pick", clash.toStdString()})));
+        } else if (operation == QLatin1String("git merge conflict")) {
+            QVERIFY(!succeeded(git.run({"merge", "side"})));
+        } else {
+            repo.writeFile("a.txt", "later\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "later change"})));
+            QVERIFY(!succeeded(git.run({"revert", "--no-edit", mainChange.toStdString()})));
+            expected = expected.arg(mainChange);
+        }
+        QFile prepared(repo.path() + QStringLiteral("/.git/MERGE_MSG"));
+        if (!written.isEmpty()) {
+            QVERIFY(prepared.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QVERIFY(prepared.write(written) == written.size());
+            prepared.close();
+        } else if (operation.contains(QLatin1String("conflict"))) {
+            // git's note of the conflicts is there to go.
+            QVERIFY(prepared.open(QIODevice::ReadOnly));
+            QVERIFY(prepared.readAll().contains("Conflicts:\n"));
+            prepared.close();
+        }
+        QCOMPARE(QString::fromStdString(own.preparedMessage()), expected);
+    }
 };
 
 QTEST_MAIN(TestRepository)

@@ -24,6 +24,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QGroupBox>
@@ -102,7 +103,10 @@ private slots:
         const QString ini = SettingsService().fileName();
         auto writeIni = [&ini](const QByteArray& content, int ageSecs) {
             QFile file(ini);
-            return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+            // Its folder too: run on its own, no test before this one
+            // has had QSettings write the INI (and make the folder).
+            return QDir().mkpath(QFileInfo(ini).absolutePath())
+                   && file.open(QIODevice::WriteOnly | QIODevice::Truncate)
                    && file.write(content) == content.size() && file.flush()
                    && file.setFileTime(QDateTime::currentDateTime().addSecs(ageSecs),
                                        QFileDevice::FileModificationTime);

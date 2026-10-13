@@ -1076,9 +1076,9 @@ private slots:
                 return svc->isOpen() && !svc->openPending() && svc->openKey() != before;
             }, 15000);
             QAction* want = nullptr;
-            for (QAction* a : menu->actions()) {
-                if (a->text().startsWith(entry))
-                    want = a;
+            for (QAction* action : menu->actions()) {
+                if (action->text().startsWith(entry))
+                    want = action;
             }
             menu->close();
             if (want && want->isEnabled()) {

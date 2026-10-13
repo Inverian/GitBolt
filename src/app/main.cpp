@@ -438,8 +438,9 @@ int main(int argc, char* argv[]) {
     // window keeps, and after `settings`, which its ID provider and
     // switch reader use. A disabled one for the Settings switch, so
     // turning it back on works without a restart. The reader re-reads
-    // GitBolt.ini at every flush cycle and at quit: a switch turned off
-    // by another process reaches this one no other way.
+    // GitBolt.ini at every flush cycle, before each request, and at
+    // quit: a switch turned off by another process reaches this one no
+    // other way.
     std::unique_ptr<telemetry::TelemetryService> telemetryService;
     if (telemetry::createsService(telemetryGate)) {
         telemetryService = std::make_unique<telemetry::TelemetryService>(

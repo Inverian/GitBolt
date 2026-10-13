@@ -7,7 +7,10 @@
 //     it), and on again once the operation is over;
 //   - the message starts as the one git prepared for a merge,
 //     cherry-pick or revert waiting for its commit (MERGE_MSG, without
-//     its comment lines), as a terminal's `git commit` does;
+//     git's note of the conflicts; a pick's own lines that start with
+//     '#' kept), as a terminal's `git commit` does, and follows it while
+//     the dialog is open (an abort, a Skip, a merge started meanwhile);
+//     once the operation is over, a message filled in goes with it;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
 //   - while the commit runs, nothing stages, unstages or commits, the
@@ -125,28 +128,38 @@ private slots:
     }
 
     // A merge, cherry-pick or revert stopped on a conflict: the message
-    // starts as the one git prepared for it (MERGE_MSG, its comment
-    // lines left out), as a terminal's `git commit` does. The dialog's
-    // commit (`git commit -F -`) took the typed words alone, and a
-    // revert's "This reverts commit <id>." was gone: Continue on a
-    // revert of several commits then said git never reverted the one
-    // just committed, and advised Abort.
+    // starts as the one git prepared for it (MERGE_MSG, git's note of
+    // the conflicts left out), as a terminal's `git commit` does. The
+    // dialog's commit (`git commit -F -`) took the typed words alone,
+    // and a revert's "This reverts commit <id>." was gone: Continue on
+    // a revert of several commits then said git never reverted the one
+    // just committed, and advised Abort. A picked commit's lines that
+    // start with '#' are its own, kept as a clean `git cherry-pick`
+    // keeps them: a "#42 Fix login" subject went, and the commit's
+    // subject was the line after it.
     void messageStartsAsTheOneGitPrepared_data() {
         QTest::addColumn<QString>("operation");
-        QTest::newRow("merge") << QStringLiteral("merge");
-        QTest::newRow("cherry-pick") << QStringLiteral("cherry-pick");
-        QTest::newRow("revert") << QStringLiteral("revert");
+        QTest::addColumn<QString>("sideMessage");
+        const QString side = QStringLiteral("side change");
+        QTest::newRow("merge") << QStringLiteral("merge") << side;
+        QTest::newRow("cherry-pick") << QStringLiteral("cherry-pick") << side;
+        QTest::newRow("cherry-pick, lines that start with #")
+            << QStringLiteral("cherry-pick")
+            << QStringLiteral("#42 Fix login\n\nDetails of the fix.\n\n# Notes\nKeep the cookie.");
+        QTest::newRow("revert") << QStringLiteral("revert") << side;
     }
 
     void messageStartsAsTheOneGitPrepared() {
         QFETCH(QString, operation);
+        QFETCH(QString, sideMessage);
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
         gitbolt::git::GitProcess git(repo.path().toStdString());
         QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
         QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
         repo.writeFile(QStringLiteral("a.txt"), "side\n");
-        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "side change"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "--cleanup=verbatim", "-m",
+                                   sideMessage.toStdString()})));
         const QString side = output(git.run({"rev-parse", "side"}));
         QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
         repo.writeFile(QStringLiteral("a.txt"), "main\n");
@@ -177,7 +190,7 @@ private slots:
         const QString expected =
             operation == QLatin1String("merge") ? QStringLiteral("Merge branch 'side'")
             : operation == QLatin1String("cherry-pick")
-                ? QStringLiteral("side change")
+                ? sideMessage
                 : QStringLiteral("Revert \"side change\"\n\nThis reverts commit %1.").arg(side);
         QTRY_COMPARE(message->toPlainText(), expected);
 
@@ -196,6 +209,155 @@ private slots:
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         QTest::qWait(200);
         QCOMPARE(message->toPlainText(), QString());
+    }
+
+    // The dialog left open while the operation moves on: an abort (the
+    // bar's), a Skip that stops at the next pick, a merge started after
+    // the abort, or one that starts while it's open. The message was
+    // filled in when the dialog was shown, and only then: git's message
+    // for one stop went into the commit of the next (a skipped pick's
+    // message on the next pick's changes, featA's merge message on
+    // featB's merge), stayed after an abort for an unrelated commit, or
+    // never came. It follows git's now, at every state report. Words
+    // the user typed stay, and a message the user cleared is not
+    // filled in again while git's is the same.
+    void messageFollowsGitWhileOpen_data() {
+        QTest::addColumn<QString>("scenario");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("aborted") << QStringLiteral("abort") << QString();
+        QTest::newRow("aborted, and another merge")
+            << QStringLiteral("another merge") << QStringLiteral("Merge branch 'featB'");
+        QTest::newRow("a pick skipped, the next one stopped")
+            << QStringLiteral("skip") << QStringLiteral("B change");
+        QTest::newRow("opened before the merge")
+            << QStringLiteral("opened before") << QStringLiteral("Merge branch 'featA'");
+        QTest::newRow("typed words stay")
+            << QStringLiteral("typed") << QStringLiteral("My own words");
+        QTest::newRow("a message cleared stays cleared") << QStringLiteral("cleared") << QString();
+    }
+
+    void messageFollowsGitWhileOpen() {
+        QFETCH(QString, scenario);
+        QFETCH(QString, expected);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        const std::string main = output(git.run({"branch", "--show-current"})).toStdString();
+        for (const char* side : {"A", "B"}) {
+            const std::string branch = std::string("feat") + side;
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", branch, main})));
+            repo.writeFile(QStringLiteral("a.txt"), QByteArray(side) + '\n');
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", std::string(side) + " change"})));
+        }
+        QVERIFY(succeeded(git.run({"checkout", "-q", main})));
+        repo.writeFile(QStringLiteral("a.txt"), "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        QSignalSpy states(&svc, &GitService::repoStateReady);
+        QSignalSpy steps(&svc, &GitService::rebaseStepFinished);
+        CommitDialog dialog(&svc, nullptr);
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        QVERIFY(message);
+
+        if (scenario == QLatin1String("opened before")) {
+            dialog.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+            QTRY_VERIFY(states.count() >= 1);
+            QCOMPARE(message->toPlainText(), QString());
+            QVERIFY(!succeeded(git.run({"merge", "featA"})));
+            svc.refreshStatus();
+        } else {
+            const bool skip = scenario == QLatin1String("skip");
+            if (skip)
+                QVERIFY(!succeeded(git.run({"cherry-pick", "featA", "featB"})));
+            else
+                QVERIFY(!succeeded(git.run({"merge", "featA"})));
+            dialog.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+            QTRY_COMPARE(message->toPlainText(),
+                         skip ? QStringLiteral("A change") : QStringLiteral("Merge branch 'featA'"));
+            if (scenario == QLatin1String("typed"))
+                message->setPlainText(QStringLiteral("My own words"));
+            else if (scenario == QLatin1String("cleared"))
+                message->clear();
+
+            if (skip) {
+                svc.sequenceSkip();
+                QTRY_COMPARE_WITH_TIMEOUT(steps.count(), 1, 15000);
+                QVERIFY(QFileInfo::exists(repo.path() + QStringLiteral("/.git/CHERRY_PICK_HEAD")));
+            } else if (scenario == QLatin1String("cleared")) {
+                states.clear();
+                svc.refreshStatus();
+                QTRY_VERIFY(states.count() >= 1);
+            } else {
+                QVERIFY(svc.abortConflictState());
+                QTRY_COMPARE_WITH_TIMEOUT(steps.count(), 1, 15000);
+                QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+                if (scenario != QLatin1String("abort")) {
+                    QVERIFY(!succeeded(git.run({"merge", "featB"})));
+                    svc.refreshStatus();
+                }
+            }
+        }
+        QTRY_COMPARE(message->toPlainText(), expected);
+        // And it stays so through the refreshes that follow.
+        states.clear();
+        svc.refreshStatus();
+        QTRY_VERIFY(states.count() >= 1);
+        QCOMPARE(message->toPlainText(), expected);
+    }
+
+    // The message filled in is taken for the dialog's own, not the
+    // user's, while it is as it was filled in. That was the raw MERGE_MSG,
+    // and the editor holds CRLF line ends as "\n" and a non-breaking
+    // space as a space: such a message never matched again, passed for
+    // the user's words, and stayed for the next, unrelated, commit once
+    // the operation was over.
+    void aPreparedMessageGoesWithItsOperation_data() {
+        QTest::addColumn<QByteArray>("picked");
+        QTest::addColumn<QString>("shown");
+        QTest::newRow("LF") << QByteArray("Merged PR 12: Fix\n\nBody line\n")
+                            << QStringLiteral("Merged PR 12: Fix\n\nBody line");
+        QTest::newRow("CRLF") << QByteArray("Merged PR 12: Fix\r\n\r\nBody line\r\n")
+                              << QStringLiteral("Merged PR 12: Fix\n\nBody line");
+        QTest::newRow("a non-breaking space") << QByteArray("Fix\xc2\xa0it\n\nBody line\n")
+                                              << QStringLiteral("Fix it\n\nBody line");
+    }
+
+    void aPreparedMessageGoesWithItsOperation() {
+        QFETCH(QByteArray, picked);
+        QFETCH(QString, shown);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile(QStringLiteral("a.txt"), "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "--cleanup=verbatim", "-m",
+                                   picked.toStdString()})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile(QStringLiteral("a.txt"), "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+        QVERIFY(!succeeded(git.run({"cherry-pick", "side"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        QVERIFY(message);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_COMPARE(message->toPlainText(), shown);
+
+        // Closed, and the pick given up (a terminal's --abort, say).
+        dialog.close();
+        QVERIFY(succeeded(git.run({"cherry-pick", "--abort"})));
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_COMPARE(message->toPlainText(), QString());
     }
 
     // The commit goes through git, which runs the repository's hooks;

@@ -466,11 +466,17 @@ void CommitDialog::wireConnections()
             this, &CommitDialog::onCommitComplete);
     connect(svc_, &services::GitService::operationFailed,
             this, &CommitDialog::onOperationFailed);
-    // Right behind every status refresh: whether Amend can be offered.
-    // (Hidden, the dialog asks again when it's shown: refresh().)
+    // Right behind every status refresh, and every step's report:
+    // whether Amend can be offered, and git's message as it is now. Left
+    // open across an abort or a Skip, the dialog kept the message of
+    // the stop before, which went into the next stop's commit (or the
+    // next unrelated one); opened before git stopped, it never got
+    // git's. (Hidden, the dialog asks again when it's shown: refresh().)
     connect(svc_, &services::GitService::repoStateReady, this, [this] {
-        if (isVisible())
-            updateAmend();
+        if (!isVisible())
+            return;
+        updateAmend();
+        startFromPreparedMessage(/*onlyIfChanged=*/true);
     });
     // A step on the repository (a rebase step, an abort, a commit, this
     // dialog's own or not) holds the index while it runs: locked until
@@ -998,18 +1004,25 @@ void CommitDialog::refresh()
     startFromPreparedMessage();
 }
 
-void CommitDialog::startFromPreparedMessage()
+void CommitDialog::startFromPreparedMessage(bool onlyIfChanged)
 {
     if (!svc_ || pendingCommit_)
         return;
     const QString prepared = QString::fromStdString(svc_->withRepository(
         [](git::Repository& r) { return r.preparedMessage(); }));
+    if (onlyIfChanged && prepared == preparedRead_)
+        return;
+    preparedRead_ = prepared;
     const QString current = messageEdit_->toPlainText();
     if (!current.trimmed().isEmpty() && (prefilled_.isEmpty() || current != prefilled_))
         return;     // the user's own words
     if (current != prepared)
         messageEdit_->setPlainText(prepared);
-    prefilled_ = prepared;
+    // As the editor gives it back: it holds a non-breaking space as a
+    // space (and CRLF as "\n"), and the message filled in never
+    // matched again, so it passed for the user's words and stayed for
+    // the next, unrelated, commit.
+    prefilled_ = messageEdit_->toPlainText();
 }
 
 void CommitDialog::showEvent(QShowEvent* e)

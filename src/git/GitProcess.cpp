@@ -1219,11 +1219,16 @@ bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
 }
 
 // Where git looks for it (core.hooksPath honoured), as git runs it: Git
-// for Windows runs any file there, through sh.
+// for Windows runs any file there, through sh, and, where there's none,
+// the name with ".exe" (find_hook()'s STRIP_EXTENSION retry), as a
+// compiled hook has.
 bool GitProcess::hasPrepareCommitMsgHook() const {
-    const QFileInfo hook(gitPath(QStringLiteral("hooks/prepare-commit-msg")));
+    const QString path = gitPath(QStringLiteral("hooks/prepare-commit-msg"));
+    if (path.isEmpty())
+        return false;
+    const QFileInfo hook(path);
 #ifdef Q_OS_WIN
-    return hook.isFile();
+    return hook.isFile() || QFileInfo(path + QLatin1String(".exe")).isFile();
 #else
     return hook.isFile() && hook.isExecutable();
 #endif
@@ -1451,6 +1456,22 @@ Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend)
             if (head.open(QIODevice::ReadOnly)) {
                 concluding = QString::fromLatin1(head.readAll()).trimmed();
                 break;
+            }
+        }
+        // An amend of a commit noted so (a typo fixed in it) replaces
+        // it, and concludes the stop in its place: the note named the
+        // commit that went, and a revert's in the user's words was
+        // taken for one git never made, so Continue advised Abort.
+        if (concluding.isEmpty() && amend) {
+            const auto head = run({"rev-parse", "--verify", "--quiet", "HEAD"});
+            QFile concluded(gitPath(kConcludedStops));
+            if (head && head->success() && concluded.open(QIODevice::ReadOnly)) {
+                const QByteArray was = QByteArray::fromStdString(head->stdoutData).trimmed();
+                for (const QByteArray& noted : concluded.readAll().split('\n')) {
+                    const QList<QByteArray> pair = noted.simplified().split(' ');
+                    if (pair.size() == 2 && pair[1] == was)
+                        concluding = QString::fromLatin1(pair[0]);
+                }
             }
         }
     }

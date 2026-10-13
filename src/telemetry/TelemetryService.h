@@ -59,8 +59,9 @@ public:
     /// another process: no settingsChanged reaches this one, and while
     /// this process holds the queue lock the other can't delete the
     /// queue. Read at every flush cycle (each retry tick and each
-    /// first flush) and at quit; false acts as setUserEnabled(false),
-    /// before anything is sent or written.
+    /// first flush), before each request of one, and at quit; false
+    /// acts as setUserEnabled(false), before anything more is sent or
+    /// written.
     TelemetryService(Config config, std::function<QString()> installIdProvider, bool enabled,
                      std::function<bool()> switchReader = {}, QObject* parent = nullptr);
     ~TelemetryService() override;

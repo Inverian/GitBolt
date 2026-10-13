@@ -1043,12 +1043,14 @@ private slots:
     // couldn't take the instance lock, a test session sharing the INI):
     // no settingsChanged reaches this one, and the other process can't
     // delete the queue this one holds. The service re-reads the switch
-    // at every flush cycle and at quit, and stops as if it had been
-    // turned off here: nothing more sent, the queue deleted.
+    // at every flush cycle, before each request of one, and at quit,
+    // and stops as if it had been turned off here: nothing more sent,
+    // the queue deleted.
     void switchOffElsewhereStopsHolder_data() {
         QTest::addColumn<QString>("when");
         QTest::newRow("before the first flush") << QStringLiteral("flush");
         QTest::newRow("during the backoff") << QStringLiteral("backoff");
+        QTest::newRow("between two requests of a flush") << QStringLiteral("cycle");
         QTest::newRow("at quit") << QStringLiteral("quit");
     }
 
@@ -1074,11 +1076,29 @@ private slots:
                 return StubResponse{503, {}};
             };
             sent = 1;
+        } else if (when == QLatin1String("cycle")) {
+            // A flush of five, paced: the switch goes off elsewhere as
+            // the second is answered. The switch was read at the start
+            // of the cycle alone, and the other three went out all the
+            // same (with the shipped pace and budget, up to a minute
+            // of requests after the switch was off).
+            config.paceMs = 150;
+            stub_->respond = [&persisted, answered = 0](const StubRequest&) mutable {
+                if (++answered == 2)
+                    persisted = false;
+                return StubResponse{};
+            };
+            sent = 2;
         }
         TelemetryService service(config, provider.fn(), true, [&persisted] { return persisted; });
         service.start();
         service.recordLaunch();
-        if (when == QLatin1String("backoff"))
+        if (when == QLatin1String("cycle")) {
+            for (int i = 1; i <= 4; ++i)
+                service.recordRepoOpened(i, i, 1);
+            QCOMPARE(service.queuedCount(), 5);
+        }
+        if (when == QLatin1String("backoff") || when == QLatin1String("cycle"))
             QTRY_COMPARE(stub_->requests().size(), sent);
 
         persisted = false;

@@ -117,7 +117,11 @@ private:
     /// revert's "This reverts commit <id>." went. Only into an empty
     /// message, or one still as it was filled in (git's for another
     /// stop, or another repository), which goes when there's none now.
-    void startFromPreparedMessage();
+    /// When the dialog is shown, and while it is open at every state
+    /// report (an abort, a Skip, a merge started meanwhile), there
+    /// `onlyIfChanged`: only when git's message is no longer the one
+    /// last read, so a message the user cleared stays clear.
+    void startFromPreparedMessage(bool onlyIfChanged = false);
 
     /// What can be clicked while a commit, or a local operation, runs:
     /// nothing that stages, unstages, discards or commits. git commit
@@ -200,8 +204,11 @@ private:
     // Geometry restore guard
     bool restored_ = false;
 
-    // startFromPreparedMessage(): the message it filled in last.
+    // startFromPreparedMessage(): the message it filled in last, as
+    // the editor holds it (CRLF as "\n", a non-breaking space as a
+    // space), and git's message as it read it last.
     QString prefilled_;
+    QString preparedRead_;
 };
 
 } // namespace gitbolt::dialogs

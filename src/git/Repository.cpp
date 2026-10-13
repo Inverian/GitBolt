@@ -7,6 +7,7 @@
 #include <cstring>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace gitbolt::git {
 
@@ -749,12 +750,17 @@ std::string Repository::amendProblem() const {
 }
 
 std::string Repository::preparedMessage() const {
+    // A pick's message is the picked commit's own; a merge's and a
+    // revert's are git's (or libgit2's), written for it.
+    bool picked = false;
     switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_CHERRYPICK:
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+        picked = true;
+        break;
     case GIT_REPOSITORY_STATE_MERGE:
     case GIT_REPOSITORY_STATE_REVERT:
     case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
-    case GIT_REPOSITORY_STATE_CHERRYPICK:
-    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
         break;
     default:
         return {};
@@ -762,18 +768,75 @@ std::string Repository::preparedMessage() const {
     QFile file(QString::fromUtf8(git_repository_path(repo_)) + QLatin1String("MERGE_MSG"));
     if (!file.open(QIODevice::ReadOnly))
         return {};
-    char comment = '#';
+
+    // What git starts its comment lines with. core.commentChar and
+    // core.commentString are one setting to git 2.45 and later, which
+    // takes a string for either; older gits read core.commentChar
+    // alone. Both, then: either may be the one git wrote with. '#'
+    // where neither is set, and for "auto" (only `git commit` picks a
+    // character then; MERGE_MSG has '#').
+    QList<QByteArray> comments;
     git_config* config = nullptr;
     if (git_repository_config_snapshot(&config, repo_) == 0) {
-        const char* value = nullptr;
-        if (git_config_get_string(&value, config, "core.commentChar") == 0 && value
-            && std::strlen(value) == 1)
-            comment = value[0];
+        for (const char* key : {"core.commentString", "core.commentChar"}) {
+            const char* value = nullptr;
+            if (git_config_get_string(&value, config, key) == 0 && value && *value
+                && std::strcmp(value, "auto") != 0)
+                comments << QByteArray(value);
+        }
         git_config_free(config);
     }
+    if (comments.isEmpty())
+        comments << QByteArrayLiteral("#");
+    // libgit2's note of the conflicts (GitBolt's own merge or pick)
+    // has '#' whatever the setting.
+    QList<QByteArray> notes = comments;
+    if (!notes.contains(QByteArrayLiteral("#")))
+        notes << QByteArrayLiteral("#");
+    // A comment line's text, after its prefix; none for other lines.
+    const auto commentText = [](const QByteArray& line, const QList<QByteArray>& prefixes,
+                                QByteArray* text) {
+        for (const QByteArray& prefix : prefixes) {
+            if (line.startsWith(prefix)) {
+                *text = line.mid(prefix.size()).trimmed();
+                return true;
+            }
+        }
+        return false;
+    };
+
+    QList<QByteArray> lines = file.readAll().split('\n');
+    // CRLF line ends: git's own cleanup drops the CRs.
+    for (QByteArray& line : lines) {
+        if (line.endsWith('\r'))
+            line.chop(1);
+    }
+    // git's note of the conflicts at the end ("# Conflicts:", libgit2's
+    // "#Conflicts:", the files under it), or a scissors line and what
+    // follows it (commit.cleanup=scissors): from there on there are only
+    // comment lines and blank ones. That goes, and nothing else of a
+    // pick's: its "#42 Fix login" subject, or "# Notes" heading, is the
+    // commit's own, as a clean `git cherry-pick` commits it.
+    qsizetype end = lines.size();
+    for (qsizetype i = lines.size() - 1; i >= 0; --i) {
+        QByteArray text;
+        if (!commentText(lines.at(i), notes, &text)) {
+            if (lines.at(i).trimmed().isEmpty())
+                continue;
+            break;
+        }
+        if (text == "Conflicts:" || text == "------------------------ >8 ------------------------")
+            end = i;
+    }
+    lines.resize(end);
+
     std::string message;
-    for (const QByteArray& line : file.readAll().split('\n')) {
-        if (line.startsWith(comment))
+    for (const QByteArray& line : std::as_const(lines)) {
+        // A merge's or a revert's comment lines are git's notes too (a
+        // signed tag's "gpg:" lines, revert.reference's placeholder for
+        // a title), which a terminal's `git commit` drops.
+        QByteArray text;
+        if (!picked && commentText(line, comments, &text))
             continue;
         message.append(line.constData(), static_cast<size_t>(line.size()));
         message += '\n';

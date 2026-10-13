@@ -224,11 +224,18 @@ public:
     ///
     /// Once it is made: where it concludes the stop of a cherry-pick or
     /// revert of several commits, that is noted in git's sequencer
-    /// folder, for unpickedSequenceStop(); where a rebase stopped at a
-    /// reword of an interactiveRebase() plan, the plan's message for it
-    /// goes, the user's commit there standing (rebaseContinue() no
-    /// longer tries it again).
+    /// folder, for unpickedSequenceStop(), and so is an amend of that
+    /// commit, which replaces it; where a rebase stopped at a reword of
+    /// an interactiveRebase() plan, the plan's message for it goes, the
+    /// user's commit there standing (rebaseContinue() no longer tries
+    /// it again).
     Result<ProcessOutput> commit(const std::string& message, bool amend = false) const;
+
+    /// The repository has a prepare-commit-msg hook that git would run,
+    /// where git looks for it (core.hooksPath honoured): an executable
+    /// file on Unix; on Windows any file, through sh, or the name with
+    /// ".exe" (a compiled hook), which Git for Windows tries too.
+    bool hasPrepareCommitMsgHook() const;
 
     Result<ProcessOutput> gitFlowInit() const;
     Result<ProcessOutput> gitFlowFeatureStart(const std::string& name) const;
@@ -317,10 +324,6 @@ private:
     /// still pass for the pick there; one made with commit() can't (it
     /// removes the plan's message).
     bool headIsTheRewordStop(const std::string& hash) const;
-
-    /// The repository has a prepare-commit-msg hook that git would run
-    /// (core.hooksPath honoured).
-    bool hasPrepareCommitMsgHook() const;
 
     /// Where the rebase stopped at a reword, puts its new message where
     /// git keeps the message of the commit it stopped at

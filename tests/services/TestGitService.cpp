@@ -2364,8 +2364,12 @@ private slots:
             // (GitBolt's Commit dialog, `git commit -F -`). A revert
             // was told by git's "This reverts commit <id>." alone, which
             // the user's words don't have: Continue then said git never
-            // reverted the commit, and advised Abort.
-            for (const bool ownWords : {false, true}) {
+            // reverted the commit, and advised Abort. So it did once
+            // that commit was amended (a typo fixed): GitBolt's note
+            // named the commit the amend replaced.
+            for (const QString& how : {QStringLiteral("git's message"), QStringLiteral("own words"),
+                                       QStringLiteral("own words, amended")}) {
+                const bool ownWords = how != QLatin1String("git's message");
                 QVERIFY(succeeded(work.run({"reset", "-q", "--hard", main})));
                 const QString first = QString::fromStdString(revert ? "Y.txt" : "X.txt");
                 repo->writeFile(first, QByteArrayLiteral("in the way\n"));
@@ -2387,8 +2391,18 @@ private slots:
                 } else {
                     QVERIFY(succeeded(work.run({"commit", "-q", "--no-edit"})));
                 }
+                if (how == QLatin1String("own words, amended")) {
+                    const auto amended = work.commit("Back out the first, typo fixed\n",
+                                                     /*amend=*/true);
+                    QVERIFY2(succeeded(amended), amended.ok() ? amended->stderrData.c_str()
+                                                              : amended.error().message().c_str());
+                    QCOMPARE(output(work.run({"log", "-1", "--format=%s"})),
+                             QStringLiteral("Back out the first, typo fixed"));
+                }
                 QVERIFY(QFileInfo::exists(repo->path() + QStringLiteral("/.git/sequencer")));
-                QVERIFY2(work.unpickedSequenceStop().empty(), work.unpickedSequenceStop().c_str());
+                QVERIFY2(work.unpickedSequenceStop().empty(),
+                         qPrintable(how + QStringLiteral(": ")
+                                    + QString::fromStdString(work.unpickedSequenceStop())));
                 QVERIFY(succeeded(work.run({verb, "--abort"})));
             }
         }

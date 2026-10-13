@@ -130,8 +130,9 @@ public:
     /// The switch as GitBolt.ini has it now. QSettings keeps serving
     /// what it read until sync(), so a switch another process turned
     /// off would never be seen; main() hands this to the
-    /// TelemetryService, which re-reads it at every flush cycle and at
-    /// quit. Syncs, so this process's own pending writes go out too.
+    /// TelemetryService, which re-reads it at every flush cycle, before
+    /// each request, and at quit. Syncs, so this process's own pending
+    /// writes go out too.
     bool reloadUsageStatisticsEnabled();
 
     /// The random ID usage statistics are sent under (a UUID v4), or
