@@ -4414,14 +4414,17 @@ void MainWindow::setupConnections()
                         const auto answer = QMessageBox::question(
                             this, tr("Continue"),
                             (revert
-                                 ? tr("Continue without reverting %1?\n\ngit never reverted "
-                                      "it: the revert stopped before it, and goes on with the "
-                                      "commits after it, leaving this one as it is. To have it "
-                                      "reverted, stop the revert (Abort) and revert it again.")
+                                 ? tr("Continue without reverting %1?\n\nThe revert "
+                                      "stopped before it, and no commit made since says it "
+                                      "reverts it: git goes on with the commits after it, "
+                                      "leaving this one as it is. To have it reverted, stop "
+                                      "the revert (Abort) and revert it again, with the "
+                                      "commits after it.")
                                  : tr("Continue without %1?\n\ngit never picked it: the "
                                       "cherry-pick stopped before it, and goes on with the "
                                       "commits after it, leaving this one out. To have it, "
-                                      "stop the cherry-pick (Abort) and pick it again."))
+                                      "stop the cherry-pick (Abort) and pick it again, with "
+                                      "the commits after it."))
                                 .arg(facts.unpickedSequenceStop),
                             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
                         if (answer != QMessageBox::Yes
@@ -4831,53 +4834,72 @@ void MainWindow::setupConnections()
     // through the git CLI as local ops (repoCmd_), with the same
     // feedback the Commands-menu equivalents use.
     if (auto* branchTree = repoView_->branchTree()) {
+        // Every request carries the key of the repository it was made in
+        // (the one open when its context menu went up): an entry picked
+        // once a second launch had handed another over (in the menu's
+        // own event loop) went to that one, B's branch of the same name
+        // renamed, deleted, checked out or pushed. Nothing is done then,
+        // nor asked; and where something is asked, again once answered.
+        branchTree->setRepositoryKeySource([this] {
+            return gitService_ ? gitService_->openKey() : std::string();
+        });
         // Not while a local op or a step runs (refuseWhileLocalOpRuns):
         // these run git or libgit2 at once, and a checkout ran under a
         // merge, or under git commit's hooks. (The sidebar's entries are
         // off then too: BranchTreeWidget::setRepoActionsEnabled.)
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRequested,
-                this, [this](const QString& name) {
+                this, [this](const QString& name, const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("nothing was checked out.")))
+                return;
             if (!refuseWhileLocalOpRuns())
                 gitService_->checkoutBranch(name);
         });
         connect(branchTree, &widgets::BranchTreeWidget::checkoutRemoteRequested,
-                this, [this](const QString& remoteBranch) {
+                this, [this](const QString& remoteBranch, const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("nothing was checked out.")))
+                return;
             if (!refuseWhileLocalOpRuns())
                 checkoutAsLocalBranch(remoteBranch);
         });
-        // The name is asked for here, with the key taken before the
-        // question, as for Delete below and the Rename and Set Upstream
-        // further on: asked in the sidebar, the answer went to whichever
-        // repository was open once it came (a second launch hands its
-        // path over while the question is up).
+        // The name is asked for here, as for Delete below and the Rename
+        // and Set Upstream further on: asked in the sidebar, the answer
+        // went to whichever repository was open once it came (a second
+        // launch hands its path over while the question is up). From
+        // `startPoint`, a branch's own "New Branch from '<it>'"; from
+        // HEAD for the toolbar's.
         connect(branchTree, &widgets::BranchTreeWidget::createBranchRequested,
-                this, [this]() {
-            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns())
+                this, [this](const QString& startPoint, const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("no branch was created."))
+                || refuseWhileLocalOpRuns())
                 return;
-            const std::string key = gitService_->openKey();
             bool ok = false;
-            const QString name = QInputDialog::getText(this, tr("New Branch"),
-                                                       tr("Branch name:"),
-                                                       QLineEdit::Normal, QString(), &ok);
+            const QString name = QInputDialog::getText(
+                this, tr("New Branch"),
+                startPoint.isEmpty() ? tr("Branch name:")
+                                     : tr("Name of the new branch from '%1':").arg(startPoint),
+                QLineEdit::Normal, QString(), &ok);
             if (!ok || name.trimmed().isEmpty()
                 || repositoryChangedSince(key, tr("no branch was created.")))
                 return;
-            gitService_->createBranch(name.trimmed());
+            gitService_->createBranch(name.trimmed(), startPoint);
         });
-        // The question is asked here, with the key taken before it: a
-        // repository a second launch handed over while it was up lost
-        // its branch of that name, unmerged or not.
+        // The question is asked here: a repository a second launch
+        // handed over while it was up lost its branch of that name,
+        // unmerged or not.
         connect(branchTree, &widgets::BranchTreeWidget::deleteBranchRequested,
-                this, [this](const QString& name) {
-            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns())
+                this, [this](const QString& name, const std::string& key) {
+            const QString notDone = tr("branch %1 was not deleted.").arg(name);
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
                 return;
-            const std::string key = gitService_->openKey();
             const auto answer = QMessageBox::question(
                 this, tr("Delete Branch"),
                 tr("Are you sure you want to delete branch '%1'?").arg(name),
                 QMessageBox::Yes | QMessageBox::No);
-            if (answer != QMessageBox::Yes
-                || repositoryChangedSince(key, tr("branch %1 was not deleted.").arg(name)))
+            if (answer != QMessageBox::Yes || repositoryChangedSince(key, notDone))
                 return;
             gitService_->deleteBranch(name);
         });
@@ -4885,8 +4907,11 @@ void MainWindow::setupConnections()
         // GitService::push directly on the GUI thread, freezing the
         // window for the whole network round trip, with no feedback.
         connect(branchTree, &widgets::BranchTreeWidget::pushRequested,
-                this, [this](const QString& remote, const QString& branch) {
-            if (!gitService_ || !gitService_->isOpen()) return;
+                this, [this](const QString& remote, const QString& branch,
+                             const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("nothing was pushed.")))
+                return;
             if (refuseWhileLocalOpRuns()) return;
             runRemoteOp(nullptr,
                         tr("Pushing %1 to %2…").arg(branch, remote),
@@ -4897,20 +4922,25 @@ void MainWindow::setupConnections()
                         [this]() { gitService_->refreshBranches(); });
         });
         connect(branchTree, &widgets::BranchTreeWidget::deleteRemoteBranchRequested,
-                this, [this](const QString& remoteBranch) {
-            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns()) return;
-            confirmAndDeleteRemoteBranch(remoteBranch, nullptr, gitService_->openKey());
+                this, [this](const QString& remoteBranch, const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("%1 was not deleted.").arg(remoteBranch))
+                || refuseWhileLocalOpRuns())
+                return;
+            confirmAndDeleteRemoteBranch(remoteBranch, nullptr, key);
         });
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
-                this, [this](const QString& oldName) {
-            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns()) return;
-            const std::string key = gitService_->openKey();
+                this, [this](const QString& oldName, const std::string& key) {
+            const QString notDone = tr("branch %1 was not renamed.").arg(oldName);
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
+                return;
             bool ok = false;
             const QString newName = QInputDialog::getText(
                 this, tr("Rename Branch"), tr("New name for '%1':").arg(oldName),
                 QLineEdit::Normal, oldName, &ok).trimmed();
             if (!ok || newName.isEmpty() || newName == oldName
-                || repositoryChangedSince(key, tr("branch %1 was not renamed.").arg(oldName)))
+                || repositoryChangedSince(key, notDone))
                 return;
             repoCmd_->runAsync({"branch", "-m", oldName.toStdString(),
                                 newName.toStdString()},
@@ -4922,22 +4952,24 @@ void MainWindow::setupConnections()
         // run on the GUI thread, frozen for as long as git and its
         // hooks took.
         connect(branchTree, &widgets::BranchTreeWidget::mergeRequested,
-                this, [this](const QString& name) {
-            if (!gitService_ || !gitService_->isOpen()) return;
+                this, [this](const QString& name, const std::string& key) {
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, tr("nothing was merged.")))
+                return;
             mergeBranch(name);
         });
         connect(branchTree, &widgets::BranchTreeWidget::setUpstreamRequested,
-                this, [this](const QString& branch) {
-            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns()) return;
-            const std::string key = gitService_->openKey();
+                this, [this](const QString& branch, const std::string& key) {
+            const QString notDone = tr("the upstream of %1 was not set.").arg(branch);
+            if (!gitService_ || !gitService_->isOpen()
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
+                return;
             bool ok = false;
             const QString upstream = QInputDialog::getText(
                 this, tr("Set Upstream"),
                 tr("Upstream for '%1' (e.g., origin/%1):").arg(branch),
                 QLineEdit::Normal, QStringLiteral("origin/") + branch, &ok).trimmed();
-            if (!ok || upstream.isEmpty()
-                || repositoryChangedSince(
-                    key, tr("the upstream of %1 was not set.").arg(branch)))
+            if (!ok || upstream.isEmpty() || repositoryChangedSince(key, notDone))
                 return;
             repoCmd_->runAsync({"branch",
                                 "--set-upstream-to=" + upstream.toStdString(),

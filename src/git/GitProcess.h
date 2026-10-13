@@ -206,9 +206,11 @@ public:
     /// over local changes; a commit of them then flipped the bar to
     /// Continue, which went on from the commit after it. A pick, and a
     /// commit that concludes a conflicted one, keep the commit's author
-    /// and date; a revert's message names it ("This reverts commit").
-    /// Empty where the pick was made, with no sequence, and where git
-    /// can't tell.
+    /// and date; a revert's message names it ("This reverts commit"),
+    /// unless the user's own words replaced git's; a commit() that
+    /// concluded the stop counts whatever its message, while it is
+    /// still there. Empty where the pick was made, with no sequence,
+    /// and where git can't tell.
     std::string unpickedSequenceStop() const;
 
     /// `git commit -F -` (`--amend` too when `amend`), the message on
@@ -219,6 +221,13 @@ public:
     /// minutes, for slow hooks. git runs in a process group of its own,
     /// so a hook that hangs dies with it when that time is up or a
     /// cancel flag is set.
+    ///
+    /// Once it is made: where it concludes the stop of a cherry-pick or
+    /// revert of several commits, that is noted in git's sequencer
+    /// folder, for unpickedSequenceStop(); where a rebase stopped at a
+    /// reword of an interactiveRebase() plan, the plan's message for it
+    /// goes, the user's commit there standing (rebaseContinue() no
+    /// longer tries it again).
     Result<ProcessOutput> commit(const std::string& message, bool amend = false) const;
 
     Result<ProcessOutput> gitFlowInit() const;
@@ -283,7 +292,8 @@ private:
     /// message: nothing is staged, no pick is pending (CHERRY_PICK_HEAD),
     /// and HEAD is that commit as git picked it, under its old message
     /// (a hook turned the new one down; see headIsPickOf()), with
-    /// nothing committed since (headIsTheRewordStop()). Empty otherwise.
+    /// nothing committed since, as far as headIsTheRewordStop() can
+    /// tell. Empty otherwise.
     QString rejectedRewordMessage() const;
 
     /// Whether HEAD is the commit `hash` as a rebase picked it: that
@@ -295,11 +305,22 @@ private:
     /// timed out).
     std::optional<bool> headIsPickOf(const std::string& hash) const;
 
-    /// HEAD is still what the stop at the reword of `hash` left: that
-    /// commit (a fast-forward), or the newest entry of HEAD's reflog is
-    /// git's pick for the reword ("rebase (reword): ..."), not a commit
-    /// of the user's since, such as an amend of the message.
+    /// HEAD is still what the stop at the reword of `hash` left, not a
+    /// commit of the user's since, such as an amend of the message: that
+    /// commit (a fast-forward); else, where git noted HEAD at the stop
+    /// (rebase-merge/amend), that HEAD; else the newest entry of HEAD's
+    /// reflog is git's pick for the reword ("rebase (reword): ...");
+    /// else, where HEAD keeps no reflog, HEAD's message is the stopped
+    /// commit's old one, or starts with it where a prepare-commit-msg
+    /// hook (hasPrepareCommitMsgHook()) may have added to git's pick.
+    /// An amend that keeps the old message, with a hook like that, can
+    /// still pass for the pick there; one made with commit() can't (it
+    /// removes the plan's message).
     bool headIsTheRewordStop(const std::string& hash) const;
+
+    /// The repository has a prepare-commit-msg hook that git would run
+    /// (core.hooksPath honoured).
+    bool hasPrepareCommitMsgHook() const;
 
     /// Where the rebase stopped at a reword, puts its new message where
     /// git keeps the message of the commit it stopped at

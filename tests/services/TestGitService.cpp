@@ -30,7 +30,8 @@
 //   - a cherry-pick of several commits paused between two: its state
 //     goes out as such, and Continue / Skip carry it on,
 //   - tag create / delete as the Commands menu drives them,
-//   - branch checkout when a tag shares the branch's name,
+//   - branch checkout when a tag shares the branch's name, and a new
+//     branch starts at the branch it is made from (HEAD by default),
 //   - the askpass git's children get, which an auto-fetch's get in a
 //     mode that never asks, and the kinds of question it tells apart,
 //   - Fetch prunes, unless fetch.prune or remote.<name>.prune says not,
@@ -48,8 +49,10 @@
 //     a rebase onto a moved base, an amend or a split too), and so is
 //     a cherry-pick sequence's Skip over staged work with nothing
 //     picked; the reword retry knows a pick onto a moved base, leaves
-//     the user's own amend alone, and stands aside for a pick that came
-//     out empty;
+//     the user's own amend alone (with no reflog, and when it keeps the
+//     old message and adds to it, too), and stands aside for a pick that
+//     came out empty; a sequence's stop that a commit concluded counts
+//     as picked, whatever the commit's message;
 //     git's failures (a conflict, nothing in progress) are reported,
 //     and so is a rebase that is still in progress after a step, with
 //     its state ahead of the outcome; a plan made for another HEAD (a
@@ -2128,15 +2131,46 @@ private slots:
     // takes. Continue's retry put the plan's message back over theirs,
     // which the hook turned down again, on every Continue: the rebase
     // could never be finished from the bar. The user's amend stands,
-    // where HEAD keeps no reflog to tell it by too.
+    // where HEAD keeps no reflog to tell it by too, and where it keeps
+    // the old message and adds to it (a body, a trailer): with no
+    // reflog, that passed for git's own pick, which has the old one.
+    // At a fast-forward (the commit kept where it was) and at a pick
+    // onto another base, from a terminal and from GitBolt's Commit
+    // dialog; and with a prepare-commit-msg hook, which may add to git's
+    // own pick (the hook here adds nothing).
     void rewordRetryLeavesTheUsersOwnAmendAlone_data() {
         QTest::addColumn<bool>("reflog");
-        QTest::newRow("with a reflog") << true;
-        QTest::newRow("with no reflog") << false;
+        QTest::addColumn<bool>("fastForward");
+        QTest::addColumn<QString>("amended");
+        QTest::addColumn<bool>("inGitBolt");
+        QTest::addColumn<bool>("prepareHook");
+        const QString renamed = QStringLiteral("OK renamed by me");
+        const QString addedTo = QStringLiteral("OK C\n\nRefs: T-1");
+        QTest::newRow("with a reflog") << true << true << renamed << false << false;
+        QTest::newRow("with no reflog") << false << true << renamed << false << false;
+        QTest::newRow("with no reflog, the old message added to")
+            << false << true << addedTo << false << false;
+        QTest::newRow("with no reflog, picked anew, the old message added to")
+            << false << false << addedTo << false << false;
+        QTest::newRow("with no reflog, picked anew, added to in GitBolt")
+            << false << false << addedTo << true << false;
+        QTest::newRow("with no reflog, added to in GitBolt")
+            << false << true << addedTo << true << false;
+        QTest::newRow("with a reflog, picked anew, the old message added to")
+            << true << false << addedTo << false << false;
+        QTest::newRow("with no reflog and a prepare-commit-msg hook, the old message added to")
+            << false << true << addedTo << false << true;
+        QTest::newRow("with no reflog and a prepare-commit-msg hook, picked anew, "
+                      "added to in GitBolt")
+            << false << false << addedTo << true << true;
     }
 
     void rewordRetryLeavesTheUsersOwnAmendAlone() {
         QFETCH(bool, reflog);
+        QFETCH(bool, fastForward);
+        QFETCH(QString, amended);
+        QFETCH(bool, inGitBolt);
+        QFETCH(bool, prepareHook);
         const IsolatedGitConfig config;
         gitbolt::test::TestRepo repo;
         gitbolt::git::GitProcess work(repo.path().toStdString());
@@ -2144,26 +2178,44 @@ private slots:
         if (!reflog)
             QVERIFY(succeeded(work.run({"config", "core.logAllRefUpdates", "false"})));
         QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("OK base")).ok());
+        QVERIFY(repo.writeAndCommit(QStringLiteral("b.txt"), "b\n", QStringLiteral("OK B")).ok());
         const auto c = repo.writeAndCommit(QStringLiteral("c.txt"), "c\n", QStringLiteral("OK C"));
         QVERIFY(c.ok());
-        const std::string onto = output(work.run({"rev-parse", "HEAD~1"})).toStdString();
+        // Onto C's parent, C stays as it is; onto the base, with B left
+        // out, git picks it anew.
+        const std::string onto =
+            output(work.run({"rev-parse", fastForward ? "HEAD~1" : "HEAD~2"})).toStdString();
         QVERIFY(writeHook(repo.path() + QStringLiteral("/.git/hooks"), "commit-msg",
                           "if ! head -1 \"$1\" | grep -q '^OK'; then\n"
                           "    echo 'commit-msg: must start with OK' >&2; exit 1\nfi\n"));
+        if (prepareHook)
+            QVERIFY(writeHook(repo.path() + QStringLiteral("/.git/hooks"), "prepare-commit-msg",
+                              ":\n"));
 
         const auto stopped = work.interactiveRebase(onto, "reword " + c->toHex() + " OK C\n",
                                                     {{c->toHex(), "renamed\n"}});
         QVERIFY(stopped.ok() && !stopped->success());
         QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
-        QVERIFY(succeeded(work.run({"commit", "-q", "--amend", "-m", "OK renamed by me"})));
+        QCOMPARE(output(work.run({"rev-parse", "HEAD"})) == QString::fromStdString(c->toHex()),
+                 fastForward);
+        if (inGitBolt) {
+            const auto made = work.commit(amended.toStdString(), /*amend=*/true);
+            QVERIFY2(succeeded(made), made.ok() ? made->stderrData.c_str()
+                                                : made.error().message().c_str());
+        } else {
+            QVERIFY(succeeded(work.run({"commit", "-q", "--amend", "-m", amended.toStdString()})));
+        }
         QCOMPARE(QFileInfo::exists(repo.path() + QStringLiteral("/.git/logs/HEAD")), reflog);
 
         const auto continued = work.rebaseContinue();
         QVERIFY2(succeeded(continued), continued.ok() ? continued->stderrData.c_str()
                                                       : continued.error().message().c_str());
         QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(work.run({"log", "-1", "--format=%B"})), amended);
         QCOMPARE(output(work.run({"log", "--format=%s"})),
-                 QStringLiteral("OK renamed by me\nOK base"));
+                 amended.section(QLatin1Char('\n'), 0, 0)
+                     + (fastForward ? QStringLiteral("\nOK B\nOK base")
+                                    : QStringLiteral("\nOK base")));
     }
 
     // A reword of a commit the branch it is rebased onto already has (a
@@ -2307,22 +2359,38 @@ private slots:
             QVERIFY(succeeded(work.run({verb, "--abort"})));
 
             // A conflict at the first: resolved and committed, it is the
-            // pick (or the revert).
-            QVERIFY(succeeded(work.run({"reset", "-q", "--hard", main})));
-            const QString first = QString::fromStdString(revert ? "Y.txt" : "X.txt");
-            repo->writeFile(first, QByteArrayLiteral("in the way\n"));
-            QVERIFY(succeeded(work.run({"add", first.toStdString()})));
-            QVERIFY(succeeded(work.run({"commit", "-q", "-m", "in the way"})));
-            QVERIFY(!succeeded(work.run(sequence)));
-            QVERIFY(QFileInfo::exists(repo->path() + (revert ? QStringLiteral("/.git/REVERT_HEAD")
-                                                             : QStringLiteral("/.git/CHERRY_PICK_HEAD"))));
-            QCOMPARE(work.unpickedSequenceStop(), std::string());
-            repo->writeFile(first, QByteArrayLiteral("resolved\n"));
-            QVERIFY(succeeded(work.run({"add", first.toStdString()})));
-            QVERIFY(succeeded(work.run({"commit", "-q", "--no-edit"})));
-            QVERIFY(QFileInfo::exists(repo->path() + QStringLiteral("/.git/sequencer")));
-            QCOMPARE(work.unpickedSequenceStop(), std::string());
-            QVERIFY(succeeded(work.run({verb, "--abort"})));
+            // pick (or the revert), with git's message (a terminal's
+            // `git commit --no-edit`) or with words of the user's own
+            // (GitBolt's Commit dialog, `git commit -F -`). A revert
+            // was told by git's "This reverts commit <id>." alone, which
+            // the user's words don't have: Continue then said git never
+            // reverted the commit, and advised Abort.
+            for (const bool ownWords : {false, true}) {
+                QVERIFY(succeeded(work.run({"reset", "-q", "--hard", main})));
+                const QString first = QString::fromStdString(revert ? "Y.txt" : "X.txt");
+                repo->writeFile(first, QByteArrayLiteral("in the way\n"));
+                QVERIFY(succeeded(work.run({"add", first.toStdString()})));
+                QVERIFY(succeeded(work.run({"commit", "-q", "-m", "in the way"})));
+                QVERIFY(!succeeded(work.run(sequence)));
+                QVERIFY(QFileInfo::exists(repo->path()
+                                          + (revert ? QStringLiteral("/.git/REVERT_HEAD")
+                                                    : QStringLiteral("/.git/CHERRY_PICK_HEAD"))));
+                QCOMPARE(work.unpickedSequenceStop(), std::string());
+                repo->writeFile(first, QByteArrayLiteral("resolved\n"));
+                QVERIFY(succeeded(work.run({"add", first.toStdString()})));
+                if (ownWords) {
+                    const auto made = work.commit("Back out the first, my way\n");
+                    QVERIFY2(succeeded(made), made.ok() ? made->stderrData.c_str()
+                                                        : made.error().message().c_str());
+                    QCOMPARE(output(work.run({"log", "-1", "--format=%s"})),
+                             QStringLiteral("Back out the first, my way"));
+                } else {
+                    QVERIFY(succeeded(work.run({"commit", "-q", "--no-edit"})));
+                }
+                QVERIFY(QFileInfo::exists(repo->path() + QStringLiteral("/.git/sequencer")));
+                QVERIFY2(work.unpickedSequenceStop().empty(), work.unpickedSequenceStop().c_str());
+                QVERIFY(succeeded(work.run({verb, "--abort"})));
+            }
         }
     }
 
@@ -2651,8 +2719,17 @@ private slots:
     // ticket number): the pick git made had the old message plus that,
     // so Continue's retry didn't know it for the reword's commit, and
     // "Rebase complete." came with the reword gone. Two rewords, so the
-    // second is picked anew rather than fast-forwarded.
+    // second is picked anew rather than fast-forwarded. Where HEAD keeps
+    // no reflog too: the pick is told by its message there, the old one
+    // with whatever the hook added.
+    void rewordRetryOutlivesAPrepareCommitMsgHook_data() {
+        QTest::addColumn<bool>("reflog");
+        QTest::newRow("with a reflog") << true;
+        QTest::newRow("with no reflog") << false;
+    }
+
     void rewordRetryOutlivesAPrepareCommitMsgHook() {
+        QFETCH(bool, reflog);
         const IsolatedGitConfig config;
         auto repo = repoWithCommits(1);     // commit 0
         QVERIFY(repo);
@@ -2661,6 +2738,10 @@ private slots:
                                               QStringLiteral("one"));
         const auto two = repo->writeAndCommit(QStringLiteral("two.txt"), QByteArrayLiteral("two\n"),
                                               QStringLiteral("two"));
+        if (!reflog) {
+            QVERIFY(succeeded(work.run({"config", "core.logAllRefUpdates", "false"})));
+            QVERIFY(QDir(repo->path() + QStringLiteral("/.git/logs")).removeRecursively());
+        }
         const auto onto = repo->repo().resolveRef("HEAD~2");
         QVERIFY(one.ok() && two.ok() && onto.ok());
         const QString hooks = repo->path() + QStringLiteral("/.git/hooks");
@@ -2699,6 +2780,7 @@ private slots:
         QVERIFY2(picked.startsWith(QStringLiteral("two\n")) && picked.endsWith(QStringLiteral("[T-1]")),
                  qPrintable(picked));
         QCOMPARE(svc.committedRebaseStop(), QStringLiteral("reword"));
+        QCOMPARE(QFileInfo::exists(repo->path() + QStringLiteral("/.git/logs/HEAD")), reflog);
 
         QVERIFY(QFile::remove(repo->path() + QStringLiteral("/.git/BLOCK")));
         QVERIFY2(step([&] { svc.rebaseContinue(); }),
@@ -4310,6 +4392,47 @@ private slots:
         auto status = repo->repo().status();
         QVERIFY(status.ok());
         QCOMPARE(status->size(), size_t(0));
+    }
+
+    // -----------------------------------------------------------------
+    // The sidebar's "New Branch from '<branch>'" names where the new
+    // branch starts: it started at HEAD all the same, and work on it
+    // then sat on the wrong base. The branch it names, as a branch (a
+    // tag of the same name is another commit); HEAD when none is named,
+    // as for the toolbar's New Branch; a start point that's gone is
+    // reported, and nothing made.
+    // -----------------------------------------------------------------
+    void createBranchStartsWhereAsked() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        auto atTag = repo->repo().head();
+        QVERIFY(atTag.ok());
+        QVERIFY(repo->repo().createTag("feature", atTag.value(), "release").ok());
+        auto onBranch = repo->writeAndCommit(QStringLiteral("f0.txt"),
+                                             QByteArrayLiteral("on branch\n"),
+                                             QStringLiteral("branch tip"));
+        QVERIFY(onBranch.ok());
+        QVERIFY(repo->repo().createBranch("feature", onBranch.value()).ok());
+        auto mainTip = repo->writeAndCommit(QStringLiteral("f0.txt"),
+                                            QByteArrayLiteral("on main\n"),
+                                            QStringLiteral("main tip"));
+        QVERIFY(mainTip.ok());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+
+        svc.createBranch(QStringLiteral("from-feature"), QStringLiteral("feature"));
+        QCOMPARE(failedSpy.count(), 0);
+        QCOMPARE(tip(repo->repo(), "refs/heads/from-feature"), onBranch->toHex());
+        svc.createBranch(QStringLiteral("from-head"));
+        QCOMPARE(failedSpy.count(), 0);
+        QCOMPARE(tip(repo->repo(), "refs/heads/from-head"), mainTip->toHex());
+        svc.createBranch(QStringLiteral("from-nothing"), QStringLiteral("gone"));
+        QCOMPARE(failedSpy.count(), 1);
+        QCOMPARE(failedSpy.at(0).at(0).toString(), QStringLiteral("create branch"));
+        QVERIFY(!repo->repo().resolveRef("refs/heads/from-nothing").ok());
+        QCOMPARE(tip(repo->repo(), "HEAD"), mainTip->toHex());
     }
 
     void deleteMissingTagReportsFailure() {

@@ -950,6 +950,7 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
         const bool pushRequested = pushAfterCommit_;
         pushAfterCommit_ = false;
         messageEdit_->clear();
+        prefilled_.clear();
         amendCheck_->setChecked(false);
         errorLabel_->hide();
         close();
@@ -994,6 +995,21 @@ void CommitDialog::refresh()
     updateTitle();
     readCommitterFromConfig();
     updateAmend();
+    startFromPreparedMessage();
+}
+
+void CommitDialog::startFromPreparedMessage()
+{
+    if (!svc_ || pendingCommit_)
+        return;
+    const QString prepared = QString::fromStdString(svc_->withRepository(
+        [](git::Repository& r) { return r.preparedMessage(); }));
+    const QString current = messageEdit_->toPlainText();
+    if (!current.trimmed().isEmpty() && (prefilled_.isEmpty() || current != prefilled_))
+        return;     // the user's own words
+    if (current != prepared)
+        messageEdit_->setPlainText(prepared);
+    prefilled_ = prepared;
 }
 
 void CommitDialog::showEvent(QShowEvent* e)

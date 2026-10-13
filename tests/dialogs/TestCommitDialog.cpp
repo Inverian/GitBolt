@@ -5,6 +5,9 @@
 //     cherry-pick or a revert waits for its commit (an amend there
 //     flattened the merge, or folded the pick into the commit before
 //     it), and on again once the operation is over;
+//   - the message starts as the one git prepared for a merge,
+//     cherry-pick or revert waiting for its commit (MERGE_MSG, without
+//     its comment lines), as a terminal's `git commit` does;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
 //   - while the commit runs, nothing stages, unstages or commits, the
@@ -119,6 +122,80 @@ private slots:
         svc.refreshStatus();
         QTRY_VERIFY(amend->isEnabled());
         QCOMPARE(amend->toolTip(), QString());
+    }
+
+    // A merge, cherry-pick or revert stopped on a conflict: the message
+    // starts as the one git prepared for it (MERGE_MSG, its comment
+    // lines left out), as a terminal's `git commit` does. The dialog's
+    // commit (`git commit -F -`) took the typed words alone, and a
+    // revert's "This reverts commit <id>." was gone: Continue on a
+    // revert of several commits then said git never reverted the one
+    // just committed, and advised Abort.
+    void messageStartsAsTheOneGitPrepared_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("merge") << QStringLiteral("merge");
+        QTest::newRow("cherry-pick") << QStringLiteral("cherry-pick");
+        QTest::newRow("revert") << QStringLiteral("revert");
+    }
+
+    void messageStartsAsTheOneGitPrepared() {
+        QFETCH(QString, operation);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile(QStringLiteral("a.txt"), "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "side change"})));
+        const QString side = output(git.run({"rev-parse", "side"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile(QStringLiteral("a.txt"), "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+        const std::string command = operation.toStdString();
+        if (operation == QLatin1String("revert")) {
+            // A revert of "side change", picked onto main first.
+            QVERIFY(succeeded(git.run({"reset", "-q", "--hard", "side"})));
+            repo.writeFile(QStringLiteral("a.txt"), "later\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "later change"})));
+            QVERIFY(!succeeded(git.run({"revert", "--no-edit", "side"})));
+        } else {
+            QVERIFY(!succeeded(git.run({command, "side"})));
+        }
+        // git's own, with the conflict noted in comment lines.
+        QFile prepared(repo.path() + QStringLiteral("/.git/MERGE_MSG"));
+        QVERIFY(prepared.open(QIODevice::ReadOnly));
+        QVERIFY(prepared.readAll().contains("\n#"));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        auto* commit = child<QPushButton>(dialog, "commit.commitBtn");
+        QVERIFY(message && commit);
+        const QString expected =
+            operation == QLatin1String("merge") ? QStringLiteral("Merge branch 'side'")
+            : operation == QLatin1String("cherry-pick")
+                ? QStringLiteral("side change")
+                : QStringLiteral("Revert \"side change\"\n\nThis reverts commit %1.").arg(side);
+        QTRY_COMPARE(message->toPlainText(), expected);
+
+        // Resolved and committed from the dialog, with that message.
+        repo.writeFile(QStringLiteral("a.txt"), "resolved\n");
+        QVERIFY(succeeded(git.run({"add", "a.txt"})));
+        svc.refreshStatus();
+        QTRY_VERIFY(commit->isEnabled());
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog.isVisible(), 15000);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%B"})), expected);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+
+        // Nothing prepared, nothing filled in.
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTest::qWait(200);
+        QCOMPARE(message->toPlainText(), QString());
     }
 
     // The commit goes through git, which runs the repository's hooks;

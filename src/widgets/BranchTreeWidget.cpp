@@ -119,6 +119,14 @@ void BranchTreeWidget::setRepoActionsEnabled(bool on) {
         newBranchAction_->setEnabled(on);
 }
 
+void BranchTreeWidget::setRepositoryKeySource(std::function<std::string()> source) {
+    keySource_ = std::move(source);
+}
+
+std::string BranchTreeWidget::repositoryKey() const {
+    return keySource_ ? keySource_() : std::string();
+}
+
 void BranchTreeWidget::onDoubleClicked(const QModelIndex& proxyIndex) {
     if (!repoActionsEnabled_)
         return;
@@ -128,7 +136,7 @@ void BranchTreeWidget::onDoubleClicked(const QModelIndex& proxyIndex) {
 
     QString ref = model_->checkoutRefAt(sourceIndex);
     if (!ref.isEmpty()) {
-        emit checkoutRequested(ref);
+        emit checkoutRequested(ref, repositoryKey());
     }
 }
 
@@ -162,12 +170,16 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         && parentIdx.row() == static_cast<int>(models::BranchModel::RootCategory::Tags);
 
     QMenu menu(this);
+    // The repository the menu is for: its entries are picked once its
+    // event loop is done, by when a second launch may have handed
+    // another over (setRepositoryKeySource()).
+    const std::string key = repositoryKey();
 
     // Checkout
     auto* checkoutAction = menu.addAction(QIcon::fromTheme(QStringLiteral("go-jump")),
                                           tr("Checkout '%1'").arg(branchName));
-    connect(checkoutAction, &QAction::triggered, this, [this, checkoutRef]() {
-        emit checkoutRequested(checkoutRef);
+    connect(checkoutAction, &QAction::triggered, this, [this, checkoutRef, key]() {
+        emit checkoutRequested(checkoutRef, key);
     });
 
     menu.addSeparator();
@@ -180,21 +192,22 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // for by MainWindow, as Delete's confirmation is: it knows the
         // repository the question is about, and whether that is still
         // the one open once the answer comes (a second launch can hand
-        // another over meanwhile).
-        connect(newAction, &QAction::triggered, this, [this]() {
-            emit createBranchRequested();
+        // another over meanwhile). From this branch: it started at
+        // HEAD, whatever the entry said.
+        connect(newAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit createBranchRequested(branchName, key);
         });
 
         // Rename
         auto* renameAction = menu.addAction(tr("Rename '%1'...").arg(branchName));
-        connect(renameAction, &QAction::triggered, this, [this, branchName]() {
-            emit renameBranchRequested(branchName);
+        connect(renameAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit renameBranchRequested(branchName, key);
         });
 
         // Merge into current
         auto* mergeAction = menu.addAction(tr("Merge '%1' into current").arg(branchName));
-        connect(mergeAction, &QAction::triggered, this, [this, branchName]() {
-            emit mergeRequested(branchName);
+        connect(mergeAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit mergeRequested(branchName, key);
         });
 
         menu.addSeparator();
@@ -202,14 +215,14 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Push
         auto* pushAction = menu.addAction(QIcon::fromTheme(QStringLiteral("go-up")),
                                           tr("Push '%1'").arg(branchName));
-        connect(pushAction, &QAction::triggered, this, [this, branchName]() {
-            emit pushRequested(QStringLiteral("origin"), branchName);
+        connect(pushAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit pushRequested(QStringLiteral("origin"), branchName, key);
         });
 
         // Set upstream
         auto* upstreamAction = menu.addAction(tr("Set Upstream..."));
-        connect(upstreamAction, &QAction::triggered, this, [this, branchName]() {
-            emit setUpstreamRequested(branchName);
+        connect(upstreamAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit setUpstreamRequested(branchName, key);
         });
 
         menu.addSeparator();
@@ -220,16 +233,16 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // MainWindow asks, as for the remote Delete below: it knows the
         // repository the question is about, and that it's still open
         // once the answer comes.
-        connect(deleteAction, &QAction::triggered, this, [this, branchName]() {
-            emit deleteBranchRequested(branchName);
+        connect(deleteAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit deleteBranchRequested(branchName, key);
         });
     }
 
     if (isRemote) {
         // Checkout as local tracking branch
         auto* trackAction = menu.addAction(tr("Checkout as local branch"));
-        connect(trackAction, &QAction::triggered, this, [this, branchName]() {
-            emit checkoutRemoteRequested(branchName);
+        connect(trackAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit checkoutRemoteRequested(branchName, key);
         });
 
         menu.addSeparator();
@@ -239,15 +252,15 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         auto* deleteRemoteAction = menu.addAction(
             QIcon::fromTheme(QStringLiteral("edit-delete")),
             tr("Delete '%1' from remote...").arg(branchName));
-        connect(deleteRemoteAction, &QAction::triggered, this, [this, branchName]() {
-            emit deleteRemoteBranchRequested(branchName);
+        connect(deleteRemoteAction, &QAction::triggered, this, [this, branchName, key]() {
+            emit deleteRemoteBranchRequested(branchName, key);
         });
     }
 
     if (isTag) {
         auto* checkoutTag = menu.addAction(tr("Checkout tag '%1'").arg(branchName));
-        connect(checkoutTag, &QAction::triggered, this, [this, checkoutRef]() {
-            emit checkoutRequested(checkoutRef);
+        connect(checkoutTag, &QAction::triggered, this, [this, checkoutRef, key]() {
+            emit checkoutRequested(checkoutRef, key);
         });
     }
 
@@ -276,7 +289,7 @@ void BranchTreeWidget::onFilterChanged(const QString& text) {
 void BranchTreeWidget::onNewBranchClicked() {
     if (!repoActionsEnabled_)
         return;
-    emit createBranchRequested();
+    emit createBranchRequested(QString(), repositoryKey());
 }
 
 void BranchTreeWidget::expandLocalBranches() {

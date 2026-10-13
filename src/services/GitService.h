@@ -256,7 +256,11 @@ public:
     /// refused while it runs.
     void commitChanges(const QString& message, bool amend = false);
 
-    void createBranch(const QString& name);
+    /// A local branch `name` at the tip of the local branch
+    /// `startPoint`, or at HEAD when that is empty (the sidebar's "New
+    /// Branch from '<it>'", and its New Branch). Failures, an unborn
+    /// HEAD or a start point that is gone, go out as operationFailed.
+    void createBranch(const QString& name, const QString& startPoint = QString());
     void deleteBranch(const QString& name);
     /// False when the checkout failed or was refused while a step runs
     /// (either reported as an operationFailed), or no repository is

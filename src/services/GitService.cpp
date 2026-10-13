@@ -850,12 +850,16 @@ void GitService::commitChanges(const QString& message, bool amend) {
     });
 }
 
-void GitService::createBranch(const QString& name) {
+void GitService::createBranch(const QString& name, const QString& startPoint) {
     if (!repo_) return;
     if (refusedWhileAStepRuns(QStringLiteral("create branch"))) return;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        auto headResult = repo_->head();
+        // The branch named, as a branch: a tag of the same name is
+        // another commit.
+        auto headResult = startPoint.isEmpty()
+            ? repo_->head()
+            : repo_->resolveRef("refs/heads/" + startPoint.toStdString() + "^{commit}");
         if (!headResult) {
             // Most common cause: unborn HEAD (fresh repo, no
             // commits) — nothing for the branch to point at yet.

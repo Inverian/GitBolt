@@ -113,6 +113,13 @@ public:
     /// stopped can amend: that's what an `edit` stop is for.
     std::string amendProblem() const;
 
+    /// The message git prepared for the commit that concludes a merge,
+    /// cherry-pick or revert waiting for it (MERGE_MSG), as a terminal's
+    /// `git commit` starts from it: its comment lines (core.commentChar,
+    /// '#' by default), git's note of the conflicts among them, left
+    /// out. Empty when no such operation waits, or git prepared none.
+    std::string preparedMessage() const;
+
     // Branches
     Result<std::vector<BranchInfo>> branches(BranchType filter = BranchType::Local) const;
     Result<std::vector<BranchInfo>> allBranches() const;

@@ -65,6 +65,13 @@ const QString kEditor = QStringLiteral(
 // runs with (see commentCharFor). No commit hash can be called that.
 const QString kCommentChar = QStringLiteral("comment-char");
 
+// Where commit() notes the stops of a cherry-pick or revert of several
+// commits that it concluded: "<stopped commit> <commit made>" a line. In
+// git's sequencer folder, so that it lives exactly as long as the
+// sequence does: git deletes the folder when the sequence finishes or is
+// aborted (or quit).
+const QString kConcludedStops = QStringLiteral("sequencer/gitbolt-concluded");
+
 // Every step of a rebase may replay the rest of the plan in one go, and
 // each reword in it runs the commit hooks. 30 s, run()'s default, cut
 // a Continue off mid-plan, git killed and its index.lock left behind.
@@ -1159,7 +1166,9 @@ std::string GitProcess::committedRebaseStop() const {
 // or git's own pick of it. Anything since (the user's amend of the
 // message at the stop, "commit (amend): ...") is the user's: the plan's
 // message, still turned down by the hook, came back on every Continue,
-// and replaced theirs where the hook took it.
+// and replaced theirs where the hook took it. What tells them apart:
+// git's own record of the stop where it keeps one (rebase-merge/amend),
+// else HEAD's reflog, else, with no reflog either, the message.
 bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
     const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
     if (!ids || !ids->success())
@@ -1168,6 +1177,15 @@ bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
                                  .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     if (both.size() == 2 && both[0] == both[1])
         return true;
+    if (both.isEmpty())
+        return false;
+    // git writes HEAD to rebase-merge/amend where it stops with the
+    // commit made, to be amended: at a reword turned down after a
+    // fast-forward (HEAD then is the commit itself, above). A HEAD
+    // other than that is a commit made since.
+    if (QFile amend(gitPath(QStringLiteral("rebase-merge/amend")));
+        amend.open(QIODevice::ReadOnly))
+        return QString::fromLatin1(amend.readAll()).trimmed() == both[0];
     const auto entry = run({"log", "-g", "-1", "--format=%gs", "HEAD"});
     const QString subject = entry && entry->success()
         ? QString::fromStdString(entry->stdoutData).trimmed() : QString();
@@ -1177,8 +1195,12 @@ bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
         // the retry out, and Continue said "Rebase complete." with the
         // reword gone. git's pick keeps the old message (the reword is
         // what the hook turned down); the user's amend at the stop is
-        // what changes it. startsWith: whatever a prepare-commit-msg
-        // hook added after it, as in headIsPickOf().
+        // what changes it. The same message, then; or one that starts
+        // with it where a prepare-commit-msg hook may have added to
+        // git's pick, as in headIsPickOf(). Not otherwise: an amend that
+        // kept the old message and added to it (a body, a trailer)
+        // passed for the pick, and the retry put the plan's message,
+        // turned down again, back over it on every Continue.
         const auto commit = [&](const std::string& rev) {
             return run({"log", "-1", "--format=%B", rev});
         };
@@ -1186,11 +1208,25 @@ bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
         const auto was = commit(hash);
         if (!now || !was || !now->success() || !was->success())
             return false;
-        return QString::fromStdString(now->stdoutData).trimmed()
-            .startsWith(QString::fromStdString(was->stdoutData).trimmed());
+        const QString nowMessage = QString::fromStdString(now->stdoutData).trimmed();
+        const QString wasMessage = QString::fromStdString(was->stdoutData).trimmed();
+        if (nowMessage == wasMessage)
+            return true;
+        return nowMessage.startsWith(wasMessage) && hasPrepareCommitMsgHook();
     }
     return subject.startsWith(QLatin1String("rebase (reword)"))
         || subject.startsWith(QLatin1String("rebase -i (reword)"));
+}
+
+// Where git looks for it (core.hooksPath honoured), as git runs it: Git
+// for Windows runs any file there, through sh.
+bool GitProcess::hasPrepareCommitMsgHook() const {
+    const QFileInfo hook(gitPath(QStringLiteral("hooks/prepare-commit-msg")));
+#ifdef Q_OS_WIN
+    return hook.isFile();
+#else
+    return hook.isFile() && hook.isExecutable();
+#endif
 }
 
 QString GitProcess::rejectedRewordMessage() const {
@@ -1339,17 +1375,36 @@ std::string GitProcess::unpickedSequenceStop() const {
     if (QFile safety(gitPath(QStringLiteral("sequencer/abort-safety")));
         safety.open(QIODevice::ReadOnly))
         since = safety.readAll().trimmed();
+    // Each "<id>\n" and then what tells it.
     std::vector<std::string> range = {"log", "-z", "--date=raw",
                                       since.isEmpty() ? "-n1" : "-n100",
-                                      revert ? "--format=%B" : "--format=%an%n%ae%n%ad",
+                                      revert ? "--format=%H%n%B" : "--format=%H%n%an%n%ae%n%ad",
                                       "HEAD"};
     if (!since.isEmpty())
         range.push_back("^" + since.toStdString());
     const auto made = run(range);
     if (!made || !made->success())
         return {};
-    const QStringList commits = QString::fromStdString(made->stdoutData)
-                                    .split(QLatin1Char('\0'), Qt::SkipEmptyParts);
+    QStringList ids;
+    QStringList commits;
+    for (const QString& commit : QString::fromStdString(made->stdoutData)
+                                     .split(QLatin1Char('\0'), Qt::SkipEmptyParts)) {
+        const qsizetype end = commit.indexOf(QLatin1Char('\n'));
+        ids << commit.left(end).trimmed();
+        commits << (end < 0 ? QString() : commit.mid(end + 1));
+    }
+    // A commit of GitBolt's that concluded the stop (commit() notes
+    // it), and is still there: whatever its message. The Commit
+    // dialog's commit carries the words typed, and a revert's "This
+    // reverts commit" wasn't among them.
+    if (QFile concluded(gitPath(kConcludedStops)); concluded.open(QIODevice::ReadOnly)) {
+        for (const QByteArray& noted : concluded.readAll().split('\n')) {
+            const QList<QByteArray> pair = noted.simplified().split(' ');
+            if (pair.size() == 2 && QString::fromLatin1(pair[0]) == stopId
+                && ids.contains(QString::fromLatin1(pair[1])))
+                return {};
+        }
+    }
     if (revert) {
         // git's message, kept through a conflict's MERGE_MSG: "This
         // reverts commit <id>." (abbreviated with revert.reference).
@@ -1385,11 +1440,44 @@ Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {
 }
 
 Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend) const {
+    // The pick or revert, in a sequence of several, that this commit
+    // concludes (a conflict resolved): noted for unpickedSequenceStop(),
+    // as the message typed here need not be git's.
+    QString concluding;
+    if (const QString sequencer = gitPath(QStringLiteral("sequencer"));
+        !sequencer.isEmpty() && QFileInfo(sequencer).isDir()) {
+        for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+            QFile head(gitPath(QString::fromLatin1(pending)));
+            if (head.open(QIODevice::ReadOnly)) {
+                concluding = QString::fromLatin1(head.readAll()).trimmed();
+                break;
+            }
+        }
+    }
+    // A reword the rebase stopped at: the user's commit there (an amend
+    // of its message, say) is theirs, and the plan's message, which a
+    // hook turned down, is not to come back over it on Continue
+    // (rejectedRewordMessage()).
+    const QString rewordPlan = stoppedRewordMessage();
+
     // The message is UTF-8, and labelled so (kUtf8Commits).
     std::vector<std::string> args = {"-c", kUtf8Commits, "commit", "-F", "-"};
     if (amend)
         args.emplace_back("--amend");
-    return runImpl(args, kCommitTimeoutMs, &message);
+    auto result = runImpl(args, kCommitTimeoutMs, &message);
+    if (!result || !result->success())
+        return result;
+    if (!concluding.isEmpty()) {
+        const auto head = run({"rev-parse", "HEAD"});
+        QFile concluded(gitPath(kConcludedStops));
+        if (head && head->success() && concluded.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            concluded.write(concluding.toLatin1() + ' '
+                            + QByteArray::fromStdString(head->stdoutData).trimmed() + '\n');
+        }
+    }
+    if (!rewordPlan.isEmpty())
+        QFile::remove(rewordPlan);
+    return result;
 }
 
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }

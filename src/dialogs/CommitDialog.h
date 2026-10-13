@@ -110,6 +110,14 @@ private:
     /// Amend is off, with the reason as its tooltip, while the
     /// repository has a merge, cherry-pick or revert to commit.
     void updateAmend();
+    /// Where a merge, cherry-pick or revert waits for its commit, the
+    /// message starts as the one git prepared for it
+    /// (git::Repository::preparedMessage()), as a terminal's `git commit`
+    /// does: the commit's own `-F -` took the typed words alone, and a
+    /// revert's "This reverts commit <id>." went. Only into an empty
+    /// message, or one still as it was filled in (git's for another
+    /// stop, or another repository), which goes when there's none now.
+    void startFromPreparedMessage();
 
     /// What can be clicked while a commit, or a local operation, runs:
     /// nothing that stages, unstages, discards or commits. git commit
@@ -191,6 +199,9 @@ private:
 
     // Geometry restore guard
     bool restored_ = false;
+
+    // startFromPreparedMessage(): the message it filled in last.
+    QString prefilled_;
 };
 
 } // namespace gitbolt::dialogs

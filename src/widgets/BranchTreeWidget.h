@@ -11,6 +11,9 @@
 #include <QTreeView>
 #include <QWidget>
 
+#include <functional>
+#include <string>
+
 namespace gitbolt::widgets {
 
 class BranchTreeWidget : public QWidget {
@@ -43,28 +46,43 @@ public:
     void setRepoActionsEnabled(bool on);
     bool repoActionsEnabled() const { return repoActionsEnabled_; }
 
+    /// Where the key of the repository the sidebar shows comes from
+    /// (GitService::openKey()): every request below carries the one it
+    /// was made in, a context menu's the one open when the menu went up.
+    /// Taken once the entry was picked, after the menu's own event loop,
+    /// it was whichever repository a second launch had handed over
+    /// meanwhile: B's "feature" was renamed, deleted or pushed from A's
+    /// menu.
+    void setRepositoryKeySource(std::function<std::string()> source);
+    /// The key the source gives now; empty without one.
+    std::string repositoryKey() const;
+
 signals:
+    // Every request carries `repoKey`, the repositoryKey() of the
+    // repository it was made in: the receiver does nothing once another
+    // one is open.
     void branchSelected(const QString& name);
-    void checkoutRequested(const QString& name);
+    void checkoutRequested(const QString& name, const std::string& repoKey);
     /// "Checkout as local branch" on a remote branch ("origin/x").
-    void checkoutRemoteRequested(const QString& remoteBranch);
-    /// New Branch (the toolbar's, a local branch's context menu): the
+    void checkoutRemoteRequested(const QString& remoteBranch, const std::string& repoKey);
+    /// New Branch: the toolbar's, from HEAD (`startPoint` empty), or a
+    /// local branch's "New Branch from '<it>'", from that branch. The
     /// receiver asks for the name, as it does for Rename's and Set
     /// Upstream's and for Delete's confirmation, so that what it does
     /// goes to the repository asked about.
-    void createBranchRequested();
+    void createBranchRequested(const QString& startPoint, const std::string& repoKey);
     /// The context menu's Delete on a local branch. Not asked here:
     /// the receiver confirms first.
-    void deleteBranchRequested(const QString& name);
+    void deleteBranchRequested(const QString& name, const std::string& repoKey);
     /// Rename on a local branch; the receiver asks for the new name.
-    void renameBranchRequested(const QString& name);
-    void mergeRequested(const QString& name);
-    void pushRequested(const QString& remote, const QString& branch);
+    void renameBranchRequested(const QString& name, const std::string& repoKey);
+    void mergeRequested(const QString& name, const std::string& repoKey);
+    void pushRequested(const QString& remote, const QString& branch, const std::string& repoKey);
     /// A remote-tracking branch ("origin/feature") to delete on its
     /// remote; the receiver confirms before doing anything.
-    void deleteRemoteBranchRequested(const QString& remoteBranch);
+    void deleteRemoteBranchRequested(const QString& remoteBranch, const std::string& repoKey);
     /// Set Upstream on a local branch; the receiver asks for it.
-    void setUpstreamRequested(const QString& branch);
+    void setUpstreamRequested(const QString& branch, const std::string& repoKey);
 
 private slots:
     void onDoubleClicked(const QModelIndex& index);
@@ -84,6 +102,7 @@ private:
     QLineEdit* filterInput_ = nullptr;
     QAction* newBranchAction_ = nullptr;
     bool repoActionsEnabled_ = true;
+    std::function<std::string()> keySource_;
 };
 
 } // namespace gitbolt::widgets

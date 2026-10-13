@@ -748,6 +748,43 @@ std::string Repository::amendProblem() const {
     return {};
 }
 
+std::string Repository::preparedMessage() const {
+    switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_MERGE:
+    case GIT_REPOSITORY_STATE_REVERT:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+    case GIT_REPOSITORY_STATE_CHERRYPICK:
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+        break;
+    default:
+        return {};
+    }
+    QFile file(QString::fromUtf8(git_repository_path(repo_)) + QLatin1String("MERGE_MSG"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    char comment = '#';
+    git_config* config = nullptr;
+    if (git_repository_config_snapshot(&config, repo_) == 0) {
+        const char* value = nullptr;
+        if (git_config_get_string(&value, config, "core.commentChar") == 0 && value
+            && std::strlen(value) == 1)
+            comment = value[0];
+        git_config_free(config);
+    }
+    std::string message;
+    for (const QByteArray& line : file.readAll().split('\n')) {
+        if (line.startsWith(comment))
+            continue;
+        message.append(line.constData(), static_cast<size_t>(line.size()));
+        message += '\n';
+    }
+    // Trailing blank lines (git's own cleanup drops them too).
+    while (!message.empty() && (message.back() == '\n' || message.back() == ' '
+                                || message.back() == '\r' || message.back() == '\t'))
+        message.pop_back();
+    return message;
+}
+
 Result<std::vector<BranchInfo>> Repository::branches(BranchType filter) const {
     git_branch_iterator* iter = nullptr;
     git_branch_t gitFilter = (filter == BranchType::Local) ? GIT_BRANCH_LOCAL : GIT_BRANCH_REMOTE;
