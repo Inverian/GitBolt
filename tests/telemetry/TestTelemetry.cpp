@@ -776,6 +776,10 @@ private slots:
 
     // After a failure, new records wait for the retry tick too: an
     // outage costs one request per tick, however busy the user is.
+    // Checked against the tick, which start() sets going, rather than
+    // a fixed wait after the first request: on a slow box that one can
+    // come so late (the first request sets up the network stack) that
+    // the tick falls inside the wait, and the retry is then on time.
     void backoffHoldsNewRecordsUntilTick() {
         Provider provider;
         Config config = testConfig(*stub_, dir_->path());
@@ -786,13 +790,18 @@ private slots:
         };
         auto service = makeService(config, provider);
         service->recordRepoOpened(1, 1, 1);
+        const qint64 tick = stub_->elapsedMs() + config.flushIntervalMs;
         service->start();
         QTRY_COMPARE(stub_->requests().size(), 1);
         service->recordRepoOpened(2, 2, 1);
-        QTest::qWait(300);
-        QCOMPARE(stub_->requests().size(), 1);
         QTRY_COMPARE(stub_->requests().size(), 3);
-        QVERIFY(stub_->requests().at(1).arrivedMs >= 600);
+        // Neither the retry nor the new record went before the tick,
+        // less 10%: a coarse timer may fire early by 5% of its interval
+        // (sending early by a whole interval is what this catches).
+        for (int i = 1; i < 3; ++i)
+            QVERIFY2(stub_->requests().at(i).arrivedMs >= tick - config.flushIntervalMs / 10,
+                     qPrintable(QStringLiteral("request %1 at %2 ms, tick at %3 ms")
+                                    .arg(i).arg(stub_->requests().at(i).arrivedMs).arg(tick)));
         // The retried record went first, then the new one.
         QCOMPARE(properties(stub_->requests().at(1)).value(QStringLiteral("open_ms")).toInt(), 1);
         QCOMPARE(properties(stub_->requests().at(2)).value(QStringLiteral("open_ms")).toInt(), 2);
@@ -842,6 +851,7 @@ private slots:
         auto service = makeService(config, provider);
         service->recordRepoOpened(1, 1, 1);
         service->recordRepoOpened(2, 2, 1);
+        const qint64 started = stub_->elapsedMs();
         service->start();
 
         // First cycle: one request, then the cycle ends with the front
@@ -863,9 +873,17 @@ private slots:
             10000);
         QVERIFY(stub_->requests().size() >= config.maxAttempts);
         const QList<StubRequest>& requests = stub_->requests();
+        // The i-th retry is not before the i-th tick, less 10% a tick: a
+        // coarse timer may fire early by 5% of its interval, and that
+        // adds up from tick to tick (two in one cycle would be a whole
+        // interval early). The ticks run from start(), the first request
+        // from the first flush, so the gap between those two can be
+        // anything.
         for (int i = 1; i < config.maxAttempts; ++i)
-            QVERIFY(requests.at(i).arrivedMs - requests.at(i - 1).arrivedMs
-                    >= config.flushIntervalMs / 2);
+            QVERIFY2(requests.at(i).arrivedMs - started
+                         >= i * (config.flushIntervalMs - config.flushIntervalMs / 10),
+                     qPrintable(QStringLiteral("retry %1 at %2 ms after start")
+                                    .arg(i).arg(requests.at(i).arrivedMs - started)));
         for (int i = 0; i < config.maxAttempts; ++i)
             QCOMPARE(properties(requests.at(i)).value(QStringLiteral("open_ms")).toInt(), 1);
     }
