@@ -133,7 +133,7 @@ function(gitbolt_add_bundled_libgit2)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/config_file.c _config_file_c)
     if(_config_c MATCHES "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*if \\(res == 0\\)"
        AND _config_file_c MATCHES
-           "if \\(error < 0\\)[ \t\n]*git_futils_filestamp_set\\(&b->file\\.stamp, NULL\\)")
+           "git_futils_filestamp_set\\(&b->file\\.stamp, NULL\\);[ \t\n]*memset\\(b->file\\.checksum")
         target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_CONFIG_PATCHED)
     else()
         message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "

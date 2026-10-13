@@ -59,15 +59,16 @@ gitbolt_patch(src/libgit2/config.c
     "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*\\*out = &be->entry")
 
 # A failed reread of a config file that changed kept the old entries,
-# which is right, but also the new file's stamp, which
-# config_file_is_modified() had already taken: every later lookup saw
-# the stamp unchanged and the handle kept the old config until the file
-# changed again (a remote added with git, then not listed). Forget the
-# stamp when a refresh fails, so the next lookup reads the file again:
-# a zeroed stamp matches no file, and the checksum then tells whether
-# the content changed. Unfixed in libgit2's main branch as of
-# 2026-10-13.
+# which is right, but also the file's new stamp and, as it is hashed
+# before it's parsed, its new checksum. The parse reads the files it
+# includes (include.path, includeIf) and, for onbranch, HEAD, taking
+# their stamps too. When the file or one of those couldn't be read,
+# every later lookup found nothing changed, and the handle kept the old
+# config until a file changed again (a remote added with git, then not
+# listed). Forget the stamp and the checksum when a refresh fails: they
+# then match no file and no content, so the next lookup reads everything
+# again. Unfixed in libgit2's main branch as of 2026-10-13.
 gitbolt_patch(src/libgit2/config_file.c
     "\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
-    "\tgit_config_list_free(config_list);\n\tif (error < 0)\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
+    "\tgit_config_list_free(config_list);\n\tif (error < 0) {\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\t\tmemset(b->file.checksum, 0, sizeof(b->file.checksum));\n\t}\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
     "git_config_list_free\\(config_list\\);[ \t\n]*return \\(error == GIT_ENOTFOUND\\)")

@@ -113,7 +113,9 @@ QStringList FileWatcher::enumerateWatchDirs(
     // enumerateWatchDirsGoesIntoLeftOutDirs check it). A file
     // directly in a left-out directory (build/CMakeLists.txt) has no
     // watch at all: only a manual refresh, or the next change that
-    // is watched, picks up its edit. The total is capped to keep
+    // is watched, picks up its edit. The top-level .git is the
+    // exception: watchGitInternals watches it and its index, HEAD,
+    // packed-refs and FETCH_HEAD. The total is capped to keep
     // kqueue/FSEvents happy on very large repos — if a repo exceeds
     // the cap, the user won't get auto-refresh for the unwatched
     // subtrees but everything else keeps working.
@@ -135,11 +137,12 @@ QStringList FileWatcher::enumerateWatchDirs(
         const QFileInfo fi(dir);
         const QString name = fi.fileName();
 
-        // Leave out .git (watchGitInternals watches it, its index,
-        // HEAD and refs) and common high-churn directories that are
-        // almost always ignored by git anyway: these directories
-        // themselves, not their subdirectories (see above). Files
-        // directly in them aren't watched.
+        // Leave out .git (watchGitInternals watches the top-level one,
+        // its index, HEAD and refs) and common high-churn directories
+        // that are almost always ignored by git anyway: these
+        // directories themselves, not their subdirectories (see
+        // above). Files directly in them aren't watched, except the
+        // ones watchGitInternals watches in the top-level .git.
         if (name == QStringLiteral(".git")
             || name == QStringLiteral("node_modules")
             || name == QStringLiteral("build")

@@ -1491,6 +1491,50 @@ private slots:
         QCOMPARE(statusLines(repo.repo()), QStringList{QStringLiteral("a.txt changed")});
 #endif
     }
+
+    // The same with a file that .git/config includes: a failed read of
+    // it left the handle on the old config for good, both when the
+    // included file changed and when .git/config did (twice looked up
+    // while the included file couldn't be read).
+    void unreadableIncludedConfigIsReadAgain() {
+#if defined(Q_OS_WIN)
+        QSKIP("needs Unix file permissions");
+#elif !defined(GITBOLT_LIBGIT2_CONFIG_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's config fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        repo.writeFile(".git/extra.config", "[test]\n\tvalue = 3\n");
+        repo.appendFile(".git/config", "[include]\n\tpath = extra.config\n");
+        git_config* live = nullptr;
+        QCOMPARE(git_repository_config(&live, repo.repo().raw()), 0);
+        const auto freeConfig = qScopeGuard([&] { git_config_free(live); });
+        int32_t value = 0;
+        QCOMPARE(git_config_get_int32(&value, live, "test.value"), 0);
+        QCOMPARE(value, 3);
+
+        const QString included = repo.path() + QStringLiteral("/.git/extra.config");
+        const QFileDevice::Permissions readable = QFile::permissions(included);
+        const auto unlock = qScopeGuard([&] { QFile::setPermissions(included, readable); });
+        // Another size, so the change shows in the stamp whatever the
+        // file system's time resolution.
+        repo.writeFile(".git/extra.config", "[test]\n\tvalue = 77\n");
+        QVERIFY(QFile::setPermissions(included, QFileDevice::Permissions()));
+        if (QFile(included).open(QIODevice::ReadOnly))
+            QSKIP("file permissions don't stop this user (root?)");
+        git_config_get_int32(&value, live, "test.value");
+        QVERIFY(QFile::setPermissions(included, readable));
+        QCOMPARE(git_config_get_int32(&value, live, "test.value"), 0);
+        QCOMPARE(value, 77);
+
+        QVERIFY(QFile::setPermissions(included, QFileDevice::Permissions()));
+        repo.appendFile(".git/config", "[test]\n\tother = 9\n");
+        git_config_get_int32(&value, live, "test.other");
+        git_config_get_int32(&value, live, "test.other");
+        QVERIFY(QFile::setPermissions(included, readable));
+        QCOMPARE(git_config_get_int32(&value, live, "test.other"), 0);
+        QCOMPARE(value, 9);
+#endif
+    }
 };
 
 QTEST_MAIN(TestRepository)
