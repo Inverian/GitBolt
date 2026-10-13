@@ -761,15 +761,18 @@ jobs:
             || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
           # 2) DEB on a stock Ubuntu 24.04 and a stock Debian 13, the
-          #    oldest of each the README names (no aqt LD_LIBRARY_PATH or
-          #    QT_PLUGIN_PATH to mask gaps). Debian 13 catches a Depends
-          #    entry only one release can satisfy, as libgit2-1.7 was.
+          #    oldest of each the README names, and on the newest Ubuntu
+          #    LTS, 26.04, for the README's "or later" (no aqt
+          #    LD_LIBRARY_PATH or QT_PLUGIN_PATH to mask gaps). Debian 13
+          #    and Ubuntu 26.04 catch a Depends entry only one release can
+          #    satisfy, as libgit2-1.7 was.
           #    Each image is pinned by digest (the multi-arch index, same
           #    as Docker Hub's; `docker buildx imagetools inspect <image>`
           #    prints it); its apt-get still installs today's packages,
           #    which is what a user's install resolves against.
           for image in \
             public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
+            public.ecr.aws/docker/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
             public.ecr.aws/docker/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
             echo "DEB on ${image%@*}"
             docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
@@ -778,8 +781,8 @@ jobs:
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update -qq
                 # xauth: xvfb-run needs it, and with --no-install-recommends
-                # only Ubuntu 24.04 still pulls it in with xvfb (Debian 13
-                # does not, and xvfb-run then stops at "xauth command not found").
+                # not every release pulls it in with xvfb (Debian 13 does
+                # not, and xvfb-run then stops at "xauth command not found").
                 apt-get install -y -qq --no-install-recommends xvfb xauth "/in/gitbolt_${VER}_amd64.deb" >/dev/null
                 export LC_ALL=C.UTF-8   # the stock images have no UTF-8 locale; Qt warns without one
                 out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
