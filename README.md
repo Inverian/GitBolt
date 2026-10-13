@@ -208,7 +208,7 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 | **libgit2 primary, git CLI fallback** | libgit2 for local repository access, including the hot path (log, diff, blame, status); the CLI for network operations (clone, fetch, pull, push, with git's own SSH and credential setup), commits (so the repository's hooks and commit signing apply), interactive rebase, git-flow |
 | **Headers and sources together** | Qt convention; matches Gittyup, KeePassXC, FreeCAD |
 | **PascalCase filenames** | Qt convention (`QMainWindow.h` style) |
-| **Background threading via QtConcurrent** | Network operations, commits, merges, rebase steps and other long git commands run on worker threads, with QFutureWatcher signals back to the UI; quick local changes (staging, switching branches, creating or deleting branches and tags) still run on the UI thread |
+| **Background threading via QtConcurrent** | Network operations, commits, merges, rebase steps and other long git commands run on worker threads, with QFutureWatcher signals back to the UI; some local changes (staging, stashing, switching branches, creating or deleting branches and tags) still run on the UI thread |
 | **Paged commit log model** | `fetchMore()` with 256-row pages and incremental lane computation |
 | **Lane-based revision graph** | Greedy lane assignment with bezier merge curves, custom QStyledItemDelegate |
 

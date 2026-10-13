@@ -53,7 +53,8 @@ once per session, and at most 20 error reports per session.
 If GitBolt crashes, it saves a crash report on your computer. The next
 time it starts, it tells you so, and when a summary of the report is
 sent, it says that too. The summary goes out right away, with usage
-statistics on; turning them off stops what would be sent after it. The
+statistics on; turning them off deletes whatever hasn't been sent yet,
+the summary too if it hasn't gone out (while offline, say). The
 summary contains:
 
 - the GitBolt version that crashed, when it crashed, and a random
