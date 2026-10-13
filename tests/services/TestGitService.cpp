@@ -73,7 +73,8 @@
 //   - the remote ops and checkoutBranch return their own outcome,
 //   - a conflicted merge is aborted off the GUI thread,
 //   - a commit in a submodule and an edit of .git/info/exclude
-//     refresh.
+//     refresh, and the watcher's walk goes into the directories it
+//     leaves out (.git, node_modules, build, …).
 //
 // Signal delivery: workers emit from pool threads, and QSignalSpy
 // records those on the emitting thread, so the tests wait for worker
@@ -521,6 +522,26 @@ private slots:
             QVERIFY(succeeded(sub.run({"commit", "-q", "--allow-empty", "-m", "s2"})));
         }
         QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(), 10000);
+    }
+
+    // The walk leaves out .git, node_modules, build and the like
+    // themselves, but still goes into them: what refreshes the status
+    // above, and a tracked file under build/, is watched there.
+    void enumerateWatchDirsGoesIntoLeftOutDirs() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        const QDir root(repo->path());
+        for (const char* dir : {"src", ".git/info", "node_modules/pkg/lib", "build/obj"})
+            QVERIFY(root.mkpath(QString::fromLatin1(dir)));
+        QStringList dirs;
+        for (const QString& dir :
+             gitbolt::watcher::FileWatcher::enumerateWatchDirs(repo->path()))
+            dirs << root.relativeFilePath(dir);
+        for (const char* in : {"src", ".git/info", "node_modules/pkg", "node_modules/pkg/lib",
+                               "build/obj"})
+            QVERIFY2(dirs.contains(QString::fromLatin1(in)), in);
+        for (const char* out : {".git", "node_modules", "build"})
+            QVERIFY2(!dirs.contains(QString::fromLatin1(out)), out);
     }
 
     // -----------------------------------------------------------------

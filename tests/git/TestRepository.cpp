@@ -1238,7 +1238,9 @@ private slots:
     //   - a merge's and a revert's are git's own, and their comment
     //     lines (a signed tag's "gpg:" lines) are git's notes: they go,
     //     as a terminal's `git commit` drops them; where git's note of
-    //     the conflicts is there, only the lines with its prefix;
+    //     the conflicts is there, only the lines with its prefix, and
+    //     where it isn't, the settings' (a '#' line stays with only
+    //     core.commentString set, as git 2.45 and later keep it);
     //   - a message written with CRLF line ends comes without the CRs.
     void preparedMessageIsGitsWithoutItsNotes_data() {
         QTest::addColumn<QString>("operation");
@@ -1341,6 +1343,24 @@ private slots:
                            QStringLiteral("+core.commentChar=#")}
             << QByteArray("Merge branch 'side'\n\n;; keep me\n\n# Conflicts:\n#\ta.txt\n")
             << QStringLiteral("Merge branch 'side'\n\n;; keep me");
+        // With no note (a merge stopped by --no-commit or by a hook),
+        // the settings' prefixes, '#' with none set. core.commentString
+        // is a setting of git 2.45 and later, whose `git commit` keeps
+        // a '#' line; an older git's '#' lines then show, to be deleted.
+        const QByteArray noNote = "Merge branch 'side'\n\n#123 closes the login bug\n";
+        QTest::newRow("a merge with no note: #123 goes, as git's `git commit` drops it")
+            << QStringLiteral("git merge conflict") << none << noNote
+            << QStringLiteral("Merge branch 'side'");
+        QTest::newRow("a merge with no note, core.commentString ;: #123 stays")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentString=;")}
+            << noNote + "\n; gpg: Signature made today\n"
+            << QStringLiteral("Merge branch 'side'\n\n#123 closes the login bug");
+        QTest::newRow("a merge with no note, core.commentString // (git < 2.45): # lines stay")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentString=//")}
+            << QByteArray("Merge tag 'v1'\n\nRelease one\n\n# gpg: Signature made today\n")
+            << QStringLiteral("Merge tag 'v1'\n\nRelease one\n\n# gpg: Signature made today");
     }
 
     void preparedMessageIsGitsWithoutItsNotes() {

@@ -100,9 +100,17 @@ QStringList FileWatcher::enumerateWatchDirs(
     int maxDirs,
     const std::function<bool()>& cancelled)
 {
-    // Walk the working tree and collect every directory (skipping
-    // .git/ and a few noisy patterns like node_modules/, build/,
-    // and .venv/ that are almost always in .gitignore). The total
+    // Walk the working tree and collect every directory but .git/ and
+    // a few noisy names like node_modules/, build/ and .venv/. Those
+    // are left out themselves only: the recursive iterator still goes
+    // into them, so their subdirectories are collected and watched.
+    // That is on purpose. A commit in a submodule (under .git/modules
+    // or in its own .git), an edit of .git/info/exclude and a tracked
+    // file under build/ or target/ refresh the status only through
+    // those watches; a walk that never entered these trees stopped
+    // them refreshing (TestGitService::
+    // submoduleCommitAndExcludeEditRefresh and
+    // enumerateWatchDirsGoesIntoLeftOutDirs check it). The total
     // is capped to keep kqueue/FSEvents happy on very large repos —
     // if a repo exceeds the cap, the user won't get auto-refresh
     // for the unwatched subtrees but everything else keeps working.
@@ -124,9 +132,10 @@ QStringList FileWatcher::enumerateWatchDirs(
         const QFileInfo fi(dir);
         const QString name = fi.fileName();
 
-        // Skip .git (watched selectively by watchGitInternals) and
-        // common high-churn directories that are almost always
-        // ignored by git anyway.
+        // Leave out .git (watchGitInternals watches it, its index,
+        // HEAD and refs) and common high-churn directories that are
+        // almost always ignored by git anyway: these directories
+        // themselves, not their subdirectories (see above).
         if (name == QStringLiteral(".git")
             || name == QStringLiteral("node_modules")
             || name == QStringLiteral("build")
@@ -141,7 +150,7 @@ QStringList FileWatcher::enumerateWatchDirs(
             || name == QStringLiteral("target")      // Rust
             || name == QStringLiteral(".next")       // Next.js
             || name == QStringLiteral(".cache")) {
-            // Skip this subtree entirely.
+            // This directory only: QDirIterator still goes into it.
             continue;
         }
 
