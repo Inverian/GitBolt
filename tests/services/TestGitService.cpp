@@ -71,7 +71,9 @@
 //   - a commit waiting on its hook leaves the thread pool room for an
 //     open (a job waiting on git lends its thread back),
 //   - the remote ops and checkoutBranch return their own outcome,
-//   - a conflicted merge is aborted off the GUI thread.
+//   - a conflicted merge is aborted off the GUI thread,
+//   - the directories an open watches leave out .git and node_modules,
+//     subtrees included.
 //
 // Signal delivery: workers emit from pool threads, and QSignalSpy
 // records those on the emitting thread, so the tests wait for worker
@@ -460,6 +462,33 @@ private slots:
         QVERIFY(!svc.isOpen());
         QVERIFY(svc.repository() == nullptr);
         QCOMPARE(closedSpy.count(), 1);
+    }
+
+    // The working-tree directories an open watches leave out .git and
+    // the noisy directories, subtrees included. Only the directory
+    // itself was left out: the walk went on into it, so every directory
+    // under .git (objects/xx, logs, hooks, a rebase's rebase-merge) and
+    // node_modules was watched. On Windows git removing a watched
+    // rebase-merge made Qt's watcher thread warn, on a thread of its
+    // own, mid-test.
+    void watchedDirectoriesSkipGitAndNoisySubtrees() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QDir root(repo->path());
+        QVERIFY(root.mkpath(QStringLiteral("src/deep")));
+        QVERIFY(root.mkpath(QStringLiteral("node_modules/pkg/lib")));
+        QVERIFY(root.mkpath(QStringLiteral(".git/rebase-merge")));
+
+        const QStringList dirs =
+            gitbolt::watcher::FileWatcher::enumerateWatchDirs(repo->path());
+        QVERIFY2(dirs.contains(root.filePath(QStringLiteral("src"))), qPrintable(dirs.join(u'\n')));
+        QVERIFY2(dirs.contains(root.filePath(QStringLiteral("src/deep"))),
+                 qPrintable(dirs.join(u'\n')));
+        for (const QString& dir : dirs) {
+            const QString top = root.relativeFilePath(dir).section(u'/', 0, 0);
+            QVERIFY2(top != QLatin1String(".git") && top != QLatin1String("node_modules"),
+                     qPrintable(dir));
+        }
     }
 
     // -----------------------------------------------------------------
