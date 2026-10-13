@@ -1296,6 +1296,35 @@ private slots:
         QTest::newRow("git's revert, conflicted")
             << QStringLiteral("git revert conflict") << none << QByteArray()
             << QStringLiteral("Revert \"main change\"\n\nThis reverts commit %1.");
+        // '#' is what a git older than 2.45 writes with only
+        // core.commentString set (it reads core.commentChar alone), and
+        // with core.commentChar "auto" in any case (git's match of it
+        // ignores case); "auto" keeps a character set before it.
+        const QByteArray reverted = "# *** SAY WHY WE ARE REVERTING ON THE TITLE LINE ***\n\n"
+                                    "This reverts commit %1.\n\n# Conflicts:\n#\ta.txt\n";
+        QTest::newRow("revert.reference's placeholder, and the blank line under it")
+            << QStringLiteral("git revert conflict") << none << reverted
+            << QStringLiteral("This reverts commit %1.");
+        QTest::newRow("revert.reference's placeholder, core.commentString // (git < 2.45)")
+            << QStringLiteral("git revert conflict")
+            << QStringList{QStringLiteral("core.commentString=//")} << reverted
+            << QStringLiteral("This reverts commit %1.");
+        QTest::newRow("revert.reference's placeholder, core.commentChar Auto")
+            << QStringLiteral("git revert conflict")
+            << QStringList{QStringLiteral("core.commentChar=Auto")} << reverted
+            << QStringLiteral("This reverts commit %1.");
+        QTest::newRow("a signed tag's merge, core.commentString // (git < 2.45)")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentString=//")}
+            << QByteArray("Merge tag 'v1'\n\nRelease one\n\n# gpg: Signature made today\n"
+                          "# gpg: Good signature from \"Someone\"\n\n# Conflicts:\n#\ta.txt\n")
+            << QStringLiteral("Merge tag 'v1'\n\nRelease one");
+        QTest::newRow("a merge, core.commentChar ; then auto: ; stays")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentChar=;"),
+                           QStringLiteral("+core.commentChar=AUTO")}
+            << QByteArray("Merge branch 'side'\n\n; Conflicts:\n;\ta.txt\n")
+            << QStringLiteral("Merge branch 'side'");
     }
 
     void preparedMessageIsGitsWithoutItsNotes() {
@@ -1323,9 +1352,16 @@ private slots:
         repo.writeFile("a.txt", "main\n");
         QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
         const QString mainChange = output(git.run({"rev-parse", "HEAD"}));
-        for (const QString& setting : config) {
-            QVERIFY(succeeded(git.run({"config", setting.section(QLatin1Char('='), 0, 0).toStdString(),
-                                       setting.section(QLatin1Char('='), 1).toStdString()})));
+        // "+key=value" adds a value after the key's others.
+        for (QString setting : config) {
+            std::vector<std::string> args{"config"};
+            if (setting.startsWith(QLatin1Char('+'))) {
+                args.push_back("--add");
+                setting.remove(0, 1);
+            }
+            args.push_back(setting.section(QLatin1Char('='), 0, 0).toStdString());
+            args.push_back(setting.section(QLatin1Char('='), 1).toStdString());
+            QVERIFY(succeeded(git.run(args)));
         }
 
         // A Repository of its own, as GitBolt opens one: the fixture's
@@ -1348,6 +1384,7 @@ private slots:
             QVERIFY(succeeded(git.run({"commit", "-q", "-am", "later change"})));
             QVERIFY(!succeeded(git.run({"revert", "--no-edit", mainChange.toStdString()})));
             expected = expected.arg(mainChange);
+            written.replace("%1", mainChange.toUtf8());
         }
         QFile prepared(repo.path() + QStringLiteral("/.git/MERGE_MSG"));
         if (!written.isEmpty()) {

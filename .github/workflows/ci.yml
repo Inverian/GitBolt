@@ -166,7 +166,7 @@ jobs:
           GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
       # fork build that has them fails here, before it can be tested,
@@ -214,6 +214,36 @@ jobs:
             echo "::error::translations/gitbolt_en.ts has %n texts without their English forms"
             exit 1
           fi
+
+      # Windows: a unit test that crashes leaves a minidump (Windows
+      # Error Reporting's LocalDumps), uploaded below with its binary.
+      # QtTest's crash handler is off there (-nocrashhandler, through
+      # GITBOLT_QTEST_ARGS at Configure; see tests/CMakeLists.txt): it
+      # ends the process itself, so WER never saw a crash, and its own
+      # stack walk showed nothing for test_git_service's call through a
+      # null pointer (01e65c6: "Exception address: 0x0000000000000000").
+      # The dump's stack memory still holds the caller's return address.
+      # DontShowUI: no dialog to wait on. Minidumps (DumpType 1): every
+      # thread's stack and the module list, written in a moment.
+      # A failure to set this up is only a warning: the tests still run.
+      - name: Crash dumps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          try {
+            $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+            if (-not (Test-Path "$wer\LocalDumps")) { New-Item -Path "$wer\LocalDumps" -ErrorAction Stop | Out-Null }
+            New-ItemProperty -Force -Path $wer -Name Disabled -PropertyType DWord -Value 0 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path $wer -Name DontShowUI -PropertyType DWord -Value 1 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpFolder -PropertyType ExpandString -Value $dumps -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpType -PropertyType DWord -Value 1 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpCount -PropertyType DWord -Value 20 -ErrorAction Stop | Out-Null
+            Get-ItemProperty -Path "$wer\LocalDumps" | Format-List DumpFolder, DumpType, DumpCount
+          } catch {
+            Write-Host "::warning::no crash dumps this run: $_"
+          }
 
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
       # platform, and the Linux runners have no display server.
@@ -287,6 +317,38 @@ jobs:
             # One test's settings must not reach the next.
             foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
           }
+
+      # The minidumps a crashed unit test left (Crash dumps (Windows)),
+      # each with the binary that wrote it: a debugger needs the image to
+      # walk the stack through it. In WinDbg or cdb: `.exepath <dir>`,
+      # `.sympath srv*`, `.ecxr`, `k`, then `~*k` for every thread. For
+      # a jump to address 0, the caller is at the top of the stack:
+      # `dqs @rsp L4`.
+      - name: Collect crash dumps (Windows)
+        id: dumps
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'dumps'
+          $found = @(Get-ChildItem -Path $dumps -Filter '*.dmp' -ErrorAction SilentlyContinue)
+          if ($found.Count -eq 0) { Write-Host 'No crash dumps.'; exit 0 }
+          foreach ($d in $found) {
+            Write-Host "Crash dump: $($d.Name) ($($d.Length) bytes)"
+            # <name>.exe.<pid>.dmp
+            $exe = ($d.Name -split '\.exe\.', 2)[0] + '.exe'
+            Get-ChildItem -Path build -Recurse -Filter $exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1 | Copy-Item -Destination $dumps -Force
+          }
+          "found=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Upload crash dumps (Windows)
+        if: failure() && runner.os == 'Windows' && steps.dumps.outputs.found == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-dumps-${{ runner.os }}
+          path: ${{ runner.temp }}/dumps
+          if-no-files-found: ignore
+          retention-days: 7
 
       # ==================================================================
       # Installers: pushes to main and dry runs only, never pull requests.

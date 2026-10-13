@@ -8,6 +8,21 @@
 # creates an executable, links the libraries it needs, and registers it
 # with CTest.
 
+# GITBOLT_QTEST_ARGS: QtTest options for every binary ctest runs. The
+# Windows CI passes -nocrashhandler: QtTest's own handler ends the
+# process itself (its filter returns EXCEPTION_EXECUTE_HANDLER), so
+# Windows Error Reporting never sees the crash and writes no dump, and
+# its stack walk stops dead at a call through a null pointer (CI saw
+# exactly that: "Exception address: 0x0000000000000000" and no frames).
+# Without it, WER's LocalDumps (set up by the CI step) keep a minidump,
+# whose stack memory still holds the caller's return address. ctest
+# reports the crash the same way ("Exception: SegFault"), and QtTest
+# still flushes each PASS line, so the last one names the function
+# before the one that crashed.
+set(GITBOLT_QTEST_ARGS "" CACHE STRING
+    "Extra QtTest command-line options for every unit test binary ctest runs (e.g. -nocrashhandler)")
+separate_arguments(GITBOLT_QTEST_ARGV NATIVE_COMMAND "${GITBOLT_QTEST_ARGS}")
+
 function(gitbolt_add_test test_name source_file)
     add_executable(${test_name} ${source_file})
     target_link_libraries(${test_name} PRIVATE
@@ -18,7 +33,7 @@ function(gitbolt_add_test test_name source_file)
         Qt6::Widgets  # models/ link Qt6::Widgets via Qt::Gui for QFont/QIcon
     )
     gitbolt_set_warnings(${test_name})
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    add_test(NAME ${test_name} COMMAND ${test_name} ${GITBOLT_QTEST_ARGV})
     # QT_FORCE_STDERR_LOGGING: on Windows, QtTest writes its results to
     # stdout only when the process has a console window, and sends them
     # to OutputDebugString otherwise. A CI runner's steps have a console

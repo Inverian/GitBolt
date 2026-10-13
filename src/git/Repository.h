@@ -117,9 +117,10 @@ public:
     /// cherry-pick or revert waiting for it (MERGE_MSG), without git's
     /// note of the conflicts at its end (a scissors line too), in the
     /// comment lines of core.commentChar or core.commentString ('#' by
-    /// default, and always libgit2's). A pick's message is the picked
-    /// commit's, every other line of it kept, as a clean `git
-    /// cherry-pick` commits it: a "#42 Fix login" subject is its own.
+    /// default, for "auto", for a git older than 2.45 that reads
+    /// core.commentChar alone, and always libgit2's). A pick's message
+    /// is the picked commit's, every other line of it kept, as a clean
+    /// `git cherry-pick` commits it: a "#42 Fix login" subject is its own.
     /// A merge's or a revert's is git's, and its other comment lines go
     /// too, as a terminal's `git commit` drops them. Lines end in "\n"
     /// alone. Empty when no such operation waits, or git prepared none.

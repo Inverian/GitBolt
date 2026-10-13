@@ -14,8 +14,10 @@
 //   - commitChanges round trip, through `git commit`: the repository's
 //     hooks run (core.hooksPath too) and can refuse it, a slow hook is
 //     waited for and a quit stops it, a merge's autostash comes back,
-//     an amend during a revert is refused, and the message goes in as
-//     the UTF-8 it is (no i18n.commitEncoding label), a reword's too,
+//     an amend during a revert is refused, an amend keeps the commit's
+//     author, a commit of nothing staged is refused, and the message
+//     goes in as the UTF-8 it is (no i18n.commitEncoding label), a
+//     reword's too,
 //   - Unstage All with the index locked is reported, and it leaves a
 //     merge or a stopped cherry-pick in progress (and works on an
 //     unborn branch),
@@ -1069,6 +1071,75 @@ private slots:
                                  "You are in the middle of a revert -- cannot amend.")}));
         QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
         QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Revert);
+    }
+
+    // An amend through git (`commit --amend`) keeps the commit's author,
+    // name, email and date: only the committer is the user, as in a
+    // terminal. With --reset-author, amending a teammate's commit to fix
+    // its message would have made it the user's, dated now.
+    void amendKeepsTheAuthor() {
+        const IsolatedGitConfig config;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess git(repo->path().toStdString());
+        const QString base = output(git.run({"rev-parse", "HEAD"}));
+        repo->writeFile(QStringLiteral("theirs.txt"), QByteArrayLiteral("their work\n"));
+        QVERIFY(succeeded(git.run({"add", "theirs.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "their work",
+                                   "--author=Team Mate <mate@example.com>",
+                                   "--date=2001-02-03T04:05:06+01:00"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        MainThreadSpy done(&svc, &GitService::commitComplete);
+        svc.commitChanges(QStringLiteral("their work, reworded"), /*amend=*/true);
+        QVERIFY(done.waitForAny(15000));
+        QVERIFY2(done.at(0).at(0).toBool(), qPrintable(done.at(0).at(1).toString()));
+        QCOMPARE(output(git.run({"log", "-1", "--date=iso-strict",
+                                 "--format=%an <%ae> %ad, %cn <%ce>"})),
+                 QStringLiteral("Team Mate <mate@example.com> 2001-02-03T04:05:06+01:00, "
+                                "Test User <test@gitbolt.local>"));
+        QCOMPARE(output(git.run({"log", "-1", "--format=%s"})),
+                 QStringLiteral("their work, reworded"));
+        QCOMPARE(output(git.run({"rev-parse", "HEAD^"})), base);
+    }
+
+    // A commit of nothing (nothing staged, whether or not the work tree
+    // has changes) is git's to refuse, as a terminal's `git commit` is:
+    // it fails with git's reason, and HEAD stays where it was. With
+    // --allow-empty, a Commit clicked before staging made an empty
+    // commit.
+    void commitOfNothingIsRefused_data() {
+        QTest::addColumn<bool>("unstaged");
+        QTest::addColumn<QString>("reason");
+        QTest::newRow("a clean work tree") << false << QStringLiteral("nothing to commit");
+        QTest::newRow("a change not staged") << true
+                                             << QStringLiteral("no changes added to commit");
+    }
+
+    void commitOfNothingIsRefused() {
+        QFETCH(bool, unstaged);
+        QFETCH(QString, reason);
+        const IsolatedGitConfig config;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess git(repo->path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        if (unstaged)
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("changed, not staged\n"));
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        MainThreadSpy done(&svc, &GitService::commitComplete);
+        svc.commitChanges(QStringLiteral("nothing"));
+        QVERIFY(done.waitForAny(15000));
+        QCOMPARE(done.size(), 1);
+        QVERIFY2(!done.at(0).at(0).toBool(), qPrintable(done.at(0).at(1).toString()));
+        QVERIFY2(done.at(0).at(1).toString().contains(reason),
+                 qPrintable(done.at(0).at(1).toString()));
+        QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
+        QCOMPARE(output(git.run({"rev-list", "--count", "HEAD"})), QStringLiteral("1"));
     }
 
     // `git reset`, which Unstage All runs, fails without unstaging

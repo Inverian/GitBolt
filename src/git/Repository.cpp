@@ -769,24 +769,43 @@ std::string Repository::preparedMessage() const {
     if (!file.open(QIODevice::ReadOnly))
         return {};
 
-    // What git starts its comment lines with. core.commentChar and
-    // core.commentString are one setting to git 2.45 and later, which
-    // takes a string for either; older gits read core.commentChar
-    // alone. Both, then: either may be the one git wrote with. '#'
-    // where neither is set, and for "auto" (only `git commit` picks a
-    // character then; MERGE_MSG has '#').
-    QList<QByteArray> comments;
+    // What git starts its comment lines with. git 2.45 and later take
+    // core.commentChar and core.commentString as one setting, a string
+    // for either; older gits read core.commentChar alone, so they
+    // write '#' where only core.commentString is set. The git that
+    // wrote MERGE_MSG may be the terminal's or GitBolt's, of either
+    // kind, so each prefix it may have used counts: every value of
+    // both keys, at every level, except "auto" (ignoring case, as git
+    // matches it: only `git commit` picks a character then, and
+    // MERGE_MSG has the one set before it, or '#'). And '#' unless a
+    // core.commentChar names another.
+    struct Prefixes {
+        QList<QByteArray> values;
+        bool charSet = false;
+        bool isChar = false;
+    } prefixes;
     git_config* config = nullptr;
     if (git_repository_config_snapshot(&config, repo_) == 0) {
         for (const char* key : {"core.commentString", "core.commentChar"}) {
-            const char* value = nullptr;
-            if (git_config_get_string(&value, config, key) == 0 && value && *value
-                && std::strcmp(value, "auto") != 0)
-                comments << QByteArray(value);
+            prefixes.isChar = std::strcmp(key, "core.commentChar") == 0;
+            git_config_get_multivar_foreach(
+                config, key, nullptr,
+                [](const git_config_entry* entry, void* payload) -> int {
+                    auto* p = static_cast<Prefixes*>(payload);
+                    const QByteArray value(entry->value ? entry->value : "");
+                    if (!value.isEmpty() && qstricmp(value.constData(), "auto") != 0) {
+                        if (!p->values.contains(value))
+                            p->values << value;
+                        p->charSet = p->charSet || p->isChar;
+                    }
+                    return 0;
+                },
+                &prefixes);
         }
         git_config_free(config);
     }
-    if (comments.isEmpty())
+    QList<QByteArray> comments = prefixes.values;
+    if (!prefixes.charSet && !comments.contains(QByteArrayLiteral("#")))
         comments << QByteArrayLiteral("#");
     // libgit2's note of the conflicts (GitBolt's own merge or pick)
     // has '#' whatever the setting.
@@ -837,6 +856,10 @@ std::string Repository::preparedMessage() const {
         // a title), which a terminal's `git commit` drops.
         QByteArray text;
         if (!picked && commentText(line, comments, &text))
+            continue;
+        // Leading blank lines, which git's own cleanup drops: the one
+        // under revert.reference's placeholder, say.
+        if (message.empty() && line.trimmed().isEmpty())
             continue;
         message.append(line.constData(), static_cast<size_t>(line.size()));
         message += '\n';
