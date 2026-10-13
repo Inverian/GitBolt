@@ -1435,6 +1435,54 @@ private slots:
         }
         QCOMPARE(QString::fromStdString(own.preparedMessage()), expected);
     }
+
+    // -----------------------------------------------------------------
+    // A config file that changed and can't be read again is no config
+    // entry. libgit2's get_entry() took the backend's error for a found
+    // entry and handed back an uninitialized pointer, which the lookups
+    // that ignore errors (rename detection's, among others) then read
+    // and freed through: test_git_service crashed so on Windows, where
+    // .git/config can't be read while another handle replaces it. Here
+    // the reread fails because the file is unreadable, and only the
+    // first lookup after the change rereads it, so that one is rename
+    // detection's. The fix is a patch to the bundled libgit2
+    // (cmake/PatchLibgit2.cmake).
+    // -----------------------------------------------------------------
+    void unreadableChangedConfigIsNoEntry() {
+#if defined(Q_OS_WIN)
+        QSKIP("needs Unix file permissions");
+#elif !defined(GITBOLT_LIBGIT2_GET_ENTRY_FIXED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's get_entry() fix");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        repo.writeFile("a.txt", "changed\n");
+        // Read once, so the handle holds .git/config and its stamp.
+        QVERIFY(repo.repo().status().ok());
+        git_diff* diff = nullptr;
+        QCOMPARE(git_diff_index_to_workdir(&diff, repo.repo().raw(), nullptr, nullptr), 0);
+        const auto freeDiff = qScopeGuard([&] { git_diff_free(diff); });
+
+        const QString config = repo.path() + QStringLiteral("/.git/config");
+        {
+            QFile file(config);
+            QVERIFY(file.open(QIODevice::Append));
+            QVERIFY(file.write("[diff]\n\trenames = copies\n\trenameLimit = 7\n") > 0);
+        }
+        const QFileDevice::Permissions readable = QFile::permissions(config);
+        QVERIFY(QFile::setPermissions(config, QFileDevice::Permissions()));
+        const auto unlock = qScopeGuard([&] { QFile::setPermissions(config, readable); });
+        if (QFile(config).open(QIODevice::ReadOnly))
+            QSKIP("file permissions don't stop this user (root?)");
+
+        // diff.renames and diff.renameLimit, read ignoring errors: the
+        // defaults, as if unset.
+        QCOMPARE(git_diff_find_similar(diff, nullptr), 0);
+        QVERIFY(QFile::setPermissions(config, readable));
+        QVERIFY(repo.repo().status().ok());
+        QCOMPARE(statusLines(repo.repo()), QStringList{QStringLiteral("a.txt changed")});
+#endif
+    }
 };
 
 QTEST_MAIN(TestRepository)

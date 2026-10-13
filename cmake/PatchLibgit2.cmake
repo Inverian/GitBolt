@@ -1,8 +1,9 @@
 # PATCH_COMMAND of the bundled libgit2 (cmake/Libgit2.cmake); runs in
 # its freshly unpacked source directory. Idempotent, because FetchContent
-# may run it again over an already patched tree. Both changes only
-# matter to MSVC, and both are about libgit2 being a static library here.
-# A version bump that moves the patched text fails here, loudly.
+# may run it again over an already patched tree. The first two changes
+# only matter to MSVC, and are about libgit2 being a static library
+# here; the third fixes a crash, on every platform. A version bump that
+# moves the patched text fails here, loudly.
 
 # Replaces <from> with <to> in <file>, then fails if <leftover> (a regex)
 # still matches: the upstream text changed and this patch needs updating.
@@ -36,3 +37,21 @@ gitbolt_patch(include/git2/common.h
     "# define GIT_EXTERN(type) __declspec(dllexport) type __cdecl"
     "# define GIT_EXTERN(type) type __cdecl"
     "define GIT_EXTERN\\(type\\) __declspec\\(dllexport\\)")
+
+# get_entry() took any answer from a config backend other than "not
+# found" for an entry, an error too: it then handed back the
+# uninitialized entry pointer, and the callers that ignore errors
+# (git_config__get_int_force and the other *_force lookups, such as
+# status's rename limit) read it and called its free function through
+# it, a jump to garbage. A backend errs when it rereads a config file
+# that changed and the read fails: on Windows, while another process
+# or handle is replacing .git/config (`git push -u`, `git config`, a
+# remote added). test_git_service crashed so on Windows CI, at address
+# 0, in about 1 in 35 runs of its remote-op tests (a status refresh
+# reading the rename limit as the test rewrote .git/config through
+# another handle). Unfixed in libgit2's main branch as of 2026-10-13;
+# drop this once a release sets *out on success only.
+gitbolt_patch(src/libgit2/config.c
+    "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}"
+    "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\tif (res == 0)\n\t\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}"
+    "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*\\*out = &be->entry")

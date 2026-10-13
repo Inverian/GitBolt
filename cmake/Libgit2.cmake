@@ -36,7 +36,8 @@ function(gitbolt_add_bundled_libgit2)
     # (headers, libgit2.a, pkg-config and CMake files) out of our
     # install tree and so out of every package. Offline:
     # -DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<unpacked v1.9.7 source>, used
-    # as is (PatchLibgit2.cmake, which matters only for MSVC, isn't run).
+    # as is: PatchLibgit2.cmake isn't run, so its MSVC changes and its
+    # config crash fix are missing unless that tree has them.
     # The patch script's hash is part of the command, so editing the
     # script re-runs it in existing build directories too.
     set(_patch ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PatchLibgit2.cmake)
@@ -121,6 +122,14 @@ function(gitbolt_add_bundled_libgit2)
     endif()
 
     add_subdirectory(${libgit2_SOURCE_DIR} ${libgit2_BINARY_DIR} EXCLUDE_FROM_ALL)
+
+    # Whether this tree has PatchLibgit2.cmake's get_entry() fix (an
+    # offline source directory may not): the test that needs it skips
+    # without it.
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/config.c _config_c)
+    if(_config_c MATCHES "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*if \\(res == 0\\)")
+        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_GET_ENTRY_FIXED)
+    endif()
 
     # Say so at configure time, not as an #error deep in the build: a
     # Unix libgit2 with nanosecond times needs one of these fields.
