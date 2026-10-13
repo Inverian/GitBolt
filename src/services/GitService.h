@@ -21,11 +21,13 @@ namespace gitbolt::services {
 
 /// What the in-progress bar's Skip and Abort need to know before they
 /// ask (GitService::inspectStop()): GitProcess::committedRebaseStop(),
-/// hasTrackedChanges() and stagedWorkWithoutPick().
+/// hasTrackedChanges() and stagedWorkWithoutPick(). Its Continue of a
+/// paused sequence: GitProcess::unpickedSequenceStop(), alone.
 struct StopFacts {
     QString committedRebaseStop;
     bool trackedChanges = false;
     bool stagedWithoutPick = false;
+    QString unpickedSequenceStop;
 };
 
 /// Threading rule. A GitService's state belongs to the thread it lives
@@ -343,8 +345,9 @@ public:
     /// still the open one (reportTo; dropped otherwise). They run git:
     /// git status, and two patch-ids at a reword's stop, which take
     /// seconds on a big commit, and froze the window when the bar's
-    /// buttons asked on the GUI thread.
-    void inspectStop(std::function<void(const StopFacts&)> done);
+    /// buttons asked on the GUI thread. With `continuing` (Continue of a
+    /// paused sequence), only StopFacts::unpickedSequenceStop.
+    void inspectStop(std::function<void(const StopFacts&)> done, bool continuing = false);
 
     /// Why `plan` can't run on the open repository as it is now, or an
     /// empty string when it can: HEAD has moved, or another branch is

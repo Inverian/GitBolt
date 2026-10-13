@@ -216,17 +216,19 @@ private:
     /// open then, and Edit patterns applied one repository's sparse
     /// patterns to another, whose files went.
     bool repositoryChangedSince(const std::string& key, const QString& notDone);
-    /// For the in-progress bar's Skip and Abort: finds the stop's
-    /// GitService::StopFacts on a worker, the bar busy meanwhile, then
-    /// calls `ask` with them and the open repository's key (for
-    /// repositoryChangedSince() after its question), if that repository
-    /// is still open and nothing else has started on it.
     /// Closes `window`, a modeless one of the repository with `key`,
     /// once another repository is open (or none is).
     void closeWithRepository(QWidget* window, const std::string& key);
+    /// For the in-progress bar's Skip and Abort, and its Continue of a
+    /// paused sequence (`continuing`): finds the stop's
+    /// services::StopFacts on a worker, the bar busy meanwhile, then
+    /// calls `ask` with them and the open repository's key (for
+    /// repositoryChangedSince() after its question), if that repository
+    /// is still open and nothing else has started on it.
     void inspectStopThen(
         widgets::RepoOperationBar* bar,
-        std::function<void(const services::StopFacts&, const std::string&)> ask);
+        std::function<void(const services::StopFacts&, const std::string&)> ask,
+        bool continuing = false);
     /// Keeps `apply` told whether the repository is busy (a local op or
     /// a step runs), for as long as `context` lives: the modeless
     /// windows' buttons (stashes, submodules) went to git under the op.

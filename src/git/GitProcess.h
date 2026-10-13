@@ -197,6 +197,20 @@ public:
     /// True when git can't tell: it's asked before throwing work away.
     bool stagedWorkWithoutPick() const;
 
+    /// The commit a paused cherry-pick or revert sequence stopped at,
+    /// as its todo names it ("<short id> <subject>"), where git never
+    /// picked (or reverted) it, and its --continue would count it done
+    /// all the same: no pick is pending (CHERRY_PICK_HEAD, REVERT_HEAD),
+    /// and no commit made since the sequence's last own step (its
+    /// abort-safety) is that pick. git stops before a pick it refuses
+    /// over local changes; a commit of them then flipped the bar to
+    /// Continue, which went on from the commit after it. A pick, and a
+    /// commit that concludes a conflicted one, keep the commit's author
+    /// and date; a revert's message names it ("This reverts commit").
+    /// Empty where the pick was made, with no sequence, and where git
+    /// can't tell.
+    std::string unpickedSequenceStop() const;
+
     /// `git commit -F -` (`--amend` too when `amend`), the message on
     /// stdin: the commit a terminal's git would make. The repository's
     /// hooks run (core.hooksPath honoured), commit.gpgSign and

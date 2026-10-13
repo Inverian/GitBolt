@@ -27,8 +27,12 @@
 //   - a second launch handing another repository over while a picker
 //     or a question is up changes nothing in either repository (Delete
 //     branch, Undo, Checkout, Merge, tags, remote Delete, the sidebar's
-//     Deletes, the Reflog and Worktrees windows, Skip), and the
-//     modeless windows of the first one close;
+//     Deletes, New Branch, Rename and Set Upstream, the Reflog and
+//     Worktrees windows, Skip, the Commit dialog's Discard), and the
+//     modeless windows of the first one close, once a row's context
+//     menu up in them is gone (deleted under it, GitBolt crashed);
+//   - Continue on a cherry-pick or revert sequence whose stop git never
+//     picked, a commit made since, asks before git leaves it out;
 //   - Commit & Push pushes though a quiet auto-fetch ran as the commit
 //     landed; the in-progress bar shows no merge while a merge's
 //     post-merge hook runs; the Commit tab's "contained in" reply of
@@ -52,7 +56,9 @@
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QScopedValueRollback>
@@ -64,6 +70,7 @@
 #include <QTest>
 #include <QTextBrowser>
 #include <QTimer>
+#include <QTreeView>
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
@@ -142,8 +149,9 @@ private:
 // whatever event loop is turning, a picker's or a question's included.
 // At the first modal dialog this opens `other` (openRepositoryAtPath,
 // as main() does) and waits for it to land, then answers that dialog
-// and every later one: Yes (or OK) on a message box; on any other
-// dialog, `fill` first (a picker's choice, a form's fields), then OK.
+// and every later one: Yes (or OK, or Discard) on a message box; on
+// any other dialog, `fill` first (a picker's choice, a form's fields),
+// then OK.
 class HandOffThenAnswer {
 public:
     HandOffThenAnswer(MainWindow& window, GitService* svc, const QString& other,
@@ -168,6 +176,8 @@ public:
                 QAbstractButton* yes = box->button(QMessageBox::Yes);
                 if (!yes)
                     yes = box->button(QMessageBox::Ok);
+                if (!yes)
+                    yes = box->button(QMessageBox::Discard);
                 if (yes)
                     yes->click();
                 else
@@ -190,14 +200,17 @@ private:
 };
 
 // What a hand-off mustn't change: the branches and tags and where they
-// point, HEAD, the work tree (a linked worktree's too), and the stashes.
+// point, their upstreams, HEAD, the work tree and its changes (a linked
+// worktree's too), and the stashes.
 QString fingerprint(const QString& repo) {
     gitbolt::git::GitProcess git(repo.toStdString());
     QStringList parts;
     for (const std::vector<std::string>& args : std::vector<std::vector<std::string>>{
              {"for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags"},
+             {"config", "--get-regexp", "^branch\\."},
              {"rev-parse", "HEAD"},
              {"status", "--porcelain"},
+             {"diff"},
              {"worktree", "list", "--porcelain"}}) {
         parts << output(git.run(args));
     }
@@ -208,6 +221,54 @@ QString fingerprint(const QString& repo) {
     parts << (QFileInfo::exists(repo + QStringLiteral("/.git/rebase-merge"))
                   ? QStringLiteral("rebase stopped") : QStringLiteral("no rebase"));
     return parts.join(QLatin1Char('\n'));
+}
+
+// The row of `name` in a view of the sidebar's branch model, under
+// whatever category.
+QModelIndex rowOf(const QAbstractItemModel* model, const QString& name,
+                  const QModelIndex& parent = {}) {
+    for (int row = 0; row < model->rowCount(parent); ++row) {
+        const QModelIndex index = model->index(row, 0, parent);
+        if (parent.isValid() && index.data().toString() == name)
+            return index;
+        if (const QModelIndex below = rowOf(model, name, index); below.isValid())
+            return below;
+    }
+    return {};
+}
+
+// Right-clicks `view`'s row `index`, as the user would, and picks the
+// entry of the context menu whose text starts with `entry` once it is
+// up: the menu closed first, as a click on it closes it. Whatever that
+// entry opens (a question, a picker) runs in this call.
+bool pickFromContextMenu(QAbstractItemView* view, const QModelIndex& index,
+                         const QString& entry) {
+    view->scrollTo(index);
+    const QPoint pos = view->visualRect(index).center();
+    if (view->indexAt(pos) != index)
+        return false;
+    bool picked = false;
+    QTimer timer;
+    timer.setInterval(20);
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        if (!menu)
+            return;
+        timer.stop();
+        QAction* want = nullptr;
+        for (QAction* a : menu->actions()) {
+            if (a->text().startsWith(entry))
+                want = a;
+        }
+        menu->close();
+        if (want && want->isEnabled()) {
+            picked = true;
+            want->trigger();
+        }
+    });
+    timer.start();
+    emit view->customContextMenuRequested(pos);
+    return picked;
 }
 
 } // namespace
@@ -643,6 +704,10 @@ private slots:
         QTest::newRow("Delete remote branch") << QStringLiteral("commands.delete-remote-branch");
         QTest::newRow("sidebar Delete") << QStringLiteral("sidebar.delete");
         QTest::newRow("sidebar Delete from remote") << QStringLiteral("sidebar.delete-remote");
+        QTest::newRow("sidebar New Branch") << QStringLiteral("branchTree.newBranch");
+        QTest::newRow("sidebar Rename") << QStringLiteral("sidebar.rename");
+        QTest::newRow("sidebar Set upstream") << QStringLiteral("sidebar.set-upstream");
+        QTest::newRow("Commit dialog Discard") << QStringLiteral("commit.discard");
         QTest::newRow("Reflog Reset --hard") << QStringLiteral("view.reflog");
         QTest::newRow("Worktree Remove") << QStringLiteral("repository.manage-worktrees");
         QTest::newRow("Skip at an edit stop") << QStringLiteral("bar.skip");
@@ -685,6 +750,16 @@ private slots:
                 QVERIFY(git(repo, {"-c", "sequence.editor=sed -i.bak 's/^pick/edit/'",
                                    "rebase", "-q", "-i", "HEAD~1"}));
         }
+        if (flow == QLatin1String("commit.discard")) {
+            // Both with an uncommitted edit of f.txt, theirs alone.
+            for (const QString& repo : {a, b}) {
+                QVERIFY(writeFile(repo + QStringLiteral("/f.txt"), "one\n"));
+                QVERIFY(git(repo, {"add", "f.txt"}));
+                QVERIFY(git(repo, {"commit", "-q", "-m", "f"}));
+                QVERIFY(writeFile(repo + QStringLiteral("/f.txt"),
+                                  "work of " + QFileInfo(repo).fileName().toUtf8() + '\n'));
+            }
+        }
         const QString beforeA = fingerprint(a);
         const QString beforeB = fingerprint(b);
 
@@ -702,6 +777,14 @@ private slots:
                     if (items.contains(want))
                         picker->setTextValue(want);
                 }
+                // The sidebar's names: one that is in neither, and an
+                // upstream both have.
+                if (dialog->windowTitle() == QLatin1String("New Branch"))
+                    picker->setTextValue(QStringLiteral("made-while-asked"));
+                else if (dialog->windowTitle() == QLatin1String("Rename Branch"))
+                    picker->setTextValue(QStringLiteral("renamed-while-asked"));
+                else if (dialog->windowTitle() == QLatin1String("Set Upstream"))
+                    picker->setTextValue(QStringLiteral("origin/release"));
             } else if (qobject_cast<gitbolt::dialogs::TagDialog*>(dialog)) {
                 if (auto* name = dialog->findChild<QLineEdit*>(QStringLiteral("tag.name")))
                     name->setText(QStringLiteral("v2"));
@@ -730,6 +813,31 @@ private slots:
             QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && !bar->isBusy(), 10000);
             emit bar->skipRequested();
             QTRY_VERIFY_WITH_TIMEOUT(handOff.handedOff && !handOff.asked.isEmpty(), 15000);
+        } else if (flow == QLatin1String("sidebar.rename")
+                   || flow == QLatin1String("sidebar.set-upstream")) {
+            // From the branch's context menu, as the user does.
+            auto* view = tree->findChild<QTreeView*>(QStringLiteral("branchTree.view"));
+            QVERIFY(view);
+            QModelIndex feature;
+            QTRY_VERIFY((feature = rowOf(view->model(), QStringLiteral("feature"))).isValid());
+            QVERIFY(pickFromContextMenu(view, feature,
+                                        flow == QLatin1String("sidebar.rename")
+                                            ? QStringLiteral("Rename '")
+                                            : QStringLiteral("Set Upstream")));
+        } else if (flow == QLatin1String("commit.discard")) {
+            action(window, "act.commit")->trigger();
+            auto* dialog = window.findChild<gitbolt::dialogs::CommitDialog*>();
+            QVERIFY(dialog);
+            auto* unstaged = dialog->findChild<QAbstractItemView*>(
+                QStringLiteral("commit.unstagedList"));
+            auto* discard = dialog->findChild<QPushButton*>(QStringLiteral("commit.discardBtn"));
+            QVERIFY(unstaged && discard);
+            QTRY_VERIFY_WITH_TIMEOUT(unstaged->model()->rowCount() == 1, 10000);
+            unstaged->setCurrentIndex(unstaged->model()->index(0, 0));
+            unstaged->selectionModel()->select(unstaged->model()->index(0, 0),
+                                               QItemSelectionModel::ClearAndSelect);
+            QTRY_VERIFY(discard->isEnabled());
+            discard->click();
         } else {
             action(window, flow.toLatin1().constData())->trigger();
         }
@@ -749,6 +857,226 @@ private slots:
         // The modeless windows of A are gone, B open.
         QTRY_VERIFY(!window.findChild<gitbolt::dialogs::ReflogDialog*>());
         QTRY_VERIFY(!window.findChild<gitbolt::widgets::WorktreeWidget*>());
+    }
+
+    // The sidebar's New Branch, Rename and Set Upstream ask in the
+    // window now (they asked in the sidebar, and went to whichever
+    // repository was open once answered): with no hand-off, what is
+    // answered is done, to the repository open.
+    void sidebarBranchQuestionsActOnTheOpenRepository() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString server = scratch.filePath(QStringLiteral("server.git"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        gitbolt::git::GitProcess git(work.toStdString());
+        QVERIFY(QDir().mkpath(work));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"branch", "feature"})));
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "main", "feature"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, work);
+        QVERIFY(svc);
+        auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
+        QVERIFY(tree);
+        auto* view = tree->findChild<QTreeView*>(QStringLiteral("branchTree.view"));
+        QVERIFY(view);
+        // Answers the next text question with `text`, noting its title.
+        QString asked;
+        const auto answerWith = [&asked](const QString& text) {
+            auto* timer = new QTimer;
+            timer->setInterval(20);
+            QObject::connect(timer, &QTimer::timeout, [timer, text, &asked] {
+                auto* input = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                if (!input)
+                    return;
+                timer->stop();
+                timer->deleteLater();
+                asked = input->windowTitle();
+                input->setTextValue(text);
+                input->accept();
+            });
+            timer->start();
+        };
+        const auto branches = [&] {
+            return output(git.run({"for-each-ref", "--format=%(refname:short)", "refs/heads"}));
+        };
+
+        answerWith(QStringLiteral("made-here"));
+        action(window, "branchTree.newBranch")->trigger();
+        QCOMPARE(asked, QStringLiteral("New Branch"));
+        QTRY_COMPARE_WITH_TIMEOUT(branches(), QStringLiteral("feature\nmade-here\nmain"), 10000);
+
+        QModelIndex feature;
+        QTRY_VERIFY((feature = rowOf(view->model(), QStringLiteral("feature"))).isValid());
+        answerWith(QStringLiteral("origin/main"));
+        QVERIFY(pickFromContextMenu(view, feature, QStringLiteral("Set Upstream")));
+        QCOMPARE(asked, QStringLiteral("Set Upstream"));
+        QTRY_COMPARE_WITH_TIMEOUT(output(git.run({"rev-parse", "--abbrev-ref", "feature@{u}"})),
+                                  QStringLiteral("origin/main"), 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 10000);
+
+        QTRY_VERIFY((feature = rowOf(view->model(), QStringLiteral("feature"))).isValid());
+        answerWith(QStringLiteral("renamed"));
+        QVERIFY(pickFromContextMenu(view, feature, QStringLiteral("Rename '")));
+        QCOMPARE(asked, QStringLiteral("Rename Branch"));
+        QTRY_COMPARE_WITH_TIMEOUT(branches(), QStringLiteral("made-here\nmain\nrenamed"), 10000);
+    }
+
+    // A row's context menu in the Reflog or Worktrees window is a QMenu
+    // on the stack of the window's slot, parented to the window, in
+    // exec(): up, but no modal widget. An open that landed meanwhile (a
+    // second launch's hand-off, a slow open from Recent) closed the
+    // window there and then, and WA_DeleteOnClose deleted it, the menu
+    // with it: GitBolt crashed once exec() returned. The window waits
+    // for the menu now, and closes once it is gone.
+    void contextMenuOutlivesAHandOff_data() {
+        QTest::addColumn<QString>("flow");
+        QTest::newRow("Reflog") << QStringLiteral("view.reflog");
+        QTest::newRow("Worktrees") << QStringLiteral("repository.manage-worktrees");
+    }
+
+    void contextMenuOutlivesAHandOff() {
+        QFETCH(QString, flow);
+        gitbolt::test::TestRepo a;
+        gitbolt::test::TestRepo b;
+        QVERIFY(a.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        QVERIFY(a.writeAndCommit(QStringLiteral("a.txt"), "b\n", QStringLiteral("second")).ok());
+        QVERIFY(b.writeAndCommit(QStringLiteral("b.txt"), "b\n", QStringLiteral("base")).ok());
+        QTemporaryDir linked;
+        QVERIFY(linked.isValid());
+        gitbolt::git::GitProcess git(a.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "review",
+                                   linked.filePath(QStringLiteral("review")).toStdString()})));
+
+        MainWindow window;
+        auto* svc = openIn(window, a.path());
+        QVERIFY(svc);
+        action(window, flow.toLatin1().constData())->trigger();
+        QPointer<QWidget> opened;
+        QAbstractItemView* rows = nullptr;
+        if (flow == QLatin1String("view.reflog")) {
+            auto* reflog = window.findChild<gitbolt::dialogs::ReflogDialog*>();
+            QVERIFY(reflog);
+            opened = reflog;
+            rows = reflog->findChild<QAbstractItemView*>();
+        } else {
+            auto* worktrees = window.findChild<gitbolt::widgets::WorktreeWidget*>();
+            QVERIFY(worktrees);
+            opened = worktrees->window();
+            rows = worktrees->findChild<QAbstractItemView*>();
+        }
+        QVERIFY(opened && opened != &window && rows);
+        QTRY_VERIFY_WITH_TIMEOUT(rows->model()->rowCount() > 0, 10000);
+        const QModelIndex row = rows->model()->index(rows->model()->rowCount() - 1, 0);
+        rows->scrollTo(row);
+
+        // While the menu is up: B opens, as from a second launch, and
+        // what that sets off (the window's close, deferred deletes) has
+        // its time.
+        bool menuUp = false;
+        bool handedOff = false;
+        bool aliveUnderTheMenu = false;
+        QTimer timer;
+        timer.setInterval(20);
+        QObject::connect(&timer, &QTimer::timeout, [&] {
+            auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            if (!menu)
+                return;
+            timer.stop();
+            menuUp = true;
+            const std::string before = svc->openKey();
+            window.openRepositoryAtPath(b.path());
+            handedOff = QTest::qWaitFor([&] {
+                return svc->isOpen() && !svc->openPending() && svc->openKey() != before;
+            }, 15000);
+            QTest::qWait(500);
+            aliveUnderTheMenu = !opened.isNull();
+            menu->close();
+        });
+        timer.start();
+        emit rows->customContextMenuRequested(rows->visualRect(row).center());
+        QVERIFY(menuUp);
+        QVERIFY(handedOff);
+        QVERIFY(aliveUnderTheMenu);
+        // Then it closes, A's window, with B open.
+        QTRY_VERIFY(opened.isNull());
+    }
+
+    // `git cherry-pick X Y` (or a revert) turned down over staged
+    // changes, from a terminal, and the changes then committed, as
+    // git's hint says to: HEAD has moved, so the bar offers Continue
+    // again, and git's --continue takes X for done though it was never
+    // picked. Continue left it out with "Cherry-pick complete.". It asks
+    // first now, and goes on without X only when told to.
+    void continueOfASequenceThatNeverPickedItsStopAsksFirst_data() {
+        QTest::addColumn<bool>("revert");
+        QTest::newRow("cherry-pick") << false;
+        QTest::newRow("revert") << true;
+    }
+
+    void continueOfASequenceThatNeverPickedItsStopAsksFirst() {
+        QFETCH(bool, revert);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("f.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const std::string main = branchOf(git);
+        if (!revert)
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        // Authored a while back, as a commit to pick is: one of the
+        // user's in the same second would pass for its pick.
+        for (const char* name : {"X", "Y"}) {
+            repo.writeFile(QString::fromLatin1(name) + QStringLiteral(".txt"), "x\n");
+            QVERIFY(succeeded(git.run({"add", std::string(name) + ".txt"})));
+            QVERIFY(succeeded(git.run({"commit", "-q", "--date=2020-01-02T03:04:05", "-m",
+                                       name})));
+        }
+        if (!revert)
+            QVERIFY(succeeded(git.run({"checkout", "-q", main})));
+        repo.writeFile(QStringLiteral("f.txt"), "staged work\n");
+        QVERIFY(succeeded(git.run({"add", "f.txt"})));
+        QVERIFY(!succeeded(revert ? git.run({"revert", "--no-edit", "HEAD", "HEAD~1"})
+                                  : git.run({"cherry-pick", "side~1", "side"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "my staged work"})));
+        const QString before = output(git.run({"log", "--format=%s"}));
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        auto* bar = window.findChild<gitbolt::widgets::RepoOperationBar*>();
+        QVERIFY(bar);
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && bar->sequencePaused() && !bar->isBusy(),
+                                 10000);
+        QVERIFY(!bar->sequenceSkippable());
+
+        {
+            BoxAnswerer answer(QMessageBox::Cancel);
+            emit bar->continueRequested();
+            QVERIFY(bar->isBusy());
+            QTRY_VERIFY_WITH_TIMEOUT(!answer.text.isEmpty(), 15000);
+            QVERIFY2(answer.text.startsWith(revert ? QStringLiteral("Continue without reverting ")
+                                                   : QStringLiteral("Continue without "))
+                         && answer.text.contains(revert ? QStringLiteral(" Y?")
+                                                        : QStringLiteral(" X?")),
+                     qPrintable(answer.text));
+        }
+        QTRY_VERIFY(!bar->isBusy());
+        QVERIFY(QFileInfo::exists(repo.path() + QStringLiteral("/.git/sequencer")));
+        QCOMPARE(output(git.run({"log", "--format=%s"})), before);
+
+        // Told to: git goes on with the rest, the first left out.
+        BoxAnswerer answer(QMessageBox::Yes);
+        emit bar->continueRequested();
+        QTRY_VERIFY_WITH_TIMEOUT(!answer.text.isEmpty(), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(repo.path() + QStringLiteral("/.git/sequencer")),
+                                 15000);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%s"})),
+                 revert ? QStringLiteral("Revert \"X\"") : QStringLiteral("Y"));
+        QTRY_VERIFY(!bar->isBusy());
     }
 
     // Commit & Push, the commit landing while a quiet auto-fetch (a

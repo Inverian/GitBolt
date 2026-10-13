@@ -25,6 +25,7 @@
 
 #ifdef Q_OS_MACOS
 #include <crt_externs.h>
+#include <mach/mach.h>
 #else
 extern "C" char** environ;
 #endif
@@ -171,6 +172,15 @@ QString queryLoginShellPath(const QString& shell, int timeoutMs) {
     for (const int sig : {SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGCHLD, SIGHUP})
         sigaddset(&defaults, sig);
     posix_spawnattr_setsigdefault(&attributes, &defaults);
+#ifdef Q_OS_MACOS
+    // The system's crash handling, not a task-level port inherited from
+    // GitBolt: a test session's (CrashHandler) is read by nobody, and a
+    // shell that died of a signal waited on it, unkillable, until
+    // GitBolt quit. A posix_spawn runs no pthread_atfork handler, which
+    // resets it for the children that fork.
+    posix_spawnattr_setexceptionports_np(&attributes, EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+                                         MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+#endif
 
     pid_t pid = 0;
     const int spawned = posix_spawn(&pid, program.constData(), &actions, &attributes,

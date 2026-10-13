@@ -1293,14 +1293,19 @@ bool GitService::hasTrackedChanges() const {
     return proc && proc->hasTrackedChanges();
 }
 
-void GitService::inspectStop(std::function<void(const StopFacts&)> done) {
+void GitService::inspectStop(std::function<void(const StopFacts&)> done, bool continuing) {
     auto proc = processIfOpen();
     if (!proc) return;
-    runner_.run([this, key = openKey_, proc = std::move(*proc), done = std::move(done)]() mutable {
+    runner_.run([this, key = openKey_, proc = std::move(*proc), done = std::move(done),
+                 continuing]() mutable {
         StopFacts facts;
-        facts.committedRebaseStop = QString::fromStdString(proc.committedRebaseStop());
-        facts.trackedChanges = proc.hasTrackedChanges();
-        facts.stagedWithoutPick = proc.stagedWorkWithoutPick();
+        if (continuing) {
+            facts.unpickedSequenceStop = QString::fromStdString(proc.unpickedSequenceStop());
+        } else {
+            facts.committedRebaseStop = QString::fromStdString(proc.committedRebaseStop());
+            facts.trackedChanges = proc.hasTrackedChanges();
+            facts.stagedWithoutPick = proc.stagedWorkWithoutPick();
+        }
         postReport(std::move(key), [done = std::move(done), facts] { done(facts); });
     });
 }

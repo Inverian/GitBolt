@@ -15,6 +15,18 @@
 //   check-ports   (macOS) don't crash: print whether a task-level port
 //                 takes EXC_CRASH ("crash port: set" or "crash port:
 //                 none") once the handler is installed, and exit 0
+//   check-child-ports
+//                 (macOS) as check-ports, then the same for children
+//                 started the ways GitBolt starts them: a fork ("fork:
+//                 set|none"), a QProcess with and without a child
+//                 modifier ("qprocess: …", "qprocess with a modifier:
+//                 …"), and util::queryLoginShellPath()'s posix_spawn
+//                 ("login shell: …"); and exit 0
+//   report-ports  a child of check-child-ports: print "crash port: set"
+//                 or "crash port: none", installing nothing
+//   -ilc …        the same, as a login shell queryLoginShellPath() asks
+//                 for its PATH: the marker, then "/crash-port-set" or
+//                 "/crash-port-none"
 //
 // A user session's crash keeps macOS's crash reporter out of it here,
 // as the helper's own doing (keepCrashReporterOut). A test session's
@@ -25,7 +37,10 @@
 //
 
 #include "util/CrashHandler.h"
+#include "util/LoginPath.h"
 
+#include <QCoreApplication>
+#include <QProcess>
 #include <QtGlobal>
 
 #include <csignal>
@@ -34,6 +49,8 @@
 #include <cstring>
 
 #include <dlfcn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #ifdef Q_OS_MACOS
 #include <mach/mach.h>
@@ -113,16 +130,64 @@ bool crashPortSet() {
 }
 #endif
 
+#ifdef Q_OS_MACOS
+const char* setOrNone(bool set) {
+    return set ? "set" : "none";
+}
+
+// A child's word on its own port, run the ways GitBolt starts children.
+void reportChildPorts(int argc, char* argv[]) {
+    std::fflush(stdout);
+    const pid_t pid = ::fork();
+    if (pid == 0)
+        ::_exit(crashPortSet() ? 1 : 0);
+    int status = 0;
+    const bool waited = pid > 0 && ::waitpid(pid, &status, 0) == pid && WIFEXITED(status);
+    std::printf("fork: %s\n", waited ? setOrNone(WEXITSTATUS(status) == 1) : "<failed>");
+
+    QCoreApplication app(argc, argv);
+    const QString self = QCoreApplication::applicationFilePath();
+    for (const bool modifier : {false, true}) {
+        QProcess child;
+        if (modifier)
+            child.setChildProcessModifier([] { ::setsid(); });   // as GitProcess's
+        child.start(self, {QStringLiteral("report-ports")});
+        const bool done = child.waitForFinished(30000) && child.exitCode() == 0;
+        std::printf("qprocess%s: %s\n", modifier ? " with a modifier" : "",
+                    done ? child.readAllStandardOutput().trimmed().constData() : "<failed>");
+    }
+    const QString path = gitbolt::util::queryLoginShellPath(self, 30000);
+    std::printf("login shell: %s\n",
+                path == QLatin1String("/crash-port-set")    ? "set"
+                : path == QLatin1String("/crash-port-none") ? "none"
+                                                            : "<failed>");
+    std::fflush(stdout);
+}
+#endif
+
 } // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_MACOS
+    // A child of check-child-ports: its port as it started, nothing set.
+    if (argc >= 2 && std::strcmp(argv[1], "-ilc") == 0) {
+        std::printf("__GITBOLT_LOGIN_PATH__\n/crash-port-%s\n", setOrNone(crashPortSet()));
+        return 0;
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "report-ports") == 0) {
+        std::printf("crash port: %s\n", setOrNone(crashPortSet()));
+        return 0;
+    }
+#endif
     bool testSession = false;
     bool fault = false;
     bool checkPorts = false;
+    bool checkChildPorts = false;
     for (int i = 1; i < argc; ++i) {
         testSession = testSession || std::strcmp(argv[i], "test-session") == 0;
         fault = fault || std::strcmp(argv[i], "fault") == 0;
-        checkPorts = checkPorts || std::strcmp(argv[i], "check-ports") == 0;
+        checkChildPorts = checkChildPorts || std::strcmp(argv[i], "check-child-ports") == 0;
+        checkPorts = checkPorts || checkChildPorts || std::strcmp(argv[i], "check-ports") == 0;
     }
 #ifdef Q_OS_MACOS
     if (!testSession && !checkPorts)
@@ -133,6 +198,8 @@ int main(int argc, char* argv[]) {
     if (checkPorts) {
 #ifdef Q_OS_MACOS
         std::printf("crash port: %s\n", crashPortSet() ? "set" : "none");
+        if (checkChildPorts)
+            reportChildPorts(argc, argv);
 #else
         std::printf("crash port: n/a\n");
 #endif

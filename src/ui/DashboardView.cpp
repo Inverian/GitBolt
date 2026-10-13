@@ -299,13 +299,15 @@ void DashboardView::setupUi()
 void DashboardView::applyCardColors()
 {
     // Dark: lighter than the card (#3c3c3c, #323232 hovered), at 5:1 or
-    // more. Light: the muted text grey (4.7:1 on the window); the
-    // palette(mid) it had is a border's grey, at 1.7:1.
+    // more. Light: darker than the muted text grey, which read at 4.7:1
+    // on the card (the window's #efefef) but 3.3:1 on a hovered one
+    // (palette(midlight), #cacaca); #505050 is 7:1 and 4.9:1. The
+    // palette(mid) it had before is a border's grey, at 1.7:1.
     const bool dark = conf::ThemeService::paletteIsDark();
     const QString sheet = QStringLiteral(
         "QLabel { font-size: 13pt; color: %1;"
         "         background: transparent; border: none; }")
-        .arg(dark ? QStringLiteral("#b4b4b4") : conf::ThemeService::mutedTextColor().name());
+        .arg(dark ? QStringLiteral("#b4b4b4") : QStringLiteral("#505050"));
     for (QLabel* label : std::as_const(cardDescriptions_)) {
         if (label->styleSheet() != sheet)
             label->setStyleSheet(sheet);

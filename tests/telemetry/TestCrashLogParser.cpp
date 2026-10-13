@@ -679,6 +679,36 @@ private slots:
         QCOMPARE(crashPort({QStringLiteral("check-ports")}), QStringLiteral("crash port: none"));
 #endif
     }
+
+    // macOS: that port went to every child too (task-level ports are
+    // inherited across fork and exec), and nothing reads it: a git, a
+    // hook, ssh or a terminal's program that died of a signal waited
+    // there for a reply, unkillable, until GitBolt quit, and a commit
+    // waited out its five minutes. A test session's children start with
+    // the system's crash handling, however GitBolt starts them.
+    void testSessionChildrenKeepTheSystemsCrashHandling() {
+#if !defined(GITBOLT_CRASH_HELPER) || !defined(Q_OS_MACOS)
+        QSKIP("macOS only: the port is a Mach one");
+#else
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QProcess helper;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(QStringLiteral("HOME"), home.path());
+        helper.setProcessEnvironment(env);
+        helper.start(QStringLiteral(GITBOLT_CRASH_HELPER),
+                     {QStringLiteral("test-session"), QStringLiteral("check-child-ports")});
+        QVERIFY(helper.waitForFinished(120000));
+        QCOMPARE(helper.exitStatus(), QProcess::NormalExit);
+        QCOMPARE(helper.exitCode(), 0);
+        QCOMPARE(QString::fromUtf8(helper.readAllStandardOutput()).trimmed(),
+                 QStringLiteral("crash port: set\n"
+                                "fork: none\n"
+                                "qprocess: crash port: none\n"
+                                "qprocess with a modifier: crash port: none\n"
+                                "login shell: none"));
+#endif
+    }
 };
 
 QTEST_GUILESS_MAIN(TestCrashLogParser)

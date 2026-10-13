@@ -864,6 +864,11 @@ void CommitDialog::onDiscardSelected()
 {
     const QStringList paths = selectedUnstagedPaths();
     if (paths.isEmpty() || stagingLocked_) return;
+    // The repository the question is about: a second launch can hand
+    // another one over while it is up (main() opens it at once, in the
+    // box's event loop), and discardFile() then checked those paths out
+    // there, its uncommitted edits gone for good.
+    const std::string key = svc_->openKey();
 
     const QString detail = paths.size() == 1
         ? tr("Discard all uncommitted changes to %1?\n\nThis cannot be undone.")
@@ -876,6 +881,16 @@ void CommitDialog::onDiscardSelected()
         QMessageBox::Discard | QMessageBox::Cancel,
         QMessageBox::Cancel);
     if (answer != QMessageBox::Discard) return;
+    // Another repository opened, or opening, meanwhile (as
+    // MainWindow::repositoryChangedSince() tells it): nothing is
+    // discarded. The open closes this dialog; the window says why.
+    if (!svc_->isOpen() || svc_->openPending() || svc_->openKey() != key) {
+        emit repositoryChangedUnderQuestion(tr("no changes were discarded."));
+        return;
+    }
+    // Nor under a commit or a local op that started meanwhile, nor
+    // from a dialog closed since.
+    if (!isVisible() || stagingLocked_) return;
 
     for (const QString& p : paths)
         svc_->discardFile(p);

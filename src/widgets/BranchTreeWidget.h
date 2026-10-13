@@ -48,17 +48,23 @@ signals:
     void checkoutRequested(const QString& name);
     /// "Checkout as local branch" on a remote branch ("origin/x").
     void checkoutRemoteRequested(const QString& remoteBranch);
-    void createBranchRequested(const QString& name);
+    /// New Branch (the toolbar's, a local branch's context menu): the
+    /// receiver asks for the name, as it does for Rename's and Set
+    /// Upstream's and for Delete's confirmation, so that what it does
+    /// goes to the repository asked about.
+    void createBranchRequested();
     /// The context menu's Delete on a local branch. Not asked here:
     /// the receiver confirms first.
     void deleteBranchRequested(const QString& name);
-    void renameBranchRequested(const QString& oldName, const QString& newName);
+    /// Rename on a local branch; the receiver asks for the new name.
+    void renameBranchRequested(const QString& name);
     void mergeRequested(const QString& name);
     void pushRequested(const QString& remote, const QString& branch);
     /// A remote-tracking branch ("origin/feature") to delete on its
     /// remote; the receiver confirms before doing anything.
     void deleteRemoteBranchRequested(const QString& remoteBranch);
-    void setUpstreamRequested(const QString& branch, const QString& upstream);
+    /// Set Upstream on a local branch; the receiver asks for it.
+    void setUpstreamRequested(const QString& branch);
 
 private slots:
     void onDoubleClicked(const QModelIndex& index);

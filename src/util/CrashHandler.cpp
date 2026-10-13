@@ -19,6 +19,7 @@
 #include <unistd.h>
 #if defined(Q_OS_MACOS)
 #include <mach/mach.h>
+#include <pthread.h>
 #include <sys/ucontext.h>
 #endif
 #elif defined(Q_OS_WIN)
@@ -301,8 +302,24 @@ void keepCrashReporterOut() {
         mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
         return;
     }
-    task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY, port,
-                             EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+    if (task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+                                 port, EXCEPTION_DEFAULT, THREAD_STATE_NONE)
+        != KERN_SUCCESS)
+        return;
+    // Not for the children. Task-level ports are inherited across fork
+    // and exec, and nothing ever reads this one (it is there so that the
+    // kernel hands GitBolt's own death to it, not to ReportCrash): a
+    // git, a hook, ssh or a terminal's program that died of a signal
+    // sent its EXC_CRASH there and waited for a reply, unkillable, until
+    // GitBolt quit, and a commit waited out its five minutes. Each child
+    // starts with the system's handling: QProcess and forkpty fork, and
+    // the one posix_spawn (the login shell's PATH) sets its own
+    // (util/LoginPath.cpp). GitBolt's own askpass child, a test
+    // session's too, sets this one again.
+    pthread_atfork(nullptr, nullptr, [] {
+        task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+                                 MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+    });
 }
 } // namespace
 #endif

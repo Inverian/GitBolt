@@ -9,6 +9,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -1168,9 +1169,26 @@ bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
     if (both.size() == 2 && both[0] == both[1])
         return true;
     const auto entry = run({"log", "-g", "-1", "--format=%gs", "HEAD"});
-    if (!entry || !entry->success())
-        return false;
-    const QString subject = QString::fromStdString(entry->stdoutData).trimmed();
+    const QString subject = entry && entry->success()
+        ? QString::fromStdString(entry->stdoutData).trimmed() : QString();
+    if (subject.isEmpty()) {
+        // No HEAD reflog to ask (core.logAllRefUpdates=false, and none
+        // written before): git says nothing (2.39 exits 0). That ruled
+        // the retry out, and Continue said "Rebase complete." with the
+        // reword gone. git's pick keeps the old message (the reword is
+        // what the hook turned down); the user's amend at the stop is
+        // what changes it. startsWith: whatever a prepare-commit-msg
+        // hook added after it, as in headIsPickOf().
+        const auto commit = [&](const std::string& rev) {
+            return run({"log", "-1", "--format=%B", rev});
+        };
+        const auto now = commit("HEAD");
+        const auto was = commit(hash);
+        if (!now || !was || !now->success() || !was->success())
+            return false;
+        return QString::fromStdString(now->stdoutData).trimmed()
+            .startsWith(QString::fromStdString(was->stdoutData).trimmed());
+    }
     return subject.startsWith(QLatin1String("rebase (reword)"))
         || subject.startsWith(QLatin1String("rebase -i (reword)"));
 }
@@ -1277,6 +1295,83 @@ bool GitProcess::stagedWorkWithoutPick() const {
     const auto staged = run({"--no-optional-locks", "diff", "--cached", "--quiet",
                              "--ignore-submodules=dirty"});
     return !staged || staged->exitCode != 0;
+}
+
+std::string GitProcess::unpickedSequenceStop() const {
+    // A pick or revert pending: git's --continue commits it.
+    for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+        const QString path = gitPath(QString::fromLatin1(pending));
+        if (path.isEmpty() || QFileInfo::exists(path))
+            return {};
+    }
+    // The todo's first line is the commit git stopped at: its --continue
+    // takes it for done (todo_list.current++), picked or not.
+    QFile todo(gitPath(QStringLiteral("sequencer/todo")));
+    if (!todo.open(QIODevice::ReadOnly))
+        return {};
+    QByteArray line;
+    while (!todo.atEnd() && line.isEmpty()) {
+        line = todo.readLine().simplified();
+        if (line.startsWith('#'))
+            line.clear();
+    }
+    const qsizetype verbEnd = line.indexOf(' ');
+    if (verbEnd < 0)
+        return {};
+    const QByteArray verb = line.left(verbEnd);
+    const QByteArray rest = line.mid(verbEnd + 1);
+    const std::string stop = rest.left(rest.indexOf(' ') < 0 ? rest.size() : rest.indexOf(' '))
+                                 .toStdString();
+    bool revert = false;
+    if (verb == "revert")
+        revert = true;
+    else if (verb != "pick" && verb != "p")
+        return {};
+    const auto full = run({"rev-parse", "--verify", "--quiet", stop + "^{commit}"});
+    if (!full || !full->success())
+        return {};
+    const QString stopId = QString::fromStdString(full->stdoutData).trimmed();
+
+    // The commits made since the sequence's own last step: git writes
+    // HEAD to abort-safety after each commit of its own. Where it
+    // hasn't one (an older git), HEAD alone.
+    QByteArray since;
+    if (QFile safety(gitPath(QStringLiteral("sequencer/abort-safety")));
+        safety.open(QIODevice::ReadOnly))
+        since = safety.readAll().trimmed();
+    std::vector<std::string> range = {"log", "-z", "--date=raw",
+                                      since.isEmpty() ? "-n1" : "-n100",
+                                      revert ? "--format=%B" : "--format=%an%n%ae%n%ad",
+                                      "HEAD"};
+    if (!since.isEmpty())
+        range.push_back("^" + since.toStdString());
+    const auto made = run(range);
+    if (!made || !made->success())
+        return {};
+    const QStringList commits = QString::fromStdString(made->stdoutData)
+                                    .split(QLatin1Char('\0'), Qt::SkipEmptyParts);
+    if (revert) {
+        // git's message, kept through a conflict's MERGE_MSG: "This
+        // reverts commit <id>." (abbreviated with revert.reference).
+        static const QRegularExpression reverts(
+            QStringLiteral("This reverts commit ([0-9a-f]{7,})"));
+        for (const QString& message : commits) {
+            for (auto it = reverts.globalMatch(message); it.hasNext();) {
+                if (stopId.startsWith(it.next().captured(1)))
+                    return {};
+            }
+        }
+    } else {
+        const auto author = run({"log", "-1", "--date=raw", "--format=%an%n%ae%n%ad", stop});
+        if (!author || !author->success())
+            return {};
+        const QString picked = QString::fromStdString(author->stdoutData).trimmed();
+        for (const QString& who : commits) {
+            if (who.trimmed() == picked)
+                return {};
+        }
+    }
+    return rest.toStdString();
 }
 
 Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {

@@ -74,6 +74,11 @@ signals:
     /// toolbar label, status bar) as a manual push.
     void pushAfterCommitRequested();
 
+    /// A question of the dialog's (Discard's) was answered with another
+    /// repository open, or opening: `notDone` says what wasn't done.
+    /// MainWindow says so on its status bar.
+    void repositoryChangedUnderQuestion(const QString& notDone);
+
 protected:
     void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;

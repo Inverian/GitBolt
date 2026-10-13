@@ -143,7 +143,9 @@ A test session that crashes writes its report to
 deletes it. On macOS it also stays out of the system's crash reporter:
 no "GitBolt quit unexpectedly" box on the screen and no `GitBolt-*.ips`
 in `~/Library/Logs/DiagnosticReports`, since the handler of a test
-session takes `EXC_CRASH` itself (`util::CrashHandler::install`). A
+session takes `EXC_CRASH` itself (`util::CrashHandler::install`). The
+processes it starts (git, hooks, ssh, the terminal's shell) don't
+inherit that port: one that crashes is reported by macOS as usual. A
 user's session keeps macOS's crash reporting.
 
 Addressing:

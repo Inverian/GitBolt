@@ -42,7 +42,8 @@ public:
     /// sees the endpoints, and nothing else is set up this early.
     /// On macOS a test session's crash also stays out of the system's
     /// crash reporter (no "quit unexpectedly" box, no .ips report):
-    /// its task-level EXC_CRASH port is one of its own.
+    /// its task-level EXC_CRASH port is one of its own. Its children
+    /// (git, hooks, a terminal's shell) keep the system's handling.
     static void install(const char* appVersion, bool officialBuild,
                         bool envOptOut, bool testSession);
 

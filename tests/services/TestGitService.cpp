@@ -2064,12 +2064,26 @@ private slots:
     // changed lines near the commit's (not a fast-forward): Continue's
     // retry didn't know the pick for the reword's commit (its patch-id
     // was taken with the context lines), and "Rebase complete." came
-    // with the old message.
+    // with the old message. Nor where HEAD keeps no reflog
+    // (core.logAllRefUpdates=false), which the retry asked whether HEAD
+    // was git's pick or the user's amend: git said nothing, and it
+    // never ran.
+    void rewordRetryAfterAPickOntoAMovedBase_data() {
+        QTest::addColumn<bool>("reflog");
+        QTest::newRow("with a reflog") << true;
+        QTest::newRow("with no reflog") << false;
+    }
+
     void rewordRetryAfterAPickOntoAMovedBase() {
+        QFETCH(bool, reflog);
         const IsolatedGitConfig config;
         gitbolt::test::TestRepo repo;
         gitbolt::git::GitProcess work(repo.path().toStdString());
         QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        if (!reflog) {
+            QVERIFY(succeeded(work.run({"config", "core.logAllRefUpdates", "false"})));
+            QVERIFY(QDir(repo.path() + QStringLiteral("/.git/logs")).removeRecursively());
+        }
         const auto commit = [&](const QByteArray& content, const char* message) {
             repo.writeFile(QStringLiteral("f.txt"), content);
             return succeeded(work.run({"add", "f.txt"}))
@@ -2099,6 +2113,7 @@ private slots:
         QVERIFY(output(work.run({"rev-parse", "HEAD"})).toStdString() != c);
         QCOMPARE(output(work.run({"log", "-1", "--format=%s"})), QStringLiteral("C"));
         QCOMPARE(work.committedRebaseStop(), std::string("reword"));
+        QCOMPARE(QFileInfo::exists(repo.path() + QStringLiteral("/.git/logs/HEAD")), reflog);
 
         QVERIFY(QFile::remove(repo.path() + QStringLiteral("/.git/BLOCK")));
         const auto continued = work.rebaseContinue();
@@ -2112,12 +2127,22 @@ private slots:
     // Commit dialog's Amend is there at a rebase stop) to one the hook
     // takes. Continue's retry put the plan's message back over theirs,
     // which the hook turned down again, on every Continue: the rebase
-    // could never be finished from the bar. The user's amend stands.
+    // could never be finished from the bar. The user's amend stands,
+    // where HEAD keeps no reflog to tell it by too.
+    void rewordRetryLeavesTheUsersOwnAmendAlone_data() {
+        QTest::addColumn<bool>("reflog");
+        QTest::newRow("with a reflog") << true;
+        QTest::newRow("with no reflog") << false;
+    }
+
     void rewordRetryLeavesTheUsersOwnAmendAlone() {
+        QFETCH(bool, reflog);
         const IsolatedGitConfig config;
         gitbolt::test::TestRepo repo;
         gitbolt::git::GitProcess work(repo.path().toStdString());
         QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        if (!reflog)
+            QVERIFY(succeeded(work.run({"config", "core.logAllRefUpdates", "false"})));
         QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("OK base")).ok());
         const auto c = repo.writeAndCommit(QStringLiteral("c.txt"), "c\n", QStringLiteral("OK C"));
         QVERIFY(c.ok());
@@ -2131,6 +2156,7 @@ private slots:
         QVERIFY(stopped.ok() && !stopped->success());
         QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
         QVERIFY(succeeded(work.run({"commit", "-q", "--amend", "-m", "OK renamed by me"})));
+        QCOMPARE(QFileInfo::exists(repo.path() + QStringLiteral("/.git/logs/HEAD")), reflog);
 
         const auto continued = work.rebaseContinue();
         QVERIFY2(succeeded(continued), continued.ok() ? continued->stderrData.c_str()
@@ -2223,6 +2249,81 @@ private slots:
         const auto next = work.sequenceSkip(/*revert=*/false);
         QVERIFY2(succeeded(next), next.ok() ? next->stderrData.c_str() : "");
         QCOMPARE(output(work.run({"log", "--format=%s"})), QStringLiteral("Y\ncommit 0"));
+    }
+
+    // The same sequence, its staged changes then committed (git's hint
+    // says to, and so did Skip's refusal): HEAD has moved, and git's
+    // --continue takes X for done though it never picked it, so the bar's
+    // Continue left X out with "Cherry-pick complete.". unpickedSequenceStop()
+    // names X there, for Continue to ask first; at a conflict stop that
+    // was resolved and committed (CHERRY_PICK_HEAD's author and date
+    // kept), and for a revert that was, it names nothing.
+    void unpickedSequenceStopTellsAStopGitNeverPicked() {
+        const IsolatedGitConfig config;
+        for (const bool revert : {false, true}) {
+            auto repo = repoWithCommits(1);
+            QVERIFY(repo);
+            gitbolt::git::GitProcess work(repo->path().toStdString());
+            QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+            const std::string main = branchOf(work);
+            const std::string verb = revert ? "revert" : "cherry-pick";
+            // X and Y, authored a while back: a commit of the user's in
+            // the same second would pass for a pick.
+            const auto commit = [&](const std::string& file, const char* message) {
+                repo->writeFile(QString::fromStdString(file), QByteArray(message) + '\n');
+                return succeeded(work.run({"add", file}))
+                    && succeeded(work.run({"commit", "-q", "--date=2020-01-02T03:04:05",
+                                           "-m", message}));
+            };
+            if (!revert)
+                QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+            QVERIFY(commit("X.txt", "X"));
+            QVERIFY(commit("Y.txt", "Y"));
+            const std::string y = output(work.run({"rev-parse", "HEAD"})).toStdString();
+            const std::string x = output(work.run({"rev-parse", "HEAD~1"})).toStdString();
+            if (!revert)
+                QVERIFY(succeeded(work.run({"checkout", "-q", main})));
+            const std::vector<std::string> sequence = revert
+                ? std::vector<std::string>{"revert", "--no-edit", y, x}
+                : std::vector<std::string>{"cherry-pick", x, y};
+            // The todo's "<short id> <subject>" of the first.
+            const auto namesTheFirst = [&](const std::string& unpicked) {
+                const QString said = QString::fromStdString(unpicked);
+                const QString id = said.section(QLatin1Char(' '), 0, 0);
+                return id.size() >= 7
+                    && QString::fromStdString(revert ? y : x).startsWith(id)
+                    && said.section(QLatin1Char(' '), 1) == QLatin1String(revert ? "Y" : "X");
+            };
+
+            // Refused over staged changes, which are then committed.
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("staged work\n"));
+            QVERIFY(succeeded(work.run({"add", "f0.txt"})));
+            QVERIFY(!succeeded(work.run(sequence)));
+            QVERIFY(QFileInfo::exists(repo->path() + QStringLiteral("/.git/sequencer")));
+            QVERIFY2(namesTheFirst(work.unpickedSequenceStop()), work.unpickedSequenceStop().c_str());
+            QVERIFY(succeeded(work.run({"commit", "-q", "-m", "my staged work"})));
+            QVERIFY(!repo->repo().sequenceSkippable());
+            QVERIFY2(namesTheFirst(work.unpickedSequenceStop()), work.unpickedSequenceStop().c_str());
+            QVERIFY(succeeded(work.run({verb, "--abort"})));
+
+            // A conflict at the first: resolved and committed, it is the
+            // pick (or the revert).
+            QVERIFY(succeeded(work.run({"reset", "-q", "--hard", main})));
+            const QString first = QString::fromStdString(revert ? "Y.txt" : "X.txt");
+            repo->writeFile(first, QByteArrayLiteral("in the way\n"));
+            QVERIFY(succeeded(work.run({"add", first.toStdString()})));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-m", "in the way"})));
+            QVERIFY(!succeeded(work.run(sequence)));
+            QVERIFY(QFileInfo::exists(repo->path() + (revert ? QStringLiteral("/.git/REVERT_HEAD")
+                                                             : QStringLiteral("/.git/CHERRY_PICK_HEAD"))));
+            QCOMPARE(work.unpickedSequenceStop(), std::string());
+            repo->writeFile(first, QByteArrayLiteral("resolved\n"));
+            QVERIFY(succeeded(work.run({"add", first.toStdString()})));
+            QVERIFY(succeeded(work.run({"commit", "-q", "--no-edit"})));
+            QVERIFY(QFileInfo::exists(repo->path() + QStringLiteral("/.git/sequencer")));
+            QCOMPARE(work.unpickedSequenceStop(), std::string());
+            QVERIFY(succeeded(work.run({verb, "--abort"})));
+        }
     }
 
     // A reword whose commit stops on a conflict gets its new message

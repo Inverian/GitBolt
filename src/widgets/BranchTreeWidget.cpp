@@ -2,7 +2,6 @@
 
 #include <QAction>
 #include <QHBoxLayout>
-#include <QInputDialog>
 #include <QVBoxLayout>
 
 namespace gitbolt::widgets {
@@ -177,28 +176,19 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // New branch from this one
         auto* newAction = menu.addAction(QIcon::fromTheme(QStringLiteral("list-add")),
                                          tr("New Branch from '%1'...").arg(branchName));
-        connect(newAction, &QAction::triggered, this, [this, branchName]() {
-            bool ok = false;
-            QString name = QInputDialog::getText(this, tr("New Branch"),
-                                                  tr("Branch name:"),
-                                                  QLineEdit::Normal,
-                                                  QString(), &ok);
-            if (ok && !name.trimmed().isEmpty()) {
-                emit createBranchRequested(name.trimmed());
-            }
+        // The name, and Rename's and Set Upstream's below, are asked
+        // for by MainWindow, as Delete's confirmation is: it knows the
+        // repository the question is about, and whether that is still
+        // the one open once the answer comes (a second launch can hand
+        // another over meanwhile).
+        connect(newAction, &QAction::triggered, this, [this]() {
+            emit createBranchRequested();
         });
 
         // Rename
         auto* renameAction = menu.addAction(tr("Rename '%1'...").arg(branchName));
         connect(renameAction, &QAction::triggered, this, [this, branchName]() {
-            bool ok = false;
-            QString newName = QInputDialog::getText(this, tr("Rename Branch"),
-                                                     tr("New name for '%1':").arg(branchName),
-                                                     QLineEdit::Normal,
-                                                     branchName, &ok);
-            if (ok && !newName.trimmed().isEmpty() && newName.trimmed() != branchName) {
-                emit renameBranchRequested(branchName, newName.trimmed());
-            }
+            emit renameBranchRequested(branchName);
         });
 
         // Merge into current
@@ -219,15 +209,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Set upstream
         auto* upstreamAction = menu.addAction(tr("Set Upstream..."));
         connect(upstreamAction, &QAction::triggered, this, [this, branchName]() {
-            bool ok = false;
-            QString upstream = QInputDialog::getText(
-                this, tr("Set Upstream"),
-                tr("Upstream for '%1' (e.g., origin/%1):").arg(branchName),
-                QLineEdit::Normal,
-                QStringLiteral("origin/") + branchName, &ok);
-            if (ok && !upstream.trimmed().isEmpty()) {
-                emit setUpstreamRequested(branchName, upstream.trimmed());
-            }
+            emit setUpstreamRequested(branchName);
         });
 
         menu.addSeparator();
@@ -294,14 +276,7 @@ void BranchTreeWidget::onFilterChanged(const QString& text) {
 void BranchTreeWidget::onNewBranchClicked() {
     if (!repoActionsEnabled_)
         return;
-    bool ok = false;
-    QString name = QInputDialog::getText(this, tr("New Branch"),
-                                          tr("Branch name:"),
-                                          QLineEdit::Normal,
-                                          QString(), &ok);
-    if (ok && !name.trimmed().isEmpty()) {
-        emit createBranchRequested(name.trimmed());
-    }
+    emit createBranchRequested();
 }
 
 void BranchTreeWidget::expandLocalBranches() {

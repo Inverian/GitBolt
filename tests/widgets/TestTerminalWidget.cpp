@@ -110,13 +110,15 @@ namespace {
 
 // A QTRY that runs out waits twice as long again before it fails (to
 // report how long the condition took, if it ever came true), so it
-// takes three times its timeout. Each stays under a third of QtTest's
-// per-function watchdog (QTEST_FUNCTION_TIMEOUT, 60 s): a wait that
-// never comes true then fails with the terminal's text, rather than
-// the watchdog aborting the whole binary and the tests after it.
+// takes three times its timeout, and a little more: it counts 50 ms a
+// step, and neither the step's wait running over (about 3 ms a step on
+// macOS, more on Windows) nor the time the condition takes counts. A
+// flood's 19 s wait took 60.5 s to fail. Each stays at a quarter of
+// QtTest's per-function watchdog (QTEST_FUNCTION_TIMEOUT, 60 s), the
+// floods' included (they pass in 2-3 s): a wait that never comes true
+// then fails with the terminal's text, rather than the watchdog
+// aborting the whole binary and the tests after it.
 constexpr int kTimeoutMs = 15000;
-// A flood takes longer, within the same bound.
-constexpr int kFloodTimeoutMs = 19000;
 
 QStringList rows(const TerminalWidget& terminal)
 {
@@ -827,7 +829,7 @@ private slots:
             const QList<int> shown = numberedRows(terminal, QStringLiteral("gbtype"));
             return atPrompt(terminal) && !shown.isEmpty() && shown.last() == kLines;
         };
-        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kFloodTimeoutMs);
+        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kTimeoutMs);
         ticker.stop();
         longestGap = qMax(longestGap, clock.elapsed() - lastTick);  // and since the last turn
 
@@ -920,7 +922,7 @@ private slots:
                    && prompt.previous().text()
                           == QStringLiteral("gbflood%1").arg(kPtyFloodLines);
         };
-        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kFloodTimeoutMs);
+        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kTimeoutMs);
         ticker.stop();
         longestGap = qMax(longestGap, clock.elapsed() - lastTick);  // and since the last turn
 

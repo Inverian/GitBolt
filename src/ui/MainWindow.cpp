@@ -3807,16 +3807,22 @@ bool MainWindow::repositoryChangedSince(const std::string& key, const QString& n
 
 namespace {
 
-// Closes `window` once no modal dialog is up. A QMessageBox::question()
-// parented to it lives on the stack of the code that asked, and closing
-// (deleting) the window deleted the box under it; and one of its
-// buttons may have opened the dialog (Add worktree…), whose code goes
-// on with the window's widgets once it is answered.
+// Closes `window` once no modal dialog, and no popup, is up. A
+// QMessageBox::question() parented to it lives on the stack of the code
+// that asked, and closing (deleting) the window deleted the box under
+// it; and one of its buttons may have opened the dialog (Add
+// worktree…), whose code goes on with the window's widgets once it is
+// answered. A row's context menu is the same (a QMenu on the stack of
+// the window's slot, parented to it, in exec()), but no modal widget:
+// an open that landed while it was up deleted the window, its menu
+// with it, and GitBolt crashed when exec() returned. Whatever is picked
+// from the menu once the other repository is open checks the key, and
+// is refused.
 void closeOnceUnasked(const QPointer<QWidget>& window)
 {
     if (!window)
         return;
-    if (QApplication::activeModalWidget()) {
+    if (QApplication::activeModalWidget() || QApplication::activePopupWidget()) {
         QTimer::singleShot(100, window, [window] { closeOnceUnasked(window); });
         return;
     }
@@ -3837,7 +3843,8 @@ void MainWindow::closeWithRepository(QWidget* window, const std::string& key)
 
 void MainWindow::inspectStopThen(
     widgets::RepoOperationBar* bar,
-    std::function<void(const services::StopFacts&, const std::string&)> ask)
+    std::function<void(const services::StopFacts&, const std::string&)> ask,
+    bool continuing)
 {
     if (!gitService_ || !gitService_->isOpen() || inspectingStop_)
         return;
@@ -3861,7 +3868,7 @@ void MainWindow::inspectStopThen(
             return;
         }
         ask(facts, key);
-    });
+    }, continuing);
 }
 
 void MainWindow::followRepoBusy(QObject* context, std::function<void(bool busy)> apply)
@@ -4394,12 +4401,38 @@ void MainWindow::setupConnections()
         connect(bar, &widgets::RepoOperationBar::continueRequested, this, [this, bar]() {
             if (bar->sequencePaused()) {
                 // Between two commits of a sequence: git picks (or
-                // reverts) the rest; there's nothing to commit.
-                bar->setBusy(true);
-                statusBar()->showMessage(bar->state() == git::RepoState::Revert
-                                             ? tr("Continuing the revert…")
-                                             : tr("Continuing the cherry-pick…"));
-                gitService_->sequenceContinue();
+                // reverts) the rest; there's nothing to commit. git's
+                // --continue takes the commit it stopped at for done,
+                // picked or not: one it stopped before (a pick refused
+                // over staged changes), whose stop a commit of those
+                // changes then made Continue's, went with "Cherry-pick
+                // complete.". Asked first there; looked for on a worker.
+                const bool revert = bar->state() == git::RepoState::Revert;
+                inspectStopThen(bar, [this, bar, revert](const services::StopFacts& facts,
+                                                         const std::string& key) {
+                    if (!facts.unpickedSequenceStop.isEmpty()) {
+                        const auto answer = QMessageBox::question(
+                            this, tr("Continue"),
+                            (revert
+                                 ? tr("Continue without reverting %1?\n\ngit never reverted "
+                                      "it: the revert stopped before it, and goes on with the "
+                                      "commits after it, leaving this one as it is. To have it "
+                                      "reverted, stop the revert (Abort) and revert it again.")
+                                 : tr("Continue without %1?\n\ngit never picked it: the "
+                                      "cherry-pick stopped before it, and goes on with the "
+                                      "commits after it, leaving this one out. To have it, "
+                                      "stop the cherry-pick (Abort) and pick it again."))
+                                .arg(facts.unpickedSequenceStop),
+                            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                        if (answer != QMessageBox::Yes
+                            || repositoryChangedSince(key, tr("nothing was continued.")))
+                            return;
+                    }
+                    bar->setBusy(true);
+                    statusBar()->showMessage(revert ? tr("Continuing the revert…")
+                                                    : tr("Continuing the cherry-pick…"));
+                    gitService_->sequenceContinue();
+                }, /*continuing=*/true);
                 return;
             }
             if (bar->state() != git::RepoState::Rebase) {
@@ -4812,10 +4845,24 @@ void MainWindow::setupConnections()
             if (!refuseWhileLocalOpRuns())
                 checkoutAsLocalBranch(remoteBranch);
         });
+        // The name is asked for here, with the key taken before the
+        // question, as for Delete below and the Rename and Set Upstream
+        // further on: asked in the sidebar, the answer went to whichever
+        // repository was open once it came (a second launch hands its
+        // path over while the question is up).
         connect(branchTree, &widgets::BranchTreeWidget::createBranchRequested,
-                this, [this](const QString& name) {
-            if (!refuseWhileLocalOpRuns())
-                gitService_->createBranch(name);
+                this, [this]() {
+            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns())
+                return;
+            const std::string key = gitService_->openKey();
+            bool ok = false;
+            const QString name = QInputDialog::getText(this, tr("New Branch"),
+                                                       tr("Branch name:"),
+                                                       QLineEdit::Normal, QString(), &ok);
+            if (!ok || name.trimmed().isEmpty()
+                || repositoryChangedSince(key, tr("no branch was created.")))
+                return;
+            gitService_->createBranch(name.trimmed());
         });
         // The question is asked here, with the key taken before it: a
         // repository a second launch handed over while it was up lost
@@ -4855,8 +4902,16 @@ void MainWindow::setupConnections()
             confirmAndDeleteRemoteBranch(remoteBranch, nullptr, gitService_->openKey());
         });
         connect(branchTree, &widgets::BranchTreeWidget::renameBranchRequested,
-                this, [this](const QString& oldName, const QString& newName) {
-            if (!gitService_ || !gitService_->isOpen()) return;
+                this, [this](const QString& oldName) {
+            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns()) return;
+            const std::string key = gitService_->openKey();
+            bool ok = false;
+            const QString newName = QInputDialog::getText(
+                this, tr("Rename Branch"), tr("New name for '%1':").arg(oldName),
+                QLineEdit::Normal, oldName, &ok).trimmed();
+            if (!ok || newName.isEmpty() || newName == oldName
+                || repositoryChangedSince(key, tr("branch %1 was not renamed.").arg(oldName)))
+                return;
             repoCmd_->runAsync({"branch", "-m", oldName.toStdString(),
                                 newName.toStdString()},
                                tr("Rename Branch Failed"),
@@ -4872,8 +4927,18 @@ void MainWindow::setupConnections()
             mergeBranch(name);
         });
         connect(branchTree, &widgets::BranchTreeWidget::setUpstreamRequested,
-                this, [this](const QString& branch, const QString& upstream) {
-            if (!gitService_ || !gitService_->isOpen()) return;
+                this, [this](const QString& branch) {
+            if (!gitService_ || !gitService_->isOpen() || refuseWhileLocalOpRuns()) return;
+            const std::string key = gitService_->openKey();
+            bool ok = false;
+            const QString upstream = QInputDialog::getText(
+                this, tr("Set Upstream"),
+                tr("Upstream for '%1' (e.g., origin/%1):").arg(branch),
+                QLineEdit::Normal, QStringLiteral("origin/") + branch, &ok).trimmed();
+            if (!ok || upstream.isEmpty()
+                || repositoryChangedSince(
+                    key, tr("the upstream of %1 was not set.").arg(branch)))
+                return;
             repoCmd_->runAsync({"branch",
                                 "--set-upstream-to=" + upstream.toStdString(),
                                 branch.toStdString()},
@@ -5427,6 +5492,11 @@ void MainWindow::showCommitDialog()
             statusBar()->showMessage(
                 tr("Committed, but not pushed: another operation is still running. "
                    "Push once it's done."), 8000);
+        });
+        connect(commitDialog_, &dialogs::CommitDialog::repositoryChangedUnderQuestion,
+                this, [this](const QString& notDone) {
+            statusBar()->showMessage(tr("Another repository was opened; %1").arg(notDone),
+                                     5000);
         });
     }
     commitDialog_->show();

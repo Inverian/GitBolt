@@ -662,10 +662,15 @@ private slots:
                                              describe(color, window))));
             }
         }
-        // The cards' own surface in the light theme is the window's.
+        // The cards' own surface in the light theme is the window's, and
+        // palette(midlight) while the pointer is over one (3.3:1, with
+        // the muted grey it had).
         const QColor window = QApplication::palette().color(QPalette::Window);
         QVERIFY2(contrast(textColor(card), window) >= 4.5,
                  qPrintable(describe(textColor(card), window)));
+        const QColor hovered = QApplication::palette().color(QPalette::Midlight);
+        QVERIFY2(contrast(textColor(card), hovered) >= 4.5,
+                 qPrintable(describe(textColor(card), hovered)));
     }
 
     // The home screen's cards: their descriptions were palette(mid),
