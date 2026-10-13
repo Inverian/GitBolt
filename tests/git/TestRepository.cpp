@@ -1237,7 +1237,8 @@ private slots:
     //     never read, so its "// Conflicts:" lines were committed;
     //   - a merge's and a revert's are git's own, and their comment
     //     lines (a signed tag's "gpg:" lines) are git's notes: they go,
-    //     as a terminal's `git commit` drops them;
+    //     as a terminal's `git commit` drops them; where git's note of
+    //     the conflicts is there, only the lines with its prefix;
     //   - a message written with CRLF line ends comes without the CRs.
     void preparedMessageIsGitsWithoutItsNotes_data() {
         QTest::addColumn<QString>("operation");
@@ -1325,6 +1326,21 @@ private slots:
                            QStringLiteral("+core.commentChar=AUTO")}
             << QByteArray("Merge branch 'side'\n\n; Conflicts:\n;\ta.txt\n")
             << QStringLiteral("Merge branch 'side'");
+        // git's note says which prefix it wrote its comments with: a
+        // line with another is the message's own, as that git's
+        // `git commit` keeps it.
+        QTest::newRow("a merge, core.commentString ; and git's '; Conflicts:': #123 stays")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentString=;")}
+            << QByteArray("Merge branch 'side'\n\n#123 closes the login bug\n\n"
+                          "; Conflicts:\n;\ta.txt\n")
+            << QStringLiteral("Merge branch 'side'\n\n#123 closes the login bug");
+        QTest::newRow("a merge, core.commentChar ; then #, and git's '# Conflicts:': ;; stays")
+            << QStringLiteral("git merge conflict")
+            << QStringList{QStringLiteral("core.commentChar=;"),
+                           QStringLiteral("+core.commentChar=#")}
+            << QByteArray("Merge branch 'side'\n\n;; keep me\n\n# Conflicts:\n#\ta.txt\n")
+            << QStringLiteral("Merge branch 'side'\n\n;; keep me");
     }
 
     void preparedMessageIsGitsWithoutItsNotes() {

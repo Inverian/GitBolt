@@ -44,7 +44,8 @@ function(gitbolt_add_test test_name source_file)
     # only happens if it fires before ctest's TIMEOUT kills the binary,
     # so TIMEOUT leaves room for the functions before it and for the
     # debugger; it also catches hangs outside test functions, such as
-    # teardown. These binaries take seconds, no function close to 60 s.
+    # teardown. No function comes close to 60 s; most binaries take
+    # seconds, and the slow ones get a longer TIMEOUT of their own.
     # DO_NOT_TRACK, GITBOLT_TELEMETRY: belt and braces on top of the
     # facts that no test binary links the app, where telemetry
     # endpoints live, and that the telemetry tests inject the gate's
@@ -137,6 +138,9 @@ target_link_libraries(test_git_service PRIVATE gitbolt_services)
 add_dependencies(test_git_service gitbolt_stall_transport)
 target_compile_definitions(test_git_service PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
+# Over a hundred functions against real repositories and git: about
+# 40 s here, but up to 146 s on windows-latest, too close to 180 s.
+set_tests_properties(test_git_service PROPERTIES TIMEOUT 420)
 
 # widgets/ tests. The terminal runs its shell under ConPTY on Windows
 # and under a PTY elsewhere. Each backend's end-to-end tests are a QSKIP

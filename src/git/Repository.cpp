@@ -812,12 +812,15 @@ std::string Repository::preparedMessage() const {
     QList<QByteArray> notes = comments;
     if (!notes.contains(QByteArrayLiteral("#")))
         notes << QByteArrayLiteral("#");
-    // A comment line's text, after its prefix; none for other lines.
-    const auto commentText = [](const QByteArray& line, const QList<QByteArray>& prefixes,
-                                QByteArray* text) {
-        for (const QByteArray& prefix : prefixes) {
+    // A comment line's text, after its prefix (the one of `markers` it
+    // starts with, in `marker`); none for other lines.
+    const auto commentText = [](const QByteArray& line, const QList<QByteArray>& markers,
+                                QByteArray* text, QByteArray* marker = nullptr) {
+        for (const QByteArray& prefix : markers) {
             if (line.startsWith(prefix)) {
                 *text = line.mid(prefix.size()).trimmed();
+                if (marker)
+                    *marker = prefix;
                 return true;
             }
         }
@@ -836,18 +839,33 @@ std::string Repository::preparedMessage() const {
     // comment lines and blank ones. That goes, and nothing else of a
     // pick's: its "#42 Fix login" subject, or "# Notes" heading, is the
     // commit's own, as a clean `git cherry-pick` commits it.
+    //
+    // git writes its note with a space after the prefix ("; Conflicts:");
+    // libgit2's "#Conflicts:" has none, and '#' whatever the setting.
+    // The prefix of git's note is the one git wrote all its comment
+    // lines with, so it alone marks a merge's or a revert's comments:
+    // a '#' line is the message's own where the note has ';' (from
+    // core.commentString, which only git 2.45 and later read), and a
+    // ';' line is where the note has '#' (a core.commentChar ';' that
+    // a '#' set after it outranks).
     qsizetype end = lines.size();
+    QByteArray gitsPrefix;
     for (qsizetype i = lines.size() - 1; i >= 0; --i) {
         QByteArray text;
-        if (!commentText(lines.at(i), notes, &text)) {
+        QByteArray prefix;
+        if (!commentText(lines.at(i), notes, &text, &prefix)) {
             if (lines.at(i).trimmed().isEmpty())
                 continue;
             break;
         }
-        if (text == "Conflicts:" || text == "------------------------ >8 ------------------------")
+        if (text == "Conflicts:" || text == "------------------------ >8 ------------------------") {
             end = i;
+            gitsPrefix = lines.at(i).mid(prefix.size()).startsWith(' ') ? prefix : QByteArray();
+        }
     }
     lines.resize(end);
+    if (!gitsPrefix.isEmpty())
+        comments = {gitsPrefix};
 
     std::string message;
     for (const QByteArray& line : std::as_const(lines)) {

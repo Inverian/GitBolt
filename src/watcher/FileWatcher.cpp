@@ -111,53 +111,41 @@ QStringList FileWatcher::enumerateWatchDirs(
     // run on a worker thread, which is exactly what GitService does
     // for the async open path (this walk stats every directory and
     // took ~a minute on large repos when it ran on the UI thread).
-    //
-    // One directory level at a time, so a skipped directory's subtree
-    // is never entered. A recursive QDirIterator went on into it: only
-    // the skipped directory itself was left out, and every directory
-    // under .git (objects/xx, logs, hooks, a rebase's rebase-merge) and
-    // node_modules was watched, using up the cap. On Windows each is a
-    // change-notification handle, and git deleting one (rebase-merge,
-    // when a rebase ends) made Qt's watcher thread warn "Access is
-    // denied".
     QStringList dirs;
-    QStringList pending{repoPath};
-    while (!pending.isEmpty() && dirs.size() < maxDirs) {
-        QDirIterator it(pending.takeFirst(),
-                        QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden);
-        while (it.hasNext() && dirs.size() < maxDirs) {
-            if (cancelled && cancelled())
-                return {};
+    QDirIterator it(repoPath,
+                    QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
+                    QDirIterator::Subdirectories);
 
-            const QFileInfo fi = it.nextFileInfo();
-            const QString name = fi.fileName();
+    while (it.hasNext() && dirs.size() < maxDirs) {
+        if (cancelled && cancelled())
+            return {};
 
-            // Skip .git (watched selectively by watchGitInternals) and
-            // common high-churn directories that are almost always
-            // ignored by git anyway, subtrees included.
-            if (name == QStringLiteral(".git")
-                || name == QStringLiteral("node_modules")
-                || name == QStringLiteral("build")
-                || name == QStringLiteral("build-debug")
-                || name == QStringLiteral("build-release")
-                || name == QStringLiteral(".venv")
-                || name == QStringLiteral("venv")
-                || name == QStringLiteral(".tox")
-                || name == QStringLiteral("__pycache__")
-                || name == QStringLiteral(".idea")
-                || name == QStringLiteral(".vscode")
-                || name == QStringLiteral("target")      // Rust
-                || name == QStringLiteral(".next")       // Next.js
-                || name == QStringLiteral(".cache")) {
-                continue;
-            }
+        const QString dir = it.next();
+        const QFileInfo fi(dir);
+        const QString name = fi.fileName();
 
-            dirs.append(fi.filePath());
-            // A symlinked directory is watched but not entered, as the
-            // recursive iterator did (no FollowSymlinks): no cycles.
-            if (!fi.isSymLink())
-                pending.append(fi.filePath());
+        // Skip .git (watched selectively by watchGitInternals) and
+        // common high-churn directories that are almost always
+        // ignored by git anyway.
+        if (name == QStringLiteral(".git")
+            || name == QStringLiteral("node_modules")
+            || name == QStringLiteral("build")
+            || name == QStringLiteral("build-debug")
+            || name == QStringLiteral("build-release")
+            || name == QStringLiteral(".venv")
+            || name == QStringLiteral("venv")
+            || name == QStringLiteral(".tox")
+            || name == QStringLiteral("__pycache__")
+            || name == QStringLiteral(".idea")
+            || name == QStringLiteral(".vscode")
+            || name == QStringLiteral("target")      // Rust
+            || name == QStringLiteral(".next")       // Next.js
+            || name == QStringLiteral(".cache")) {
+            // Skip this subtree entirely.
+            continue;
         }
+
+        dirs.append(dir);
     }
     return dirs;
 }

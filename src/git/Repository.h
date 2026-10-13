@@ -122,7 +122,8 @@ public:
     /// is the picked commit's, every other line of it kept, as a clean
     /// `git cherry-pick` commits it: a "#42 Fix login" subject is its own.
     /// A merge's or a revert's is git's, and its other comment lines go
-    /// too, as a terminal's `git commit` drops them. Lines end in "\n"
+    /// too, as a terminal's `git commit` drops them: where git's own
+    /// note is there, only the lines with its prefix. Lines end in "\n"
     /// alone. Empty when no such operation waits, or git prepared none.
     std::string preparedMessage() const;
 
