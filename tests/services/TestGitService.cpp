@@ -526,7 +526,8 @@ private slots:
 
     // The walk leaves out .git, node_modules, build and the like
     // themselves, but still goes into them: what refreshes the status
-    // above, and a tracked file under build/, is watched there.
+    // above, and a tracked file in a subdirectory of build/, is watched
+    // there. One directly in build/ is not: build/ itself has no watch.
     void enumerateWatchDirsGoesIntoLeftOutDirs() {
         auto repo = repoWithCommits(1);
         QVERIFY(repo);

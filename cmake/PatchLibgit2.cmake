@@ -2,8 +2,10 @@
 # its freshly unpacked source directory. Idempotent, because FetchContent
 # may run it again over an already patched tree. The first two changes
 # only matter to MSVC, and are about libgit2 being a static library
-# here; the third fixes a crash, on every platform. A version bump that
-# moves the patched text fails here, loudly.
+# here; the third fixes a crash when a config file that changed can't
+# be read again, on every platform, and the fourth the stale config
+# that followed it. A version bump that moves the patched text fails
+# here, loudly.
 
 # Replaces <from> with <to> in <file>, then fails if <leftover> (a regex)
 # still matches: the upstream text changed and this patch needs updating.
@@ -55,3 +57,17 @@ gitbolt_patch(src/libgit2/config.c
     "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}"
     "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\tif (res == 0)\n\t\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}"
     "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*\\*out = &be->entry")
+
+# A failed reread of a config file that changed kept the old entries,
+# which is right, but also the new file's stamp, which
+# config_file_is_modified() had already taken: every later lookup saw
+# the stamp unchanged and the handle kept the old config until the file
+# changed again (a remote added with git, then not listed). Forget the
+# stamp when a refresh fails, so the next lookup reads the file again:
+# a zeroed stamp matches no file, and the checksum then tells whether
+# the content changed. Unfixed in libgit2's main branch as of
+# 2026-10-13.
+gitbolt_patch(src/libgit2/config_file.c
+    "\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
+    "\tgit_config_list_free(config_list);\n\tif (error < 0)\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
+    "git_config_list_free\\(config_list\\);[ \t\n]*return \\(error == GIT_ENOTFOUND\\)")

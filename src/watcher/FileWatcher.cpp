@@ -106,14 +106,17 @@ QStringList FileWatcher::enumerateWatchDirs(
     // into them, so their subdirectories are collected and watched.
     // That is on purpose. A commit in a submodule (under .git/modules
     // or in its own .git), an edit of .git/info/exclude and a tracked
-    // file under build/ or target/ refresh the status only through
-    // those watches; a walk that never entered these trees stopped
-    // them refreshing (TestGitService::
-    // submoduleCommitAndExcludeEditRefresh and
-    // enumerateWatchDirsGoesIntoLeftOutDirs check it). The total
-    // is capped to keep kqueue/FSEvents happy on very large repos —
-    // if a repo exceeds the cap, the user won't get auto-refresh
-    // for the unwatched subtrees but everything else keeps working.
+    // file in a subdirectory of build/ or target/ (build/obj/x)
+    // refresh the status only through those watches; a walk that
+    // never entered these trees stopped them refreshing
+    // (TestGitService::submoduleCommitAndExcludeEditRefresh and
+    // enumerateWatchDirsGoesIntoLeftOutDirs check it). A file
+    // directly in a left-out directory (build/CMakeLists.txt) has no
+    // watch at all: only a manual refresh, or the next change that
+    // is watched, picks up its edit. The total is capped to keep
+    // kqueue/FSEvents happy on very large repos — if a repo exceeds
+    // the cap, the user won't get auto-refresh for the unwatched
+    // subtrees but everything else keeps working.
     //
     // Pure filesystem work, no QFileSystemWatcher access: safe to
     // run on a worker thread, which is exactly what GitService does
@@ -135,7 +138,8 @@ QStringList FileWatcher::enumerateWatchDirs(
         // Leave out .git (watchGitInternals watches it, its index,
         // HEAD and refs) and common high-churn directories that are
         // almost always ignored by git anyway: these directories
-        // themselves, not their subdirectories (see above).
+        // themselves, not their subdirectories (see above). Files
+        // directly in them aren't watched.
         if (name == QStringLiteral(".git")
             || name == QStringLiteral("node_modules")
             || name == QStringLiteral("build")

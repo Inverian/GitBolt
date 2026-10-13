@@ -792,7 +792,10 @@ private slots:
         service->recordRepoOpened(1, 1, 1);
         const qint64 tick = stub_->elapsedMs() + config.flushIntervalMs;
         service->start();
-        QTRY_COMPARE(stub_->requests().size(), 1);
+        // Not size() == 1: on a slow box the first request can come so
+        // close to the tick that the retry follows before a poll sees
+        // one. A new record then goes after the tick all the same.
+        QTRY_VERIFY(!stub_->requests().isEmpty());
         service->recordRepoOpened(2, 2, 1);
         QTRY_COMPARE(stub_->requests().size(), 3);
         // Neither the retry nor the new record went before the tick,
@@ -846,7 +849,14 @@ private slots:
         Provider provider;
         Config config = testConfig(*stub_, dir_->path());
         config.flushIntervalMs = 500;
-        stub_->respond = [status](const StubRequest&) { return StubResponse{status, {}}; };
+        // The queue file as each request arrives: the previous cycle's
+        // rewrite is on disk by then, and nothing changes it until this
+        // request's answer.
+        QList<QList<QJsonObject>> atArrival;
+        stub_->respond = [&, status](const StubRequest&) {
+            atArrival << queueLines(config);
+            return StubResponse{status, {}};
+        };
 
         auto service = makeService(config, provider);
         service->recordRepoOpened(1, 1, 1);
@@ -855,12 +865,15 @@ private slots:
         service->start();
 
         // First cycle: one request, then the cycle ends with the front
-        // record's attempt counted on disk; the second isn't tried.
-        QTRY_VERIFY(!queueLines(config).isEmpty()
-                    && queueLines(config).first().value(QStringLiteral("attempts")).toInt() == 1);
-        QCOMPARE(queueLines(config).size(), 2);
-        QCOMPARE(queueLines(config).at(1).value(QStringLiteral("attempts")).toInt(), 0);
-        QCOMPARE(stub_->requests().size(), 1);
+        // record's attempt counted on disk, as the retry finds it. Read
+        // when the retry arrives, not polled: that state lasts only
+        // until the retry fails, which a poll can miss on a slow box.
+        // (That the second record isn't tried in the first cycle, the
+        // open_ms check at the end covers.)
+        QTRY_VERIFY(atArrival.size() >= 2);
+        QCOMPARE(atArrival.at(1).size(), 2);
+        QCOMPARE(atArrival.at(1).at(0).value(QStringLiteral("attempts")).toInt(), 1);
+        QCOMPARE(atArrival.at(1).at(1).value(QStringLiteral("attempts")).toInt(), 0);
 
         // Ticks retry it until maxAttempts, then it is dropped; one
         // request per tick, never two in one cycle.

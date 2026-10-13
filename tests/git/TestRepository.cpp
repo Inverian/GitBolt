@@ -1443,16 +1443,17 @@ private slots:
     // that ignore errors (rename detection's, among others) then read
     // and freed through: test_git_service crashed so on Windows, where
     // .git/config can't be read while another handle replaces it. Here
-    // the reread fails because the file is unreadable, and only the
-    // first lookup after the change rereads it, so that one is rename
-    // detection's. The fix is a patch to the bundled libgit2
-    // (cmake/PatchLibgit2.cmake).
+    // the reread fails because the file is unreadable, and the first
+    // lookups after the change are rename detection's. Once readable
+    // again, the change must be seen: the failed reread used to leave
+    // the handle on the old config for good. The fixes are patches to
+    // the bundled libgit2 (cmake/PatchLibgit2.cmake).
     // -----------------------------------------------------------------
     void unreadableChangedConfigIsNoEntry() {
 #if defined(Q_OS_WIN)
         QSKIP("needs Unix file permissions");
-#elif !defined(GITBOLT_LIBGIT2_GET_ENTRY_FIXED)
-        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's get_entry() fix");
+#elif !defined(GITBOLT_LIBGIT2_CONFIG_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's config fixes");
 #else
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
@@ -1479,6 +1480,13 @@ private slots:
         // defaults, as if unset.
         QCOMPARE(git_diff_find_similar(diff, nullptr), 0);
         QVERIFY(QFile::setPermissions(config, readable));
+        // Readable again, the same handle sees the change.
+        git_config* live = nullptr;
+        QCOMPARE(git_repository_config(&live, repo.repo().raw()), 0);
+        const auto freeConfig = qScopeGuard([&] { git_config_free(live); });
+        int32_t renameLimit = 0;
+        QCOMPARE(git_config_get_int32(&renameLimit, live, "diff.renameLimit"), 0);
+        QCOMPARE(renameLimit, 7);
         QVERIFY(repo.repo().status().ok());
         QCOMPARE(statusLines(repo.repo()), QStringList{QStringLiteral("a.txt changed")});
 #endif

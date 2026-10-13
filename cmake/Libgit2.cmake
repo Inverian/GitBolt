@@ -37,7 +37,9 @@ function(gitbolt_add_bundled_libgit2)
     # install tree and so out of every package. Offline:
     # -DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<unpacked v1.9.7 source>, used
     # as is: PatchLibgit2.cmake isn't run, so its MSVC changes and its
-    # config crash fix are missing unless that tree has them.
+    # config fixes are missing unless that tree has them (configure
+    # warns about the config fixes below; docs/BUILDING.md says how to
+    # patch the tree).
     # The patch script's hash is part of the command, so editing the
     # script re-runs it in existing build directories too.
     set(_patch ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PatchLibgit2.cmake)
@@ -123,12 +125,20 @@ function(gitbolt_add_bundled_libgit2)
 
     add_subdirectory(${libgit2_SOURCE_DIR} ${libgit2_BINARY_DIR} EXCLUDE_FROM_ALL)
 
-    # Whether this tree has PatchLibgit2.cmake's get_entry() fix (an
-    # offline source directory may not): the test that needs it skips
-    # without it.
+    # Whether this tree has PatchLibgit2.cmake's config fixes, the
+    # get_entry() crash and the stale config after it (an offline source
+    # directory may not): the test that needs them skips without them,
+    # and configure says so.
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/config.c _config_c)
-    if(_config_c MATCHES "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*if \\(res == 0\\)")
-        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_GET_ENTRY_FIXED)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/config_file.c _config_file_c)
+    if(_config_c MATCHES "GIT_ENOTFOUND\\)[ \t\n]*{[ \t\n]*if \\(res == 0\\)"
+       AND _config_file_c MATCHES
+           "if \\(error < 0\\)[ \t\n]*git_futils_filestamp_set\\(&b->file\\.stamp, NULL\\)")
+        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_CONFIG_PATCHED)
+    else()
+        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "
+            "cmake/PatchLibgit2.cmake's config fixes, one of them for a crash; "
+            "run cmake -P ${_patch} in that directory")
     endif()
 
     # Say so at configure time, not as an #error deep in the build: a
@@ -202,5 +212,6 @@ if(NOT GITBOLT_LIBGIT2_PROVIDER)
     set(GITBOLT_LIBGIT2_PROVIDER "bundled")
     message(STATUS "libgit2: bundled ${GITBOLT_LIBGIT2_VERSION} (static)")
 else()
-    message(STATUS "libgit2: system (${GITBOLT_LIBGIT2_PROVIDER})")
+    message(STATUS "libgit2: system (${GITBOLT_LIBGIT2_PROVIDER}), "
+        "without cmake/PatchLibgit2.cmake's config fixes")
 endif()

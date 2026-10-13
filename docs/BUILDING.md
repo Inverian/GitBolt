@@ -461,8 +461,16 @@ no libgit2 library.
   stack (SecureTransport on macOS, WinHTTP on Windows); on Linux, where
   it would be OpenSSL, it is left out. Either way there is no OpenSSL
   to build or ship.
+- The bundled copy is patched
+  ([`cmake/PatchLibgit2.cmake`](../cmake/PatchLibgit2.cmake)) against a
+  libgit2 crash when `.git/config` changes and then can't be read or
+  parsed, and against the stale config that followed it. A system
+  libgit2 (Homebrew, vcpkg, distribution packages) doesn't have these
+  patches, so use the bundled one for builds you hand out.
 - Configuring needs network access once per build directory. Offline,
-  unpack the release elsewhere and pass
+  unpack the release elsewhere, run
+  `cmake -P <GitBolt>/cmake/PatchLibgit2.cmake` in that directory
+  (GitBolt's patches to libgit2, one of them a crash fix), and pass
   `-DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<that directory>`.
 - On Windows it needs neither vcpkg nor pkgconf.
 
