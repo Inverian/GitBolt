@@ -204,25 +204,49 @@ bool isWindowsDispatchModule(const QString& module) {
     return dispatch.match(fileName(module)).hasMatch();
 }
 
+// Where a Windows exception entered the stack. A fault enters user
+// mode at ntdll's KiUserExceptionDispatcher; a throw raises it in
+// place: _CxxThrowException calls RaiseException, which calls
+// RtlRaiseException. Symbols are the export names dbghelp finds
+// without PDBs.
+bool isWindowsRaisePoint(const RawFrame& f) {
+    static const QRegularExpression vcruntime(QStringLiteral("^vcruntime140[_a-z0-9]*\\.dll$"),
+                                              QRegularExpression::CaseInsensitiveOption);
+    const QString module = fileName(f.module);
+    const auto is = [&module](const char* name) {
+        return module.compare(QLatin1String(name), Qt::CaseInsensitive) == 0;
+    };
+    if (is("ntdll.dll"))
+        return f.symbol == QLatin1String("KiUserExceptionDispatcher")
+               || f.symbol == QLatin1String("RtlRaiseException");
+    if (is("KERNELBASE.dll") || is("kernel32.dll"))
+        return f.symbol == QLatin1String("RaiseException");
+    return vcruntime.match(module).hasMatch() && f.symbol == QLatin1String("_CxxThrowException");
+}
+
 // Drops the frames the handler itself added, by position: names can
-// be wrong, positions can't. POSIX: #0 is signalHandler (backtrace()
+// be wrong, positions can't. POSIX: #0 is the handler (backtrace()
 // runs in it) and #1 the kernel's trampoline (_sigtramp, __restore_rt).
 // Windows: #0 is signalHandler (CaptureStackBackTrace skips the
-// writer), then the CRT and loader frames that dispatched the
-// exception up to KiUserExceptionDispatcher, or, for raise()/abort(),
-// the CRT frames on top of the caller.
+// writer), then everything up to where the exception was raised: for
+// a fault, the CRT and loader frames that dispatched it up to
+// KiUserExceptionDispatcher; for an unhandled C++ exception, abort()
+// from terminate(), the CRT's unhandled-exception filter (inside
+// GitBolt.exe, so it would pass for the crash point), the dispatch and
+// the throw's own frames. For raise()/abort(), the CRT frames on top
+// of the caller.
 QList<RawFrame> dropHandlerFrames(QList<RawFrame> frames, bool windows) {
     if (!windows) {
         frames.removeIf([](const RawFrame& f) { return f.index < 2; });
         return frames;
     }
     frames.removeIf([](const RawFrame& f) { return f.index < 1; });
-    const auto dispatcher = std::find_if(frames.cbegin(), frames.cend(), [](const RawFrame& f) {
-        return fileName(f.module).compare(QLatin1String("ntdll.dll"), Qt::CaseInsensitive) == 0
-               && f.symbol == QLatin1String("KiUserExceptionDispatcher");
-    });
-    if (dispatcher != frames.cend()) {
-        frames.erase(frames.cbegin(), dispatcher + 1);
+    auto raised = std::find_if(frames.cbegin(), frames.cend(), isWindowsRaisePoint);
+    if (raised != frames.cend()) {
+        // The newest raise frame, then its callers that raise too.
+        while (raised + 1 != frames.cend() && isWindowsRaisePoint(*(raised + 1)))
+            ++raised;
+        frames.erase(frames.cbegin(), raised + 1);
         return frames;
     }
     while (!frames.isEmpty() && isWindowsDispatchModule(frames.first().module))

@@ -18,7 +18,8 @@ the AppImage, so run the workflow on the branch (workflow_dispatch
 builds the installers) before merging.
 
 Pins it doesn't follow, printed as reminders: the NSIS zip from
-SourceForge and the ubuntu image digest the DEB is tested in.
+SourceForge and the ubuntu and debian image digests the DEB is tested
+in.
 
 Uses the GitHub API without a token (60 requests an hour is plenty);
 set GITHUB_TOKEN to lift that limit.
@@ -110,7 +111,7 @@ def main() -> int:
                                   f"uses: {owner}/{repo}@{new_commit} # {newest}")
 
     print("check   NSIS (https://nsis.sourceforge.io/Download) and the "
-          "ubuntu image digest by hand")
+          "ubuntu and debian image digests by hand")
 
     if write and updated != text:
         with open(CI, "w") as fh:

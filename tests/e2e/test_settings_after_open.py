@@ -18,17 +18,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     # A fresh config: Recent holds its "(No recent repositories)"
     # placeholder at startup, and opening the repository replaces it.
     repo = make_repo(os.path.join(scratch, "repo"))
-    # A crash writes ~/.gitbolt/crash.log, and every later launch opens
-    # with a "Crash Detected" box: keep a failure out of the real home.
-    home = os.environ.get("HOME")
-    os.environ["HOME"] = os.path.join(scratch, "home")
-    try:
-        app = App(binary, repo, config_home=os.path.join(scratch, "config"))
-    finally:
-        if home is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = home
+    app = App(binary, repo, config_home=os.path.join(scratch, "config"))
     apps.append(app)
     app.wait_bridge()
     app.wait_until(lambda s: s.get("repoOpen"), "repo open")

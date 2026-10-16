@@ -17,6 +17,12 @@ test run can coexist with a real GitBolt session and with other tests:
 - XDG_CONFIG_HOME: a private dir unless the test passes config_home,
   so GitBolt.ini reads/writes never touch the user's real settings —
   one per App even where Apps share a runtime dir (see App).
+- HOME: a private dir too, the same way. ~/.gitbolt (the crash log,
+  which a crashing test would otherwise truncate and the user's next
+  launch would report as theirs), ~/.gitconfig (read by the app's git
+  and libgit2, written by Settings' Git Config page) and
+  QDir::homePath() all hang off it. The harness's own git() keeps the
+  test's HOME: make_repo sets the identity the app's commits need.
 - QT_QPA_PLATFORM=offscreen: no focus stealing, same behavior on
   headless CI. An exported QT_QPA_PLATFORM wins for the apps a test
   drives, so a developer can watch them; never for a second launch,
@@ -31,9 +37,11 @@ test run can coexist with a real GitBolt session and with other tests:
 
 from __future__ import annotations
 
+import http.server
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -52,7 +60,8 @@ def make_runtime_dir() -> str:
 
 def app_env(runtime_dir: str, instance_name: str,
             bridge_name: str | None = None,
-            config_home: str | None = None) -> dict:
+            config_home: str | None = None,
+            home: str | None = None) -> dict:
     """Environment for a GitBolt process isolated into `runtime_dir`."""
     env = os.environ.copy()
     env.pop("GITBOLT_TEST_BRIDGE", None)
@@ -63,6 +72,8 @@ def app_env(runtime_dir: str, instance_name: str,
     env["XDG_RUNTIME_DIR"] = runtime_dir
     env["XDG_CONFIG_HOME"] = (config_home
                               or os.path.join(runtime_dir, "config"))
+    env["HOME"] = home or os.path.join(runtime_dir, "home")
+    os.makedirs(env["HOME"], exist_ok=True)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env["DO_NOT_TRACK"] = "1"
     env["GITBOLT_TELEMETRY"] = "0"
@@ -133,6 +144,83 @@ class SilentServer:
                 pass    # git has closed it already
 
 
+class OpenGate:
+    """Holds every open of repository `repo` until release(), for a test
+    that needs something to happen while GitBolt opens it: the repo's
+    config includes a FIFO, and reading that config (libgit2's open,
+    and any git command run in the repo) blocks on the FIFO until
+    something writes to it. Released, a thread keeps opening the FIFO
+    for writing, so every read of it gets its end at once from then on.
+    """
+
+    def __init__(self, repo: str, scratch: str) -> None:
+        self.fifo = os.path.join(scratch, f"gate-{uuid.uuid4().hex[:8]}.fifo")
+        os.mkfifo(self.fifo)
+        git("config", "include.path", self.fifo, cwd=repo)
+        self._released = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        self._released.wait()
+        while True:
+            try:
+                with open(self.fifo, "w"):
+                    pass
+            except OSError:
+                return      # the scratch dir is gone
+            time.sleep(0.01)
+
+    def release(self) -> None:
+        self._released.set()
+
+
+class AuthServer:
+    """An http:// git "server" on 127.0.0.1 that wants a user name and
+    password: every request without credentials is answered 401 with a
+    Basic challenge, so git asks for them. One with credentials gets a
+    404, which ends the fetch."""
+
+    def __init__(self) -> None:
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                if self.headers.get("Authorization"):
+                    self.send_response(404)
+                else:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="e2e"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args) -> None:
+                pass    # keep the test's output to its verdict
+
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.origin = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.url = f"{self.origin}/repo.git"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def askpass_children(self) -> list[str]:
+        """The askpass processes asking for a user name for this server:
+        git passes its question as the argument, and it names the server
+        ("Username for 'http://127.0.0.1:<port>': ")."""
+        out = subprocess.run(["ps", "-A", "-o", "pid=,args="],
+                             capture_output=True, text=True).stdout
+        question = f"Username for '{self.origin}'"
+        return [line.strip() for line in out.splitlines()
+                if question in line]
+
+    def close(self) -> None:
+        """Stop serving, and end any askpass still asking (a failed test
+        must not leave one behind)."""
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        for line in self.askpass_children():
+            try:
+                os.kill(int(line.split()[0]), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+
+
 class App:
     """One GitBolt process plus its private bridge connection."""
 
@@ -140,7 +228,8 @@ class App:
                  config_home: str | None = None,
                  instance_name: str | None = None,
                  runtime_dir: str | None = None,
-                 label: str = "app"):
+                 label: str = "app",
+                 home: str | None = None):
         tag = uuid.uuid4().hex[:8]
         self.binary = binary
         self.label = label
@@ -158,16 +247,22 @@ class App:
         # until the lock is 30 s old.
         if config_home is None and not self._owns_runtime_dir:
             config_home = os.path.join(self.runtime_dir, f"config-{tag}")
+        # And a home: two apps writing one ~/.gitbolt/crash.log would
+        # clobber each other's.
+        if home is None and not self._owns_runtime_dir:
+            home = os.path.join(self.runtime_dir, f"home-{tag}")
         self.log_path = os.path.join(self.runtime_dir,
                                      f"{self.bridge_name}.log")
         self.env = app_env(self.runtime_dir, self.instance_name,
                            bridge_name=self.bridge_name,
-                           config_home=config_home)
+                           config_home=config_home, home=home)
 
         args = [binary] + ([repo] if repo else [])
         self._log = open(self.log_path, "w")
+        # stdin from nowhere, as a desktop launch has it: no terminal.
         self.proc = subprocess.Popen(
-            args, env=self.env, stdout=self._log, stderr=subprocess.STDOUT)
+            args, env=self.env, stdin=subprocess.DEVNULL, stdout=self._log,
+            stderr=subprocess.STDOUT)
 
     @property
     def lock_path(self) -> str:
@@ -194,6 +289,7 @@ class App:
         # would hang to its timeout instead of seeing exit 1.
         env["QT_QPA_PLATFORM"] = "offscreen"
         return subprocess.Popen([self.binary, *args], env=env,
+                                stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
 

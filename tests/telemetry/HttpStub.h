@@ -120,6 +120,8 @@ public:
     };
 
     const QList<StubRequest>& requests() const { return requests_; }
+    /// The clock requests' arrivedMs is read from.
+    qint64 elapsedMs() const { return clock_.elapsed(); }
     int disconnects() const { return disconnects_; }
     QStringList headerViolations() const { return violations_; }
 

@@ -99,6 +99,33 @@ private slots:
                  qPrintable(tip));
         QVERIFY2(tip.contains(QStringLiteral("release notes")), qPrintable(tip));
     }
+
+    // A signed tag's row shows its message, not the signature block
+    // `git tag -s` appends to it (createTag writes these bytes as-is).
+    void signedTagRowHidesTheSignature() {
+        gitbolt::test::TestRepo repo;
+        auto tagged = repo.writeAndCommit("a.txt", "a\n", "tagged");
+        QVERIFY(tagged.ok());
+        QVERIFY(repo.repo().createTag("v1", tagged.value(),
+            "release notes\n"
+            "-----BEGIN SSH SIGNATURE-----\n"
+            "U1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTk=\n"
+            "-----END SSH SIGNATURE-----\n").ok());
+
+        BranchModel model;
+        auto tags = repo.repo().tags();
+        QVERIFY(tags.ok());
+        model.setTags(std::move(tags.value()));
+
+        const QModelIndex tagsRoot = model.index(
+            static_cast<int>(BranchModel::RootCategory::Tags), 0);
+        QCOMPARE(model.rowCount(tagsRoot), 1);
+        const QString tip = model.data(model.index(0, 0, tagsRoot),
+                                       Qt::ToolTipRole).toString();
+        QVERIFY2(tip.endsWith(QStringLiteral("\nrelease notes")), qPrintable(tip));
+        QVERIFY2(!tip.contains(QStringLiteral("BEGIN")), qPrintable(tip));
+        QVERIFY2(!tip.contains(QStringLiteral("SIGNATURE")), qPrintable(tip));
+    }
 };
 
 QTEST_MAIN(TestBranchModel)

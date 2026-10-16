@@ -45,7 +45,10 @@ def _shm_segments() -> dict[str, str]:
 def _early_exits(binary: str, scratch: str) -> None:
     runtime = os.path.join(scratch, "early")
     os.mkdir(runtime, 0o700)
-    env = app_env(runtime, "gb-e2e-inst-early")
+    # Its home outside the runtime dir, which must end up empty: the
+    # crash handler creates ~/.gitbolt before --version is handled.
+    env = app_env(runtime, "gb-e2e-inst-early",
+                  home=os.path.join(scratch, "early-home"))
     before = _shm_segments() if sys.platform == "darwin" else {}
     pids = set()
     for args, want in [(["--version"], 0), (["--help"], 0),

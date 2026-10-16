@@ -14,14 +14,19 @@
 //     picking the same target again lists its commits again;
 //   - the bar shows only while a rebase / merge / cherry-pick / revert
 //     is in progress, offers Resolve while files are conflicted, holds
-//     Continue / Commit back until they're not, goes quiet while a step
-//     runs, and follows a theme switch.
+//     Continue / Commit back until they're not, offers Continue and
+//     Skip for a cherry-pick or revert of several commits paused
+//     between two, goes quiet while a step runs, and follows a theme
+//     switch;
+//   - the bar counts conflicted files in English: "1 file", "3 files"
+//     (util::installEnglishPlurals), not "1 file(s)".
 //
 
 #include <QApplication>
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QInputDialog>
+#include <QLabel>
 #include <QListView>
 #include <QMessageBox>
 #include <QPushButton>
@@ -33,6 +38,7 @@
 #include <QTimer>
 
 #include "dialogs/RebaseDialog.h"
+#include "util/Translations.h"
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/RepoOperationBar.h"
 
@@ -109,6 +115,8 @@ private slots:
     void initTestCase() {
         QVERIFY(settings_.isValid());
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings_.path());
+        // The app's English plural forms, as main.cpp installs them.
+        QCOMPARE(gitbolt::util::installEnglishPlurals(), gitbolt::util::hasEnglishPlurals());
     }
 
     void planListsCommitsNewestFirstAsPicks() {
@@ -249,6 +257,99 @@ private slots:
 
         bar.setState(gitbolt::git::RepoState::None, 0);
         QVERIFY(bar.isHidden());
+    }
+
+    // "%n file(s)" read "1 file(s)": Qt picks a plural form only from a
+    // loaded translation, and GitBolt loaded none.
+    void barCountsConflictedFiles() {
+        if (!gitbolt::util::hasEnglishPlurals())
+            QSKIP("built without Qt LinguistTools (or with Qt before 6.7): no English plural forms");
+        RepoOperationBar bar;
+        auto* message = bar.findChild<QLabel*>();
+        QVERIFY(message);
+        bar.setState(gitbolt::git::RepoState::Merge, 1);
+        QCOMPARE(message->text(),
+                 QStringLiteral("Merge stopped on conflicts in 1 file. Resolve them, then commit."));
+        bar.setState(gitbolt::git::RepoState::Rebase, 3);
+        QCOMPARE(message->text(),
+                 QStringLiteral("Rebase stopped on conflicts in 3 files. Resolve them, then Continue."));
+        bar.setState(gitbolt::git::RepoState::CherryPick, 2);
+        QVERIFY2(message->text().contains(QLatin1String(" in 2 files.")), qPrintable(message->text()));
+        bar.setState(gitbolt::git::RepoState::Revert, 1);
+        QVERIFY2(message->text().contains(QLatin1String(" in 1 file.")), qPrintable(message->text()));
+    }
+
+    // A cherry-pick or revert of several commits, paused between two of
+    // them, has nothing to commit: Continue carries it on, as for a
+    // rebase. Commit… led nowhere there. Stopped at a commit that waits
+    // for its own, it's Commit… still.
+    //
+    // Skip only where git's --skip takes it. Paused because the stopped
+    // commit was committed (the bar's own Commit…), git has "nothing to
+    // skip", and the Skip offered there only ever failed. At the stop
+    // itself, an empty pick that Commit… can't conclude had no Skip.
+    //
+    // Paused with HEAD where git left it, the stopped commit was never
+    // picked, and git's --continue leaves it out just as --skip does:
+    // "Continue to pick the rest" dropped it without a word. Only Skip,
+    // which says so, is offered there.
+    void barOffersContinueForAPausedSequence() {
+        RepoOperationBar bar;
+        auto* message = bar.findChild<QLabel*>();
+        QVERIFY(message);
+        for (const auto state : {gitbolt::git::RepoState::CherryPick,
+                                 gitbolt::git::RepoState::Revert}) {
+            const bool revert = state == gitbolt::git::RepoState::Revert;
+            // Paused with HEAD where git left it (a pick git refused, or
+            // a reset at the stop).
+            bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/true);
+            QVERIFY(!bar.isHidden());
+            QVERIFY(bar.sequencePaused());
+            QVERIFY(!button(bar, label("Commit…")));
+            QVERIFY(button(bar, label("Continue"))->isHidden());
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+            QVERIFY(button(bar, label("Skip"))->isEnabled());
+            QVERIFY(button(bar, label("Skip"))->toolTip().contains(
+                revert ? QLatin1String("git revert --skip")
+                       : QLatin1String("git cherry-pick --skip")));
+            QCOMPARE(message->text(),
+                     revert ? QStringLiteral("A revert of several commits stopped before "
+                                             "reverting a commit. Skip leaves that commit out "
+                                             "and reverts the rest; Abort goes back.")
+                            : QStringLiteral("A cherry-pick of several commits stopped before "
+                                             "picking a commit. Skip leaves that commit out "
+                                             "and picks the rest; Abort goes back."));
+            QSignalSpy continued(&bar, &RepoOperationBar::continueRequested);
+            QSignalSpy skipped(&bar, &RepoOperationBar::skipRequested);
+            button(bar, label("Skip"))->click();
+            QCOMPARE(skipped.count(), 1);
+
+            // Paused after the stopped commit was committed.
+            bar.setState(state, 0, /*sequencePaused=*/true, /*sequenceSkippable=*/false);
+            QVERIFY(!button(bar, label("Continue"))->isHidden());
+            QVERIFY(button(bar, label("Continue"))->isEnabled());
+            QVERIFY(button(bar, label("Skip"))->isHidden());
+            QVERIFY2(message->text().contains(revert ? QLatin1String("Continue to revert the rest")
+                                                     : QLatin1String("Continue to pick the rest")),
+                     qPrintable(message->text()));
+            button(bar, label("Continue"))->click();
+            QCOMPARE(continued.count(), 1);
+
+            // Stopped at a commit of the sequence, conflicted or empty.
+            bar.setState(state, 1, /*sequencePaused=*/false, /*sequenceSkippable=*/true);
+            QVERIFY(!bar.sequencePaused());
+            QVERIFY(button(bar, label("Commit…")));
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+            QVERIFY(button(bar, label("Skip"))->isEnabled());
+            bar.setState(state, 0, /*sequencePaused=*/false, /*sequenceSkippable=*/true);
+            QVERIFY(button(bar, label("Commit…"))->isEnabled());
+            QVERIFY(!button(bar, label("Skip"))->isHidden());
+
+            // A single cherry-pick or revert: Commit… or Abort.
+            bar.setState(state, 0, /*sequencePaused=*/false);
+            QVERIFY(button(bar, label("Commit…"))->isEnabled());
+            QVERIFY(button(bar, label("Skip"))->isHidden());
+        }
     }
 
     void barButtonsAskForTheirStepUntilBusy() {

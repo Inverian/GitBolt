@@ -96,10 +96,13 @@ else()
     set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
     set(CPACK_DEBIAN_PACKAGE_PRIORITY "optional")
     # Let dpkg-shlibdeps compute the real shared-library dependencies:
-    # the build host's libgit2 soname plus the system libraries the
-    # BUNDLED Qt needs (xcb-cursor, xkbcommon-x11, fontconfig, GL, ...),
-    # instead of hand-pinning a list that drifts. The bundled Qt itself
-    # (/usr/lib/gitbolt, see src/app/CMakeLists.txt) has no package.
+    # the system libraries the BUNDLED Qt needs (xcb-cursor,
+    # xkbcommon-x11, fontconfig, GL, ...), instead of hand-pinning a list
+    # that drifts. The bundled Qt itself (/usr/lib/gitbolt, see
+    # src/app/CMakeLists.txt) has no package. Released DEBs link libgit2
+    # statically (GITBOLT_BUNDLED_LIBGIT2, which CI checks); one built
+    # against a system libgit2 would also depend on its soname's package,
+    # which only that distribution release has.
     set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
     # Plus OpenSSL 3, which shlibdeps can't see: the bundled Qt's TLS
     # backend (plugins/tls/libqopensslbackend.so) dlopen()s libssl at

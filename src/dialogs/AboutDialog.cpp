@@ -228,6 +228,13 @@ void AboutDialog::setupUi()
     // DPI): an explicit minimum overrides the layout's own, so a
     // fixed 520 let dragging the dialog narrower cut lines short.
     setMinimumWidth(qMax(520, minimumSizeHint().width()));
+    // And as tall as the wrapped labels need at that width. A top-level
+    // window's minimum ignores height-for-width, so it came out ~45 px
+    // short: dragging the dialog smaller clipped the build-info table,
+    // and so did opening it on a short screen, where Qt caps a new
+    // window at 2/3 of the screen's height down to that minimum. Still
+    // resizable.
+    setMinimumHeight(rootLayout->totalHeightForWidth(minimumWidth()));
 }
 
 } // namespace gitbolt::dialogs

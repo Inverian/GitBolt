@@ -4,6 +4,7 @@
 
 #include <QWidget>
 
+class QEvent;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -73,6 +74,10 @@ signals:
     /// blame view for this repo-relative path.
     void blameRequested(const QString& path);
 
+protected:
+    /// A theme switch recolours the preview's heading.
+    void changeEvent(QEvent* event) override;
+
 private slots:
     void onTreeClicked(const QModelIndex& index);
     void onContextMenu(const QPoint& pos);
@@ -80,6 +85,7 @@ private slots:
 
 private:
     void setupUi();
+    void applyColors();
     void rebuildTree();
     void showBlobPreview(const git::ObjectId& blobId, const QString& path,
                          quint64 size);

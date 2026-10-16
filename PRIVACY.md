@@ -51,8 +51,11 @@ once per session, and at most 20 error reports per session.
 ### Crash reports
 
 If GitBolt crashes, it saves a crash report on your computer. The next
-time it starts, it tells you so, and when a summary of the report will
-be sent, it says that too. The summary contains:
+time it starts, it tells you so, and when a summary of the report is
+sent, it says that too. The summary goes out right away, with usage
+statistics on; turning them off deletes whatever hasn't been sent yet,
+the summary too if it hasn't gone out (while offline, say). The
+summary contains:
 
 - the GitBolt version that crashed, when it crashed, and a random
   report ID;
@@ -104,12 +107,17 @@ computer, so you can still quote it to have your data deleted.
 ## When it is sent
 
 GitBolt sends nothing until its window is open. Events are sent about
-10 seconds after they happen, one request at a time. If the server
-can't be reached, they wait on your computer and GitBolt tries again
-every 15 minutes; events still waiting when GitBolt quits are sent
-the next time it starts. They are kept in a file next to GitBolt's
-settings file: at most 500 events, for at most 14 days, and an event
-that fails to send 5 times is dropped.
+10 seconds after they happen, one request at a time. A crash summary
+is sent as soon as the window is open, before other events. If the
+server can't be reached, they wait on your computer and GitBolt tries
+again every 15 minutes; events still waiting when GitBolt quits are
+sent the next time it starts. They are kept in a file next to
+GitBolt's settings file: at most 500 events, for at most 14 days, and
+an event that fails to send 5 times is dropped. A try that fails
+before any of it reaches the server doesn't count: the server's name
+can't be looked up, the connection is refused, or there is no route to
+it, as while your computer is offline. A try that times out, or fails
+in any other way, does.
 
 ## Where it goes
 

@@ -1,5 +1,7 @@
 #include "git/GitProcess.h"
+#include "git/Askpass.h"
 #include "git/GitProcessLog.h"
+#include "util/LoginPath.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
@@ -7,12 +9,16 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QThread>
+#include <QThreadPool>
 #include <optional>
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <sstream>
 #include <string_view>
 
@@ -59,10 +65,21 @@ const QString kEditor = QStringLiteral(
 // runs with (see commentCharFor). No commit hash can be called that.
 const QString kCommentChar = QStringLiteral("comment-char");
 
+// Where commit() notes the stops of a cherry-pick or revert of several
+// commits that it concluded: "<stopped commit> <commit made>" a line. In
+// git's sequencer folder, so that it lives exactly as long as the
+// sequence does: git deletes the folder when the sequence finishes or is
+// aborted (or quit).
+const QString kConcludedStops = QStringLiteral("sequencer/gitbolt-concluded");
+
 // Every step of a rebase may replay the rest of the plan in one go, and
 // each reword in it runs the commit hooks. 30 s, run()'s default, cut
 // a Continue off mid-plan, git killed and its index.lock left behind.
 constexpr int kRebaseTimeoutMs = 300000;
+
+// A commit runs the repository's hooks, and a pre-commit hook may lint
+// or test the whole tree: as long as a rebase step, not run()'s 30 s.
+constexpr int kCommitTimeoutMs = 300000;
 
 // git strips the lines that start with core.commentChar from every
 // message it has had edited: a reword's, which kEditor writes, and a
@@ -98,8 +115,14 @@ char commentCharFor(const std::vector<std::string>& messages) {
 GitProcess::GitProcess(const std::string& workingDirectory)
     : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
 
-void GitProcess::applyEnvironment(QProcess& process) {
+void GitProcess::applyEnvironment(QProcess& process, bool allowPrompts) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // The login shell's PATH ahead of the session's (util/LoginPath.h):
+    // launched from the Dock, GitBolt has launchd's, and a hook that
+    // runs node, npx or anything else from Homebrew, nvm or volta
+    // turned every commit down ("node: command not found").
+    env.insert(QStringLiteral("PATH"),
+               util::pathForChildren(env.value(QStringLiteral("PATH"))));
     // The child has no tty, so a git that decides to prompt (HTTPS
     // remote with no cached credential, ssh host-key confirmation)
     // used to block until waitForFinished's timeout killed it —
@@ -121,17 +144,32 @@ void GitProcess::applyEnvironment(QProcess& process) {
     // When git (or ssh underneath it) does need a credential and no
     // helper supplies one, route the question to a GUI prompt: the
     // GitBolt binary re-invoked in askpass mode (see main.cpp, keyed
-    // on GITBOLT_ASKPASS_MODE — ssh passes no flags, so an env marker
-    // is the only reliable switch). SSH_ASKPASS_REQUIRE=force makes
+    // on kAskpassModeEnv — ssh passes no flags, so an env marker is
+    // the only reliable switch). SSH_ASKPASS_REQUIRE=force makes
     // OpenSSH ≥ 8.4 use the askpass even when a TTY exists.
+    //
+    // Without prompts (forbidPrompts), git gets an empty GIT_ASKPASS:
+    // it outranks core.askPass and SSH_ASKPASS, and with
+    // GIT_TERMINAL_PROMPT=0 git fails at once, saying "terminal
+    // prompts disabled". (A failing askpass would block it too, but
+    // git's first line would then blame the askpass.) ssh still gets
+    // GitBolt, in refuse mode, which says no without a window: an ssh
+    // older than 8.4 ignores SSH_ASKPASS_REQUIRE=never, and could run
+    // a distro ssh-askpass instead. Git Credential Manager opens a
+    // sign-in window of its own unless told not to.
     const QString self = QCoreApplication::applicationFilePath();
+    if (!allowPrompts) {
+        env.insert(QStringLiteral("GIT_ASKPASS"), QString());
+        env.insert(QStringLiteral("GCM_INTERACTIVE"), QStringLiteral("never"));
+    }
     if (!self.isEmpty()) {
-        env.insert(QStringLiteral("GIT_ASKPASS"), self);
+        if (allowPrompts)
+            env.insert(QStringLiteral("GIT_ASKPASS"), self);
         env.insert(QStringLiteral("SSH_ASKPASS"), self);
         env.insert(QStringLiteral("SSH_ASKPASS_REQUIRE"),
                    QStringLiteral("force"));
-        env.insert(QStringLiteral("GITBOLT_ASKPASS_MODE"),
-                   QStringLiteral("1"));
+        env.insert(QLatin1String(kAskpassModeEnv),
+                   QLatin1String(allowPrompts ? kAskpassAsk : kAskpassRefuse));
     }
     process.setProcessEnvironment(env);
 }
@@ -144,54 +182,7 @@ int GitProcess::defaultTimeoutMs() {
 
 Result<ProcessOutput> GitProcess::run(const std::vector<std::string>& args,
                                       std::optional<int> timeout) const {
-    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
-    if (!cancelFlags_.empty())
-        return runCancellable(args, timeoutMs);
-
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-
-    QStringList qargs;
-    for (const auto& arg : args)
-        qargs.append(QString::fromStdString(arg));
-
-    // Wall-clock timing the run so the command log can show per-
-    // command latency. Cheap (no allocations after start()).
-    QElapsedTimer timer;
-    timer.start();
-
-    process.start(QString::fromStdString(gitPath_), qargs);
-
-    if (!process.waitForStarted(5000)) {
-        // Still log the failed-to-start case with exit code -1 so
-        // it shows up in the command log; users debugging "why
-        // didn't this run?" want to see attempts as well as
-        // successes.
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
-    }
-
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Git process timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-
-    GitProcessLog::instance().emitCommand(
-        QString::fromStdString(workDir_), qargs, output.exitCode,
-        timer.elapsed());
-
-    return output;
+    return runImpl(args, timeout.value_or(defaultTimeoutMs()));
 }
 
 Result<ProcessOutput> GitProcess::runWithInput(
@@ -199,52 +190,7 @@ Result<ProcessOutput> GitProcess::runWithInput(
     const std::string& stdinData,
     std::optional<int> timeout) const
 {
-    const int timeoutMs = timeout.value_or(defaultTimeoutMs());
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-
-    QStringList qargs;
-    for (const auto& arg : args)
-        qargs.append(QString::fromStdString(arg));
-
-    QElapsedTimer timer;
-    timer.start();
-
-    process.start(QString::fromStdString(gitPath_), qargs);
-    if (!process.waitForStarted(5000)) {
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed,
-                        "Failed to start git process");
-    }
-
-    // Feed the payload and close stdin so git sees EOF — commands
-    // like `git apply -` block until the write channel closes.
-    process.write(stdinData.data(),
-                  static_cast<qint64>(stdinData.size()));
-    process.closeWriteChannel();
-
-    if (!process.waitForFinished(timeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(
-            QString::fromStdString(workDir_), qargs, -1,
-            timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed,
-                        "Git process timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-
-    GitProcessLog::instance().emitCommand(
-        QString::fromStdString(workDir_), qargs, output.exitCode,
-        timer.elapsed());
-
-    return output;
+    return runImpl(args, timeout.value_or(defaultTimeoutMs()), &stdinData);
 }
 
 Result<std::vector<std::string>> GitProcess::logOneline(const std::string& range, int maxCount) const {
@@ -307,17 +253,25 @@ Result<ProcessOutput> GitProcess::pull(const std::string& remote, const std::str
     return run(args, 120000);
 }
 
-Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool prune) const {
+Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool pruneByDefault) const {
+    // `-c fetch.prune=true`, not --prune: a remote's own
+    // remote.<name>.prune outranks fetch.prune even from -c, so a
+    // remote set not to prune keeps its refs, where --prune would
+    // override it. It also needs no remote name: an empty `remote` is
+    // whichever one git picks.
     std::vector<std::string> args;
-    args.reserve(3);
+    args.reserve(4);
+    if (pruneByDefault) {
+        args.emplace_back("-c");
+        args.emplace_back("fetch.prune=true");
+    }
     args.emplace_back("fetch");
     if (!remote.empty()) args.push_back(remote);
-    if (prune) args.emplace_back("--prune");
     return run(args, 120000);
 }
 
 // ---------------------------------------------------------------------------
-// Clone, and run() with a cancel flag
+// Clone, and every other git command
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -329,21 +283,22 @@ constexpr int kPollMs = 50;
 // can never hang the worker (and through the thread pool, app exit).
 constexpr int kTerminateWaitMs = 2000;
 
-// The process tree of one `git clone` (or of a cancellable run(): a
-// fetch, pull or push). git does the transfer in children —
-// git-remote-https, ssh, index-pack, upload-pack for a local URL,
-// GitBolt itself in askpass mode — so killing only git on cancel
-// orphans them: they run on, and on Windows keep files inside the
-// destination open, so it can't be removed. ProcessTree puts git
-// in a group that one call stops as a whole:
+// The process tree of one git command: a `git clone`, or any run().
+// git does the transfer in children — git-remote-https, ssh,
+// index-pack, upload-pack for a local URL, GitBolt itself in askpass
+// mode — and local work too: hooks, clean / smudge filters. Killing
+// only git on cancel orphans them: they run on, and on Windows keep
+// files inside the destination open, so it can't be removed.
+// ProcessTree puts git in a group that one call stops as a whole:
 //
 //   Unix:    setsid() in the child makes git the leader of a new
 //            process group; terminate() signals the group.
 //   Windows: git is created inside a job object (the attribute is
 //            applied by CreateProcess itself, so not even a child
 //            spawned in git's first microseconds escapes);
-//            terminate() ends the job, and KILL_ON_JOB_CLOSE kills
-//            whatever is left if GitBolt itself dies mid-clone.
+//            terminate() sends Ctrl-C to git's console where it can
+//            (interruptTree), then ends the job, and KILL_ON_JOB_CLOSE
+//            kills whatever is left if GitBolt itself dies mid-clone.
 //
 // Only while git runs, though. Once git has exited on its own,
 // release() lets the tree go, and whatever git or a helper started
@@ -377,6 +332,72 @@ private:
 };
 
 #if defined(Q_OS_WIN)
+
+// The Ctrl-Cs ignoreCtrlC has taken (see interruptTree).
+std::atomic<unsigned> ctrlCsTaken{0};
+
+// GitBolt's answer to the Ctrl-C it sends git (see interruptTree):
+// GenerateConsoleCtrlEvent reaches every process on the console, the
+// sender attached to it included, and the default handler would end
+// GitBolt. A handler function rather than SetConsoleCtrlHandler(nullptr,
+// TRUE): that flag is inherited, and every git started after it would
+// ignore Ctrl-C.
+BOOL WINAPI ignoreCtrlC(DWORD type)
+{
+    if (type != CTRL_C_EVENT && type != CTRL_BREAK_EVENT)
+        return FALSE;
+    ++ctrlCsTaken;
+    return TRUE;
+}
+
+// Ctrl-C for git and everything it started, as in a terminal: they all
+// share the hidden console that Qt's CREATE_NO_WINDOW gives git, and
+// GitBolt attaches to it just long enough to send one. git's handler
+// rolls back the lockfiles it holds (index.lock, HEAD.lock) and git
+// exits; sh, a hook, a filter and ssh get it too. TerminateJobObject
+// alone, like any TerminateProcess, runs none of that: git's
+// index.lock stayed behind, and every later stage, commit and checkout
+// failed on it. False when no Ctrl-C can be sent: GitBolt has a
+// console of its own (a console test does; the app never has), which
+// git then shares with whatever else runs there, or git is gone.
+//
+// The handler goes in after AttachConsole, every time: attaching puts
+// the process's handler list back to the default one alone, which ends
+// the process (ExitProcess(STATUS_CONTROL_C_EXIT)). Registered once,
+// before the first attach, it was gone when the Ctrl-C came, and GitBolt
+// ended with git: a quit, a repository switch during an auto-fetch, a
+// clone's Cancel or any timeout took the whole app down (the Windows
+// CI's test_git_process died "Interrupt" in its timeout test). Removed
+// first, so that where attaching resets nothing it is listed once. The
+// Ctrl-C reaches GitBolt on a thread of its own, after the call: the
+// console stays attached, and the next cancel waits its turn, until the
+// handler has taken it (or a second has gone by).
+bool interruptTree(const QProcess& process)
+{
+    const auto pid = static_cast<DWORD>(process.processId());
+    if (pid == 0)
+        return false;
+    // A process has one console at a time: two cancels take turns.
+    static std::mutex consoleMutex;
+    const std::lock_guard<std::mutex> lock(consoleMutex);
+    if (!AttachConsole(pid))
+        return false;
+    SetConsoleCtrlHandler(ignoreCtrlC, FALSE);
+    if (!SetConsoleCtrlHandler(ignoreCtrlC, TRUE)) {
+        FreeConsole();
+        return false;
+    }
+    const unsigned before = ctrlCsTaken.load();
+    const bool sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+    if (sent) {
+        QElapsedTimer waited;
+        waited.start();
+        while (ctrlCsTaken.load() == before && waited.elapsed() < 1000)
+            QThread::msleep(5);
+    }
+    FreeConsole();
+    return sent;
+}
 
 ProcessTree::ProcessTree()
 {
@@ -459,6 +480,28 @@ bool ProcessTree::dropHook(QProcess& process)
 
 void ProcessTree::terminate(QProcess& process)
 {
+    // Ctrl-C first, so that git rolls back its lockfiles; then the job
+    // ends whatever is left, or everything at once where no Ctrl-C
+    // could be sent (a lockfile git held then stays behind). git exits
+    // within milliseconds of the Ctrl-C, but a hook it ran gets one too
+    // and may have cleaning up to do: pre-commit puts back the unstaged
+    // changes it set aside. Ended with git, the hook lost them from the
+    // work tree. So the job's other processes get the same time to
+    // finish before it is ended.
+    if (interruptTree(process)) {
+        process.waitForFinished(kTerminateWaitMs);
+        if (job_) {
+            QElapsedTimer grace;
+            grace.start();
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION info{};
+            while (grace.elapsed() < kTerminateWaitMs
+                   && QueryInformationJobObject(job_, JobObjectBasicAccountingInformation,
+                                                &info, static_cast<DWORD>(sizeof(info)),
+                                                nullptr)
+                   && info.ActiveProcesses > 0)
+                QThread::msleep(10);
+        }
+    }
     if (job_)
         TerminateJobObject(job_, 1);
     else
@@ -512,12 +555,25 @@ void ProcessTree::terminate(QProcess& process)
         process.waitForFinished(kTerminateWaitMs);
         return;
     }
-    // SIGTERM first: git clone's handler deletes the half-written
-    // destination itself, and ssh closes its connection. SIGKILL then
-    // sweeps the group for anything that ignored SIGTERM or outlived
-    // git (ESRCH once the group is empty).
-    ::kill(-group, SIGTERM);
+    // SIGINT first, what Ctrl-C in a terminal sends: git clone's
+    // handler deletes the half-written destination itself, every git
+    // rolls back the lockfiles it holds (index.lock, HEAD.lock), and ssh
+    // closes its connection. A hook gets it too, and may have cleaning
+    // up to do once git is gone: pre-commit puts back the unstaged
+    // changes it set aside, in a trap or a Python `finally` (which
+    // SIGTERM's default action skips). git exits within milliseconds,
+    // and the SIGKILL that came right after it used to end that cleanup
+    // halfway: quitting during a commit lost the user's unstaged changes
+    // from the work tree. So the whole group gets the time git got
+    // before SIGKILL sweeps it for anything that ignored SIGINT or hung.
+    // kill(…, 0) fails once the group is empty (ESRCH), or holds only
+    // zombies (EPERM, on macOS).
+    ::kill(-group, SIGINT);
     process.waitForFinished(kTerminateWaitMs);
+    QElapsedTimer grace;
+    grace.start();
+    while (::kill(-group, 0) == 0 && grace.elapsed() < kTerminateWaitMs)
+        QThread::msleep(10);
     ::kill(-group, SIGKILL);
     process.waitForFinished(kTerminateWaitMs);
 }
@@ -528,6 +584,35 @@ void ProcessTree::release()
 }
 
 #endif
+
+// A git command on a thread of the global pool, where every long git job
+// runs (a commit and its hooks, a rebase step, a checkout, a local op, a
+// fetch), spends its time waiting on git, and the thread is one of the
+// pool's idealThreadCount() slots all the while. The pool also opens
+// repositories and runs every refresh: on a 2-CPU machine two such jobs
+// held both slots, and an open waited the whole commit out ("Opening…"
+// for as long as a pre-commit hook ran), the window's refreshes with it.
+// While git runs, the slot goes back to the pool, which starts another
+// thread if queued work needs one, and it is taken back once git is
+// done. (QThreadPool::releaseThread, made for a thread that waits.)
+class PoolSlotLent {
+public:
+    PoolSlotLent()
+        : pool_(QThreadPool::globalInstance()->contains(QThread::currentThread())
+                    ? QThreadPool::globalInstance() : nullptr) {
+        if (pool_)
+            pool_->releaseThread();
+    }
+    ~PoolSlotLent() {
+        if (pool_)
+            pool_->reserveThread();
+    }
+    PoolSlotLent(const PoolSlotLent&) = delete;
+    PoolSlotLent& operator=(const PoolSlotLent&) = delete;
+
+private:
+    QThreadPool* const pool_;
+};
 
 // Any entry makes a directory non-empty for git — .DS_Store and other
 // hidden files included — and so it must for us.
@@ -612,13 +697,22 @@ bool GitProcess::cancelled() const
                        [](const auto& flag) { return flag->load(); });
 }
 
-// run() for a GitProcess with a cancel flag: git in a ProcessTree, and
-// a poll loop instead of one long waitForFinished(), so a cancel is
-// seen within kPollMs and stops the whole tree — including an ssh or
-// git-remote-https waiting on a network that stopped answering, which
-// would otherwise hold its caller until the timeout.
-Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>& args,
-                                                 int timeoutMs) const
+// Every git command: git in a ProcessTree, and a poll loop instead of
+// one long waitForFinished(), so a cancel is seen within kPollMs and
+// stops the whole tree — including an ssh or git-remote-https waiting
+// on a network that stopped answering, which would otherwise hold its
+// caller until the timeout. A timeout stops the tree the same way. It
+// used to SIGKILL git alone: git left its index.lock behind, which
+// every later stage, commit and checkout tripped over, and the hook or
+// filter it was running ran on, orphaned (a merge whose post-merge
+// hook was slow had gone through, and was reported as timed out). Now
+// git is interrupted first (SIGINT, as Ctrl-C sends, on Unix; a Ctrl-C
+// on Windows; see ProcessTree::terminate) and rolls its lockfiles back
+// itself, and a hook gets to finish cleaning up before the rest is
+// killed.
+Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, int timeoutMs,
+                                          const std::string* stdinData,
+                                          const std::map<std::string, std::string>& extraEnv) const
 {
     const QString workDir = QString::fromStdString(workDir_);
     QStringList qargs;
@@ -631,9 +725,17 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
     ProcessTree tree;
     QProcess process;
     process.setWorkingDirectory(workDir);
-    applyEnvironment(process);
+    applyEnvironment(process, !promptsForbidden_);
+    if (!extraEnv.empty()) {
+        QProcessEnvironment env = process.processEnvironment();
+        for (const auto& [name, value] : extraEnv)
+            env.insert(QString::fromStdString(name), QString::fromStdString(value));
+        process.setProcessEnvironment(env);
+    }
     tree.prepare(process);
 
+    // Wall-clock timing the run so the command log can show per-
+    // command latency.
     QElapsedTimer timer;
     timer.start();
     const QString gitPath = QString::fromStdString(gitPath_);
@@ -644,12 +746,22 @@ Result<ProcessOutput> GitProcess::runCancellable(const std::vector<std::string>&
         started = process.waitForStarted(kStartTimeoutMs);
     }
     if (!started) {
+        // Still logged, with exit code -1: someone debugging "why
+        // didn't this run?" wants to see the attempts too.
         GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
         return GitError(GitErrorCode::ProcessFailed, "Failed to start git process");
     }
+    // Fed once and closed, so that git reading it (`commit -F -`,
+    // `apply -`) sees the end: they block until the channel closes.
+    if (stdinData) {
+        process.write(stdinData->data(), static_cast<qint64>(stdinData->size()));
+        process.closeWriteChannel();
+    }
 
-    // Each wait also moves git's output into QProcess's buffers, so
-    // its pipes can't fill up and stall it between polls.
+    // Each wait also moves git's output into QProcess's buffers (and
+    // the payload into its stdin), so its pipes can't fill up and
+    // stall it between polls.
+    const PoolSlotLent lent;
     while (!process.waitForFinished(kPollMs) && process.state() != QProcess::NotRunning) {
         const bool stop = cancelled();
         if (stop || (timeoutMs >= 0 && timer.elapsed() >= timeoutMs)) {
@@ -775,6 +887,7 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     };
 
     bool cancelled = false;
+    const PoolSlotLent lent;
     while (process.state() != QProcess::NotRunning) {
         if (cancelFlag && cancelFlag->load()) {
             cancelled = true;
@@ -861,7 +974,7 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         return QStringLiteral("'%1'").arg(quoted);
     };
     // The new messages, and the comment character, go into the rebase's
-    // own state, for kEditor and rebaseCommentConfig() to find: the
+    // own state, for kEditor and rebaseConfig() to find: the
     // sequence editor runs once git has set that up, and before any
     // commit is made.
     QTemporaryDir messageDir(QDir::tempPath() + QStringLiteral("/gitbolt-messages-XXXXXX"));
@@ -881,71 +994,511 @@ Result<ProcessOutput> GitProcess::interactiveRebase(
         "cp %1 \"$1\" && cp -R %2 \"$(git rev-parse --git-path rebase-merge)/%3\" && :")
         .arg(shellQuoted(todoFile.fileName()), shellQuoted(messageDir.path()), kRewordMessages);
 
-    QProcess process;
-    process.setWorkingDirectory(QString::fromStdString(workDir_));
-    applyEnvironment(process);
-    QProcessEnvironment env = process.processEnvironment();
-    env.insert(QStringLiteral("GIT_SEQUENCE_EDITOR"), sequenceEditor);
-    process.setProcessEnvironment(env);
-
-    // The git commands the rebase runs (`git commit` for a reword or a
+    // Through runImpl() like every other command, so a cancel (quitting)
+    // stops it and its hooks; it used to run a QProcess of its own that
+    // nothing could stop, and quitting waited out the whole rebase. The
+    // git commands the rebase runs (`git commit` for a reword or a
     // squash) inherit the -c.
-    const QStringList args = {QStringLiteral("-c"),
-                              QStringLiteral("core.commentChar=") + QLatin1Char(commentChar),
-                              QStringLiteral("rebase"), QStringLiteral("-i"),
-                              QString::fromStdString(onto)};
-    const QString workDir = QString::fromStdString(workDir_);
-    QElapsedTimer timer;
-    timer.start();
-    process.start(QString::fromStdString(gitPath_), args);
-    if (!process.waitForStarted(5000)) {
-        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Failed to start rebase");
-    }
-    if (!process.waitForFinished(kRebaseTimeoutMs)) {
-        process.kill();
-        GitProcessLog::instance().emitCommand(workDir, args, -1, timer.elapsed());
-        return GitError(GitErrorCode::ProcessFailed, "Rebase timed out");
-    }
-
-    ProcessOutput output;
-    output.exitCode = process.exitCode();
-    output.stdoutData = process.readAllStandardOutput().toStdString();
-    output.stderrData = process.readAllStandardError().toStdString();
-    GitProcessLog::instance().emitCommand(workDir, args, output.exitCode, timer.elapsed());
-    return output;
+    // The new messages are UTF-8, and so are the commits' (kUtf8Commits).
+    auto result = runImpl({"-c", kUtf8Commits, "-c", std::string("core.commentChar=") + commentChar,
+                           "rebase", "-i", onto},
+                          kRebaseTimeoutMs, nullptr,
+                          {{"GIT_SEQUENCE_EDITOR", sequenceEditor.toStdString()}});
+    keepRewordMessage();
+    return result;
 }
 
-std::vector<std::string> GitProcess::rebaseCommentConfig() const {
+std::vector<std::string> GitProcess::rebaseConfig() const {
+    std::vector<std::string> config = {"-c", kUtf8Commits};
     const auto path = run({"rev-parse", "--git-path",
                            QStringLiteral("rebase-merge/%1/%2")
                                .arg(kRewordMessages, kCommentChar).toStdString()});
     if (!path || !path->success())
-        return {};
+        return config;
     QFile file(QDir(QString::fromStdString(workDir_))
                    .absoluteFilePath(QString::fromStdString(path->stdoutData).trimmed()));
     if (!file.open(QIODevice::ReadOnly))
-        return {};
+        return config;
     const QByteArray commentChar = file.read(2);
     if (commentChar.size() != 1)
+        return config;
+    config.insert(config.end(), {"-c", "core.commentChar=" + commentChar.toStdString()});
+    return config;
+}
+
+QString GitProcess::gitPath(const QString& path) const {
+    const auto out = run({"rev-parse", "--git-path", path.toStdString()});
+    if (!out || !out->success())
         return {};
-    return {"-c", "core.commentChar=" + commentChar.toStdString()};
+    return QDir(QString::fromStdString(workDir_))
+        .absoluteFilePath(QString::fromStdString(out->stdoutData).trimmed());
+}
+
+// git's done list ends with the line of the commit the rebase stopped
+// at ("reword <hash> <subject>", as kEditor reads it too).
+QString GitProcess::stoppedRewordMessage(std::string* hash) const {
+    const QString dir = gitPath(QStringLiteral("rebase-merge"));
+    if (dir.isEmpty())
+        return {};
+    QFile done(dir + QStringLiteral("/done"));
+    if (!done.open(QIODevice::ReadOnly))
+        return {};
+    const QList<QByteArray> words = done.readAll().trimmed().split('\n').last().simplified().split(' ');
+    if (words.size() < 2 || (words[0] != "reword" && words[0] != "r"))
+        return {};
+    const QString message = QStringLiteral("%1/%2/%3")
+                                .arg(dir, kRewordMessages, QString::fromLatin1(words[1]));
+    if (!QFileInfo(message).isFile())
+        return {};
+    if (hash)
+        *hash = words[1].toStdString();
+    return message;
+}
+
+// HEAD is the reword's commit as git picked it, before the message:
+// the commit itself (git fast-forwards where it can), or a copy that
+// keeps its author, date and message, and its change (patch-id). The
+// message alone said so of whichever commit HEAD was: a stop before the
+// reword's own was made (an untracked file in the way, a conflict
+// resolved to nothing) left an earlier commit with the same message
+// there ("wip", "wip"), and Continue renamed that one.
+std::optional<bool> GitProcess::headIsPickOf(const std::string& hash) const {
+    const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
+    if (!ids || !ids->success())
+        return std::nullopt;
+    const QStringList both = QString::fromStdString(ids->stdoutData)
+                                 .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (both.size() == 2 && both[0] == both[1])
+        return true;
+    // Who and when, not the message: a prepare-commit-msg hook that
+    // adds to every message it's given ("[T-1]", a Change-Id) gave the
+    // pick another one, and Continue's retry of a reword a commit-msg
+    // hook had turned down never came ("Rebase complete.", the reword
+    // gone). The patch-id below pins the change, which tells "wip" from
+    // "wip".
+    const auto commit = [&](const std::string& rev, const char* format) {
+        return run({"log", "-1", "--date=raw", std::string("--format=") + format, rev});
+    };
+    const auto now = commit("HEAD", "%an%n%ae%n%ad");
+    const auto before = commit(hash, "%an%n%ae%n%ad");
+    if (!now || !before || !now->success() || !before->success())
+        return std::nullopt;
+    if (now->stdoutData != before->stdoutData)
+        return false;
+    // The change: the same patch-id, whatever base it was picked onto.
+    // Without context lines (-U0): a clean pick onto a base that
+    // changed lines near the commit's has other context around the
+    // same change, and with it another patch-id. The pick then didn't
+    // count as the commit, and Skip at an `edit` stop on a rebase onto
+    // an updated branch ran git's reset --hard over the changes made
+    // there.
+    const auto patchId = [&](const std::string& rev) -> std::optional<std::string> {
+        const auto patch = run({"diff-tree", "--root", "-p", "-U0", "--no-commit-id", rev});
+        if (!patch || !patch->success())
+            return std::nullopt;
+        if (patch->stdoutData.empty())
+            return std::string();   // no change at all
+        const auto id = runWithInput({"patch-id", "--stable"}, patch->stdoutData);
+        if (!id || !id->success() || id->stdoutData.empty())
+            return std::nullopt;
+        return id->stdoutData.substr(0, id->stdoutData.find(' '));
+    };
+    const auto headId = patchId("HEAD");
+    const auto hashId = patchId(hash);
+    if (!headId || !hashId)
+        return std::nullopt;
+    if (*headId != *hashId)
+        return false;
+    if (!headId->empty())
+        return true;
+    // No change to tell them apart by: the message has to start as the
+    // commit's did, whatever a hook added after it.
+    const auto nowMessage = commit("HEAD", "%B");
+    const auto beforeMessage = commit(hash, "%B");
+    if (!nowMessage || !beforeMessage || !nowMessage->success() || !beforeMessage->success())
+        return std::nullopt;
+    const QString was = QString::fromStdString(beforeMessage->stdoutData).trimmed();
+    return QString::fromStdString(nowMessage->stdoutData).trimmed().startsWith(was);
+}
+
+std::string GitProcess::committedRebaseStop() const {
+    const QString dir = gitPath(QStringLiteral("rebase-merge"));
+    if (dir.isEmpty())
+        return {};
+    QFile done(dir + QStringLiteral("/done"));
+    if (!done.open(QIODevice::ReadOnly))
+        return {};
+    const QList<QByteArray> words = done.readAll().trimmed().split('\n').last().simplified().split(' ');
+    if (words.size() < 2)
+        return {};
+    std::string verb;
+    if (words[0] == "pick" || words[0] == "p")
+        verb = "pick";
+    else if (words[0] == "reword" || words[0] == "r")
+        verb = "reword";
+    else if (words[0] == "edit" || words[0] == "e")
+        verb = "edit";
+    else
+        return {};
+    // git's own word for it: it writes rebase-merge/amend where it stops
+    // with the commit made, to be amended (every `edit`, and a reword
+    // turned down after a fast-forward), and removes it when the rebase
+    // goes on. It stays through whatever the user does there: an amend
+    // of the commit, or a split of it, leaves HEAD a commit that is no
+    // pick of the stopped one, and Skip then ran git's reset --hard over
+    // the work made since.
+    if (QFileInfo::exists(dir + QStringLiteral("/amend")))
+        return verb;
+    // A pick git has yet to commit (a conflict, or a change that came
+    // out empty): HEAD is the commit before it, which may be the same
+    // change picked earlier (the branch's copy of it).
+    if (QFileInfo::exists(gitPath(QStringLiteral("CHERRY_PICK_HEAD"))))
+        return {};
+    // Where git can't tell (a patch-id that timed out on a huge commit),
+    // as made: rebaseSkip() then refuses while there is work to lose,
+    // rather than letting a reset --hard through.
+    const std::optional<bool> picked = headIsPickOf(words[1].toStdString());
+    return !picked || *picked ? verb : std::string();
+}
+
+// The message git turned down is to be tried again where HEAD is still
+// the commit the stop left: the stopped commit itself (a fast-forward),
+// or git's own pick of it. Anything since (the user's amend of the
+// message at the stop, "commit (amend): ...") is the user's: the plan's
+// message, still turned down by the hook, came back on every Continue,
+// and replaced theirs where the hook took it. What tells them apart:
+// git's own record of the stop where it keeps one (rebase-merge/amend),
+// else HEAD's reflog, else, with no reflog either, the message.
+bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
+    const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
+    if (!ids || !ids->success())
+        return false;
+    const QStringList both = QString::fromStdString(ids->stdoutData)
+                                 .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    if (both.size() == 2 && both[0] == both[1])
+        return true;
+    if (both.isEmpty())
+        return false;
+    // git writes HEAD to rebase-merge/amend where it stops with the
+    // commit made, to be amended: at a reword turned down after a
+    // fast-forward (HEAD then is the commit itself, above). A HEAD
+    // other than that is a commit made since.
+    if (QFile amend(gitPath(QStringLiteral("rebase-merge/amend")));
+        amend.open(QIODevice::ReadOnly))
+        return QString::fromLatin1(amend.readAll()).trimmed() == both[0];
+    const auto entry = run({"log", "-g", "-1", "--format=%gs", "HEAD"});
+    const QString subject = entry && entry->success()
+        ? QString::fromStdString(entry->stdoutData).trimmed() : QString();
+    if (subject.isEmpty()) {
+        // No HEAD reflog to ask (core.logAllRefUpdates=false, and none
+        // written before): git says nothing (2.39 exits 0). That ruled
+        // the retry out, and Continue said "Rebase complete." with the
+        // reword gone. git's pick keeps the old message (the reword is
+        // what the hook turned down); the user's amend at the stop is
+        // what changes it. The same message, then; or one that starts
+        // with it where a prepare-commit-msg hook may have added to
+        // git's pick, as in headIsPickOf(). Not otherwise: an amend that
+        // kept the old message and added to it (a body, a trailer)
+        // passed for the pick, and the retry put the plan's message,
+        // turned down again, back over it on every Continue.
+        const auto commit = [&](const std::string& rev) {
+            return run({"log", "-1", "--format=%B", rev});
+        };
+        const auto now = commit("HEAD");
+        const auto was = commit(hash);
+        if (!now || !was || !now->success() || !was->success())
+            return false;
+        const QString nowMessage = QString::fromStdString(now->stdoutData).trimmed();
+        const QString wasMessage = QString::fromStdString(was->stdoutData).trimmed();
+        if (nowMessage == wasMessage)
+            return true;
+        return nowMessage.startsWith(wasMessage) && hasPrepareCommitMsgHook();
+    }
+    return subject.startsWith(QLatin1String("rebase (reword)"))
+        || subject.startsWith(QLatin1String("rebase -i (reword)"));
+}
+
+// Where git looks for it (core.hooksPath honoured), as git runs it: Git
+// for Windows runs any file there, through sh, and, where there's none,
+// the name with ".exe" (find_hook()'s STRIP_EXTENSION retry), as a
+// compiled hook has.
+bool GitProcess::hasPrepareCommitMsgHook() const {
+    const QString path = gitPath(QStringLiteral("hooks/prepare-commit-msg"));
+    if (path.isEmpty())
+        return false;
+    const QFileInfo hook(path);
+#ifdef Q_OS_WIN
+    return hook.isFile() || QFileInfo(path + QLatin1String(".exe")).isFile();
+#else
+    return hook.isFile() && hook.isExecutable();
+#endif
+}
+
+QString GitProcess::rejectedRewordMessage() const {
+    std::string hash;
+    const QString message = stoppedRewordMessage(&hash);
+    if (message.isEmpty())
+        return {};
+    // A pick git has yet to commit (a conflict, or one that came out
+    // empty on top of the branch's own copy of the change): that copy at
+    // HEAD looked like the pick, and the retry's commit --amend failed
+    // there ("cannot amend") on every Continue. git's --continue
+    // commits, or drops, the pick.
+    if (QFileInfo::exists(gitPath(QStringLiteral("CHERRY_PICK_HEAD"))))
+        return {};
+    const auto staged = run({"diff", "--cached", "--quiet"});
+    if (!staged || staged->exitCode != 0)
+        return {};
+    const std::optional<bool> picked = headIsPickOf(hash);
+    if (!picked || !*picked || !headIsTheRewordStop(hash))
+        return {};
+    return message;
+}
+
+// Only kEditor knew the new message: a `git rebase --continue` in a
+// terminal, after the conflict that stopped a reword, committed with
+// what these held, the old one.
+void GitProcess::keepRewordMessage() const {
+    const QString message = stoppedRewordMessage();
+    if (message.isEmpty())
+        return;
+    for (const QString& kept : {gitPath(QStringLiteral("rebase-merge/message")),
+                                gitPath(QStringLiteral("MERGE_MSG"))}) {
+        if (!kept.isEmpty() && QFileInfo::exists(kept) && QFile::remove(kept))
+            QFile::copy(message, kept);
+    }
 }
 
 Result<ProcessOutput> GitProcess::rebaseContinue() const {
-    std::vector<std::string> args = rebaseCommentConfig();
+    const std::vector<std::string> commentConfig = rebaseConfig();
+    // A reword whose new message a hook turned down (commit-msg, say)
+    // stopped the rebase with the commit picked under its old message.
+    // git's --continue then went on with that message, and Continue
+    // said "Rebase complete." with the reword gone. It gets the plan's
+    // message again first, hooks and all.
+    if (const QString message = rejectedRewordMessage(); !message.isEmpty()) {
+        std::vector<std::string> amend = commentConfig;
+        amend.insert(amend.end(), {"commit", "--amend", "--only", "--allow-empty", "-F",
+                                   QDir::toNativeSeparators(message).toStdString()});
+        auto amended = run(amend, kRebaseTimeoutMs);
+        if (!amended || !amended->success())
+            return amended;
+    }
+    std::vector<std::string> args = commentConfig;
     args.insert(args.end(), {"rebase", "--continue"});
-    return run(args, kRebaseTimeoutMs);
+    auto result = run(args, kRebaseTimeoutMs);
+    keepRewordMessage();
+    return result;
 }
 
 Result<ProcessOutput> GitProcess::rebaseAbort() const {
     return run({"rebase", "--abort"}, kRebaseTimeoutMs);
 }
 
+bool GitProcess::hasTrackedChanges() const {
+    // --no-optional-locks: a look, which mustn't take index.lock from a
+    // git that runs meanwhile. Submodules: a dirty one's work tree is
+    // its own, which no reset of this one touches.
+    const auto status = run({"--no-optional-locks", "status", "--porcelain",
+                             "--untracked-files=no", "--ignore-submodules=dirty"});
+    if (!status || !status->success())
+        return true;
+    return !QString::fromStdString(status->stdoutData).trimmed().isEmpty();
+}
+
 Result<ProcessOutput> GitProcess::rebaseSkip() const {
-    std::vector<std::string> args = rebaseCommentConfig();
+    // At an `edit` (or a reword a hook turned down) HEAD is the stopped
+    // commit, and the paused bar says to make changes there; Continue
+    // turns unstaged ones down, which left Skip, and git's --skip runs
+    // `reset --hard` first: the edits to tracked files, and new files
+    // staged, were gone for good, with "Rebase complete.".
+    if (!committedRebaseStop().empty() && hasTrackedChanges())
+        return GitError(GitErrorCode::Uncommitted, kSkipWouldDiscard);
+    std::vector<std::string> args = rebaseConfig();
     args.insert(args.end(), {"rebase", "--skip"});
-    return run(args, kRebaseTimeoutMs);
+    auto result = run(args, kRebaseTimeoutMs);
+    keepRewordMessage();
+    return result;
+}
+
+Result<ProcessOutput> GitProcess::sequenceContinue(bool revert) const {
+    return run({revert ? "revert" : "cherry-pick", "--continue"}, kRebaseTimeoutMs);
+}
+
+bool GitProcess::stagedWorkWithoutPick() const {
+    for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+        const QString path = gitPath(QString::fromLatin1(pending));
+        if (path.isEmpty())
+            return true;    // git can't say: as if there were
+        if (QFileInfo::exists(path))
+            return false;
+    }
+    const auto staged = run({"--no-optional-locks", "diff", "--cached", "--quiet",
+                             "--ignore-submodules=dirty"});
+    return !staged || staged->exitCode != 0;
+}
+
+std::string GitProcess::unpickedSequenceStop() const {
+    // A pick or revert pending: git's --continue commits it.
+    for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+        const QString path = gitPath(QString::fromLatin1(pending));
+        if (path.isEmpty() || QFileInfo::exists(path))
+            return {};
+    }
+    // The todo's first line is the commit git stopped at: its --continue
+    // takes it for done (todo_list.current++), picked or not.
+    QFile todo(gitPath(QStringLiteral("sequencer/todo")));
+    if (!todo.open(QIODevice::ReadOnly))
+        return {};
+    QByteArray line;
+    while (!todo.atEnd() && line.isEmpty()) {
+        line = todo.readLine().simplified();
+        if (line.startsWith('#'))
+            line.clear();
+    }
+    const qsizetype verbEnd = line.indexOf(' ');
+    if (verbEnd < 0)
+        return {};
+    const QByteArray verb = line.left(verbEnd);
+    const QByteArray rest = line.mid(verbEnd + 1);
+    const std::string stop = rest.left(rest.indexOf(' ') < 0 ? rest.size() : rest.indexOf(' '))
+                                 .toStdString();
+    bool revert = false;
+    if (verb == "revert")
+        revert = true;
+    else if (verb != "pick" && verb != "p")
+        return {};
+    const auto full = run({"rev-parse", "--verify", "--quiet", stop + "^{commit}"});
+    if (!full || !full->success())
+        return {};
+    const QString stopId = QString::fromStdString(full->stdoutData).trimmed();
+
+    // The commits made since the sequence's own last step: git writes
+    // HEAD to abort-safety after each commit of its own. Where it
+    // hasn't one (an older git), HEAD alone.
+    QByteArray since;
+    if (QFile safety(gitPath(QStringLiteral("sequencer/abort-safety")));
+        safety.open(QIODevice::ReadOnly))
+        since = safety.readAll().trimmed();
+    // Each "<id>\n" and then what tells it.
+    std::vector<std::string> range = {"log", "-z", "--date=raw",
+                                      since.isEmpty() ? "-n1" : "-n100",
+                                      revert ? "--format=%H%n%B" : "--format=%H%n%an%n%ae%n%ad",
+                                      "HEAD"};
+    if (!since.isEmpty())
+        range.push_back("^" + since.toStdString());
+    const auto made = run(range);
+    if (!made || !made->success())
+        return {};
+    QStringList ids;
+    QStringList commits;
+    for (const QString& commit : QString::fromStdString(made->stdoutData)
+                                     .split(QLatin1Char('\0'), Qt::SkipEmptyParts)) {
+        const qsizetype end = commit.indexOf(QLatin1Char('\n'));
+        ids << commit.left(end).trimmed();
+        commits << (end < 0 ? QString() : commit.mid(end + 1));
+    }
+    // A commit of GitBolt's that concluded the stop (commit() notes
+    // it), and is still there: whatever its message. The Commit
+    // dialog's commit carries the words typed, and a revert's "This
+    // reverts commit" wasn't among them.
+    if (QFile concluded(gitPath(kConcludedStops)); concluded.open(QIODevice::ReadOnly)) {
+        for (const QByteArray& noted : concluded.readAll().split('\n')) {
+            const QList<QByteArray> pair = noted.simplified().split(' ');
+            if (pair.size() == 2 && QString::fromLatin1(pair[0]) == stopId
+                && ids.contains(QString::fromLatin1(pair[1])))
+                return {};
+        }
+    }
+    if (revert) {
+        // git's message, kept through a conflict's MERGE_MSG: "This
+        // reverts commit <id>." (abbreviated with revert.reference).
+        static const QRegularExpression reverts(
+            QStringLiteral("This reverts commit ([0-9a-f]{7,})"));
+        for (const QString& message : commits) {
+            for (auto it = reverts.globalMatch(message); it.hasNext();) {
+                if (stopId.startsWith(it.next().captured(1)))
+                    return {};
+            }
+        }
+    } else {
+        const auto author = run({"log", "-1", "--date=raw", "--format=%an%n%ae%n%ad", stop});
+        if (!author || !author->success())
+            return {};
+        const QString picked = QString::fromStdString(author->stdoutData).trimmed();
+        for (const QString& who : commits) {
+            if (who.trimmed() == picked)
+                return {};
+        }
+    }
+    return rest.toStdString();
+}
+
+Result<ProcessOutput> GitProcess::sequenceSkip(bool revert) const {
+    // A sequence git stopped before it picked anything for the commit
+    // (a pick it refused over a dirty index): there's no pick to drop,
+    // and git's --skip runs `reset --merge HEAD`, which put every staged
+    // change back to HEAD's, with "Cherry-pick complete.".
+    if (stagedWorkWithoutPick())
+        return GitError(GitErrorCode::Uncommitted, kSequenceSkipWouldDiscard);
+    return run({revert ? "revert" : "cherry-pick", "--skip"}, kRebaseTimeoutMs);
+}
+
+Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend) const {
+    // The pick or revert, in a sequence of several, that this commit
+    // concludes (a conflict resolved): noted for unpickedSequenceStop(),
+    // as the message typed here need not be git's.
+    QString concluding;
+    if (const QString sequencer = gitPath(QStringLiteral("sequencer"));
+        !sequencer.isEmpty() && QFileInfo(sequencer).isDir()) {
+        for (const char* pending : {"CHERRY_PICK_HEAD", "REVERT_HEAD"}) {
+            QFile head(gitPath(QString::fromLatin1(pending)));
+            if (head.open(QIODevice::ReadOnly)) {
+                concluding = QString::fromLatin1(head.readAll()).trimmed();
+                break;
+            }
+        }
+        // An amend of a commit noted so (a typo fixed in it) replaces
+        // it, and concludes the stop in its place: the note named the
+        // commit that went, and a revert's in the user's words was
+        // taken for one git never made, so Continue advised Abort.
+        if (concluding.isEmpty() && amend) {
+            const auto head = run({"rev-parse", "--verify", "--quiet", "HEAD"});
+            QFile concluded(gitPath(kConcludedStops));
+            if (head && head->success() && concluded.open(QIODevice::ReadOnly)) {
+                const QByteArray was = QByteArray::fromStdString(head->stdoutData).trimmed();
+                for (const QByteArray& noted : concluded.readAll().split('\n')) {
+                    const QList<QByteArray> pair = noted.simplified().split(' ');
+                    if (pair.size() == 2 && pair[1] == was)
+                        concluding = QString::fromLatin1(pair[0]);
+                }
+            }
+        }
+    }
+    // A reword the rebase stopped at: the user's commit there (an amend
+    // of its message, say) is theirs, and the plan's message, which a
+    // hook turned down, is not to come back over it on Continue
+    // (rejectedRewordMessage()).
+    const QString rewordPlan = stoppedRewordMessage();
+
+    // The message is UTF-8, and labelled so (kUtf8Commits).
+    std::vector<std::string> args = {"-c", kUtf8Commits, "commit", "-F", "-"};
+    if (amend)
+        args.emplace_back("--amend");
+    auto result = runImpl(args, kCommitTimeoutMs, &message);
+    if (!result || !result->success())
+        return result;
+    if (!concluding.isEmpty()) {
+        const auto head = run({"rev-parse", "HEAD"});
+        QFile concluded(gitPath(kConcludedStops));
+        if (head && head->success() && concluded.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            concluded.write(concluding.toLatin1() + ' '
+                            + QByteArray::fromStdString(head->stdoutData).trimmed() + '\n');
+        }
+    }
+    if (!rewordPlan.isEmpty())
+        QFile::remove(rewordPlan);
+    return result;
 }
 
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }

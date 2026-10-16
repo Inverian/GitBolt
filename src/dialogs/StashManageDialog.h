@@ -26,6 +26,12 @@ public:
     /// the user sees the result of their Apply / Pop / Drop.
     void setStashes(const std::vector<gitbolt::git::StashEntry>& stashes);
 
+    /// While another operation runs on the repository (a local op, a
+    /// commit, a rebase step): Apply, Pop, Drop and New are off, with a
+    /// tooltip saying why. They went to git under it, and a Pop wrote
+    /// the stash's files, failed on index.lock, and kept the stash.
+    void setBusy(bool busy);
+
 signals:
     /// Apply the stash at `index` to the working tree without
     /// removing it from the stash list (`git stash apply <i>`).
@@ -59,6 +65,7 @@ private:
     QPushButton* dropBtn_  = nullptr;
     QPushButton* newBtn_   = nullptr;
     QPushButton* closeBtn_ = nullptr;
+    bool busy_ = false;
 };
 
 } // namespace gitbolt::dialogs

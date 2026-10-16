@@ -263,7 +263,7 @@ QWidget* SettingsDialog::createGeneralPage()
     usageLockedNote_->setObjectName(QStringLiteral("settings.usage-locked-note"));
     usageLockedNote_->setWordWrap(true);
     usageLockedNote_->setMinimumWidth(kUsageNoteWidth);
-    usageLockedNote_->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(usageLockedNote_, QStringLiteral("QLabel { color: %1; }"));
     usageForm->addRow(QString(), usageLockedNote_);
     usageForm->setRowVisible(usageLockedNote_, false);
 
@@ -274,7 +274,7 @@ QWidget* SettingsDialog::createGeneralPage()
         usageGroup_);
     usageNote->setWordWrap(true);
     usageNote->setMinimumWidth(kUsageNoteWidth);
-    usageNote->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(usageNote, QStringLiteral("QLabel { color: %1; }"));
     usageForm->addRow(QString(), usageNote);
 
     // The ID the statistics are sent under, for a deletion request.
@@ -365,8 +365,7 @@ QWidget* SettingsDialog::createUiDesignPage()
     form->addRow(tr("Bottom inspector pane:"), row);
 
     bottomPanePreview_ = new QLabel(layoutGroup);
-    bottomPanePreview_->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); font-size: 11pt; }"));
+    conf::ThemeService::keepMutedText(bottomPanePreview_, QStringLiteral("QLabel { color: %1; font-size: 11pt; }"));
     form->addRow(QString(), bottomPanePreview_);
 
     auto* note = new QLabel(
@@ -376,8 +375,7 @@ QWidget* SettingsDialog::createUiDesignPage()
            "at any time to override this."),
         layoutGroup);
     note->setWordWrap(true);
-    note->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(note, QStringLiteral("QLabel { color: %1; }"));
     form->addRow(QString(), note);
 
     root->addWidget(layoutGroup);
@@ -483,8 +481,7 @@ QWidget* SettingsDialog::createUiDesignPage()
     // refreshCurrentMainWindowSize() in loadSettings() and after
     // Apply runs (since Apply may have just resized the parent).
     currentMainWindowSize_ = new QLabel(sizeGroup);
-    currentMainWindowSize_->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(currentMainWindowSize_, QStringLiteral("QLabel { color: %1; }"));
     sizeForm->addRow(QString(), currentMainWindowSize_);
 
     auto* sizeNote = new QLabel(
@@ -496,8 +493,7 @@ QWidget* SettingsDialog::createUiDesignPage()
             .arg(kMinStartupWidth).arg(kMinStartupHeight),
         sizeGroup);
     sizeNote->setWordWrap(true);
-    sizeNote->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(sizeNote, QStringLiteral("QLabel { color: %1; }"));
     sizeForm->addRow(QString(), sizeNote);
 
     root->addWidget(sizeGroup);
@@ -559,8 +555,7 @@ QWidget* SettingsDialog::createUiDesignPage()
     // picking values empirically (drag the dialog, click Apply,
     // read off the size).
     currentDialogSizeLabel_ = new QLabel(dlgGroup);
-    currentDialogSizeLabel_->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(currentDialogSizeLabel_, QStringLiteral("QLabel { color: %1; }"));
     dlgForm->addRow(QString(), currentDialogSizeLabel_);
 
     auto syncDlgSizeEnabled = [this]() {
@@ -583,8 +578,7 @@ QWidget* SettingsDialog::createUiDesignPage()
             .arg(kMinDefaultDialogW).arg(kMinDefaultDialogH),
         dlgGroup);
     dlgNote->setWordWrap(true);
-    dlgNote->setStyleSheet(
-        QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(dlgNote, QStringLiteral("QLabel { color: %1; }"));
     dlgForm->addRow(QString(), dlgNote);
 
     root->addWidget(dlgGroup);
@@ -841,7 +835,7 @@ QWidget* SettingsDialog::createPluginsPage()
            "settings will be managed from this page."),
         page);
     footer->setWordWrap(true);
-    footer->setStyleSheet(QStringLiteral("QLabel { color: palette(mid); }"));
+    conf::ThemeService::keepMutedText(footer, QStringLiteral("QLabel { color: %1; }"));
     layout->addWidget(footer);
 
     layout->addStretch();
@@ -1033,7 +1027,7 @@ QWidget* SettingsDialog::createRecentReposPage()
            "\"Clear Recent\" button."),
         page);
     note->setWordWrap(true);
-    note->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    conf::ThemeService::keepMutedText(note, QStringLiteral("color: %1;"));
     leftCol->addWidget(note);
     leftCol->addStretch();
 

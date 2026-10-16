@@ -1,14 +1,19 @@
+#include "SingleInstance.h"
 #include "TelemetryEndpoints.h"
 #include "TestBridge.h"
 #include "ui/MainWindow.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "git/Askpass.h"
 #include "telemetry/EventQueue.h"
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
 #include "telemetry/TelemetryService.h"
 #include "util/CrashHandler.h"
+#include "util/LockFiles.h"
+#include "util/LoginPath.h"
 #include "util/TestSession.h"
+#include "util/Translations.h"
 
 #include <memory>
 #include <string_view>
@@ -16,21 +21,15 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QCryptographicHash>
-#include <QDateTime>
-#include <QDeadlineTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QIcon>
 #include <QInputDialog>
 #include <QMessageBox>
-#include <QLocalServer>
-#include <QLocalSocket>
 #include <QLockFile>
 #include <QScopeGuard>
-#include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextStream>
-#include <QThread>
 #include <QThreadPool>
 
 #include <git2.h>
@@ -42,12 +41,28 @@ namespace {
 // wired up in GitProcess::applyEnvironment). Show one modal field,
 // print the answer to stdout, exit. Cancel exits nonzero, which makes
 // git abort the operation with a normal auth error instead of hanging.
+// ssh's yes-or-no questions (a new host key) get Yes / No instead.
 int runAskpass(const QString& prompt)
 {
-    // "Username for 'https://…'" wants visible text; everything else
-    // (Password for…, Enter passphrase for key…) is a secret.
-    const bool secret =
-        !prompt.contains(QStringLiteral("username"), Qt::CaseInsensitive);
+    const auto kind =
+        gitbolt::git::askpassKind(prompt, qgetenv("SSH_ASKPASS_PROMPT"));
+    if (kind == gitbolt::git::AskpassKind::YesNo) {
+        // Plain text: the host key's fingerprint is to be read, and
+        // the prompt is ssh's, not markup. No, unless the user says
+        // yes: ssh's confirm() and ask_permission() take the word.
+        QMessageBox box(QMessageBox::Question, QStringLiteral("GitBolt"),
+                        prompt.trimmed(), QMessageBox::Yes | QMessageBox::No);
+        box.setTextFormat(Qt::PlainText);
+        box.setDefaultButton(QMessageBox::No);
+        box.setWindowFlag(Qt::WindowStaysOnTopHint);
+        box.show();
+        box.raise();
+        box.activateWindow();
+        const bool yes = box.exec() == QMessageBox::Yes;
+        QTextStream(stdout) << (yes ? "yes" : "no") << "\n";
+        return 0;
+    }
+    const bool secret = kind == gitbolt::git::AskpassKind::Secret;
 
     QInputDialog dialog;
     dialog.setWindowTitle(QStringLiteral("GitBolt"));
@@ -70,131 +85,80 @@ int runAskpass(const QString& prompt)
     return 0;
 }
 
-// Per-user directory for the single-instance lock and forwarding
-// socket. Linux/BSD: $XDG_RUNTIME_DIR, private to the user and never
-// aged out by tmp cleaners — in a shared /tmp, one user's lock (and
-// socket) would turn every other user's launch away. macOS's $TMPDIR
-// and Windows' %TEMP% are per-user already.
-QString instanceRuntimeDir()
-{
-#if defined(Q_OS_UNIX) && !defined(Q_OS_DARWIN)
-    const QString runtime =
-        QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
-    if (!runtime.isEmpty())
-        return runtime;
-#endif
-    return QDir::tempPath();
-}
+// How long a hand-off waits on a busy owner before saying so.
+constexpr qint64 kBusyNoticeMs = 10000;
 
-// Name of the forwarding socket that the lock holder listens on.
-// Unix: a socket file beside the lock, in the same per-user directory.
-// Windows: a pipe name. Pipes share one machine-wide namespace, so a
-// fixed name would let one user's instance hold the pipe (its
-// UserAccessOption DACL shutting everyone else out) while a second
-// user's own instance, holding that user's lock, could never listen
-// — every later launch by that user would find no listener. A hash of
-// the lock's directory gives the pipe exactly the lock's scope: per
-// user, or per session where %TEMP% is (Remote Desktop hosts). Pipes
-// die with their owner, so there is never a stale one to clear.
-QString instanceServerName(const QDir& runtimeDir,
-                           const QString& instanceName)
-{
-#ifdef Q_OS_WIN
-    const QByteArray scope = QCryptographicHash::hash(
-        runtimeDir.absolutePath().toLower().toUtf8(),
-        QCryptographicHash::Sha256);
-    return instanceName + QLatin1Char('-')
-           + QString::fromLatin1(scope.toHex().left(16));
-#else
-    return runtimeDir.filePath(instanceName);
-#endif
-}
+// A hand-off waits for as long as its owner lives (see
+// handOffToRunningInstance): a busy owner acts on it once it is free,
+// and if it dies busy instead, this launch takes its place and opens
+// the path itself. A launch from Finder, Nautilus or Explorer would
+// wait with nothing to show for it, so after a while this says so: a
+// note for whoever started it from a terminal and, where someone can
+// see it, a window whose Cancel stops the wait. Not on a headless
+// platform (offscreen/minimal: CI, the e2e harness): nobody is there.
+class BusyInstanceNotice {
+public:
+    explicit BusyInstanceNotice(const QString& path) : path_(path) {}
 
-// Clears a leftover lock file that QLockFile's own PID check can never
-// prove stale: one truncated by a crash mid-write, or naming another
-// machine ID. Safe against a live owner: its flock (Unix) or open
-// handle (Windows) dies with it, and removeStaleLockFile() fails while
-// one is held. The age check stays clear of the instant between a new
-// owner creating the file and locking it. Serialised through
-// "<lock>.rmlock" exactly as QLockFile serialises its own stale
-// removal: two launchers removing at once could otherwise each unlink
-// a lock the other had just re-created, and both would run as the
-// single instance.
-bool removeUnprovableStaleLock(QLockFile& lock)
-{
-    const auto settled = [&lock]() {
-        const QDateTime written = QFileInfo(lock.fileName()).lastModified();
-        return written.isValid()
-               && qAbs(written.secsTo(QDateTime::currentDateTime())) >= 2;
-    };
-    if (!settled())
-        return false;
-    QLockFile removal(lock.fileName() + QStringLiteral(".rmlock"));
-    // Re-checked under the removal lock: another launcher may have
-    // just removed the file and re-created it as a live lock.
-    return removal.tryLock(0) && settled() && lock.removeStaleLockFile();
-}
-
-enum class Handoff { Delivered, Queued, HungUp, NoListener };
-
-// Sends this launch's repo path (empty: just raise the window) to the
-// instance listening on `serverName`, as one line, and waits for the
-// line it answers with:
-// - Delivered: it answered.
-// - Queued: the line left this process but no answer came in time.
-//   The owner is alive but busy — submodule commands, sparse checkout
-//   and Find Large Files run git synchronously on its GUI thread, for
-//   minutes at worst — and acts on the line once it is free.
-// - HungUp: the owner took the connection but closed it unanswered:
-//   an instance on its way out (or killed while this waited), whose
-//   lock is about to come free. The caller retries.
-// - NoListener: nothing took the connection. The caller retries.
-//
-// Until the line has left, this waits for as long as the connection
-// lasts: it proves the owner alive, as its end dies with it. Only
-// Windows waits here — Qt's pipes have no buffer, so a write
-// completes only once the owner's event loop has accepted the
-// connection, and is cancelled if this process exits first; a Unix
-// socket buffers the line at once. A deadline here used to turn an
-// owner that was merely busy for longer into "not responding".
-Handoff handOffToRunningInstance(const QString& serverName,
-                                 const QString& path)
-{
-    QLocalSocket sock;
-    sock.connectToServer(serverName);
-    if (!sock.waitForConnected(1000))
-        return Handoff::NoListener;
-
-    sock.write(path.toUtf8() + '\n');
-    while (sock.bytesToWrite() > 0) {
-        if (sock.state() != QLocalSocket::ConnectedState)
-            return Handoff::HungUp;
-        sock.waitForBytesWritten(1000);
+    gitbolt::app::HandoffWait wait()
+    {
+        return [this](qint64 waitedMs) { return keepWaiting(waitedMs); };
     }
 
-    const QDeadlineTimer receipt(10000);
-    while (!sock.canReadLine()) {
-        if (sock.state() != QLocalSocket::ConnectedState)
-            return Handoff::HungUp;
-        if (receipt.hasExpired())
-            return Handoff::Queued;
-        sock.waitForReadyRead(int(receipt.remainingTime()));
-    }
-    return Handoff::Delivered;
-}
+    // Gone once this launch takes the owner's place.
+    void dismiss() { box_.reset(); }
 
-// The hand-off is with a busy owner, which acts on it once it is free.
-// Nothing for the user to do, so no dialog — just a note for whoever
-// started this from a terminal.
-void reportBusyInstance(const QString& path)
-{
-    if (path.isEmpty())
-        qWarning("GitBolt is already running but busy; its window "
-                 "comes to the front once it is free.");
-    else
-        qWarning("GitBolt is already running but busy; it opens %s "
-                 "once it is free.", qPrintable(path));
-}
+private:
+    bool keepWaiting(qint64 waitedMs)
+    {
+        if (waitedMs >= kBusyNoticeMs && !noticed_) {
+            noticed_ = true;
+            note();
+            if (!gitbolt::util::isHeadlessPlatform(QGuiApplication::platformName()))
+                showBox();
+        }
+        // The hand-off blocks this thread: the window's events go
+        // through here.
+        if (box_)
+            QCoreApplication::processEvents();
+        return !cancelled_;
+    }
+
+    void note() const
+    {
+        if (path_.isEmpty())
+            qWarning("GitBolt is already running but busy; its window "
+                     "comes to the front once it is free.");
+        else
+            qWarning("GitBolt is already running but busy; it opens %s "
+                     "once it is free.", qPrintable(path_));
+    }
+
+    void showBox()
+    {
+        box_ = std::make_unique<QMessageBox>(
+            QMessageBox::Information, QStringLiteral("GitBolt"),
+            path_.isEmpty()
+                ? QObject::tr("GitBolt is busy. Its window will come to the "
+                              "front when it is free.")
+                : QObject::tr("GitBolt is busy. It will open %1 when it is "
+                              "free.").arg(QDir::toNativeSeparators(path_)),
+            QMessageBox::Cancel);
+        box_->setObjectName(QStringLiteral("app.busyInstance"));
+        // Cancel, Escape or the close button: this launch stops
+        // waiting.
+        QObject::connect(box_.get(), &QDialog::finished, box_.get(),
+                         [this]() { cancelled_ = true; });
+        box_->show();
+        box_->raise();
+        box_->activateWindow();
+    }
+
+    QString                      path_;
+    std::unique_ptr<QMessageBox> box_;
+    bool                         noticed_   = false;
+    bool                         cancelled_ = false;
+};
 
 // The lock's owner is alive (it still holds the lock) but never took
 // the hand-off. Tell the user, who can close or kill it — except on a
@@ -251,6 +215,13 @@ QString telemetryQueueDir(const QString& settingsFile)
 } // namespace
 
 int main(int argc, char* argv[]) {
+    // An askpass for a git command nobody is waiting on (the periodic
+    // auto-fetch, GitProcess::forbidPrompts): no, at once, before
+    // anything could show a window or a Dock icon. Fails the question,
+    // which fails git or ssh with its own reason.
+    if (qgetenv(gitbolt::git::kAskpassModeEnv) == gitbolt::git::kAskpassRefuse)
+        return 1;
+
     // Install crash handler before anything else. Its report header
     // says whether a later launch may upload the report: official
     // build, no environment opt-out, not a test session. There is no
@@ -268,6 +239,10 @@ int main(int argc, char* argv[]) {
 
     QApplication app(argc, argv);
 
+    // English plural forms for every %n text ("1 file", "2 files"),
+    // whatever the locale; a build without them shows "(s)".
+    gitbolt::util::installEnglishPlurals();
+
     // Use Fusion style on macOS so QMenu honors our per-action icons
     // (the native QMacStyle ignores iconVisibleInMenu/AA_DontShowIconsInMenus).
     // Fusion matches cross-platform GitExtensions look-and-feel.
@@ -280,6 +255,14 @@ int main(int argc, char* argv[]) {
     app.setApplicationVersion(QStringLiteral(GITBOLT_VERSION));
     app.setOrganizationName(QStringLiteral("GitBolt"));
     app.setOrganizationDomain(QStringLiteral("gitbolt.com"));
+    // The desktop entry is gitbolt.desktop (and the metainfo's
+    // launchable). Unset, Qt's Wayland plugin made up the app_id
+    // "com.gitbolt.gitbolt" from the domain and the executable, which
+    // no desktop file matches: GNOME and KDE gave the window a generic
+    // icon and kept it apart from the launcher and a pinned favorite.
+    // Inert off Linux; set everywhere so dump-state shows it in any
+    // e2e run. Before the askpass branch: its prompt groups too.
+    app.setDesktopFileName(QStringLiteral("gitbolt"));
 
     // App-level window icon. Resolves via the Qt resource system
     // (":/icons/*") which the .qrc at src/app/resources/gitbolt.qrc
@@ -296,7 +279,7 @@ int main(int argc, char* argv[]) {
     // window and exit 0 — git would read empty stdout as an empty
     // password. ssh passes no identifying flag, so the env marker set
     // by GitProcess::applyEnvironment is the switch.
-    if (qEnvironmentVariableIsSet("GITBOLT_ASKPASS_MODE")) {
+    if (qEnvironmentVariableIsSet(gitbolt::git::kAskpassModeEnv)) {
         return runAskpass(argc > 1 ? QString::fromLocal8Bit(argv[1])
                                    : QString());
     }
@@ -329,11 +312,10 @@ int main(int argc, char* argv[]) {
     const QStringList positionalArgs = parser.positionalArguments();
     QString initialRepoPath;
     if (!positionalArgs.isEmpty()) {
-        // Resolve the argument to an absolute, canonical path relative to
-        // the user's current working directory. A bare "." should become
-        // the full path, not stay as the literal ".".
-        const QFileInfo fi(positionalArgs.first());
-        initialRepoPath = fi.absoluteFilePath();
+        // Resolve the argument to an absolute path relative to the
+        // user's current working directory (and on Windows, mend an
+        // Explorer drive root's).
+        initialRepoPath = gitbolt::app::repoPathArgument(positionalArgs.first());
     }
 
     // Single-instance guard: a lock file in a per-user directory.
@@ -355,54 +337,48 @@ int main(int argc, char* argv[]) {
     const QString instanceName =
         instanceOverride.isEmpty() ? QStringLiteral("gitbolt-instance")
                                    : instanceOverride;
-    const QDir runtimeDir(instanceRuntimeDir());
-    const QString serverName = instanceServerName(runtimeDir, instanceName);
+    const QDir runtimeDir(gitbolt::app::instanceRuntimeDir());
+    const QString serverName =
+        gitbolt::app::instanceServerName(runtimeDir, instanceName);
     QLockFile instanceLock(
         runtimeDir.filePath(instanceName + QStringLiteral(".lock")));
     instanceLock.setStaleLockTime(0);
-    QDeadlineTimer patience(10000);
-    int hangUps = 0;
-    while (!instanceLock.tryLock(0)) {
-        if (instanceLock.error() != QLockFile::LockFailedError) {
-            // Can't create the lock at all (unwritable directory, full
-            // disk). Nothing the user could fix from a dialog, and no
-            // reason to refuse to start: run unguarded.
-            qWarning("Cannot create %s; starting without the "
-                     "single-instance guard",
-                     qPrintable(instanceLock.fileName()));
-            break;
-        }
-        // Another instance holds the lock. Hand it our repo argument —
-        // this is how "Open in GitBolt" from Finder/Nautilus reaches
-        // an already-open window: both shell extensions spawn a fresh
-        // process.
-        const Handoff handoff =
-            handOffToRunningInstance(serverName, initialRepoPath);
-        if (handoff == Handoff::Delivered)
-            return 0;
-        if (handoff == Handoff::Queued) {
-            reportBusyInstance(initialRepoPath);
-            return 0;
-        }
-        // The owner hung up: alive a moment ago, however long this
-        // waited on it, and on its way out now. Its lock gets the full
-        // patience to come free — a few times only: an owner that keeps
-        // taking the line and hanging up isn't on its way out, and
-        // waiting on it would never end.
-        if (handoff == Handoff::HungUp && ++hangUps <= 3) {
-            patience = QDeadlineTimer(10000);
-        } else if (patience.hasExpired()) {
-            reportUnresponsiveInstance();
-            return 1;
-        }
-        // Nobody listening, or the owner hung up unanswered. Usually it
-        // is still starting up (it locks well before its server below
-        // exists) or shutting down, so retry — unless the lock is stale
-        // in a way its contents can't prove, which removal settles.
-        if (removeUnprovableStaleLock(instanceLock))
-            continue;
-        QThread::msleep(100);
+    // If another instance holds the lock, hand it our repo argument —
+    // this is how "Open in GitBolt" from Finder/Nautilus/Explorer
+    // reaches an already-open window: the shell extensions spawn a
+    // fresh process.
+    BusyInstanceNotice busyNotice(initialRepoPath);
+    const gitbolt::app::Claim claim = gitbolt::app::claimInstance(
+        instanceLock, serverName, initialRepoPath, 10000, busyNotice.wait());
+    // The wait is over: the owner took the path, or this launch takes
+    // the place of one that died busy.
+    busyNotice.dismiss();
+    switch (claim) {
+    case gitbolt::app::Claim::Owner:
+        break;
+    case gitbolt::app::Claim::Unguarded:
+        // Nothing the user could fix from a dialog, and no reason to
+        // refuse to start: run unguarded.
+        qWarning("Cannot create %s; starting without the "
+                 "single-instance guard",
+                 qPrintable(instanceLock.fileName()));
+        break;
+    case gitbolt::app::Claim::Delivered:
+        return 0;
+    case gitbolt::app::Claim::Cancelled:  // the user stopped the wait
+        return 1;
+    case gitbolt::app::Claim::Unresponsive:
+        reportUnresponsiveInstance();
+        return 1;
     }
+
+    // The PATH git's children get, a commit's hooks among them: the
+    // login shell's, asked in the background now, well before the
+    // first commit (util/LoginPath.h). Started from the Dock, GitBolt
+    // has launchd's PATH, and a hook that needs node (husky,
+    // lint-staged) turned every commit down.
+    if (gitbolt::util::shouldLookUpLoginPath())
+        gitbolt::util::startLoginPathLookup();
 
     // Settings service — constructed before the theme so the saved
     // theme choice is restored before any window paints. Also used
@@ -459,50 +435,50 @@ int main(int argc, char* argv[]) {
     if (telemetry::discardsQueue(telemetryGate))
         telemetry::EventQueue::discard(telemetryConfig.queueDir);
     // Declared before `window`, so it outlives the raw pointer the
-    // window keeps, and after `settings`, which its ID provider uses.
-    // A disabled one for the Settings switch, so turning it back on
-    // works without a restart.
+    // window keeps, and after `settings`, which its ID provider and
+    // switch reader use. A disabled one for the Settings switch, so
+    // turning it back on works without a restart. The reader re-reads
+    // GitBolt.ini at every flush cycle, before each request, and at
+    // quit: a switch turned off by another process reaches this one no
+    // other way.
     std::unique_ptr<telemetry::TelemetryService> telemetryService;
     if (telemetry::createsService(telemetryGate)) {
         telemetryService = std::make_unique<telemetry::TelemetryService>(
             telemetryConfig,
             [&settings]() { return settings.ensureTelemetryInstallId(); },
-            telemetryGate == telemetry::Gate::Active);
+            telemetryGate == telemetry::Gate::Active,
+            [&settings]() { return settings.reloadUsageStatisticsEnabled(); });
         QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
                          &telemetry::TelemetryService::persistPending);
     }
 
     // Check for crash report from a previous session. Not in a test
-    // session: ~/.gitbolt/crash.log is the user's (e2e and bridge runs
-    // keep the real HOME), so it stays for their next launch, and an
-    // offscreen box would block before the test bridge exists.
+    // session: ~/.gitbolt/crash.log is the user's (a bridge run outside
+    // the e2e harness keeps the real HOME, and writes its own crashes
+    // to crash-test.log), so it stays for their next launch. A test
+    // that plants one in a HOME of its own opts in with
+    // GITBOLT_TEST_CRASH_BOX=1 (tests/e2e/test_crash_box_handoff.py).
+    // The report is read here, before the telemetry service starts
+    // below; the box that tells the user comes up once the window and
+    // the hand-off listener are (see there).
     const bool testSession = gitbolt::util::isTestSession(
         gitbolt::util::detectTestSession(QGuiApplication::platformName(),
                                          app.arguments()));
-    if (!testSession && gitbolt::util::CrashHandler::hasPendingCrashReport()) {
-        QString report = gitbolt::util::CrashHandler::readCrashReport();
+    const bool crashBoxOptIn =
+        qEnvironmentVariable("GITBOLT_TEST_CRASH_BOX") == QLatin1String("1");
+    const bool crashPending = (!testSession || crashBoxOptIn)
+                              && gitbolt::util::CrashHandler::hasPendingCrashReport();
+    QString crashReport;
+    bool crashSummaryQueued = false;
+    if (crashPending) {
+        crashReport = gitbolt::util::CrashHandler::readCrashReport();
         // With usage statistics on, a summary goes into their queue
         // before the file is deleted below: signal, versions and stack
         // frames reduced to module offsets, never the raw report. The
         // parser refuses reports from builds and sessions that must
         // never send, and then the box says nothing about sending.
-        const bool summaryQueued =
-            telemetryService && telemetryService->queueCrashReport(report);
-        QMessageBox crashBox;
-        crashBox.setWindowTitle(QObject::tr("Crash Detected"));
-        crashBox.setText(QObject::tr(
-            "GitBolt crashed during the last session. "
-            "A crash report has been saved."));
-        if (summaryQueued) {
-            crashBox.setInformativeText(QObject::tr(
-                "A summary of the report, with no repository data, will be sent "
-                "with the usage statistics. You can turn them off in "
-                "Tools › Settings › General."));
-        }
-        crashBox.setDetailedText(report);
-        crashBox.setStandardButtons(QMessageBox::Ok);
-        crashBox.exec();
-        gitbolt::util::CrashHandler::clearCrashReport();
+        crashSummaryQueued =
+            telemetryService && telemetryService->queueCrashReport(crashReport);
     }
 
     // Create and show the main window. Inject the app-wide theme
@@ -532,51 +508,28 @@ int main(int argc, char* argv[]) {
 
     // Test bridge — agent/test control channel, never active unless
     // explicitly requested via the environment. Declared after
-    // `window` so it is destroyed first. See docs/AGENT_TESTING.md.
+    // `window` so it is destroyed first. Created before the crash box
+    // below, so a test can see and dismiss it. See
+    // docs/AGENT_TESTING.md.
     std::unique_ptr<gitbolt::app::TestBridge> testBridge;
     if (qEnvironmentVariableIsSet("GITBOLT_TEST_BRIDGE"))
         testBridge = std::make_unique<gitbolt::app::TestBridge>(&window);
 
     // Second-instance handshake: a later `gitbolt <path>` (the shell
-    // extensions, a plain CLI launch) hands its path over here — one
-    // line, empty for a bare relaunch, answered with one — instead of
-    // opening a second window. Only the lock holder listens, so
-    // clearing a socket left by a killed instance can never take a
-    // live one's.
-    // UserAccessOption keeps other local users from driving our window.
-    QLocalServer instanceServer;
+    // extensions, a plain CLI launch) hands its path over here instead
+    // of opening a second window (see SingleInstance.h).
+    gitbolt::app::InstanceServer instanceServer;
     if (instanceLock.isLocked()) {
-        QLocalServer::removeServer(serverName);  // stale socket
-        instanceServer.setSocketOptions(QLocalServer::UserAccessOption);
         if (instanceServer.listen(serverName)) {
-            QObject::connect(
-                &instanceServer, &QLocalServer::newConnection,
-                &window, [&instanceServer, &window]() {
-                    while (QLocalSocket* sock =
-                               instanceServer.nextPendingConnection()) {
-                        QObject::connect(
-                            sock, &QLocalSocket::readyRead, &window,
-                            [sock, &window]() {
-                                if (!sock->canReadLine())
-                                    return;  // rest of the path in flight
-                                const QString path = QString::fromUtf8(
-                                    sock->readLine()).trimmed();
-                                // The sender's receipt, flushed now:
-                                // opening the repo below may sit in a
-                                // dialog for a while.
-                                sock->write("ok\n");
-                                sock->flush();
-                                sock->disconnectFromServer();
-                                window.show();
-                                window.raise();
-                                window.activateWindow();
-                                if (!path.isEmpty())
-                                    window.openRepositoryAtPath(path);
-                            });
-                        QObject::connect(sock, &QLocalSocket::disconnected,
-                                         sock, &QObject::deleteLater);
-                    }
-                });
+            QObject::connect(&instanceServer,
+                             &gitbolt::app::InstanceServer::pathReceived,
+                             &window, [&window](const QString& path) {
+                                 window.show();
+                                 window.raise();
+                                 window.activateWindow();
+                                 if (!path.isEmpty())
+                                     window.openRepositoryAtPath(path);
+                             });
         } else {
             qWarning("Single-instance server: listen(%s) failed: %s",
                      qPrintable(serverName),
@@ -590,6 +543,40 @@ int main(int argc, char* argv[]) {
         QMetaObject::invokeMethod(&window, [&window, initialRepoPath]() {
             window.openRepositoryAtPath(initialRepoPath);
         }, Qt::QueuedConnection);
+    }
+
+    // The crash box, last: its exec() turns the event loop, so a launch
+    // that hands over while it is up is answered and opened like any
+    // other, after the queued open above, so the newer path wins. Shown
+    // before the window and the listener, as it was, it left this
+    // instance holding the lock and answering nobody: a second launch
+    // waited its 10 s, said "not responding" and dropped its path.
+    if (crashPending) {
+        QMessageBox crashBox(&window);
+        crashBox.setObjectName(QStringLiteral("app.crashDetected"));
+        crashBox.setWindowTitle(QObject::tr("Crash Detected"));
+        crashBox.setText(QObject::tr(
+            "GitBolt crashed during the last session. "
+            "A crash report has been saved."));
+        // Present tense: the summary goes out first and at once, while
+        // the box is still up (the service started above), so the
+        // switch can only stop what comes after it.
+        if (crashSummaryQueued) {
+            crashBox.setInformativeText(QObject::tr(
+                "A summary of the report, with no repository data, is being sent "
+                "with the usage statistics. You can turn them off for the future in "
+                "Tools › Settings › General."));
+        }
+        crashBox.setDetailedText(crashReport);
+        crashBox.setStandardButtons(QMessageBox::Ok);
+        crashBox.exec();
+        gitbolt::util::CrashHandler::clearCrashReport();
+        // The window was closed while the box was up (Cmd+Q, the
+        // bridge's quit): a quit then ends at most the box's loop, and
+        // the last window closing quits only from inside app.exec(),
+        // which would run on with no window.
+        if (!window.isVisible())
+            QMetaObject::invokeMethod(&app, &QCoreApplication::quit, Qt::QueuedConnection);
     }
 
     int exitCode = app.exec();

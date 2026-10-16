@@ -127,22 +127,24 @@ jobs:
             ForEach-Object { "$($_.Name)=$($_.Value)" } |
             Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
-      # Linux only: macOS and Windows build libgit2 from source (below).
-      # libgl1-mesa-dev: Qt6::Gui links OpenGL on Linux, and the aqt
-      # Qt binaries expect the system GL headers/libs at link time.
-      - name: Install libgit2 (Ubuntu)
+      # Linux only. No libgit2-dev: libgit2 is built from source on every
+      # platform (below). libgl1-mesa-dev: Qt6::Gui links OpenGL on
+      # Linux, and the aqt Qt binaries expect the system GL headers/libs
+      # at link time.
+      - name: Install build dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgit2-dev pkg-config libgl1-mesa-dev
+          sudo apt-get install -y pkg-config libgl1-mesa-dev
 
       # ------------------------------------------------------------------
-      # Configure, build, test. Ninja on every platform. macOS and Windows
-      # use GITBOLT_BUNDLED_LIBGIT2: the pinned libgit2 release
-      # (cmake/Libgit2.cmake), linked statically. Homebrew's bottles need
-      # the runner's macOS (26), and vcpkg's would add DLLs to the
-      # installer. Linux keeps Ubuntu's libgit2-dev, which the DEB then
-      # depends on.
+      # Configure, build, test. Ninja on every platform, and
+      # GITBOLT_BUNDLED_LIBGIT2 on every platform: the pinned libgit2
+      # release (cmake/Libgit2.cmake), linked statically. Homebrew's
+      # bottles need the runner's macOS (26), vcpkg's would add DLLs to
+      # the installer, and Ubuntu's libgit2-dev made the DEB depend on
+      # that release's libgit2 package (libgit2-1.7), which no other
+      # release has: Debian 13 and Ubuntu 25.04 couldn't install it.
       # ------------------------------------------------------------------
       #
       # Usage statistics endpoints (cmake/Telemetry.cmake, PRIVACY.md):
@@ -153,13 +155,18 @@ jobs:
       # they can only send events, not read any. The host is public.
       # Step env, never the command line; cmake reads each from the
       # environment on the first configure.
+      #
+      # GITBOLT_REQUIRE_ENGLISH_PLURALS: fail here, not quietly show
+      # "1 file(s)", if the Qt above ever lacks LinguistTools (aqt's
+      # default desktop install has it on all three: the qttools
+      # archive).
       - name: Configure
         env:
           GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=${{ runner.os == 'Linux' && 'OFF' || 'ON' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
       # fork build that has them fails here, before it can be tested,
@@ -188,6 +195,56 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # Every %n text needs its English singular and plural in
+      # translations/gitbolt_en.ts (util::installEnglishPlurals), or the
+      # app shows "1 file(s)". update_translations re-reads the sources
+      # with lupdate: a %n text added or changed without its forms
+      # leaves the file changed or unfinished. One leg is enough:
+      # lupdate reads whole files, #ifdef branches included, and every
+      # platform's targets list the same C++ sources.
+      - name: Check English plural forms (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake --build build --target update_translations
+          if ! git diff --exit-code -- translations/; then
+            echo "::error::translations/gitbolt_en.ts is stale: run 'cmake --build build --target update_translations', fill in the new forms and commit it"
+            exit 1
+          fi
+          if grep -n 'type="unfinished"' translations/gitbolt_en.ts; then
+            echo "::error::translations/gitbolt_en.ts has %n texts without their English forms"
+            exit 1
+          fi
+
+      # Windows: a unit test that crashes leaves a minidump (Windows
+      # Error Reporting's LocalDumps), uploaded below with its binary.
+      # QtTest's crash handler is off there (-nocrashhandler, through
+      # GITBOLT_QTEST_ARGS at Configure; see tests/CMakeLists.txt): it
+      # ends the process itself, so WER never saw a crash, and its own
+      # stack walk showed nothing for test_git_service's call through a
+      # null pointer (01e65c6: "Exception address: 0x0000000000000000").
+      # The dump's stack memory still holds the caller's return address.
+      # DontShowUI: no dialog to wait on. Minidumps (DumpType 1): every
+      # thread's stack and the module list, written in a moment.
+      # A failure to set this up is only a warning: the tests still run.
+      - name: Crash dumps (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'dumps'
+          New-Item -ItemType Directory -Force -Path $dumps | Out-Null
+          try {
+            $wer = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting'
+            if (-not (Test-Path "$wer\LocalDumps")) { New-Item -Path "$wer\LocalDumps" -ErrorAction Stop | Out-Null }
+            New-ItemProperty -Force -Path $wer -Name Disabled -PropertyType DWord -Value 0 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path $wer -Name DontShowUI -PropertyType DWord -Value 1 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpFolder -PropertyType ExpandString -Value $dumps -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpType -PropertyType DWord -Value 1 -ErrorAction Stop | Out-Null
+            New-ItemProperty -Force -Path "$wer\LocalDumps" -Name DumpCount -PropertyType DWord -Value 20 -ErrorAction Stop | Out-Null
+            Get-ItemProperty -Path "$wer\LocalDumps" | Format-List DumpFolder, DumpType, DumpCount
+          } catch {
+            Write-Host "::warning::no crash dumps this run: $_"
+          }
+
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
       # platform, and the Linux runners have no display server.
       - name: Test
@@ -201,8 +258,16 @@ jobs:
       # flushing its output leaves ctest nothing to show, and the code tells
       # a missing DLL (0xC0000135) from a crash (0xC0000005) from a plain
       # failure count. e2e tests (Python) already show their output above.
-      # env: the same QtTest settings tests/CMakeLists.txt gives ctest
-      # runs. QT_FORCE_STDERR_LOGGING: steps get a console without a
+      # Each binary runs as ctest ran it: the command ctest ran (its
+      # path: on Windows qt_standard_project_setup() puts every binary in
+      # build/, not build/tests, where the lookup used to find none), in
+      # the test's WORKING_DIRECTORY, with its ENVIRONMENT (read from
+      # `ctest --show-only=json-v1`, and put back after it). Without them the rerun showed another failure
+      # than the real one: test_about_dialog names its screen config
+      # relative to tests/fixtures, and test_file_tree's use-after-free
+      # check needs Guard Malloc / MALLOC_PERTURB_.
+      # env: the QtTest settings, for a test whose ctest entry lacks them.
+      # QT_FORCE_STDERR_LOGGING: steps get a console without a
       # window, and on Windows QtTest then prints to OutputDebugString,
       # not stdout. QTEST_FUNCTION_TIMEOUT: a hung function is aborted
       # with its name after 60 s. timeout-minutes: Start-Process -Wait
@@ -217,19 +282,73 @@ jobs:
           QTEST_FUNCTION_TIMEOUT: '60000'
         run: |
           $failed = Get-Content build/Testing/Temporary/LastTestsFailed.log -ErrorAction SilentlyContinue
+          $props = @{}
+          $cmds = @{}
+          foreach ($t in (ctest --test-dir build --show-only=json-v1 | Out-String | ConvertFrom-Json).tests) {
+            $props[$t.name] = $t.properties
+            $cmds[$t.name] = $t.command
+          }
           foreach ($line in $failed) {
             $name = ($line -split ':', 2)[1]
-            $exe = Get-ChildItem build/tests -File |
-                   Where-Object { $_.BaseName -eq $name -and $_.Extension -in '.exe', '' } |
-                   Select-Object -First 1
+            # The binary ctest ran, if it is the test's own: an e2e test's
+            # command is Python.
+            $cmd = @($cmds[$name])
+            $exe = if ($cmd.Count -gt 0 -and $cmd[0]) {
+                     Get-Item -LiteralPath $cmd[0] -ErrorAction SilentlyContinue |
+                       Where-Object { $_.BaseName -eq $name } | Select-Object -First 1
+                   }
             if (-not $exe) { Write-Host "== ${name}: not a test binary (see ctest output above)"; continue }
-            Write-Host "== $name -v2"
+            $tp = $props[$name]
+            $wd = ($tp | Where-Object name -eq 'WORKING_DIRECTORY').value
+            # ctest's own default: the directory of the add_test() call.
+            if (-not $wd) { $wd = (Resolve-Path build/tests).Path }
+            $saved = @{}
+            foreach ($kv in ($tp | Where-Object name -eq 'ENVIRONMENT').value) {
+              $k, $v = $kv -split '=', 2
+              if (-not $saved.ContainsKey($k)) { $saved[$k] = [Environment]::GetEnvironmentVariable($k) }
+              [Environment]::SetEnvironmentVariable($k, $v)
+            }
+            Write-Host "== $name -v2 (in $wd)"
             $out = Join-Path $env:RUNNER_TEMP "$name.out"; $err = Join-Path $env:RUNNER_TEMP "$name.err"
-            $p = Start-Process -FilePath $exe.FullName -ArgumentList '-v2' -WorkingDirectory $exe.DirectoryName `
+            $p = Start-Process -FilePath $exe.FullName -ArgumentList '-v2' -WorkingDirectory $wd `
                    -NoNewWindow -PassThru -Wait -RedirectStandardOutput $out -RedirectStandardError $err
             Get-Content $out, $err
             Write-Host ("== $name exit {0} (0x{0:X8})" -f $p.ExitCode)
+            # One test's settings must not reach the next.
+            foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
           }
+
+      # The minidumps a crashed unit test left (Crash dumps (Windows)),
+      # each with the binary that wrote it: a debugger needs the image to
+      # walk the stack through it. In WinDbg or cdb: `.exepath <dir>`,
+      # `.sympath srv*`, `.ecxr`, `k`, then `~*k` for every thread. For
+      # a jump to address 0, the caller is at the top of the stack:
+      # `dqs @rsp L4`.
+      - name: Collect crash dumps (Windows)
+        id: dumps
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dumps = Join-Path $env:RUNNER_TEMP 'dumps'
+          $found = @(Get-ChildItem -Path $dumps -Filter '*.dmp' -ErrorAction SilentlyContinue)
+          if ($found.Count -eq 0) { Write-Host 'No crash dumps.'; exit 0 }
+          foreach ($d in $found) {
+            Write-Host "Crash dump: $($d.Name) ($($d.Length) bytes)"
+            # <name>.exe.<pid>.dmp
+            $exe = ($d.Name -split '\.exe\.', 2)[0] + '.exe'
+            Get-ChildItem -Path build -Recurse -Filter $exe -ErrorAction SilentlyContinue |
+              Select-Object -First 1 | Copy-Item -Destination $dumps -Force
+          }
+          "found=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Upload crash dumps (Windows)
+        if: failure() && runner.os == 'Windows' && steps.dumps.outputs.found == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-dumps-${{ runner.os }}
+          path: ${{ runner.temp }}/dumps
+          if-no-files-found: ignore
+          retention-days: 7
 
       # ==================================================================
       # Installers: pushes to main and dry runs only, never pull requests.
@@ -572,6 +691,10 @@ jobs:
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         run: |
           desktop-file-validate src/app/platform/linux/gitbolt.desktop
+          # The Wayland app_id is desktopFileName ("gitbolt", main.cpp);
+          # shells fall back to StartupWMClass for a renamed copy.
+          grep -qx 'StartupWMClass=gitbolt' src/app/platform/linux/gitbolt.desktop \
+            || { echo "::error::gitbolt.desktop lacks StartupWMClass=gitbolt"; exit 1; }
           appstreamcli validate --no-net --explain src/app/platform/linux/com.gitbolt.app.metainfo.xml
 
       # build/gitbolt_<ver>_amd64.deb (DEB-DEFAULT naming lowercases the
@@ -687,30 +810,58 @@ jobs:
             || { echo "::error::Depends lacks bundled Qt's system deps (shlibdeps didn't scan Qt)"; exit 1; }
           dpkg-deb -f "$deb" Depends | grep -q 'libssl3' \
             || { echo "::error::Depends lacks libssl3 (the TLS plugin dlopen()s it)"; exit 1; }
+          # libgit2 is linked in statically (GITBOLT_BUNDLED_LIBGIT2): a
+          # libgit2 package in Depends ties the DEB to the one release
+          # that has that soname's package.
+          if dpkg-deb -f "$deb" Depends | grep -F libgit2; then
+            echo "::error::Depends names a libgit2 package, but libgit2 is linked in statically"; exit 1
+          fi
           # Plugins must find the private Qt libs on their own: glibc does
           # not apply the exe's RUNPATH to a dlopen'd plugin's deps.
           rm -rf debroot && dpkg-deb -x "$deb" debroot
           readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' | grep -qF '[$ORIGIN/../../lib]' \
             || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
-          # 2) DEB on a stock Ubuntu 24.04 (no aqt LD_LIBRARY_PATH or
-          #    QT_PLUGIN_PATH to mask gaps). The image is pinned by digest
-          #    (the multi-arch index, same as Docker Hub's ubuntu:24.04);
-          #    its apt-get still installs today's noble packages, which is
-          #    what a user's install resolves against.
-          docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
+          # 2) DEB on a stock Ubuntu 24.04 and a stock Debian 13, the
+          #    oldest of each the README names, and on the newest Ubuntu
+          #    LTS, 26.04, for the README's "or later" (no aqt
+          #    LD_LIBRARY_PATH or QT_PLUGIN_PATH to mask gaps). Debian 13
+          #    and Ubuntu 26.04 catch a Depends entry only one release can
+          #    satisfy, as libgit2-1.7 was.
+          #    Each image is pinned by digest (the multi-arch index, same
+          #    as Docker Hub's; `docker buildx imagetools inspect <image>`
+          #    prints it); its apt-get still installs today's packages,
+          #    which is what a user's install resolves against.
+          for image in \
             public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
-            bash -euo pipefail -c '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y -qq --no-install-recommends xvfb "/in/gitbolt_${VER}_amd64.deb" >/dev/null
-              export LC_ALL=C.UTF-8   # the stock image has no UTF-8 locale; Qt warns without one
-              out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
-                QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
-              echo "DEB: $out"
-              # xvfb-run merges stderr into stdout, so match the version line
-              # rather than the whole output.
-              grep -qx "GitBolt $VER" <<<"$out"'
+            public.ecr.aws/docker/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
+            public.ecr.aws/docker/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
+            echo "DEB on ${image%@*}"
+            # ECR Public rate-limits anonymous pulls ("toomanyrequests:
+            # Rate exceeded" failed a run): pull first, retrying with a
+            # growing wait, so docker run finds the image.
+            for attempt in 1 2 3 4 5; do
+              docker pull -q "$image" && break
+              [ "$attempt" -lt 5 ] || { echo "::error::could not pull $image"; exit 1; }
+              sleep $((attempt * 20))
+            done
+            docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
+              "$image" \
+              bash -euo pipefail -c '
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update -qq
+                # xauth: xvfb-run needs it, and with --no-install-recommends
+                # not every release pulls it in with xvfb (Debian 13 does
+                # not, and xvfb-run then stops at "xauth command not found").
+                apt-get install -y -qq --no-install-recommends xvfb xauth "/in/gitbolt_${VER}_amd64.deb" >/dev/null
+                export LC_ALL=C.UTF-8   # the stock images have no UTF-8 locale; Qt warns without one
+                out=$(GITBOLT_INSTANCE_NAME=ci-smoke xvfb-run -a gitbolt --version) || {
+                  QT_DEBUG_PLUGINS=1 GITBOLT_INSTANCE_NAME=ci-smoke2 xvfb-run -a gitbolt --version || true; exit 1; }
+                echo "DEB: $out"
+                # xvfb-run merges stderr into stdout, so match the version line
+                # rather than the whole output.
+                grep -qx "GitBolt $VER" <<<"$out"'
+          done
 
           # 3) AppImage on the runner with install-qt-action's env removed
           chmod +x "$appimage"
@@ -730,6 +881,14 @@ jobs:
           if grep -rlIF --exclude-dir=usr QT_QPA_PLATFORMTHEME squashfs-root; then
             echo "::error::the AppImage sets QT_QPA_PLATFORMTHEME before starting gitbolt"
             ls -l squashfs-root/AppRun
+            exit 1
+          fi
+
+          # 5) No libgit2 in the AppImage: it is linked into gitbolt
+          #    statically, so a copy here means linuxdeploy found a
+          #    shared one the binary links.
+          if find squashfs-root/usr/lib -name 'libgit2*' | grep .; then
+            echo "::error::the AppImage bundles a libgit2, but libgit2 is linked in statically"
             exit 1
           fi
           rm -rf squashfs-root

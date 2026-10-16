@@ -3,8 +3,10 @@
 # how stale-binary "my change does nothing" sessions happen.
 # Add new files HERE.
 set(SOURCES
+    DiffColors.cpp
     DiffSyntaxHighlighter.cpp
     RevisionGraphDelegate.cpp
+    DiffColors.h
     DiffSyntaxHighlighter.h
     RevisionGraphDelegate.h
 )

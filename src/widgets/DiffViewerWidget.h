@@ -8,6 +8,7 @@
 #include <vector>
 
 class QAction;
+class QEvent;
 class QLabel;
 class QPlainTextEdit;
 class QPoint;
@@ -61,6 +62,13 @@ public:
     void setHunkActionMode(HunkAction mode) { hunkAction_ = mode; }
     HunkAction hunkActionMode() const { return hunkAction_; }
 
+    /// While the host can't stage (its commit's hooks run, a local op
+    /// does), the context menu offers no hunk or line action; the diff
+    /// stays live to scroll, select and copy. (Disabled outright, it
+    /// could not even be scrolled.)
+    void setStagingLocked(bool locked) { stagingLocked_ = locked; }
+    bool stagingLocked() const { return stagingLocked_; }
+
     /// The file entry currently displayed — hosts use this to
     /// build hunk/line patches for the staging requests below.
     bool hasFile() const { return hasFile_; }
@@ -79,6 +87,11 @@ signals:
 public slots:
     void setViewMode(ViewMode mode);
 
+protected:
+    /// A theme switch recolours the highlighter and the file label
+    /// (DiffTextEdit reads its stripes' colours at every paint).
+    void changeEvent(QEvent* event) override;
+
 private slots:
     void syncScrollLeft(int value);
     void syncScrollRight(int value);
@@ -86,6 +99,7 @@ private slots:
 
 private:
     void setupUi();
+    void applyColors();
     void renderUnified(const gitbolt::git::DiffFileEntry& file);
     void renderSideBySide(const gitbolt::git::DiffFileEntry& file);
     void applyViewMode();
@@ -119,6 +133,7 @@ private:
     // index within that hunk); (-1,-1) for the file header and
     // (h,-1) for hunk header rows. Rebuilt by renderUnified.
     HunkAction hunkAction_ = HunkAction::None;
+    bool stagingLocked_ = false;
     std::vector<std::pair<int, int>> blockHunkLine_;
 };
 

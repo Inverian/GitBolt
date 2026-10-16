@@ -1,9 +1,12 @@
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/DiffTextEdit.h"
+#include "editor/DiffColors.h"
 #include "editor/DiffSyntaxHighlighter.h"
 
 #include <QAction>
 #include <QActionGroup>
+#include <QApplication>
+#include <QEvent>
 #include <QLabel>
 #include <QMenu>
 #include <QScrollBar>
@@ -25,8 +28,21 @@ namespace gitbolt::widgets {
 // the chars only), QTextBlockFormat::setBackground (ignored across
 // the inter-block leading by QPlainTextDocumentLayout), and
 // QTextEdit::ExtraSelection + FullWidthSelection (only fills the
-// text-line rect, not the leading). The colour swatches live there;
-// this file no longer needs its own copies.
+// text-line rect, not the leading). The colour swatches, for either
+// theme, live in editor/DiffColors.cpp.
+
+namespace {
+
+// The file name over the diff: muted, and readable in either theme
+// (the light theme's #555 was 1.9:1 on the dark toolbar).
+QColor fileLabelColor(const QPalette& palette)
+{
+    const bool dark = palette.color(QPalette::WindowText).lightness()
+                      > palette.color(QPalette::Window).lightness();
+    return dark ? QColor(0x9e, 0x9e, 0x9e) : QColor(0x55, 0x55, 0x55);
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -36,6 +52,33 @@ DiffViewerWidget::DiffViewerWidget(QWidget* parent)
     : QWidget(parent)
 {
     setupUi();
+    applyColors();
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+void DiffViewerWidget::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    // A theme switch sets the application palette, and what reaches
+    // a child widget is the PaletteChange its window passes down
+    // (RepoOperationBar::changeEvent).
+    if (event->type() == QEvent::PaletteChange && unifiedHighlighter_)
+        applyColors();
+}
+
+void DiffViewerWidget::applyColors()
+{
+    const QPalette app = QApplication::palette();
+    unifiedHighlighter_->setColors(editor::diffColorsFor(app));
+    // In the label's style sheet, not its palette: the theme's new
+    // application style sheet, set right after its palette, repolishes
+    // every widget, and that puts back the palette a widget had at its
+    // last polish.
+    fileLabel_->setStyleSheet(QStringLiteral("padding: 0 6px; color: %1;")
+                                  .arg(fileLabelColor(app).name()));
 }
 
 // ---------------------------------------------------------------------------
@@ -146,8 +189,8 @@ void DiffViewerWidget::setupUi()
     toolbar_->addSeparator();
 
     fileLabel_ = new QLabel(this);
-    fileLabel_->setStyleSheet(QStringLiteral("padding: 0 6px; color: #555;"));
-    toolbar_->addWidget(fileLabel_);
+    fileLabel_->setObjectName(QStringLiteral("diff.fileLabel"));
+    toolbar_->addWidget(fileLabel_);   // styled by applyColors()
 
     layout->addWidget(toolbar_);
 
@@ -382,7 +425,7 @@ void DiffViewerWidget::onUnifiedContextMenu(const QPoint& pos)
     QMenu* menu = unifiedEditor_->createStandardContextMenu();
 
     const bool stagingEligible =
-        hunkAction_ != HunkAction::None && hasFile_
+        hunkAction_ != HunkAction::None && hasFile_ && !stagingLocked_
         && currentFile_.status == git::DiffStatus::Modified;
 
     if (stagingEligible) {

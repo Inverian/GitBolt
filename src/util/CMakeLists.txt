@@ -5,12 +5,18 @@
 set(SOURCES
     AsyncRunner.cpp
     CrashHandler.cpp
+    LockFiles.cpp
+    LoginPath.cpp
     TestSession.cpp
+    Translations.cpp
     AsyncRunner.h
     CrashHandler.h
+    LockFiles.h
+    LoginPath.h
     LruCache.h
     PerformanceTimer.h
     TestSession.h
+    Translations.h
 )
 add_library(gitbolt_util STATIC ${SOURCES})
 

@@ -11,6 +11,7 @@
 #include <QShowEvent>
 #include <QSocketNotifier>
 #include <QTextBoundaryFinder>
+#include <QTextBlock>
 #include <QTextCursor>
 
 #include <errno.h>
@@ -22,7 +23,6 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QTextBlock>
 #include <QTextDocument>
 
 #include <string_view>
@@ -105,7 +105,6 @@ void overwrite(QTextCursor& cur, QStringView run)
     cur.insertText(run.toString());
 }
 
-#ifdef Q_OS_WIN
 // Put `cur` at `column` (0-based) of its row. A row shorter than that
 // is padded: the cells past the end of a line are blank.
 void placeInRow(QTextCursor& cur, int column)
@@ -133,7 +132,6 @@ void blankCells(QTextCursor& cur, int from, int to)
     blank.insertText(QString(to - from, QLatin1Char(' ')));
     cur.setPosition(base + at);
 }
-#endif
 } // namespace
 
 TerminalWidget::TerminalWidget(QWidget* parent)
@@ -346,6 +344,7 @@ void TerminalWidget::start(const QString& workingDirectory)
     // ----- parent -----
     masterFd_ = fd;
     childPid_ = pid;
+    screenCursor_ = QTextCursor();  // the new shell writes below
 
     // Non-blocking reads so we never deadlock the GUI thread when
     // we read the master fd a slice at a time inside the read notifier.
@@ -520,8 +519,11 @@ void TerminalWidget::takeConPtyOutput()
     if (!conpty_)
         return;
     const std::string output = conpty_->takeOutput();
-    if (!output.empty())
-        appendOutput(QByteArray(output.data(), static_cast<qsizetype>(output.size())));
+    if (!output.empty()) {
+        const QByteArray bytes(output.data(), static_cast<qsizetype>(output.size()));
+        outputRead(bytes);
+        appendOutput(bytes);
+    }
 }
 #endif
 
@@ -558,8 +560,10 @@ void TerminalWidget::onPtyReadable()
         break;
     }
     slice.truncate(got);
-    if (!slice.isEmpty())
+    if (!slice.isEmpty()) {
+        outputRead(slice);
         appendOutput(slice);
+    }
     if (exited) {
         stopShell();
         appendPlainText(tr("\n[gitbolt] shell exited"));
@@ -568,14 +572,19 @@ void TerminalWidget::onPtyReadable()
 }
 
 // Stream PTY output into the scrollback with just-enough terminal
-// emulation to make zsh's line editor (ZLE) display correctly:
+// emulation for the shells' line editors (zsh's ZLE, bash's readline)
+// and progress meters to display correctly:
 //
+//   - The shell's cursor stays where a read leaves it
+//     (screenCursor_), and the next read goes on from there.
 //   - \r moves the insertion point to column 0 of the CURRENT
 //     line (not a new line). ZLE uses \r + \x1b[K on every
 //     keystroke to redraw the line it's editing in place.
-//   - \x1b[K (EL — erase in line) deletes from the cursor to the
-//     end of the current line.
 //   - \b moves the cursor one column left without deleting.
+//   - The CSI sequences that move or erase within the row: CUF, CUB,
+//     CHA, HPA, EL, ECH, ICH and DCH (see csi()). zsh moves along
+//     the line it edits with CUF and CUB, bash inserts and deletes
+//     with ICH and DCH.
 //   - Printable characters OVERWRITE the character at the cursor,
 //     matching real terminal semantics (a print at column N
 //     replaces the char that was at column N; it does NOT push
@@ -587,9 +596,17 @@ void TerminalWidget::onPtyReadable()
 // Everything else we don't understand (SGR colors, cursor
 // position queries, application-mode escapes, DEC private mode
 // toggles, etc.) is silently dropped. That's enough to let ZLE,
-// tab completion, up-arrow history, and in-line backspace edits
-// all display correctly on a single-line prompt. Full SGR colors
-// and fullscreen-TUI support (vim/htop) remain follow-up work.
+// tab completion, up-arrow history, and in-line edits all display
+// correctly on a single-line prompt. Full SGR colors and
+// fullscreen-TUI support (vim/htop) remain follow-up work.
+//
+// What remains approximate on macOS and Linux: this is a model of the
+// cursor's row, not of a screen. A row doesn't wrap at the PTY's width
+// (a longer one stays one row, scrolled sideways), and the moves
+// between rows (CUP, CUU, CUD) and ED are dropped. A line editor
+// assumes the terminal wraps: zsh redraws a command line longer than
+// the terminal is wide with those moves, so such a line can show wrong
+// while it is edited. Windows runs the screen model below instead.
 void TerminalWidget::appendOutput(const QByteArray& bytes)
 {
     // Decode (the decoder keeps a character the read cut in two for
@@ -634,14 +651,18 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
         startScreen();
     QTextCursor cur = screenCursor_;
 #else
-    // The write cursor always starts at end-of-document. \r then
-    // walks it back to the start of the LAST line (where the
-    // shell's current prompt lives), and subsequent printables
-    // overwrite in place. This is why user clicks elsewhere in
-    // the scrollback don't corrupt future output — we always
-    // rebase at End at the top of each batch.
-    QTextCursor cur = textCursor();
-    cur.movePosition(QTextCursor::End);
+    // The walk resumes where the last read left the shell's cursor:
+    // git's progress meter ends each update with a CR for the next one
+    // to write over, and a line editor sends each arrow key as a read
+    // of its own. Starting every read at the end of the text piled the
+    // meter's updates up on one row. screenCursor_ is the widget's own
+    // cursor, not the caret, so a click in the scrollback doesn't move
+    // it. A new shell's first read starts at the end of the text.
+    if (screenCursor_.isNull()) {
+        screenCursor_ = QTextCursor(document());
+        screenCursor_.movePosition(QTextCursor::End);
+    }
+    QTextCursor cur = screenCursor_;
 #endif
 
     // The whole read is one edit: the document lays out the lines it
@@ -657,7 +678,22 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 
         if (u == '\r') {
             // CR — move to column 0 of the current line (NOT a new line)
+#ifdef Q_OS_WIN
             cur.movePosition(QTextCursor::StartOfBlock);
+#else
+            // Of the current screen row, where the line is longer than
+            // the terminal: its rows don't wrap here, but the shell's
+            // do, so they are one block, a row every screenColumns_
+            // cells. readline, at the right margin, sends "<key> \r" to
+            // get onto the next row; to the block's start, the keys
+            // after it overwrote the prompt and the command. A cursor
+            // just past the last column hasn't wrapped yet (terminals
+            // put that off until the next character), so its row is
+            // still the one before.
+            const int column = cur.positionInBlock();
+            const int columns = qMax(1, screenColumns_);
+            placeInRow(cur, column > 0 ? (column - 1) / columns * columns : 0);
+#endif
             ++i;
             continue;
         }
@@ -697,20 +733,7 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 while (j < n) {
                     const ushort fu = text[j].unicode();
                     if (fu >= 0x40 && fu <= 0x7e) {
-#ifdef Q_OS_WIN
-                        screenCsi(cur, fu, QStringView(text).mid(i + 2, j - i - 2));
-#else
-                        // Final byte — act on the few we care about
-                        if (fu == 'K') {
-                            // EL — erase to end of line (default param)
-                            QTextCursor eraseCur = cur;
-                            eraseCur.movePosition(QTextCursor::EndOfBlock,
-                                                  QTextCursor::KeepAnchor);
-                            eraseCur.removeSelectedText();
-                        }
-                        // SGR (`m`), CUP/HVP, CUU/CUD/CUF/CUB,
-                        // DEC private mode set/reset, etc. — drop.
-#endif
+                        csi(cur, fu, QStringView(text).mid(i + 2, j - i - 2));
                         i = j + 1;
                         handled = true;
                         break;
@@ -726,16 +749,19 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 }
                 continue;
             }
-#ifdef Q_OS_WIN
-            if (next == ']' && text.indexOf(QChar(0x1b), i + 2) < 0 && n - i < 4096) {
+            if (next == ']' && n - i < 4096) {
                 // An OSC the regex above couldn't remove because its
-                // terminator is in the next chunk: conhost retitles the
-                // window on every command, so this does happen. Park
-                // it like an unterminated CSI.
-                pendingOutput_ = text.mid(i);
-                break;
+                // terminator is in the next chunk, or its last byte is
+                // (the read ends on the ESC of an ESC \): conhost
+                // retitles the window on every command, and shells'
+                // prompts often do, so this does happen. Park it like
+                // an unterminated CSI.
+                const qsizetype esc = text.indexOf(QChar(0x1b), i + 2);
+                if (esc < 0 || esc == n - 1) {
+                    pendingOutput_ = text.mid(i);
+                    break;
+                }
             }
-#endif
             // ESC followed by a single byte we don't handle
             i += 2;
             continue;
@@ -777,9 +803,7 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
     // Sync the visible blinking caret with where we just finished
     // writing so the user can see where the shell's cursor is.
     setTextCursor(cur);
-#ifdef Q_OS_WIN
     screenCursor_ = cur;
-#endif
 
     if (wasAtBottom) {
         sb->setValue(sb->maximum());
@@ -833,6 +857,14 @@ qsizetype TerminalWidget::rowChunk(QStringView run, qsizetype room)
 //     never cut: it is one UTF-8 character, which the decoder holds
 //     back until it is whole.) Rare, and only drawn wrong, so left as
 //     it is.
+//   - What conhost itself breaks stays broken. Windows' conhost (seen
+//     on build 26100) gives each half of a surrogate pair a cell of its
+//     own, so an astral character printed in the last column comes out
+//     of ConPTY split over the wrap: something else in that cell, and
+//     the low half alone, as invalid UTF-8 (three U+FFFD here), at the
+//     start of the next row. The bytes are wrong before they get here;
+//     TestTerminalWidget::conhostWrapKeepsCharactersWhole tells the two
+//     apart by what ConPTY sent (outputRead).
 // ---------------------------------------------------------------------------
 
 // A fresh screen below the output so far. conhost clears the screen
@@ -896,10 +928,14 @@ void TerminalWidget::screenLineFeed(QTextCursor& cur)
     placeInRow(cur, column);
 }
 
-// The CSI sequences ConPTY paints with. SGR (colors), mode switches
-// (ESC[?25l hides the cursor), window reports and the rest change
-// nothing drawn here.
-void TerminalWidget::screenCsi(QTextCursor& cur, ushort finalByte, QStringView params)
+#endif // Q_OS_WIN
+
+// The CSI sequences that move or erase within the cursor's row, and on
+// Windows the screen ones ConPTY paints with. SGR (colors), mode
+// switches (ESC[?25l hides the cursor), window reports and the rest
+// change nothing drawn here. The line editors use the row's: zsh moves
+// with CUF and CUB, bash inserts and deletes with ICH and DCH.
+void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
 {
     for (const QChar c : params) {
         if (c.unicode() < '0' || c.unicode() > ';')
@@ -910,21 +946,26 @@ void TerminalWidget::screenCsi(QTextCursor& cur, ushort finalByte, QStringView p
         return index < args.size() ? args.at(index).toInt() : 0;
     };
     const int count  = qMax(1, arg(0));  // moves treat 0 as 1
-    const int row    = cur.blockNumber() - screenTop_.blockNumber() + 1;
     const int column = cur.positionInBlock() + 1;
     const int length = cur.block().length() - 1;
+#ifdef Q_OS_WIN
+    const int row    = cur.blockNumber() - screenTop_.blockNumber() + 1;
+    const auto toColumn = [&](int to) { screenMoveTo(cur, row, to); };
+#else
+    // No wrap here, so a row can run past the last column; a move right
+    // stops there, as on a terminal, but never takes the cursor left.
+    const auto toColumn = [&](int to) {
+        if (to > column)
+            to = qMax(column, qMin(to, screenColumns_));
+        placeInRow(cur, qMax(1, to) - 1);
+    };
+#endif
 
     switch (finalByte) {
-    case 'H':  // CUP
-    case 'f':  // HVP
-        screenMoveTo(cur, qMax(1, arg(0)), qMax(1, arg(1)));
-        break;
-    case 'A': screenMoveTo(cur, row - count, column); break;  // CUU
-    case 'B': screenMoveTo(cur, row + count, column); break;  // CUD
-    case 'C': screenMoveTo(cur, row, column + count); break;  // CUF
-    case 'D': screenMoveTo(cur, row, column - count); break;  // CUB
-    case 'G': screenMoveTo(cur, row, count); break;           // CHA
-    case 'd': screenMoveTo(cur, count, column); break;        // VPA
+    case 'C': toColumn(column + count); break;  // CUF
+    case 'D': toColumn(column - count); break;  // CUB
+    case 'G':                                   // CHA
+    case '`': toColumn(count); break;           // HPA
     case 'K': {  // EL: 0 cursor to end, 1 start to cursor, 2 whole row
         const int mode = arg(0);
         if (mode == 0 || mode == 2) {
@@ -939,6 +980,28 @@ void TerminalWidget::screenCsi(QTextCursor& cur, ushort finalByte, QStringView p
     case 'X':  // ECH: blank cells from the cursor on, without moving
         blankCells(cur, column - 1, qMin(column - 1 + count, length));
         break;
+    case '@':  // ICH: blanks in at the cursor, the rest of the row right
+        if (column <= length) {
+            const int at = cur.position();
+            cur.insertText(QString(count, QLatin1Char(' ')));
+            cur.setPosition(at);
+        }
+        break;
+    case 'P': {  // DCH: the cursor's characters out, the rest of the row left
+        QTextCursor erase = cur;
+        for (int k = 0; k < count && !erase.atBlockEnd(); ++k)
+            erase.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+        erase.removeSelectedText();
+        break;
+    }
+#ifdef Q_OS_WIN
+    case 'H':  // CUP
+    case 'f':  // HVP
+        screenMoveTo(cur, qMax(1, arg(0)), qMax(1, arg(1)));
+        break;
+    case 'A': screenMoveTo(cur, row - count, column); break;  // CUU
+    case 'B': screenMoveTo(cur, row + count, column); break;  // CUD
+    case 'd': screenMoveTo(cur, count, column); break;        // VPA
     case 'J':  // ED
         if (arg(0) == 0) {  // cursor to the end of the screen
             QTextCursor erase = cur;
@@ -965,11 +1028,13 @@ void TerminalWidget::screenCsi(QTextCursor& cur, ushort finalByte, QStringView p
         }
         screenMoveTo(cur, row, column);
         break;
+#endif
     default:
         break;
     }
 }
 
+#ifdef Q_OS_WIN
 // A resize makes conhost repaint the screen from its top-left cell. If
 // the screen got shorter than the cursor's row, conhost first pushed
 // the rows above into the scrollback to keep the cursor on screen, and
@@ -1142,7 +1207,8 @@ void TerminalWidget::updatePtySize()
     memset(&ws, 0, sizeof(ws));
     ws.ws_col = static_cast<unsigned short>(grid.width());
     ws.ws_row = static_cast<unsigned short>(grid.height());
-    ::ioctl(masterFd_, TIOCSWINSZ, &ws);
+    if (::ioctl(masterFd_, TIOCSWINSZ, &ws) == 0)
+        screenColumns_ = grid.width();
 #endif
 }
 

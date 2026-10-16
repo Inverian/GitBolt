@@ -91,7 +91,8 @@ private:
 
     std::vector<git::CommitData> commits_;
     std::vector<GraphRowData> graphData_;
-    bool hasMore_ = true;
+    // Only a first page (setCommits) turns paging on; see clear().
+    bool hasMore_ = false;
 
     // ---- Lane-assignment checkpoint ----
     // Working state of the graph fold, carried across appendGraphRows

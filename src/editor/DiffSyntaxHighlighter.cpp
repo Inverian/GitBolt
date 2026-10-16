@@ -1,6 +1,9 @@
 #include "editor/DiffSyntaxHighlighter.h"
 
-#include <QColor>
+#include "editor/DiffColors.h"
+
+#include <QApplication>
+#include <QPalette>
 
 namespace gitbolt::editor {
 
@@ -11,26 +14,27 @@ DiffSyntaxHighlighter::DiffSyntaxHighlighter(QTextDocument* parent)
     // QTextCharFormat::setBackground only paints under the actual
     // characters, leaving visible white slivers in the line gap
     // between consecutive colored lines (the "double-spaced" look).
-    // The unified-mode renderer applies per-block backgrounds via
-    // QTextBlockFormat::setBackground in a separate pass after
-    // setPlainText, which paints the entire line height edge-to-
-    // edge — matching how the side-by-side renderer already
-    // colors its panels and how GitHub's diff renders.
-
-    // Addition lines: green foreground
-    additionFmt_.setForeground(QColor(0, 140, 0));
-
-    // Deletion lines: red foreground
-    deletionFmt_.setForeground(QColor(180, 0, 0));
-
-    // Hunk headers (@@ ... @@): blue foreground
-    hunkHeaderFmt_.setForeground(QColor(0, 102, 204));
+    // DiffTextEdit::paintEvent paints each line's background edge
+    // to edge instead, the way GitHub's diff renders.
 
     // File headers (diff --git ...): bold
     fileHeaderFmt_.setFontWeight(QFont::Bold);
 
-    // Context lines: gray foreground
-    contextFmt_.setForeground(QColor(128, 128, 128));
+    applyColors(diffColorsFor(QApplication::palette()));
+}
+
+void DiffSyntaxHighlighter::setColors(const DiffColors& colors)
+{
+    applyColors(colors);
+    rehighlight();
+}
+
+void DiffSyntaxHighlighter::applyColors(const DiffColors& colors)
+{
+    additionFmt_.setForeground(colors.addFg);
+    deletionFmt_.setForeground(colors.delFg);
+    hunkHeaderFmt_.setForeground(colors.hunkFg);
+    contextFmt_.setForeground(colors.contextFg);
 }
 
 void DiffSyntaxHighlighter::highlightBlock(const QString& text)
@@ -47,18 +51,14 @@ void DiffSyntaxHighlighter::highlightBlock(const QString& text)
     } else if (text.startsWith(QLatin1String("@@"))) {
         setFormat(0, len, hunkHeaderFmt_);
     } else if (text.startsWith(QLatin1Char('+'))) {
-        // Distinguish file-level headers like +++ from additions
-        if (text.startsWith(QLatin1String("+++"))) {
-            setFormat(0, len, fileHeaderFmt_);
-        } else {
-            setFormat(0, len, additionFmt_);
-        }
+        // An addition, "+++" and all: the diff shown never has git's
+        // "+++ b/" and "--- a/" file headers (DiffViewerWidget renders
+        // hunks under its own "diff --git" line), and an added "++i;"
+        // or a removed "---" (front matter, an SQL comment) came out
+        // as a bold header, as if unchanged.
+        setFormat(0, len, additionFmt_);
     } else if (text.startsWith(QLatin1Char('-'))) {
-        if (text.startsWith(QLatin1String("---"))) {
-            setFormat(0, len, fileHeaderFmt_);
-        } else {
-            setFormat(0, len, deletionFmt_);
-        }
+        setFormat(0, len, deletionFmt_);
     } else if (text.startsWith(QLatin1String("index "))
                || text.startsWith(QLatin1String("new file"))
                || text.startsWith(QLatin1String("deleted file"))

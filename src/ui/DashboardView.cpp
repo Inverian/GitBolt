@@ -1,8 +1,10 @@
 #include "ui/DashboardView.h"
 #include "conf/SettingsService.h"
+#include "conf/ThemeService.h"
 #include "services/RecentRepoProbe.h"
 #include "widgets/BoltLogoWidget.h"
 
+#include <QApplication>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDir>
@@ -287,12 +289,36 @@ void DashboardView::setupUi()
         if (picked == openAct) {
             emit openRepositoryRequested(path);
         } else if (picked == forgetAct && settings_) {
+            // Its settingsChanged rebuilds the table (and the
+            // File > Recent Repositories submenu).
             settings_->removeRecentRepository(path);
-            // SettingsService doesn't emit a change signal today;
-            // refresh the table directly.
-            refreshRecentList();
         }
     });
+}
+
+void DashboardView::applyCardColors()
+{
+    // Dark: lighter than the card (#3c3c3c, #323232 hovered), at 5:1 or
+    // more. Light: darker than the muted text grey, which read at 4.7:1
+    // on the card (the window's #efefef) but 3.3:1 on a hovered one
+    // (palette(midlight), #cacaca); #505050 is 7:1 and 4.9:1. The
+    // palette(mid) it had before is a border's grey, at 1.7:1.
+    const bool dark = conf::ThemeService::paletteIsDark();
+    const QString sheet = QStringLiteral(
+        "QLabel { font-size: 13pt; color: %1;"
+        "         background: transparent; border: none; }")
+        .arg(dark ? QStringLiteral("#b4b4b4") : QStringLiteral("#505050"));
+    for (QLabel* label : std::as_const(cardDescriptions_)) {
+        if (label->styleSheet() != sheet)
+            label->setStyleSheet(sheet);
+    }
+}
+
+void DashboardView::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange)
+        applyCardColors();
 }
 
 QPushButton* DashboardView::createActionCard(const QString& title, const QString& iconText,
@@ -346,9 +372,8 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     descLabel->setAlignment(Qt::AlignCenter);
     descLabel->setWordWrap(true);
     descLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
-    descLabel->setStyleSheet(QStringLiteral(
-        "QLabel { font-size: 13pt; color: palette(mid);"
-        "         background: transparent; border: none; }"));
+    cardDescriptions_.append(descLabel);
+    applyCardColors();
 
     // Stretch on both ends so the icon/title/description block sits
     // vertically centered within the fixed-height card, rather than
@@ -481,35 +506,34 @@ void DashboardView::refreshRecentList()
         for (int c = 0; c < recentList_->columnCount(); ++c)
             item->setToolTip(c, path);
 
-        probeAndPopulate(item, path);
+        probeAndPopulate(path);
     }
 
     updateRecentColumnWidths();
 }
 
-void DashboardView::probeAndPopulate(QTreeWidgetItem* row, const QString& path)
+void DashboardView::probeAndPopulate(const QString& path)
 {
-    // Capture a QPointer to `this` so the completion handler is a no-op
-    // if DashboardView is destroyed before the probe finishes. The row
-    // is identified by its stashed path (UserRole on column 0) rather
-    // than by pointer — if refreshRecentList() runs again and rebuilds
-    // the tree, the original QTreeWidgetItem* is dangling, but a new
-    // row with the same path has the same UserRole and receives the
-    // (still relevant) data. We look up the row by walking the tree's
-    // top-level items in the handler.
+    // The watcher is parented to `this`, so the completion handler
+    // never runs if DashboardView is destroyed before the probe
+    // finishes. The row is identified by its stashed path (UserRole on
+    // column 0) and nothing else: if refreshRecentList() runs again
+    // and rebuilds the tree, the row this probe was started for is
+    // deleted, but a new row with the same path has the same UserRole
+    // and receives the (still relevant) data. A pointer to the old row
+    // can't serve even as a hint: a new row of ANOTHER repository may
+    // have its address, and would get this repository's data.
     auto watcher = new QFutureWatcher<services::RecentRepoInfo>(this);
     QObject::connect(watcher, &QFutureWatcher<services::RecentRepoInfo>::finished,
-                     this, [this, watcher, path, row]() {
+                     this, [this, watcher, path]() {
         watcher->deleteLater();
 
         // Locate the row for `path` by scanning current top-level
-        // items. If the tree has since been rebuilt, `row` may be
-        // dangling — never dereference it; we only use it as a hint
-        // if it's still present (cheap common case).
+        // items.
         QTreeWidgetItem* target = nullptr;
         for (int i = 0; i < recentList_->topLevelItemCount(); ++i) {
             QTreeWidgetItem* it = recentList_->topLevelItem(i);
-            if (it == row || it->data(0, Qt::UserRole).toString() == path) {
+            if (it->data(0, Qt::UserRole).toString() == path) {
                 target = it;
                 break;
             }

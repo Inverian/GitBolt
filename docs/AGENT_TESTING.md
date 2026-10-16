@@ -100,10 +100,17 @@ tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay is
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```
 
-`dump-state` also reports `headOid`, `theme`, `logRows`, and
-`statusMessage` so a harness can assert "HEAD moved", "Dark
-persisted", "the log loaded", and "the fetch failed" without shelling
-out or screenshotting.
+`dump-state` also reports `headOid`, `theme`, `logRows`,
+`statusMessage` and `opIndicator` (the toolbar's inline op label:
+"Merging topic…", "✓ Fetch complete.", "✗ fetch failed: …") so a
+harness can assert "HEAD moved", "Dark persisted", "the log loaded",
+"the fetch failed" and "the merge is still running" without shelling
+out or screenshotting, and `sequencePaused`: a cherry-pick or revert
+of several commits is paused between two of them (`repoState` is then
+`cherry-pick` or `revert`), with `sequenceSkippable` saying whether
+git's `--skip` would leave out the commit it stopped at (the in-progress
+bar offers Skip only then). `desktopFileName` is the desktop entry the app
+claims, its app_id on Wayland (`tests/e2e/test_desktop_identity.py`).
 
 Usage statistics (`src/telemetry`, [PRIVACY.md](../PRIVACY.md)) are
 never sent from a bridge session. `dump-state` reports `telemetry`, the
@@ -120,6 +127,26 @@ endpoints compiled in. Neither is ever `on` under the bridge
 `fire-timer` emits a running `QTimer`'s timeout (found by
 `objectName`; a stopped timer is an error, since it could never fire).
 It's how a test reaches work the app only does every few minutes.
+
+The "Crash Detected" box that a crash leaves for the next launch never
+shows in a test session (bridge, instance name, offscreen or CI):
+`~/.gitbolt/crash.log` is the user's, and stays for their next launch.
+A test of the box sets `GITBOLT_TEST_CRASH_BOX=1`, and only with a
+`HOME` of its own with a `crash.log` planted in it
+(`tests/e2e/test_crash_box_handoff.py`). The box comes up over the
+window once the bridge and the single-instance listener are up, so
+`list-widgets` finds it by its `objectName`, `app.crashDetected`
+(macOS message boxes have no title), and `click OK` dismisses it.
+
+A test session that crashes writes its report to
+`~/.gitbolt/crash-test.log`, never `crash.log`, and nothing reads or
+deletes it. On macOS it also stays out of the system's crash reporter:
+no "GitBolt quit unexpectedly" box on the screen and no `GitBolt-*.ips`
+in `~/Library/Logs/DiagnosticReports`, since the handler of a test
+session takes `EXC_CRASH` itself (`util::CrashHandler::install`). The
+processes it starts (git, hooks, ssh, the terminal's shell) don't
+inherit that port: one that crashes is reported by macOS as usual. A
+user's session keeps macOS's crash reporting.
 
 Addressing:
 - **Actions** by `objectName` (every action has one — see below), by

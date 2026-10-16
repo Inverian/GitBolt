@@ -382,6 +382,7 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | `GITBOLT_BUILD_TESTS` | `ON` | Build the unit test executables |
 | `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
 | `GITBOLT_BUNDLED_LIBGIT2` | `OFF` | Build the pinned libgit2 from source and link it statically instead of using a system copy (see below). Used automatically when no system libgit2 is found |
+| `GITBOLT_REQUIRE_ENGLISH_PLURALS` | `OFF` | Fail the configure when the [English plural forms](#english-plural-forms) can't be built (no Qt LinguistTools, or Qt before 6.7). CI sets it |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
 | `GITBOLT_TELEMETRY_HOST` | empty | Usage statistics ingest origin, `https://<host>`; empty compiles telemetry out (see below) |
@@ -395,6 +396,19 @@ Example — debug build with sanitizers:
 cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_SANITIZERS=ON -G Ninja
 cmake --build build-asan --parallel
 ```
+
+### English plural forms
+
+Texts with a count, such as "Merge stopped on conflicts in %n file(s)", get their English singular and plural ("1 file", "2 files") from `translations/gitbolt_en.ts`, which the build compiles into the app. That needs Qt's LinguistTools and Qt 6.7 or later. Homebrew's `qt`, the Qt Online Installer's default desktop install and CI's Qt include LinguistTools; on Linux install `qt6-tools-dev` and `qt6-l10n-tools` (Debian, Ubuntu), `qt6-qttools-devel` (Fedora) or `qt6-tools` (Arch). Without them GitBolt still builds, CMake prints `English plural forms: off`, and those texts read "1 file(s)".
+
+After adding or changing a text with `%n`, refresh the file and fill in both forms of each new entry:
+
+```bash
+cmake --build build --target update_translations
+# edit translations/gitbolt_en.ts: both <numerusform>s, and drop type="unfinished"
+```
+
+Commit the `.ts` file with the change. CI runs the same target on Linux and fails while the file is out of date or a form is missing.
 
 ### Usage statistics endpoints
 
@@ -435,18 +449,28 @@ With `-DGITBOLT_BUNDLED_LIBGIT2=ON`, CMake downloads the libgit2 release
 pinned in [`cmake/Libgit2.cmake`](../cmake/Libgit2.cmake) (1.9.7, checked
 against its SHA-256) at configure time, builds it as part of the project
 and links it statically into GitBolt, so there is no libgit2 library to
-install or ship. It is what CI and the macOS and Windows installers use;
-the Linux packages keep the distribution's libgit2.
+install or ship. It is what CI and every installer use, so the DEB
+depends on no distribution's libgit2 package and the AppImage carries
+no libgit2 library.
 
 - GitBolt uses libgit2 only for local repository access. Clone, fetch,
   pull and push run the `git` CLI, so git's own SSH and credential
   configuration applies to them (`~/.ssh/config`, `core.sshCommand`,
   credential helpers). The bundled libgit2 is therefore built without
-  an SSH transport; HTTPS stays, on the operating system's TLS stack
-  (SecureTransport on macOS, WinHTTP on Windows), so there is no
-  OpenSSL to build or ship.
+  an SSH transport. HTTPS stays where it is the operating system's TLS
+  stack (SecureTransport on macOS, WinHTTP on Windows); on Linux, where
+  it would be OpenSSL, it is left out. Either way there is no OpenSSL
+  to build or ship.
+- The bundled copy is patched
+  ([`cmake/PatchLibgit2.cmake`](../cmake/PatchLibgit2.cmake)) against a
+  libgit2 crash when `.git/config` changes and then can't be read or
+  parsed, and against the stale config that followed it. A system
+  libgit2 (Homebrew, vcpkg, distribution packages) doesn't have these
+  patches, so use the bundled one for builds you hand out.
 - Configuring needs network access once per build directory. Offline,
-  unpack the release elsewhere and pass
+  unpack the release elsewhere, run
+  `cmake -P <GitBolt>/cmake/PatchLibgit2.cmake` in that directory
+  (GitBolt's patches to libgit2, one of them a crash fix), and pass
   `-DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<that directory>`.
 - On Windows it needs neither vcpkg nor pkgconf.
 
@@ -575,6 +599,8 @@ sudo dnf install cmake ninja-build pkgconf-pkg-config gcc-c++ \
 ```bash
 sudo pacman -S cmake ninja pkgconf gcc qt6-base qt6-svg libgit2 git
 ```
+
+Optionally add Qt's LinguistTools for the [English plural forms](#english-plural-forms) ("1 file" rather than "1 file(s)"; Qt 6.7 or later): `qt6-tools-dev qt6-l10n-tools` on Debian and Ubuntu, `qt6-qttools-devel` on Fedora, `qt6-tools` on Arch.
 
 After installing dependencies, the configure and build commands are identical to macOS.
 

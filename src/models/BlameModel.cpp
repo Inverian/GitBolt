@@ -172,13 +172,13 @@ void BlameModel::flattenHunks() {
             if (hours < 1)
                 bl.date = tr("just now");
             else if (hours < 24)
-                bl.date = tr("%1 hours ago").arg(hours);
+                bl.date = tr("%n hour(s) ago", nullptr, hours);
             else if (hours < 24 * 30)
-                bl.date = tr("%1 days ago").arg(hours / 24);
+                bl.date = tr("%n day(s) ago", nullptr, hours / 24);
             else if (hours < 24 * 365)
-                bl.date = tr("%1 months ago").arg(hours / (24 * 30));
+                bl.date = tr("%n month(s) ago", nullptr, hours / (24 * 30));
             else
-                bl.date = tr("%1 years ago").arg(hours / (24 * 365));
+                bl.date = tr("%n year(s) ago", nullptr, hours / (24 * 365));
         }
 
         lines_.push_back(std::move(bl));

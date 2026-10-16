@@ -1,5 +1,8 @@
 #include "widgets/DiffTextEdit.h"
 
+#include "editor/DiffColors.h"
+
+#include <QApplication>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QTextBlock>
@@ -8,22 +11,20 @@
 namespace gitbolt::widgets {
 
 namespace {
-// Same swatch values used by DiffViewerWidget's per-line styling.
-// Kept in sync visually — if either palette changes, update both.
-const QColor kAddBg(200, 255, 200);
-const QColor kDelBg(255, 220, 220);
-const QColor kHunkBg(220, 230, 255);
-
-QColor lineBackground(const QString& text)
+// Every line these editors show is a hunk's (prefixed '+', '-' or
+// ' '), a hunk header, or the "diff --git" line: never git's "--- a/"
+// and "+++ b/" file headers. Those were told apart by their first
+// three characters, so a removed "--" line (Markdown and YAML front
+// matter's "---", an SQL or Lua comment) or an added "++i;" got no
+// stripe, and read as unchanged.
+QColor lineBackground(const QString& text, const editor::DiffColors& colors)
 {
     if (text.startsWith(QLatin1String("@@")))
-        return kHunkBg;
-    if (text.startsWith(QLatin1Char('+'))
-        && !text.startsWith(QLatin1String("+++")))
-        return kAddBg;
-    if (text.startsWith(QLatin1Char('-'))
-        && !text.startsWith(QLatin1String("---")))
-        return kDelBg;
+        return colors.hunkBg;
+    if (text.startsWith(QLatin1Char('+')))
+        return colors.addBg;
+    if (text.startsWith(QLatin1Char('-')))
+        return colors.delBg;
     return QColor();
 }
 } // namespace
@@ -48,13 +49,17 @@ void DiffTextEdit::paintEvent(QPaintEvent* event)
         const int width = viewport()->width();
         QTextBlock block = firstVisibleBlock();
         const QPointF offset = contentOffset();
+        // Read at every paint, so a theme switch (which repaints)
+        // needs nothing else here.
+        const editor::DiffColors colors =
+            editor::diffColorsFor(QApplication::palette());
 
         while (block.isValid()) {
             const QRectF geom = blockBoundingGeometry(block).translated(offset);
             if (geom.top() > viewport()->height())
                 break;
 
-            const QColor bg = lineBackground(block.text());
+            const QColor bg = lineBackground(block.text(), colors);
             if (bg.isValid()) {
                 const QTextBlock next = block.next();
                 const qreal bottom = next.isValid()

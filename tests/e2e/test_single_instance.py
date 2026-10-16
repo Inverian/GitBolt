@@ -7,15 +7,20 @@ warning) and the first instance must switch to the forwarded repo. A
 bare relaunch (no path, e.g. a launcher click) must be answered too.
 And when the first instance is alive but busy — its GUI thread stuck
 in a long synchronous git call, so the hand-off goes unanswered — the
-path is still queued for it: the second launch exits 0 with a note,
-not an error dialog and not a rival window, and the owner opens the
-path once it is free.
+launch waits for as long as that instance lives, with a note after
+10 s (and, where someone can see it, a window to cancel the wait), not
+an error dialog and not a rival window: the owner opens the path once
+it is free, and the launch exits 0. If the owner dies busy instead, the
+launch takes its place and opens the path itself. It used to give up
+after 10 s and exit 0, leaving the path with an owner that might never
+read it.
 """
 
 from __future__ import annotations
 
 import os
 import signal
+import time
 
 from e2elib import App, Failure, make_repo, run
 
@@ -29,9 +34,11 @@ def test(binary: str, scratch: str, apps: list) -> None:
     repo_b = make_repo(os.path.join(scratch, "repo-b"))
 
     first = App(binary, repo_a, label="first instance")
-    apps.append(first)
-    first.wait_bridge()
-    first.wait_until(_on("repo-a"), "repo A open")
+    dying = App(binary, repo_a, label="owner that dies busy")
+    apps += [first, dying]
+    for owner in (first, dying):
+        owner.wait_bridge()
+        owner.wait_until(_on("repo-a"), "repo A open")
 
     # Same instance namespace => the lock is taken and the new process
     # hands off instead of starting a window.
@@ -52,19 +59,44 @@ def test(binary: str, scratch: str, apps: list) -> None:
     if not _on("repo-b")(first.state()):
         raise Failure(f"bare relaunch changed the repo: {first.state()}")
 
-    # Busy owner (stopped here): the hand-off connects and its line is
-    # sent, but the receipt never comes in the launch's wait.
+    # Busy owners (stopped here): the hand-off connects and its line is
+    # sent, but no receipt comes while they are stopped.
     os.kill(first.proc.pid, signal.SIGSTOP)
+    os.kill(dying.proc.pid, signal.SIGSTOP)
+    busy = first.start_second(repo_a)
     try:
-        busy = first.launch_second(repo_a)
-    finally:
+        taker = App(binary, repo_b, instance_name=dying.instance_name,
+                    runtime_dir=dying.runtime_dir,
+                    label="launch waiting on the owner that dies")
+        apps.append(taker)
+        # Past the 10 s after which a launch used to give up, and now
+        # leaves its note.
+        time.sleep(13)
+        for owner, launch in (("busy", busy), ("dying", taker.proc)):
+            if launch.poll() is not None:
+                raise Failure(f"launch gave up on the {owner} owner, "
+                              f"alive: rc={launch.returncode}")
         os.kill(first.proc.pid, signal.SIGCONT)
-    if busy.returncode != 0 or b"busy" not in busy.stderr:
-        raise Failure("launch against a busy instance should leave the "
-                      "path queued and exit 0 with a note, got "
-                      f"rc={busy.returncode}: {busy.stderr[-400:]}")
-    first.wait_until(_on("repo-a"),
-                     "busy instance to open the queued repo A once free")
+        _, err = busy.communicate(timeout=30)
+        if busy.returncode != 0 or b"busy" not in err:
+            raise Failure("launch against a busy instance should wait, with "
+                          "a note, and exit 0 once it is free, got "
+                          f"rc={busy.returncode}: {err[-400:]}")
+        first.wait_until(_on("repo-a"),
+                         "busy instance to open repo A once free")
+
+        dying.crash()
+        taker.wait_bridge()
+        taker.wait_until(_on("repo-b"),
+                         "launch to take the dead owner's place with repo B")
+    finally:
+        # Before teardown kills its owner: it would take over and run
+        # on with nobody to quit it.
+        if busy.poll() is None:
+            busy.kill()
+            busy.wait()
+        if first.proc.poll() is None:
+            os.kill(first.proc.pid, signal.SIGCONT)
     # It still owns the namespace: nothing took the lock or the socket
     # while it was stopped.
     again = first.launch_second(repo_b)
