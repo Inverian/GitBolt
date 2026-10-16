@@ -4,6 +4,322 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.6] — 2026-10-16
+
+Commits made in GitBolt now go through git, so your hooks and commit
+signing apply; Fetch removes branches deleted on the server; and the
+dark theme gets dark diffs. Also: a fix for a crash on Windows when
+.git/config changed, git commands that no longer freeze the window, a
+.deb that installs on Debian 13 and newer Ubuntu releases, and fixes
+to amend, rebase, cherry-pick, launching and crash reports.
+
+### Added
+
+- **Cherry-picks and reverts of several commits**: a `git cherry-pick`
+  or `git revert` of several commits, started in a terminal, can now
+  be carried on from the in-progress bar. Once the commit it stopped
+  at is committed, the bar offers Continue, which picks (or reverts)
+  the rest. Before, the bar offered only Commit…, and once that commit
+  was made the bar went away, with the rest of the commits still to
+  come. Skip, offered where git can skip, leaves out the commit it
+  stopped at. Continue asks first where git never picked that commit,
+  Skip refuses where it would discard staged changes and Abort warns
+  where it would, and Abort says when the commits made so far stay on
+  the branch (git doesn't rewind past a commit made during the
+  sequence).
+- **Waiting for a busy GitBolt**: a second launch (Open in GitBolt
+  from Explorer or Nautilus, or `gitbolt <path>`) that is still
+  waiting for a busy GitBolt after 10 seconds shows a "GitBolt is
+  busy" window. Its Cancel stops the wait, and the busy GitBolt then
+  doesn't open that path.
+- **Commit dialog**: when the commit concludes a merge, cherry-pick or
+  revert, the message starts as the one git prepared for it (such as
+  "Merge branch 'topic'"), without git's note of the conflicts. A
+  merge's or a revert's comment lines go too, as `git commit` drops
+  them in a terminal (core.commentChar and core.commentString are
+  followed); a cherry-pick keeps the picked commit's message whole, so
+  a subject such as "#42 Fix login" stays. While the dialog is open,
+  the message follows the repository: it changes at the operation's
+  next stop and clears once the operation ends. A message you have
+  typed is kept.
+
+### Changed
+
+- **Commits** made in GitBolt now run `git commit`. They were written
+  through libgit2, which ran no hooks and signed nothing. The
+  repository's pre-commit, prepare-commit-msg, commit-msg and
+  post-commit hooks now run (core.hooksPath is honoured),
+  commit.gpgSign signs the commit, and a hook that turns the commit
+  down shows what it said in the Commit dialog and the status bar.
+  While git and its hooks run, the Commit button reads "Committing…",
+  and staging, the toolbar, the sidebar's branch commands and the
+  repository menus are off until it is done. A commit may take up to
+  five minutes, for slow hooks; quitting stops git and its hooks. A
+  commit that changes nothing is now refused, as git refuses it,
+  where GitBolt used to make an empty commit.
+- **PATH for git and its hooks**: on macOS, and on Linux when GitBolt
+  is started from the desktop rather than a terminal, the git
+  commands GitBolt runs, and the hooks they run, get the PATH your
+  login shell sets up, ahead of the session's. Started from the Dock
+  or Finder, GitBolt had only the system's PATH, so a hook that needs
+  node or another tool from Homebrew, nvm or volta, such as a husky
+  pre-push hook, failed with "command not found", as the commit hooks
+  that now run (lint-staged's, say) would have.
+- **Fetch** now removes the remote-tracking branches of branches
+  deleted on the server, as `git fetch --prune` does, so they leave
+  the sidebar too. This applies to Fetch and to the periodic
+  background fetch, not to Pull. Where fetch.prune or
+  remote.<name>.prune is set, that setting decides, as in git. Without
+  either, GitBolt prunes only where nothing but remote-tracking
+  branches could go: not where a remote fetches into refs outside
+  refs/remotes/ (tags, or a mirror's branches) or pruneTags is set, in
+  the repository or in any of its initialized submodules, nor where a
+  submodule sets fetch.prune itself.
+- **Periodic background fetch** never asks for anything: git runs with
+  its prompts off and ssh's questions are answered no at once, without
+  a window, so a fetch that needs a password, a passphrase or a new
+  host key confirmed fails instead of showing GitBolt's always-on-top
+  prompt at every interval. Credential helpers still answer, and a
+  Fetch, Pull or Push you start still asks, unless a Fetch you click
+  joins a periodic fetch already running.
+- **New SSH host keys**: ssh's question whether to trust a server's
+  host key is now a Yes/No box, No by default, with the fingerprint in
+  plain text. It was a password field, so "yes" had to be typed
+  blind.
+- **Stopping git**: when a git command is stopped, by quitting, by
+  Cancel or by its time limit, GitBolt now first interrupts it as
+  Ctrl-C in a terminal would (on Windows, a Ctrl-C to git's console),
+  so git removes its lock files, such as index.lock, and a hook can
+  clean up. Whatever git started that is still running a few seconds
+  later is then ended along with it. Before, a time limit on a local
+  git command ended git alone, which could leave its hooks or filters
+  running and index.lock behind, and on Windows a cancel ended
+  everything at once.
+- **Dark theme**: diffs (their line backgrounds and text), the
+  conflict resolver's panes and headings, commit details on the Commit
+  tab, file status colours in file lists, the toolbar's ✓ and ✗
+  results, the home screen's card descriptions, the status colours in
+  the Submodules and Worktrees windows, the File Tree's heading, the
+  Clone dialog's status and secondary text such as Settings' notes now
+  use dark-theme colours, with GitHub dark's greens, reds and blues.
+  Most had the light theme's: pale green, red and blue bands across
+  diffs, which left their text as faint as 1.2:1 contrast.
+- **Light theme**: secondary text (Settings' notes, the home screen's
+  card descriptions, the Commit dialog's ⓘ legend), commit details'
+  links, dates, notes and +/− counts, the toolbar's ✓ and ✗ results,
+  the Clone dialog's status and the conflict resolver's headings now
+  have 4.5:1 contrast or more. Some, in the palette's border grey,
+  read at 1.7:1.
+- **Crash Detected**: the box now comes up over the main window once
+  it is open, not before it, and says that the summary of the report
+  "is being sent": it goes out at once, so turning usage statistics
+  off afterwards deletes only what hasn't been sent yet.
+- **Linux packages**: libgit2 (1.9.7) is now built into GitBolt, as on
+  macOS and Windows. The .deb no longer depends on Ubuntu 24.04's
+  libgit2-1.7 package, which kept it off Debian 13 and later Ubuntu
+  releases; CI now installs and starts it on stock Ubuntu 24.04 and
+  26.04 and Debian 13. The AppImage still needs GCC 13's C++ runtime
+  or newer.
+- **Building from source**: the English plural forms ("1 file", "2
+  files") need Qt's LinguistTools and Qt 6.7 or later. Without them
+  GitBolt still builds, and those texts read "1 file(s)";
+  `-DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON` makes the configure fail
+  instead. docs/BUILDING.md lists the Linux packages that add them;
+  Homebrew's Qt and the Qt installer's default install already have
+  them.
+- **Documentation**: the README's Download table lists the .deb for
+  Ubuntu 24.04 or later and Debian 13, and its feature list no longer
+  claims a cherry-pick of several selected commits: GitBolt picks one
+  commit at a time, and carries on a multi-commit cherry-pick started
+  in a terminal; nor does it list a macOS Finder extension, which was
+  never shipped. PRIVACY.md says that a crash summary is sent as soon
+  as the window is open, before other events, that turning usage
+  statistics off deletes a summary not yet sent, and that a try that
+  fails before reaching the server, as while offline, doesn't count
+  towards an event's 5 tries.
+
+### Fixed
+
+- **Crash when .git/config changed**: GitBolt could crash when a
+  repository's `.git/config` changed and then couldn't be read again.
+  On Windows that could happen whenever `git config`, `git push -u` or
+  a remote added in a terminal rewrote the file while GitBolt
+  refreshed. The libgit2 built into every GitBolt download is now
+  patched against it. libgit2 itself isn't fixed yet, so a GitBolt
+  built from source against a system libgit2 doesn't have the fix.
+  After such a failed read, GitBolt also went on using the old
+  settings, its list of remotes among them, until `.git/config`
+  changed again; it now reads the file again the next time it looks.
+- **Amend** ("Amend last commit" in the Commit dialog) made you the
+  author of the amended commit, dated at the amend. It now keeps the
+  commit's author and author date, as git does. Amend is also off,
+  with the reason as its tooltip, while a merge, cherry-pick or revert
+  waits for its commit: amending there flattened the merge, or folded
+  the pick or revert into the commit before it, and left the
+  operation in progress.
+- **Merging with merge.autoStash**: when a Merge, or a Pull that
+  merges, on a working tree with uncommitted changes stopped on
+  conflicts, concluding it with Commit… never put those changes back,
+  and they were in neither the working tree nor the stash list. The
+  commit now applies them ("Applied autostash."); if that conflicts,
+  they stay in the stash and GitBolt says so.
+- **Cherry-pick** is refused while a merge, rebase, revert or another
+  cherry-pick is in progress. libgit2 wrote its pick over that
+  operation's state, and a pick that then failed deleted it: an
+  earlier pick was lost, and its commit went in as an ordinary one.
+  Picking a commit whose changes are already on the branch now says so
+  and leaves nothing in progress, where it reported success and left
+  an empty pick for Commit….
+- **Interactive rebase rewords**: a reword whose new message a hook
+  turned down was dropped without a word on Continue, which said
+  "Rebase complete." with the old message in place. Continue now tries
+  the new message again; while the hook still refuses it, the rebase
+  stays where it is and shows what the hook said. A reword stopped by
+  a conflict and carried on in a terminal (`git rebase --continue` or
+  `git commit`) now gets the new message too. In a repository whose
+  i18n.commitEncoding is not UTF-8, reworded messages were labelled
+  with that encoding though written in UTF-8, which garbled their
+  accented letters; rewords GitBolt carries out are now stored as
+  UTF-8.
+- **Rebase Skip, Abort and quitting**: at a stop whose commit is
+  already made (an `edit` stop, or a reword a hook turned down), Skip
+  ran git's `--skip`, which resets the working tree there, and threw
+  away your uncommitted changes. GitBolt now refuses and says to
+  commit or stash them first, and its Skip question there says the
+  commit stays in the branch. Abort's question there now says when
+  uncommitted changes would be discarded too. Quitting during a rebase
+  step waited for the step, up to five minutes, with no way to cancel,
+  and a launch meanwhile said GitBolt wasn't responding; it now stops
+  git as Ctrl-C would, and the rebase stays in progress.
+- **Staging**: during a merge or cherry-pick, Unstage All ended the
+  operation, and the merge then went in as an ordinary commit. It now
+  unstages without ending it. When another git held the index lock, a
+  Stage or Unstage that failed showed the file as staged (or
+  unstaged) anyway, until something else changed the index, and an
+  Unstage All that failed said nothing. The lists now stay right, and
+  the failure is reported.
+- **Commit & Push**: when the push couldn't start, the commit was made
+  and the push skipped, with no more than a passing note that another
+  remote operation was running, or none: only "ahead 1" showed that
+  nothing was pushed. A periodic fetch running in the background now
+  gives way, so the push goes ahead; otherwise the status bar says the
+  commit wasn't pushed.
+- **Commands that ask first** (Delete Branch, the Commit dialog's
+  Discard, Undo Last Commit, Merge, Delete Tag, Clean, the stash
+  manager's Drop, Delete Obsolete Branches, the sidebar's Rename and
+  Set Upstream, and others) acted on whichever repository was open
+  when you answered. If a second launch, such as Open in GitBolt from
+  Explorer or Nautilus, or `gitbolt <path>` in a terminal, opened
+  another repository while the question was up, that one lost the
+  branch, the tag or its uncommitted changes. Such a command now does
+  nothing then, and the status bar says "Another repository was
+  opened; …".
+- **Window freezes**: many commands ran git on the main thread, which
+  froze the window until git finished or its time limit, 30 seconds
+  for most, ran out; the limit then killed git and reported as failed
+  a merge that had gone through. They now run in the background, one
+  at a time (a fetch, pull or push can still run alongside), with the
+  status bar saying what is running, and get five minutes: Merge,
+  Checkout as local branch, the Reflog's Checkout and Reset, Undo Last
+  Commit, Reset, Clean, Bisect, Archive, Format Patch, Apply Patch,
+  Delete Obsolete Branches, Find Large Files, the sidebar's Rename and
+  Set Upstream, and most submodule and sparse-checkout commands.
+  Pushing a newly created tag now runs in the background too, as Push
+  does. File History (Show History in the File Tree) also loads in the
+  background, with a busy cursor and a note in the status bar.
+- **Launching GitBolt while it is busy**: on macOS and Linux, a second
+  launch gave up after 10 seconds and left its path with the busy
+  GitBolt, which lost it if it then quit or crashed. It now waits, as
+  on Windows, and if the busy GitBolt quits it opens in its place with
+  that path. A Crash Detected box at startup no longer holds up a
+  second launch: GitBolt answers it while the box is up, where the
+  launch said "not responding" after 10 seconds and dropped its path.
+  On Windows, Open in GitBolt in a drive's root folder (such as `E:\`)
+  passed GitBolt a path ending in a quote, which it couldn't open.
+- **Switching repositories**: the previous repository's commits could
+  appear for a moment in the new one's history, and the open time sent
+  with usage statistics came out too long. A rebase step's, a
+  refresh's or a cherry-pick's result for the previous repository, or
+  its commit's details on the Commit tab, could also show up in the
+  new one.
+- **Operation feedback**: a periodic fetch that showed on the toolbar
+  (as after a Fetch clicked while it ran) and ended while another
+  repository was opening could leave its label there, and a checkout
+  or tag push that failed while a fetch, pull or push ran made that
+  operation report a failure. Pushing a new tag while a fetch, pull or
+  push runs is now turned down with the usual note; the tag is still
+  created, to push later.
+- **Repository › Close**: after closing a repository, a failed open
+  turned Refresh, Fetch, Pull, Push, Commit and the repository menus
+  back on, all acting on the closed repository.
+- **Recent repositories**: File › Recent Repositories now follows the
+  home screen's Clear Recent and Forget this repository at once. It
+  kept the old list until the next open, and clicking a removed entry
+  added it back. The home screen's recent list could also show one
+  repository's branch, changes, ahead/behind counts and last-commit
+  time in another's row.
+- **File Tree**: Expand All or Collapse All could crash GitBolt when,
+  while its menu was open, a second launch opened another repository
+  or the history refreshed.
+- **Sidebar**: "New Branch from 'X'..." created the branch at HEAD,
+  not at X. It now starts at X, and its prompt says so.
+- **Diffs**: a removed line starting with "--" (such as Markdown or
+  YAML's "---", or an SQL comment) or an added line starting with "++"
+  (such as "++i;") showed without its red or green, as if unchanged,
+  and in bold in the unified view.
+- **Counts** now take the English singular or plural, "1 file" and "2
+  files" instead of "1 file(s)": the in-progress bar's conflict
+  counts, File History, Delete Obsolete Branches, Find Large Files,
+  the Git Command Log's replayed commands, the history's "days ago"
+  and "yrs ago", the blame view's dates (which read "1 hours ago") and
+  the File Tree's counts ("1 files, 1 directories", now "1 file, 1
+  folder").
+- **Terminal** (macOS and Linux): each read of the shell's output
+  started again at the end of the text, so git's progress meters piled
+  up on one line and editing in the middle of a command line showed
+  the wrong text. The terminal now keeps the shell's cursor between
+  reads and follows the cursor moves, erases, inserts and deletes
+  within a line that shells and progress meters use; bash command
+  lines longer than the terminal stay whole, and a window-title
+  sequence split between two reads no longer prints as text. Lines
+  still don't wrap, so a command line longer than the terminal can
+  still show wrongly while it is edited: in zsh, and in bash when the
+  cursor moves back into an earlier row.
+- **About GitBolt** could cut off its build details and trademark text
+  when dragged short, or when opened on a short screen (such as
+  1366×768 at 125%). Its minimum height now fits its text.
+- **Wayland**: GitBolt's windows now match its desktop entry, so GNOME
+  and KDE show its icon and group its windows with its launcher and a
+  pinned favourite, instead of a generic icon.
+- **Signed tags**: a signed tag's tooltip in the sidebar showed its
+  signature block (PGP, X.509 or SSH) under the message. It now leaves
+  the block out.
+- **Crash reports**: a crash that came back within seconds of every
+  start was never reported, as the next crash replaced the summary
+  before it was sent. The summary now goes first, as soon as the
+  window is open. On macOS the function that crashed could be missing
+  from the report's stack, and on Windows the summary of an unhandled
+  C++ exception started in the C runtime instead of at the throw. A
+  crash of GitBolt run by tests or the test bridge no longer replaces
+  the report waiting from your own session: it goes to
+  `~/.gitbolt/crash-test.log`.
+- **Usage statistics**: turning them off in a second GitBolt process
+  didn't stop the one that held the queue, which went on sending; that
+  one now checks the setting before each request and at quit, and
+  then deletes the queue. A queue lock left by another machine (a home
+  folder shared between machines) or left half-written by a crash
+  stopped usage statistics from being recorded or sent, for good, and
+  kept the queue from being deleted; it is now cleared. A try that
+  fails before reaching the server (the server's name not found, the
+  connection refused, no route to it) no longer counts towards the 5
+  tries after which an event is dropped, so being offline no longer
+  uses up an event's tries; events still expire after 14 days.
+- **Building from source on Linux** with the bundled libgit2
+  (`-DGITBOLT_BUNDLED_LIBGIT2=ON`, or no libgit2 installed) and CMake 4
+  stopped with "GIT_USE_NSEC defined but unknown struct stat nanosecond
+  type". It now builds in a fresh build directory; in one that failed
+  before, configure now says to start afresh.
+
 ## [0.9.5] — 2026-10-12
 
 Usage statistics and crash reports, which show the maintainers which
