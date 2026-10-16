@@ -170,6 +170,59 @@ private slots:
         }
         QVERIFY(headings > 1);
     }
+
+    // -----------------------------------------------------------------
+    // Nothing reads as an HTML tag outside code: GitHub drops it from
+    // the release notes ("remote.<name>.prune" came out "remote..prune"),
+    // and Qt's markdown importer holds back all the text after an
+    // unclosed one, so Help > Changelog lost every entry after it.
+    // `<name>` in backticks, and autolinks (<https://...>), are fine.
+    // -----------------------------------------------------------------
+    void noRawHtmlTags() {
+        static const QRegularExpression codeSpan(QStringLiteral("`[^`]*`"));
+        static const QRegularExpression tag(
+            QStringLiteral(R"(<(?!https?://)[A-Za-z/!])"));
+        bool inFence = false;
+        int lineNo = 0;
+        for (const QString& line : readText(kEmbedded).split(QLatin1Char('\n'))) {
+            ++lineNo;
+            if (line.trimmed().startsWith(QLatin1String("```"))) {
+                inFence = !inFence;
+                continue;
+            }
+            if (inFence)
+                continue;
+            QString prose = line;
+            prose.remove(codeSpan);
+            QVERIFY2(!tag.match(prose).hasMatch(), qPrintable(QStringLiteral(
+                "CHANGELOG.md:%1 has a raw <...> outside backticks, which GitHub "
+                "drops and Help > Changelog hides everything after: %2")
+                .arg(lineNo).arg(line.trimmed())));
+        }
+    }
+
+    // Every entry is still there in the viewer, as a heading of its own:
+    // markup that swallows the rest of the file shows up as entries gone.
+    void everyEntryRenders() {
+        const QString markdown = readText(kEmbedded);
+        QStringList expected;
+        for (const Entry& e : parseEntries(markdown))
+            expected.append(e.heading.mid(3).trimmed());   // drop "## "
+        QVERIFY(expected.size() > 1);
+
+        QTextDocument doc;
+        doc.setMarkdown(markdown);
+        QStringList rendered;
+        for (QTextBlock b = doc.begin(); b.isValid(); b = b.next()) {
+            if (b.blockFormat().headingLevel() == 2)
+                rendered.append(b.text().trimmed());
+        }
+        for (const QString& heading : expected) {
+            QVERIFY2(rendered.contains(heading), qPrintable(QStringLiteral(
+                "\"## %1\" doesn't render as a heading in Help > Changelog "
+                "(something before it swallowed the rest?)").arg(heading)));
+        }
+    }
 };
 
 QTEST_MAIN(TestChangelog)

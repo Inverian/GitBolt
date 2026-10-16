@@ -333,8 +333,9 @@ void CrashHandler::install(const char* appVersion, bool officialBuild,
     // Pre-render the path (this also creates ~/.gitbolt — mkpath is
     // NOT signal-safe, so it must happen here) and the static system
     // header the handler will write verbatim. A test session writes a
-    // file of its own: e2e and bridge runs keep the real HOME, and the
-    // handler truncates what it writes, so a report of the user's,
+    // file of its own: a bridge run outside the e2e harness (which gives
+    // each app a HOME of its own) keeps the real HOME, and the handler
+    // truncates what it writes, so a report of the user's,
     // still waiting for their next launch, would be lost to a test's.
     const QByteArray pathBytes =
         QFile::encodeName(testSession ? testCrashLogPath() : crashLogPath());

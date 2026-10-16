@@ -609,10 +609,10 @@ private slots:
     }
 
     // A test session's crash goes to crash-test.log. crash.log is the
-    // user's (e2e and bridge runs keep the real HOME), and the handler
-    // truncates the file it writes: a report of theirs still waiting
-    // for their next launch used to be replaced by one that launch
-    // then refused to send.
+    // user's (a bridge run outside the e2e harness keeps the real
+    // HOME), and the handler truncates the file it writes: a report of
+    // theirs still waiting for their next launch used to be replaced by
+    // one that launch then refused to send.
     void testSessionCrashKeepsUsersLog() {
 #ifndef GITBOLT_CRASH_HELPER
         QSKIP("POSIX only: the Windows handler is a different code path");

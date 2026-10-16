@@ -68,8 +68,8 @@ to amend, rebase, cherry-pick, launching and crash reports.
 - **Fetch** now removes the remote-tracking branches of branches
   deleted on the server, as `git fetch --prune` does, so they leave
   the sidebar too. This applies to Fetch and to the periodic
-  background fetch, not to Pull. Where fetch.prune or
-  remote.<name>.prune is set, that setting decides, as in git. Without
+  background fetch, not to Pull. Where `fetch.prune` or
+  `remote.<name>.prune` is set, that setting decides, as in git. Without
   either, GitBolt prunes only where nothing but remote-tracking
   branches could go: not where a remote fetches into refs outside
   refs/remotes/ (tags, or a mirror's branches) or pruneTags is set, in

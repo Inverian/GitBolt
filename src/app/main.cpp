@@ -453,9 +453,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Check for crash report from a previous session. Not in a test
-    // session: ~/.gitbolt/crash.log is the user's (e2e and bridge runs
-    // keep the real HOME, and write their own crashes to
-    // crash-test.log), so it stays for their next launch. A test
+    // session: ~/.gitbolt/crash.log is the user's (a bridge run outside
+    // the e2e harness keeps the real HOME, and writes its own crashes
+    // to crash-test.log), so it stays for their next launch. A test
     // that plants one in a HOME of its own opts in with
     // GITBOLT_TEST_CRASH_BOX=1 (tests/e2e/test_crash_box_handoff.py).
     // The report is read here, before the telemetry service starts
