@@ -14,6 +14,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
 #include <QLineEdit>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -680,6 +681,11 @@ QByteArray TestBridge::cmdDumpState()
             state[QStringLiteral("repoState")] = QStringLiteral("other");
             break;
         }
+        // A cherry-pick or revert of several commits, between two of
+        // them: the bar's Continue runs git's --continue.
+        state[QStringLiteral("sequencePaused")] = repo->sequencePaused();
+        // Whether git's --skip would take the commit it stopped at.
+        state[QStringLiteral("sequenceSkippable")] = repo->sequenceSkippable();
         if (auto branch = repo->headBranchName())
             state[QStringLiteral("branch")] =
                 QString::fromStdString(*branch);
@@ -712,11 +718,19 @@ QByteArray TestBridge::cmdDumpState()
     // rendered light, and only this distinction can catch that.
     state[QStringLiteral("paletteWindow")] =
         QApplication::palette().color(QPalette::Window).name();
+    // The Wayland app_id: it must name the shipped desktop entry, or
+    // the window won't group with the launcher (main.cpp).
+    state[QStringLiteral("desktopFileName")] = QGuiApplication::desktopFileName();
     if (auto* logModel = window_->findChild<models::CommitLogModel*>())
         state[QStringLiteral("logRows")] = logModel->rowCount();
     // Where op outcomes land ("Push complete.", "fetch failed: …").
     state[QStringLiteral("statusMessage")] =
         window_->statusBar()->currentMessage();
+    // The toolbar's inline op label: an op running ("Merging topic…"),
+    // or its outcome ("✓ Fetch complete.", "✗ fetch failed: …"), which
+    // can outlive the status bar's.
+    if (auto* opIndicator = window_->findChild<QLabel*>(QStringLiteral("toolbar.opIndicator")))
+        state[QStringLiteral("opIndicator")] = opIndicator->text();
 
     QJsonArray windows;
     const QWidgetList tops = QApplication::topLevelWidgets();

@@ -12,10 +12,16 @@ and did just that when they finished:
   home screen or over the next repository. It is now cancelled, and
   says so, once its repository is closed or replaced; but not when an
   open begins, as an open that fails, or that opens the same
-  repository again, leaves it on screen;
+  repository again, leaves it on screen. One that fails while the
+  next repository's open is still pending reports over the loading
+  screen, and its red ✗ goes once that repository is open;
 - a toolbar Fetch, Pull or Push: it re-enabled its own action. It still
   does wherever the repository actions are on, as File > Home leaves
   them (the repository stays open there).
+
+An open that failed after Close did the same for every repository
+action: it put the home screen back, but took the actions to go with it
+from the service, which still has the closed repository.
 
 Each op here waits on a server that never answers (SilentServer) until
 the test hangs up, which fails the fetch at a moment the test picks.
@@ -25,7 +31,7 @@ from __future__ import annotations
 
 import os
 
-from e2elib import (App, Failure, SilentServer, auto_fetch_config,
+from e2elib import (App, Failure, OpenGate, SilentServer, auto_fetch_config,
                     check_for, git, home_screen, make_repo, on_screen, run,
                     stall_auto_fetch)
 
@@ -103,6 +109,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     git("remote", "add", "origin", os.path.join(scratch, "missing.git"),
         cwd=work_a)
     work_b = make_repo(os.path.join(scratch, "work-b"))
+    work_c = make_repo(os.path.join(scratch, "work-c"))
     not_a_repo = os.path.join(scratch, "not-a-repo")
     os.makedirs(not_a_repo)
 
@@ -193,6 +200,54 @@ def test(binary: str, scratch: str, apps: list) -> None:
     app.wait_until(lambda s: not warning_up(app) and on_screen("work-a")(s),
                    "work-a back on screen")
     fails_and_gives_fetch_back(app, server, "an open that failed")
+
+    # 7. A revealed auto-fetch that fails while another repository's
+    # open is still pending: the failure goes up over the loading
+    # screen, and goes once work-c is open. It stuck there, a red
+    # "✗ fetch failed" over a repository with no remote to fail.
+    gate = OpenGate(work_c, scratch)
+    server = reveal_auto_fetch(app, work_a)
+    handoff = app.launch_second(work_c)
+    if handoff.returncode != 0:
+        raise Failure(f"hand-off of work-c failed: rc={handoff.returncode}")
+    app.wait_until(lambda s: any(t.startswith("Opening work-c")
+                                 for t in s["windows"]),
+                   "work-c's open pending")
+    server.hang_up()
+    app.wait_until(lambda s: s.get("statusMessage", "")
+                   .startswith("fetch failed"),
+                   "work-a's fetch failing while work-c opens")
+    gate.release()
+    app.wait_until(on_screen("work-c"), "work-c on screen")
+    check_for(2, "a revealed fetch that failed while work-c opened",
+              lambda: app.state().get("opIndicator") != ""
+              and f"work-a's fetch left {app.state().get('opIndicator')!r} "
+                  "on work-c")
+
+    # 8. Close, then an open that fails: the home screen stays, with
+    # every repository action still off.
+    app.ok("trigger repository.close")
+    app.wait_until(home_screen, "the home screen")
+    handoff = app.launch_second(not_a_repo)
+    if handoff.returncode != 0:
+        raise Failure(f"hand-off of not-a-repo failed: "
+                      f"rc={handoff.returncode}")
+    app.wait_until(lambda s: warning_up(app), "the failed open's warning")
+    app.ok("click OK")
+    app.wait_until(lambda s: not warning_up(app), "the warning closed")
+
+    def closed_problem() -> str:
+        on = [name for name in ("act.refresh", "act.fetch", "act.pull",
+                                "act.push", "act.commit",
+                                "commands.undo-last-commit")
+              if app.action_enabled(name)]
+        if on:
+            return f"enabled on the home screen: {', '.join(on)}"
+        windows = app.state()["windows"]
+        if windows != ["GitBolt"]:
+            return f"windows {windows}, not the home screen"
+        return ""
+    check_for(2, "Close, then an open that failed", closed_problem)
 
     rc = app.quit(timeout=15)
     if rc != 0:

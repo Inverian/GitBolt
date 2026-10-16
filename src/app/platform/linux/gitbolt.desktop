@@ -9,3 +9,4 @@ Categories=Development;RevisionControl;
 MimeType=inode/directory;
 Keywords=git;version control;repository;
 StartupNotify=true
+StartupWMClass=gitbolt

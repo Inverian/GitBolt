@@ -17,6 +17,11 @@
 #include <execinfo.h>
 #include <fcntl.h>
 #include <unistd.h>
+#if defined(Q_OS_MACOS)
+#include <mach/mach.h>
+#include <pthread.h>
+#include <sys/ucontext.h>
+#endif
 #elif defined(Q_OS_WIN)
 #include <windows.h>
 #include <dbghelp.h>
@@ -167,6 +172,78 @@ const char* signalName(int sig) {
     }
 }
 
+#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
+
+// The PC the signal interrupted, from the context SA_SIGINFO hands the
+// handler; 0 where it isn't read. Darwin's backtrace() walks frame
+// pointers, and _sigtramp's frame links to the interrupted function's
+// caller: the function that faulted (or __pthread_kill, for raise())
+// is never a frame, only the context has it. glibc unwinds through the
+// signal frame by its CFI, so Linux has that frame already. A plain
+// read of the context struct: async-signal-safe.
+std::uintptr_t interruptedPc(const void* context) {
+#if defined(Q_OS_MACOS) && (defined(__arm64__) || defined(__aarch64__) || defined(__x86_64__))
+    const auto* uc = static_cast<const ucontext_t*>(context);
+    if (!uc || !uc->uc_mcontext)
+        return 0;
+#if defined(__x86_64__)
+    return static_cast<std::uintptr_t>(uc->uc_mcontext->__ss.__rip);
+#else
+    return static_cast<std::uintptr_t>(
+        __darwin_arm_thread_state64_get_pc(uc->uc_mcontext->__ss));
+#endif
+#else
+    Q_UNUSED(context);
+    return 0;
+#endif
+}
+
+// The handler, installed as sa_sigaction itself: a wrapper around it
+// would be a frame of its own, and the parser drops #0 and #1 by
+// position.
+void onSignal(int signal, siginfo_t*, void* context) {
+    // Async-signal-safe path: open/write/close + backtrace + dladdr
+    // only. No allocation, no locks, no stdio.
+    const int fd = ::open(g_crashPath,
+                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        writeRaw(fd, g_header, g_headerLen);
+        writeStr(fd, "Signal: ");
+        writeStr(fd, signalName(signal));
+        writeStr(fd, " (");
+        writeDec(fd, signal);
+        writeStr(fd, ")\n");
+        // Raw epoch — localtime/strftime take locks. The reader can
+        // format it; the crash dialog shows the report verbatim and
+        // an epoch is still unambiguous.
+        writeStr(fd, "Epoch: ");
+        writeDec(fd, static_cast<long long>(::time(nullptr)));
+        writeStr(fd, "\n\n--- Stack Trace ---\n");
+
+        // Captured here, in the handler, so frame #0 is the handler
+        // and #1 the signal trampoline; the parser drops those two.
+        // Then the interrupted PC where backtrace() lacks it (macOS),
+        // and backtrace()'s frames from #2 on, numbered from there.
+        void* frames[64];
+        const int frameCount = ::backtrace(frames, 64);
+        const std::uintptr_t pc = interruptedPc(context);
+        int index = 0;
+        for (int i = 0; i < frameCount; ++i) {
+            writeFrame(fd, index++, frames[i]);
+            if (i == 1 && pc != 0
+                && (frameCount == 2 || reinterpret_cast<std::uintptr_t>(frames[2]) != pc))
+                writeFrame(fd, index++, reinterpret_cast<void*>(pc));
+        }
+
+        writeStr(fd, "\n=== End of Report ===\n");
+        ::close(fd);
+    }
+    // SA_RESETHAND already restored the default disposition.
+    ::raise(signal);
+}
+
+#endif // unix
+
 } // namespace
 
 QByteArray CrashHandler::renderHeader(const char* appVersion,
@@ -176,7 +253,8 @@ QByteArray CrashHandler::renderHeader(const char* appVersion,
     // needs to refuse a report (format 1 always said "App version:
     // unknown": qApp did not exist yet when install() ran). One
     // ~/.gitbolt/crash.log is shared by every build and session under
-    // a HOME, so the report has to say where it came from.
+    // a HOME (test sessions write crash-test.log now; older builds
+    // didn't), so the report has to say where it came from.
     return (QStringLiteral("=== GitBolt Crash Report ===\n")
             + QStringLiteral("Format: 2\n")
             + QStringLiteral("App version: %1\n")
@@ -204,12 +282,63 @@ QByteArray CrashHandler::renderHeader(const char* appVersion,
         .toUtf8();
 }
 
+#if defined(Q_OS_MACOS)
+namespace {
+// Keeps macOS's crash reporter out of a test session's crash. With a
+// task-level port of its own for EXC_CRASH (and corpse notifications),
+// the kernel hands those to this dying task instead of ReportCrash: a
+// test that crashes GitBolt on purpose (offscreen under the bridge, in
+// CI) put the "GitBolt quit unexpectedly" box on the user's screen and
+// left a GitBolt-*.ips in ~/Library/Logs/DiagnosticReports, though the
+// handler had already written crash-test.log. The signal handler still
+// runs first, and the process still dies of its signal. A user's
+// session keeps the system's crash reporting.
+void keepCrashReporterOut() {
+    mach_port_t port = MACH_PORT_NULL;
+    if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port) != KERN_SUCCESS)
+        return;
+    if (mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND)
+        != KERN_SUCCESS) {
+        mach_port_mod_refs(mach_task_self(), port, MACH_PORT_RIGHT_RECEIVE, -1);
+        return;
+    }
+    if (task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+                                 port, EXCEPTION_DEFAULT, THREAD_STATE_NONE)
+        != KERN_SUCCESS)
+        return;
+    // Not for the children. Task-level ports are inherited across fork
+    // and exec, and nothing ever reads this one (it is there so that the
+    // kernel hands GitBolt's own death to it, not to ReportCrash): a
+    // git, a hook, ssh or a terminal's program that died of a signal
+    // sent its EXC_CRASH there and waited for a reply, unkillable, until
+    // GitBolt quit, and a commit waited out its five minutes. Each child
+    // starts with the system's handling: QProcess and forkpty fork, and
+    // the one posix_spawn (the login shell's PATH) sets its own
+    // (util/LoginPath.cpp). GitBolt's own askpass child, a test
+    // session's too, sets this one again.
+    pthread_atfork(nullptr, nullptr, [] {
+        task_set_exception_ports(mach_task_self(), EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY,
+                                 MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+    });
+}
+} // namespace
+#endif
+
 void CrashHandler::install(const char* appVersion, bool officialBuild,
                            bool envOptOut, bool testSession) {
+#if defined(Q_OS_MACOS)
+    if (testSession)
+        keepCrashReporterOut();
+#endif
     // Pre-render the path (this also creates ~/.gitbolt — mkpath is
     // NOT signal-safe, so it must happen here) and the static system
-    // header the handler will write verbatim.
-    const QByteArray pathBytes = QFile::encodeName(crashLogPath());
+    // header the handler will write verbatim. A test session writes a
+    // file of its own: a bridge run outside the e2e harness (which gives
+    // each app a HOME of its own) keeps the real HOME, and the handler
+    // truncates what it writes, so a report of the user's,
+    // still waiting for their next launch, would be lost to a test's.
+    const QByteArray pathBytes =
+        QFile::encodeName(testSession ? testCrashLogPath() : crashLogPath());
     std::snprintf(g_crashPath, sizeof(g_crashPath), "%s",
                   pathBytes.constData());
 
@@ -262,12 +391,14 @@ void CrashHandler::install(const char* appVersion, bool officialBuild,
     sigaltstack(&ss, nullptr);
 
     struct sigaction sa{};
-    sa.sa_handler = signalHandler;
+    sa.sa_sigaction = onSignal;
+    // SA_SIGINFO: the handler gets the interrupted context, whose PC
+    // macOS's backtrace() never reports (interruptedPc).
     // SA_ONSTACK: run on the alternate stack (stack overflows).
     // SA_RESETHAND: default disposition restored on entry, so the
     // re-raise at the end of the handler dumps core normally and a
     // crash INSIDE the handler can't recurse.
-    sa.sa_flags = SA_ONSTACK | SA_RESETHAND;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESETHAND;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
@@ -301,46 +432,21 @@ QString CrashHandler::crashLogPath() {
     return dir + QStringLiteral("/crash.log");
 }
 
+QString CrashHandler::testCrashLogPath() {
+    QString dir = QDir::homePath() + QStringLiteral("/.gitbolt");
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/crash-test.log");
+}
+
+#if !defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
 void CrashHandler::signalHandler(int signal) {
-#if defined(Q_OS_UNIX) || defined(Q_OS_MACOS)
-    // Async-signal-safe path: open/write/close + backtrace + dladdr
-    // only. No allocation, no locks, no stdio.
-    const int fd = ::open(g_crashPath,
-                          O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd >= 0) {
-        writeRaw(fd, g_header, g_headerLen);
-        writeStr(fd, "Signal: ");
-        writeStr(fd, signalName(signal));
-        writeStr(fd, " (");
-        writeDec(fd, signal);
-        writeStr(fd, ")\n");
-        // Raw epoch — localtime/strftime take locks. The reader can
-        // format it; the crash dialog shows the report verbatim and
-        // an epoch is still unambiguous.
-        writeStr(fd, "Epoch: ");
-        writeDec(fd, static_cast<long long>(::time(nullptr)));
-        writeStr(fd, "\n\n--- Stack Trace ---\n");
-
-        // Captured here, in the handler, so frame #0 is the handler
-        // and #1 the signal trampoline; the parser drops those two.
-        void* frames[64];
-        const int frameCount = ::backtrace(frames, 64);
-        for (int i = 0; i < frameCount; ++i)
-            writeFrame(fd, i, frames[i]);
-
-        writeStr(fd, "\n=== End of Report ===\n");
-        ::close(fd);
-    }
-    // SA_RESETHAND already restored the default disposition.
-    ::raise(signal);
-#else
     std::signal(signal, SIG_DFL);
     writeStackTrace(signal);
     std::raise(signal);
-#endif
 }
+#endif
 
-// Windows-only since the POSIX path moved into the handler itself
+// Windows-only since the POSIX path moved into its handler, onSignal
 // (the constraints differ: no fork-style signal-safety list, and the
 // dbghelp calls below have no fd-based equivalents).
 Q_NEVER_INLINE void CrashHandler::writeStackTrace(int signal) {

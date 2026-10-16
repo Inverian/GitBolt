@@ -4,6 +4,7 @@
 #include <QtConcurrent>
 
 #include "conf/SettingsService.h"
+#include "conf/ThemeService.h"
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
@@ -16,24 +17,30 @@
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
 
+#include <QApplication>
 #include <QColor>
 #include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMainWindow>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QShowEvent>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
+#include <QStatusBar>
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QTabWidget>
@@ -43,6 +50,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <memory>
+#include <optional>
 #include <set>
 #include <unordered_map>
 
@@ -204,10 +212,17 @@ QWidget* RepositoryView::buildCommitInfoTab()
     v->addWidget(commitInfoTopRow_);
 
     // ----- Full-width horizontal separator -----------------------
+    // The rule colour of the message's own <hr> (showCommitDetails),
+    // in the theme in effect: a #ccc kept for both drew a bright line
+    // across the dark theme's panel.
     auto* sep = new QFrame(page);
+    sep->setObjectName(QStringLiteral("commit.separator"));
     sep->setFrameShape(QFrame::HLine);
     sep->setFrameShadow(QFrame::Plain);
-    sep->setStyleSheet(QStringLiteral("QFrame { color: #ccc; }"));
+    conf::ThemeService::keepThemedStyleSheet(sep, [](bool dark) {
+        return QStringLiteral("QFrame { color: %1; }")
+            .arg(dark ? QStringLiteral("#3c3c3c") : QStringLiteral("#ddd"));
+    });
     v->addWidget(sep);
 
     // ----- Bottom: full-width message body -----------------------
@@ -282,19 +297,61 @@ void RepositoryView::showFileHistory(const QString& path)
 {
     if (!gitService_ || !gitService_->isOpen())
         return;
-
-    // %x09 = tab separator; fields: full sha, short sha, date,
-    // author, subject.
-    auto out = gitService_->process().run(
-        {"log", "--follow", "--date=short",
-         "--pretty=format:%H%x09%h%x09%ad%x09%an%x09%s", "--",
-         path.toStdString()});
-    if (!out.ok() || !out.value().success()) {
-        QMessageBox::warning(this, tr("File History"),
-            tr("Could not load history for %1").arg(path));
+    // One load per file at a time: with nothing to show for a while, a
+    // second Show History… loaded it again and opened a second dialog.
+    if (historyLoading_.contains(path))
         return;
-    }
+    historyLoading_.insert(path);
 
+    // On a worker, like the contained-in query below: `git log
+    // --follow` walks the whole history, which takes a while on a big
+    // repository, and it froze the window meanwhile. The dialog comes
+    // up once it's done, unless another repository was opened by then.
+    // Meanwhile the cursor and the status bar say it's coming; nothing
+    // did.
+    QGuiApplication::setOverrideCursor(Qt::BusyCursor);
+    if (auto* window = qobject_cast<QMainWindow*>(this->window()))
+        window->statusBar()->showMessage(tr("Loading the history of %1…").arg(path));
+    using Log = std::optional<std::string>;
+    const std::string key = gitService_->openKey();
+    auto* watcher = new QFutureWatcher<Log>(this);
+    connect(watcher, &QFutureWatcher<Log>::finished, this,
+            [this, watcher, path, key]() {
+        watcher->deleteLater();
+        historyLoading_.remove(path);
+        QGuiApplication::restoreOverrideCursor();
+        if (auto* window = qobject_cast<QMainWindow*>(this->window())) {
+            if (window->statusBar()->currentMessage()
+                == tr("Loading the history of %1…").arg(path))
+                window->statusBar()->clearMessage();
+        }
+        if (!gitService_ || gitService_->openPending() || key != gitService_->openKey())
+            return;
+        const Log log = watcher->result();
+        if (!log) {
+            QMessageBox::warning(this, tr("File History"),
+                tr("Could not load history for %1").arg(path));
+            return;
+        }
+        showFileHistoryDialog(path, QString::fromStdString(*log));
+    });
+    watcher->setFuture(QtConcurrent::run(
+        [proc = gitService_->process(), file = path.toStdString()]() -> Log {
+            // %x09 = tab separator; fields: full sha, short sha, date,
+            // author, subject.
+            auto out = proc.run(
+                {"log", "--follow", "--date=short",
+                 "--pretty=format:%H%x09%h%x09%ad%x09%an%x09%s", "--",
+                 file});
+            if (!out.ok() || !out.value().success())
+                return std::nullopt;
+            return std::move(out.value().stdoutData);
+        }));
+}
+
+void RepositoryView::showFileHistoryDialog(const QString& path,
+                                           const QString& stdoutText)
+{
     auto* dlg = new QDialog(this);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->setWindowTitle(tr("History — %1").arg(path));
@@ -310,8 +367,6 @@ void RepositoryView::showFileHistory(const QString& path)
     tree->setAlternatingRowColors(true);
     tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
 
-    const QString stdoutText =
-        QString::fromStdString(out.value().stdoutData);
     const QStringList lines =
         stdoutText.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
     for (const QString& line : lines) {
@@ -327,7 +382,7 @@ void RepositoryView::showFileHistory(const QString& path)
     tree->header()->resizeSection(1, 90);
     tree->header()->resizeSection(2, 140);
     layout->addWidget(new QLabel(
-        tr("%1 revision(s) touch this file:").arg(tree->topLevelItemCount()),
+        tr("%n revision(s) touch this file:", nullptr, tree->topLevelItemCount()),
         dlg));
     layout->addWidget(tree, 1);
 
@@ -428,7 +483,7 @@ QWidget* RepositoryView::buildGpgTab()
     QFont f = placeholder->font();
     f.setItalic(true);
     placeholder->setFont(f);
-    placeholder->setStyleSheet(QStringLiteral("color: palette(mid);"));
+    conf::ThemeService::keepMutedText(placeholder, QStringLiteral("color: %1;"));
 
     l->addWidget(placeholder);
     return page;
@@ -630,7 +685,11 @@ void RepositoryView::resetInspectorTabs()
     if (branchTreeWidget_)
         branchTreeWidget_->clear();
 
-    // Commit tab — clear metadata and message
+    // Commit tab — clear metadata and message. A "contained in" query
+    // still out for the previous repository's commit is dropped: its
+    // reply wrote that commit's message into this one's Commit tab.
+    ++containsQueryToken_;
+    shownCommit_.reset();
     if (avatarLabel_) {
         avatarLabel_->clear();
         avatarLabel_->setStyleSheet(QStringLiteral(
@@ -730,6 +789,18 @@ void RepositoryView::applyBottomPanePercent()
 // restore until the first showEvent is the Qt-recommended pattern;
 // the `restored_` bool makes sure we don't clobber user drags on
 // later shows (e.g. the stacked widget swapping back in).
+void RepositoryView::changeEvent(QEvent* e)
+{
+    QWidget::changeEvent(e);
+    // A theme switch: the commit on show takes the theme's colours.
+    // (Its window passes the application's PaletteChange down here.)
+    if (e->type() == QEvent::PaletteChange && shownCommit_ && !renderingDetails_) {
+        const QScopedValueRollback<bool> rendering(renderingDetails_, true);
+        const git::CommitData commit = *shownCommit_;
+        showCommitDetails(commit);
+    }
+}
+
 void RepositoryView::showEvent(QShowEvent* e)
 {
     QWidget::showEvent(e);
@@ -780,6 +851,8 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
     // by the repo, not by the current selection — only the commit
     // details, diff, and file-tree views get blanked.
     if (commitHash.isEmpty()) {
+        ++containsQueryToken_;      // a query out for it is stale now
+        shownCommit_.reset();
         if (avatarLabel_) {
             avatarLabel_->clear();
             avatarLabel_->setStyleSheet(QStringLiteral(
@@ -837,6 +910,26 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
 // in the GitProcess::run call below to avoid hangs.
 void RepositoryView::showCommitDetails(const git::CommitData& commit)
 {
+    shownCommit_ = commit;
+    // The light theme's greys, blue, green and red read at 1.7:1 to
+    // 3.6:1 on the dark theme's background ("Contained in branches"
+    // all but vanished): the dark theme gets lighter ones, as the file
+    // tree's heading does (FileTreeWidget::applyColors), at 4.5:1 or
+    // more. Rendered again on a theme switch (changeEvent).
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    // The light ones read at 4.5:1 or more on the light window (#efefef)
+    // the browsers show through: its link blue, grey, green and red
+    // (#1f6feb, #888, #22863a, #d73a49) read at 3.1:1 to 4.0:1.
+    const QString labelColor    = dark ? QStringLiteral("#9e9e9e") : QStringLiteral("#666");
+    const QString linkColor     = dark ? QStringLiteral("#58a6ff") : QStringLiteral("#0969da");
+    const QString sepColor      = dark ? QStringLiteral("#3c3c3c") : QStringLiteral("#ddd");
+    const QString containsColor = dark ? QStringLiteral("#b4b4b4") : QStringLiteral("#444");
+    const QString mutedColor    = dark ? QStringLiteral("#9e9e9e") : QStringLiteral("#6a6a6a");
+    const QString addedColor    = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
+    const QString deletedColor  = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
+
     const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
     const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
     const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
@@ -905,14 +998,15 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // No `text-decoration` here — leave it unset so QTextDocument's
     // default link underline applies, matching the mailto links in
     // the left column. The two link kinds should look identical.
-    static const QString kHashLinkStyle = QStringLiteral(
+    const QString kHashLinkStyle = QStringLiteral(
         "font-family:Menlo,Consolas,monospace;font-size:11px;"
-        "color:#1f6feb;");
+        "color:%1;").arg(linkColor);
     QString parentRows;
     if (commit.parentIds.empty()) {
         parentRows = QStringLiteral(
             "<tr><td class='lbl'>Parent:</td>"
-            "<td class='val'><i style='color:#888;'>(none — root commit)</i></td></tr>");
+            "<td class='val'><i style='color:%1;'>(none — root commit)</i></td></tr>")
+            .arg(mutedColor);
     } else {
         for (const auto& pid : commit.parentIds) {
             const QString hex = QString::fromStdString(pid.toHex()).toHtmlEscaped();
@@ -951,7 +1045,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     if (childRows.isEmpty()) {
         childRows = QStringLiteral(
             "<tr><td class='lbl'>Child:</td>"
-            "<td class='val'><i style='color:#888;'>(none — head of branch)</i></td></tr>");
+            "<td class='val'><i style='color:%1;'>(none — head of branch)</i></td></tr>")
+            .arg(mutedColor);
     }
 
     // Committer row (only when different from author).
@@ -962,8 +1057,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             static_cast<qint64>(committerTimeT)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         committerRow = QStringLiteral(
             "<tr><td class='lbl'>Committer:</td>"
-            "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt; &nbsp; <span style='color:#888;'>%3</span></td></tr>")
-            .arg(committerName, committerEmail, committerDate);
+            "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
+            .arg(committerName, committerEmail, committerDate, mutedColor);
     }
 
     // Diff stats — files-changed count + total +N/-M lines. Pulled
@@ -979,12 +1074,13 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             statsRow = QStringLiteral(
                 "<tr><td class='lbl'>Stats:</td>"
                 "<td class='val'>%1 file%2 changed, "
-                "<span style='color:#22863a;'>+%3</span> "
-                "<span style='color:#d73a49;'>−%4</span></td></tr>")
+                "<span style='color:%5;'>+%3</span> "
+                "<span style='color:%6;'>−%4</span></td></tr>")
                 .arg(d.files.size())
                 .arg(d.files.size() == 1 ? QString{} : QStringLiteral("s"))
                 .arg(d.totalAdditions)
-                .arg(d.totalDeletions);
+                .arg(d.totalDeletions)
+                .arg(addedColor, deletedColor);
         }
     }
 
@@ -1081,9 +1177,9 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
   }
   table.meta { border-spacing: 0; }
   table.meta td { padding: 1px 4px; vertical-align: top; font-size: 11px; }
-  td.lbl { color: #666; white-space: nowrap; padding-right: 4px; }
+  td.lbl { color: %3; white-space: nowrap; padding-right: 4px; }
   td.val { font-size: 11px; }
-  td.val a { color: #1f6feb; text-decoration: none; }
+  td.val a { color: %4; text-decoration: none; }
 </style>
 
 <table style="border-spacing:0;">
@@ -1097,7 +1193,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
   </tr>
 </table>
 )HTML")
-        .arg(leftRows, rightRows);
+        .arg(leftRows, rightRows, labelColor, linkColor);
 
     detailBrowser_->setHtml(metadataHtml);
 
@@ -1114,10 +1210,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     white-space: pre-wrap; margin: 0; padding: 6px 0 2px 0;
     font-family: Menlo, Consolas, monospace; font-size: 11px;
   }
-  hr.sep { border: none; border-top: 1px solid #ddd; margin: 12px 0; }
-  div.contains { color: #444; padding: 2px 0; }
-  div.contains a { color: #1f6feb; text-decoration: none; }
-  span.muted { color: #888; font-style: italic; }
+  hr.sep { background-color: %4; margin: 12px 0; }
+  div.contains { color: %5; padding: 2px 0; }
+  div.contains a { color: %6; text-decoration: none; }
+  span.muted { color: %7; font-style: italic; }
 </style>
 
 <div class="summary">%1</div>
@@ -1129,7 +1225,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 <div class="contains">Contained in no tag</div>
 <div class="contains">Derives from no tag</div>
 )HTML")
-        .arg(summary, bodyHtml, containsBranchesText);
+        .arg(summary, bodyHtml, containsBranchesText, sepColor, containsColor, linkColor,
+             mutedColor);
 
     messageBrowser_->setHtml(messageHtml);
 
@@ -1140,6 +1237,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     if (gitService_ && gitService_->isOpen()) {
         const quint64 token = ++containsQueryToken_;
         const std::string sha = commit.id.toHex();
+        const std::string key = gitService_->openKey();
         git::GitProcess proc = gitService_->process();
         // Rebuild the surrounding HTML on completion: everything but
         // the contains row is captured by value.
@@ -1148,10 +1246,13 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 
         auto* watcher = new QFutureWatcher<QString>(this);
         connect(watcher, &QFutureWatcher<QString>::finished, this,
-                [this, watcher, token, htmlTemplate, placeholder]() {
+                [this, watcher, token, key, htmlTemplate, placeholder]() {
             watcher->deleteLater();
             if (token != containsQueryToken_ || !messageBrowser_)
                 return;  // selection moved on — stale reply
+            // Nor for another repository (one opening, or open).
+            if (!gitService_ || gitService_->openPending() || gitService_->openKey() != key)
+                return;
             QString patched = htmlTemplate;
             patched.replace(placeholder, watcher->result());
             messageBrowser_->setHtml(patched);

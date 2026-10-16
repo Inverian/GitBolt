@@ -1,12 +1,12 @@
 #pragma once
 
+#include <QList>
 #include <QWidget>
 
 class QLabel;
 class QPushButton;
 class QToolButton;
 class QTreeWidget;
-class QTreeWidgetItem;
 
 namespace gitbolt::conf {
 class SettingsService;
@@ -40,6 +40,9 @@ protected:
     /// view. We reposition it on every resize so it stays in the
     /// corner regardless of window size.
     void resizeEvent(QResizeEvent* event) override;
+    /// A theme switch: the cards' descriptions take the theme's colour
+    /// (applyCardColors()).
+    void changeEvent(QEvent* event) override;
 
 private:
     void setupUi();
@@ -49,12 +52,17 @@ private:
     void updateRecentColumnWidths();
     /// Kick off a background probe for one repo and populate the
     /// corresponding row's columns when it completes. Row lookup is by
-    /// path stashed in column 0's UserRole, not by index, so rows that
-    /// reshuffle (e.g. because the user opened a different repo) don't
-    /// get crossed data.
-    void probeAndPopulate(QTreeWidgetItem* row, const QString& path);
+    /// path stashed in column 0's UserRole only, never by index or
+    /// pointer: a rebuild in between deletes the rows, and a new row of
+    /// another repository can get a deleted one's address.
+    void probeAndPopulate(const QString& path);
     QPushButton* createActionCard(const QString& title, const QString& iconText,
                                   const QString& description);
+    /// The cards' descriptions in the theme's colour. palette(mid), a
+    /// border's grey, read at 1.4:1 on the dark theme's cards (#3c3c3c)
+    /// and at 1.7:1 on the light theme's window.
+    void applyCardColors();
+    QList<QLabel*> cardDescriptions_;
 
     conf::SettingsService* settings_ = nullptr;
 

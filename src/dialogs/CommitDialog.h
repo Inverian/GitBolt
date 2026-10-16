@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QString>
 #include <QStringList>
+#include <string>
 #include <vector>
 
 class QAction;
@@ -61,12 +62,22 @@ public:
     /// working-tree state. Called on show().
     void refresh();
 
+    /// While a local operation (a merge, a reset, `git am`) runs on the
+    /// repository: no commit, and no staging, starts on top of it.
+    /// MainWindow follows its busy state with this.
+    void setLocalOpBusy(bool busy);
+
 signals:
     /// Emitted after a "Commit & Push" commit lands successfully.
     /// MainWindow triggers its toolbar Push action in response, so
     /// the push half gets the same inline feedback (wait cursor,
     /// toolbar label, status bar) as a manual push.
     void pushAfterCommitRequested();
+
+    /// A question of the dialog's (Discard's) was answered with another
+    /// repository open, or opening: `notDone` says what wasn't done.
+    /// MainWindow says so on its status bar.
+    void repositoryChangedUnderQuestion(const QString& notDone);
 
 protected:
     void showEvent(QShowEvent* e) override;
@@ -96,6 +107,32 @@ private:
     void clearDiff();
     void updateStatusBar();
     void readCommitterFromConfig();
+    /// Amend is off, with the reason as its tooltip, while the
+    /// repository has a merge, cherry-pick or revert to commit.
+    void updateAmend();
+    /// Where a merge, cherry-pick or revert waits for its commit, the
+    /// message starts as the one git prepared for it
+    /// (git::Repository::preparedMessage()), as a terminal's `git commit`
+    /// does: the commit's own `-F -` took the typed words alone, and a
+    /// revert's "This reverts commit <id>." went. Only into an empty
+    /// message, or one still as it was filled in (git's for another
+    /// stop, or another repository), which goes when there's none now.
+    /// When the dialog is shown, and while it is open at every state
+    /// report (an abort, a Skip, a merge started meanwhile), there
+    /// `onlyIfChanged`: only when git's message is no longer the one
+    /// last read, so a message the user cleared stays clear.
+    void startFromPreparedMessage(bool onlyIfChanged = false);
+
+    /// What can be clicked while a commit, or a local operation, runs:
+    /// nothing that stages, unstages, discards or commits. git commit
+    /// reads the index again after the pre-commit hook, so a file
+    /// staged while the hook ran went into the commit unchecked, and an
+    /// Unstage All made it empty; a second Commit (Ctrl+Return) started
+    /// a second git commit.
+    void applyLocks();
+    /// A step runs on the repository (GitService::rebaseStepRunning()):
+    /// a commit, this dialog's or another's, a rebase step, an abort.
+    bool stepRunning() const;
 
     QStringList selectedUnstagedPaths() const;
     QStringList selectedStagedPaths() const;
@@ -156,9 +193,22 @@ private:
     // Commit completion handshake
     bool pendingCommit_ = false;
     bool pushAfterCommit_ = false;
+    // GitService::openKey() of the repository the pending commit is for.
+    std::string pendingKey_;
+    // setLocalOpBusy()
+    bool localOpBusy_ = false;
+    // applyLocks(): nothing stages, unstages or discards (a commit's
+    // hooks, a local op or a step run); the lists and the diff stay live.
+    bool stagingLocked_ = false;
 
     // Geometry restore guard
     bool restored_ = false;
+
+    // startFromPreparedMessage(): the message it filled in last, as
+    // the editor holds it (CRLF as "\n", a non-breaking space as a
+    // space), and git's message as it read it last.
+    QString prefilled_;
+    QString preparedRead_;
 };
 
 } // namespace gitbolt::dialogs

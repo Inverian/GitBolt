@@ -6,7 +6,9 @@
 namespace gitbolt::util {
 
 /// Installs signal handlers for SIGSEGV, SIGABRT, SIGBUS, SIGFPE to write
-/// a crash report to ~/.gitbolt/crash.log before terminating.
+/// a crash report to ~/.gitbolt/crash.log before terminating; a test
+/// session writes ~/.gitbolt/crash-test.log instead, which nothing reads
+/// or deletes, so a test's crash never replaces the user's report.
 ///
 /// Call install() once at application startup.
 /// On the next launch, call hasPendingCrashReport() to check for a log file.
@@ -24,8 +26,10 @@ namespace gitbolt::util {
 /// Shipped builds are stripped, so their own symbols are unreliable or
 /// missing; image-relative offsets survive ASLR and let a maintainer
 /// symbolize offline. Frames #0 and #1 are the handler and the
-/// kernel's signal trampoline on POSIX. telemetry::CrashLogParser
-/// reads this format; keep the two in step.
+/// kernel's signal trampoline on POSIX. On macOS, #2 is the
+/// interrupted PC from the signal context: backtrace() walks frame
+/// pointers and never reaches the function that was running.
+/// telemetry::CrashLogParser reads this format; keep the two in step.
 class CrashHandler {
 public:
     /// Install signal handlers. The header pre-rendered here records
@@ -36,6 +40,10 @@ public:
     /// out (`envOptOut`), and whether this is a test session
     /// (`testSession`). main.cpp passes them: it is the only file that
     /// sees the endpoints, and nothing else is set up this early.
+    /// On macOS a test session's crash also stays out of the system's
+    /// crash reporter (no "quit unexpectedly" box, no .ips report):
+    /// its task-level EXC_CRASH port is one of its own. Its children
+    /// (git, hooks, a terminal's shell) keep the system's handling.
     static void install(const char* appVersion, bool officialBuild,
                         bool envOptOut, bool testSession);
 
@@ -57,8 +65,14 @@ public:
 
     /// Path to the crash log file.
     static QString crashLogPath();
+    /// Where a test session's handler writes instead (install()'s
+    /// `testSession`). The app never shows, sends or deletes it; the
+    /// next test crash overwrites it.
+    static QString testCrashLogPath();
 
 private:
+    /// Windows. POSIX installs an SA_SIGINFO handler of its own
+    /// (CrashHandler.cpp), for the interrupted context.
     static void signalHandler(int signal);
     static void writeStackTrace(int signal);
 };

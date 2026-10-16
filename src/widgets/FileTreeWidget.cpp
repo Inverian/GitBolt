@@ -7,6 +7,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
+#include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -15,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QPersistentModelIndex>
 #include <QPlainTextEdit>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
@@ -62,6 +64,31 @@ FileTreeWidget::FileTreeWidget(QWidget* parent)
     : QWidget(parent)
 {
     setupUi();
+    applyColors();
+}
+
+void FileTreeWidget::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    // A theme switch: the PaletteChange the window passes down
+    // (RepoOperationBar::changeEvent).
+    if (event->type() == QEvent::PaletteChange && previewHeader_)
+        applyColors();
+}
+
+void FileTreeWidget::applyColors()
+{
+    // A dark gray heading on the light theme, a light gray one on the
+    // dark (#444 there read at 1.7:1). In the style sheet, not the
+    // palette: the theme's application style sheet, set right after
+    // its palette, repolishes every widget, and that puts back the
+    // palette a widget had at its last polish.
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    previewHeader_->setStyleSheet(QStringLiteral("QLabel { color: %1; padding: 2px; }")
+                                      .arg(dark ? QStringLiteral("#b4b4b4")
+                                                : QStringLiteral("#444")));
 }
 
 void FileTreeWidget::setupUi()
@@ -112,9 +139,8 @@ void FileTreeWidget::setupUi()
 
     previewHeader_ = new QLabel(tr("Select a file to preview its contents"),
                                 rightPane);
-    previewHeader_->setStyleSheet(QStringLiteral(
-        "QLabel { color: #444; padding: 2px; }"));
-    previewHeader_->setWordWrap(true);
+    previewHeader_->setObjectName(QStringLiteral("fileTree.previewHeader"));
+    previewHeader_->setWordWrap(true);   // styled by applyColors()
     rightLayout->addWidget(previewHeader_);
 
     preview_ = new QPlainTextEdit(rightPane);
@@ -331,10 +357,14 @@ void FileTreeWidget::rebuildTree()
     }
 
     // Header summary mirrors GitExtensions' "(N) Tree at <hex>:
-    // <files>, <dirs>, <total size>" line.
+    // <files>, <dirs>, <total size>" line. Every count text has a
+    // "(s)" source like the rest: without the English plural forms
+    // (built without LinguistTools) "%n directories" read "1 directories".
     previewHeader_->setText(
-        tr("%1 files, %2 directories — %3 total")
-            .arg(fileCount).arg(dirCount).arg(formatSize(totalBytes)));
+        tr("%1, %2 — %3 total")
+            .arg(tr("%n file(s)", nullptr, fileCount),
+                 tr("%n folder(s)", nullptr, dirCount),
+                 formatSize(totalBytes)));
 
     // Auto-expand the root level so users see top-level structure
     // immediately without having to click. Don't recurse — large
@@ -502,11 +532,18 @@ void FileTreeWidget::onContextMenu(const QPoint& pos)
             emit openExternallyRequested(path);
         });
     } else {
-        menu.addAction(tr("Expand All"), this, [this, idx]() {
-            treeView_->expandRecursively(idx);
+        // menu.exec() runs a nested event loop, and a hand-off or log
+        // refresh handled in it can clear the model: a plain proxy
+        // index would then point into mappings the proxy has freed.
+        // A persistent one is invalid from then on.
+        const QPersistentModelIndex dir(idx);
+        menu.addAction(tr("Expand All"), this, [this, dir]() {
+            if (dir.isValid())
+                treeView_->expandRecursively(dir);
         });
-        menu.addAction(tr("Collapse All"), this, [this, idx]() {
-            treeView_->collapse(idx);
+        menu.addAction(tr("Collapse All"), this, [this, dir]() {
+            if (dir.isValid())
+                treeView_->collapse(dir);
         });
     }
 

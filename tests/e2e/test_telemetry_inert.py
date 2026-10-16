@@ -33,18 +33,9 @@ INERT = {"compiled-out", "inert:test-bridge"}
 def test(binary: str, scratch: str, apps: list) -> None:
     repo = make_repo(os.path.join(scratch, "repo"))
     config_home = os.path.join(scratch, "config")
-    # A home of its own: OK in Settings writes the Git Config page's
-    # name and email back with `git config --global`, and a crash would
-    # write ~/.gitbolt/crash.log.
-    home = os.environ.get("HOME")
-    os.environ["HOME"] = os.path.join(scratch, "home")
-    try:
-        app = App(binary, repo, config_home=config_home)
-    finally:
-        if home is None:
-            del os.environ["HOME"]
-        else:
-            os.environ["HOME"] = home
+    # OK in Settings writes the Git Config page's name and email back
+    # with `git config --global`: into the app's own HOME (e2elib).
+    app = App(binary, repo, config_home=config_home)
     apps.append(app)
     app.wait_bridge()
     state = app.wait_until(lambda s: s.get("repoOpen"), "repo open")

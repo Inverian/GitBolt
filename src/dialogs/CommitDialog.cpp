@@ -1,6 +1,7 @@
 #include "dialogs/CommitDialog.h"
 
 #include "conf/SettingsService.h"
+#include "conf/ThemeService.h"
 #include "git/Config.h"
 #include "git/Diff.h"
 #include "git/PatchBuilder.h"
@@ -161,9 +162,9 @@ void CommitDialog::setupUi()
         info->setCursor(Qt::WhatsThisCursor);
         // Muted gray so it doesn't compete with the bold title;
         // slightly larger so the glyph is easy to hit and read.
-        info->setStyleSheet(QStringLiteral(
-            "QLabel { color: palette(mid); font-size: 15px; "
-            "padding: 0 2px; }"));
+        // (Not palette(mid), a border's grey: 1.7:1 on the window.)
+        conf::ThemeService::keepMutedText(info, QStringLiteral(
+            "QLabel { color: %1; font-size: 15px; padding: 0 2px; }"));
         row->addWidget(info);
         return row;
     };
@@ -318,6 +319,7 @@ void CommitDialog::setupUi()
     // footer status strip so the user's typed message stays visible.
     // -----------------------------------------------------------------------
     errorLabel_ = new QLabel(this);
+    errorLabel_->setObjectName(QStringLiteral("commit.error"));
     errorLabel_->setWordWrap(true);
     errorLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:#5a1f1f; color:#ffdada; padding:6px 10px; }"));
@@ -391,8 +393,12 @@ void CommitDialog::wireConnections()
     connect(unstageBtn_,  &QPushButton::clicked, this, &CommitDialog::onUnstageSelected);
     connect(discardBtn_,  &QPushButton::clicked, this, &CommitDialog::onDiscardSelected);
 
-    connect(stageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::stageAll);
-    connect(unstageAllBtn_, &QPushButton::clicked, svc_, &services::GitService::unstageAll);
+    connect(stageAllBtn_, &QPushButton::clicked, this, [this] {
+        if (!stagingLocked_) svc_->stageAll();
+    });
+    connect(unstageAllBtn_, &QPushButton::clicked, this, [this] {
+        if (!stagingLocked_) svc_->unstageAll();
+    });
 
     // ---- Hunk / line staging from the diff pane ----------------------------
     // The diff viewer's context menu emits these; the verb (stage
@@ -402,7 +408,7 @@ void CommitDialog::wireConnections()
     // `git apply --cached` and surfaces via operationFailed.
     connect(diffView_, &widgets::DiffViewerWidget::hunkActionRequested,
             this, [this](int hunkIdx) {
-        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        if (!diffView_->hasFile() || hunkIdx < 0 || stagingLocked_) return;
         const bool reverse =
             diffView_->hunkActionMode()
             == widgets::DiffViewerWidget::HunkAction::Unstage;
@@ -420,7 +426,7 @@ void CommitDialog::wireConnections()
     });
     connect(diffView_, &widgets::DiffViewerWidget::linesActionRequested,
             this, [this](int hunkIdx, QList<int> lineIdxs) {
-        if (!diffView_->hasFile() || hunkIdx < 0) return;
+        if (!diffView_->hasFile() || hunkIdx < 0 || stagingLocked_) return;
         const bool reverse =
             diffView_->hunkActionMode()
             == widgets::DiffViewerWidget::HunkAction::Unstage;
@@ -460,6 +466,23 @@ void CommitDialog::wireConnections()
             this, &CommitDialog::onCommitComplete);
     connect(svc_, &services::GitService::operationFailed,
             this, &CommitDialog::onOperationFailed);
+    // Right behind every status refresh, and every step's report:
+    // whether Amend can be offered, and git's message as it is now. Left
+    // open across an abort or a Skip, the dialog kept the message of
+    // the stop before, which went into the next stop's commit (or the
+    // next unrelated one); opened before git stopped, it never got
+    // git's. (Hidden, the dialog asks again when it's shown: refresh().)
+    connect(svc_, &services::GitService::repoStateReady, this, [this] {
+        if (!isVisible())
+            return;
+        updateAmend();
+        startFromPreparedMessage(/*onlyIfChanged=*/true);
+    });
+    // A step on the repository (a rebase step, an abort, a commit, this
+    // dialog's own or not) holds the index while it runs: locked until
+    // it reports (commitComplete above, for a commit).
+    connect(svc_, &services::GitService::stepStarted, this, [this] { applyLocks(); });
+    connect(svc_, &services::GitService::rebaseStepFinished, this, [this] { applyLocks(); });
 
     // Branch list refreshes after every checkout / refresh / open. Use it
     // as our "the current branch may have changed" signal so the title
@@ -468,9 +491,97 @@ void CommitDialog::wireConnections()
             [this](std::vector<gitbolt::git::BranchInfo>) { updateTitle(); });
     connect(svc_, &services::GitService::repositoryOpened, this,
             [this](const QString&) {
+                // A commit still running for another repository reports
+                // nowhere (see GitService::commitChanges): its wait
+                // would have kept Commit off for good. One for this
+                // repository, opened again, still reports here, and a
+                // Commit & Push still pushes once it's in: cleared, the
+                // push was dropped.
+                if (pendingCommit_ && svc_->openKey() != pendingKey_) {
+                    pendingCommit_ = false;
+                    pushAfterCommit_ = false;
+                    pendingKey_.clear();
+                }
+                applyLocks();
                 readCommitterFromConfig();
                 updateTitle();
             });
+}
+
+void CommitDialog::setLocalOpBusy(bool busy)
+{
+    localOpBusy_ = busy;
+    applyLocks();
+}
+
+bool CommitDialog::stepRunning() const
+{
+    return svc_ && svc_->rebaseStepRunning();
+}
+
+void CommitDialog::applyLocks()
+{
+    // A step running on the repository counts as well as the commit
+    // this dialog waits for: away to another repository and back while
+    // the commit's hook ran, the dialog no longer waited for it (that
+    // open cleared the wait), and unlocked with it still running. A
+    // file staged then went into it, the hook never seeing it.
+    const bool step = stepRunning();
+    const bool locked = pendingCommit_ || localOpBusy_ || step;
+    // What stages, unstages or discards: the lists' buttons, their
+    // double-click and Enter (the activation handlers), and the diff's
+    // hunk and line actions. The lists and the diff themselves stay
+    // live, to scroll, select and read while a hook runs: disabled
+    // outright, neither could even be scrolled.
+    stagingLocked_ = locked;
+    const bool unstagedSelected = !selectedUnstagedPaths().isEmpty();
+    stageBtn_->setEnabled(!locked && unstagedSelected);
+    discardBtn_->setEnabled(!locked && unstagedSelected);
+    unstageBtn_->setEnabled(!locked && !selectedStagedPaths().isEmpty());
+    stageAllBtn_->setEnabled(!locked);
+    unstageAllBtn_->setEnabled(!locked);
+    diffView_->setStagingLocked(locked);
+    // The message the commit took stays as it was until it's in.
+    messageEdit_->setReadOnly(pendingCommit_);
+    commitBtn_->setEnabled(!locked);
+    commitPushBtn_->setEnabled(!locked);
+    commitShortcut_->setEnabled(!locked);
+    if (locked)
+        amendCheck_->setEnabled(false);
+    else
+        updateAmend();
+    // Said on the button, which shows it disabled too: a tooltip on a
+    // disabled button was all there was while a hook took its time, the
+    // dialog greyed out and silent.
+    commitBtn_->setText(pendingCommit_ && !pushAfterCommit_ ? tr("Committing…") : tr("Commit"));
+    commitPushBtn_->setText(pendingCommit_ && pushAfterCommit_ ? tr("Committing…")
+                                                               : tr("Commit && Push"));
+    commitBtn_->setToolTip(pendingCommit_ ? tr("Committing… (git runs the repository's hooks)")
+                           : localOpBusy_ ? tr("Another operation is still running")
+                           : step         ? tr("Another git operation is still running "
+                                               "on this repository")
+                                          : QString());
+}
+
+// ---------------------------------------------------------------------------
+// Amend: not while a merge, cherry-pick or revert waits for its commit
+// ---------------------------------------------------------------------------
+
+void CommitDialog::updateAmend()
+{
+    // An amend there flattened the merge, or folded the pick into the
+    // commit before it, and left the operation in progress. The commit
+    // refuses it (Repository::amendProblem()); the box says so, in
+    // git's words, before it's ticked.
+    const QString problem = svc_ && svc_->isOpen()
+        ? QString::fromStdString(svc_->withRepository(
+              [](git::Repository& r) { return r.amendProblem(); }))
+        : QString();
+    if (!problem.isEmpty())
+        amendCheck_->setChecked(false);
+    amendCheck_->setEnabled(problem.isEmpty() && !pendingCommit_ && !localOpBusy_
+                            && !stepRunning());
+    amendCheck_->setToolTip(problem);
 }
 
 // ---------------------------------------------------------------------------
@@ -627,8 +738,8 @@ void CommitDialog::onUnstagedSelectionChanged()
 {
     const QStringList paths = selectedUnstagedPaths();
     const bool hasSel = !paths.isEmpty();
-    stageBtn_->setEnabled(hasSel);
-    discardBtn_->setEnabled(hasSel);
+    stageBtn_->setEnabled(hasSel && !stagingLocked_);
+    discardBtn_->setEnabled(hasSel && !stagingLocked_);
 
     // When a single file is selected, show its diff. Multi-select
     // leaves the previous diff in place — picking the "right" one to
@@ -649,7 +760,7 @@ void CommitDialog::onStagedSelectionChanged()
 {
     const QStringList paths = selectedStagedPaths();
     const bool hasSel = !paths.isEmpty();
-    unstageBtn_->setEnabled(hasSel);
+    unstageBtn_->setEnabled(hasSel && !stagingLocked_);
 
     if (paths.size() == 1)
         showDiffForStaged(paths.first());
@@ -662,7 +773,7 @@ void CommitDialog::onStagedSelectionChanged()
 
 void CommitDialog::onUnstagedActivated(const QModelIndex& index)
 {
-    if (!index.isValid()) return;
+    if (!index.isValid() || stagingLocked_) return;
     const auto srcIdx = unstagedProxy_->mapToSource(index);
     const QString path = unstagedModel_->pathAt(srcIdx.row());
     if (!path.isEmpty())
@@ -671,7 +782,7 @@ void CommitDialog::onUnstagedActivated(const QModelIndex& index)
 
 void CommitDialog::onStagedActivated(const QModelIndex& index)
 {
-    if (!index.isValid()) return;
+    if (!index.isValid() || stagingLocked_) return;
     const auto srcIdx = stagedProxy_->mapToSource(index);
     const QString path = stagedModel_->pathAt(srcIdx.row());
     if (!path.isEmpty())
@@ -743,12 +854,14 @@ void CommitDialog::clearDiff()
 
 void CommitDialog::onStageSelected()
 {
+    if (stagingLocked_) return;
     for (const QString& p : selectedUnstagedPaths())
         svc_->stageFile(p);
 }
 
 void CommitDialog::onUnstageSelected()
 {
+    if (stagingLocked_) return;
     for (const QString& p : selectedStagedPaths())
         svc_->unstageFile(p);
 }
@@ -756,7 +869,12 @@ void CommitDialog::onUnstageSelected()
 void CommitDialog::onDiscardSelected()
 {
     const QStringList paths = selectedUnstagedPaths();
-    if (paths.isEmpty()) return;
+    if (paths.isEmpty() || stagingLocked_) return;
+    // The repository the question is about: a second launch can hand
+    // another one over while it is up (main() opens it at once, in the
+    // box's event loop), and discardFile() then checked those paths out
+    // there, its uncommitted edits gone for good.
+    const std::string key = svc_->openKey();
 
     const QString detail = paths.size() == 1
         ? tr("Discard all uncommitted changes to %1?\n\nThis cannot be undone.")
@@ -769,6 +887,16 @@ void CommitDialog::onDiscardSelected()
         QMessageBox::Discard | QMessageBox::Cancel,
         QMessageBox::Cancel);
     if (answer != QMessageBox::Discard) return;
+    // Another repository opened, or opening, meanwhile (as
+    // MainWindow::repositoryChangedSince() tells it): nothing is
+    // discarded. The open closes this dialog; the window says why.
+    if (!svc_->isOpen() || svc_->openPending() || svc_->openKey() != key) {
+        emit repositoryChangedUnderQuestion(tr("no changes were discarded."));
+        return;
+    }
+    // Nor under a commit or a local op that started meanwhile, nor
+    // from a dialog closed since.
+    if (!isVisible() || stagingLocked_) return;
 
     for (const QString& p : paths)
         svc_->discardFile(p);
@@ -780,6 +908,10 @@ void CommitDialog::onDiscardSelected()
 
 void CommitDialog::onCommitClicked()
 {
+    // One commit at a time: Ctrl+Return reached here while one ran,
+    // and the first one's outcome was taken for the second's.
+    if (pendingCommit_ || localOpBusy_ || stepRunning())
+        return;
     const QString msg = messageEdit_->toPlainText().trimmed();
     if (msg.isEmpty()) {
         errorLabel_->setText(tr("Commit message cannot be empty."));
@@ -788,9 +920,10 @@ void CommitDialog::onCommitClicked()
     }
     errorLabel_->hide();
     pendingCommit_ = true;
-    commitBtn_->setEnabled(false);
-    commitPushBtn_->setEnabled(false);
-    svc_->commitChanges(msg, amendCheck_->isChecked());
+    pendingKey_ = svc_->openKey();
+    const bool amend = amendCheck_->isChecked();
+    applyLocks();
+    svc_->commitChanges(msg, amend);
 }
 
 void CommitDialog::onCommitAndPushClicked()
@@ -798,6 +931,8 @@ void CommitDialog::onCommitAndPushClicked()
     // Commit, then push. The push half fires as
     // pushAfterCommitRequested once commitComplete reports success —
     // never before, so a failed or rejected commit pushes nothing.
+    if (pendingCommit_ || localOpBusy_ || stepRunning())
+        return;
     pushAfterCommit_ = true;
     onCommitClicked();
     if (!pendingCommit_)
@@ -806,15 +941,22 @@ void CommitDialog::onCommitAndPushClicked()
 
 void CommitDialog::onCommitComplete(bool success, const QString& message)
 {
-    if (!pendingCommit_) return;
+    // Not this dialog's commit, or one it stopped waiting for: the step
+    // it locked for is over all the same (the service clears its mark
+    // before it reports).
+    if (!pendingCommit_) {
+        applyLocks();
+        return;
+    }
     pendingCommit_ = false;
-    commitBtn_->setEnabled(true);
-    commitPushBtn_->setEnabled(true);
+    pendingKey_.clear();
+    applyLocks();
 
     if (success) {
         const bool pushRequested = pushAfterCommit_;
         pushAfterCommit_ = false;
         messageEdit_->clear();
+        prefilled_.clear();
         amendCheck_->setChecked(false);
         errorLabel_->hide();
         close();
@@ -829,16 +971,22 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
 
 void CommitDialog::onOperationFailed(const QString& op, const QString& err)
 {
-    if (op.startsWith(QLatin1String("commit"),  Qt::CaseInsensitive) ||
+    const bool commit = op.startsWith(QLatin1String("commit"), Qt::CaseInsensitive);
+    if (commit ||
         op.startsWith(QLatin1String("stage"),   Qt::CaseInsensitive) ||
         op.startsWith(QLatin1String("unstage"), Qt::CaseInsensitive) ||
         op.startsWith(QLatin1String("discard"), Qt::CaseInsensitive)) {
         errorLabel_->setText(op + tr(" failed: ") + err);
         errorLabel_->show();
-        commitBtn_->setEnabled(true);
-        commitPushBtn_->setEnabled(true);
+        // A stage, unstage or discard that failed says so, and that's
+        // all: it ended the wait for a commit still running, whose
+        // outcome was then dropped, a requested push with it.
+        if (!commit)
+            return;
         pendingCommit_ = false;
         pushAfterCommit_ = false;
+        pendingKey_.clear();
+        applyLocks();
     }
 }
 
@@ -852,6 +1000,29 @@ void CommitDialog::refresh()
         svc_->refreshStatus();
     updateTitle();
     readCommitterFromConfig();
+    updateAmend();
+    startFromPreparedMessage();
+}
+
+void CommitDialog::startFromPreparedMessage(bool onlyIfChanged)
+{
+    if (!svc_ || pendingCommit_)
+        return;
+    const QString prepared = QString::fromStdString(svc_->withRepository(
+        [](git::Repository& r) { return r.preparedMessage(); }));
+    if (onlyIfChanged && prepared == preparedRead_)
+        return;
+    preparedRead_ = prepared;
+    const QString current = messageEdit_->toPlainText();
+    if (!current.trimmed().isEmpty() && (prefilled_.isEmpty() || current != prefilled_))
+        return;     // the user's own words
+    if (current != prepared)
+        messageEdit_->setPlainText(prepared);
+    // As the editor gives it back: it holds a non-breaking space as a
+    // space (and CRLF as "\n"), and the message filled in never
+    // matched again, so it passed for the user's words and stayed for
+    // the next, unrelated, commit.
+    prefilled_ = messageEdit_->toPlainText();
 }
 
 void CommitDialog::showEvent(QShowEvent* e)

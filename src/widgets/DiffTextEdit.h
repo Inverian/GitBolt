@@ -20,7 +20,9 @@ namespace gitbolt::widgets {
 ///
 /// The line-type is detected purely from the first character of each
 /// block's text (`+`, `-`, `@@`, leading space, etc.) so the widget
-/// is a drop-in replacement that needs no additional state.
+/// is a drop-in replacement that needs no additional state. The
+/// colours are the current theme's (editor/DiffColors.h), read at
+/// every paint.
 class DiffTextEdit : public QPlainTextEdit {
     Q_OBJECT
 

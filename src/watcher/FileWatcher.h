@@ -40,8 +40,9 @@ public:
     void addWatchPaths(const QString& repoPath, const QStringList& dirs);
 
     /// Pure enumeration of the working-tree directories worth
-    /// watching (skip list for .git, node_modules, build, … and a
-    /// hard cap). No QFileSystemWatcher access — safe to run on any
+    /// watching: every one but .git, node_modules, build, …
+    /// themselves (their subdirectories are still listed), up to a
+    /// hard cap. No QFileSystemWatcher access — safe to run on any
     /// thread. `cancelled` is polled each iteration so an obsolete
     /// walk (repo switched, app quitting) can bail early.
     static QStringList enumerateWatchDirs(

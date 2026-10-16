@@ -8,7 +8,13 @@
 //     meaning, and the rest are dropped;
 //   - a read can end partway through an escape sequence or a UTF-8
 //     character, and the rest is picked up from the next read. A
-//     character cut in two used to come out as two U+FFFDs;
+//     character cut in two used to come out as two U+FFFDs, and on
+//     macOS and Linux an OSC cut in two as its text;
+//   - the shell's cursor stays where a read leaves it, and the moves
+//     and erases within its row are honored: git's progress meter and
+//     the line editors' edits (recorded from zsh and bash) write over
+//     what they drew. On macOS and Linux every read used to start at
+//     the end of the text, and only EL was honored;
 //   - overwriting replaces whole characters, surrogate pairs and
 //     combining marks included;
 //   - a read goes in as one edit, its plain text a run at a time: an
@@ -29,7 +35,9 @@
 //   - Ctrl+C typed during the flood gets through at once and stops it,
 //     and the shell takes commands again. On Linux, as on Windows,
 //     Ctrl+C is also the copy key, and with nothing selected it used
-//     to copy nothing rather than interrupt.
+//     to copy nothing rather than interrupt;
+//   - a progress meter's updates, reads of their own each ending in a
+//     CR, redraw one row instead of piling up on it.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -47,7 +55,10 @@
 //     the shell back while a batch waits to be drawn, so no batch is
 //     more than its cap;
 //   - Ctrl+C stops a flood at once, rather than once a backlog has
-//     been drawn, and the shell takes commands again.
+//     been drawn, and the shell takes commands again;
+//   - a row conhost paints with a surrogate pair, or a letter and its
+//     combining mark, in its last column keeps the character whole,
+//     as the fed wrap tests do with synthetic output.
 //
 // Each platform's end-to-end tests are a QSKIP on the others.
 //
@@ -55,6 +66,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSocketNotifier>
 #include <QStringList>
@@ -80,7 +92,14 @@ namespace {
 class FedTerminal : public TerminalWidget {
 public:
     using TerminalWidget::appendOutput;
+    using TerminalWidget::gridSize;
     using TerminalWidget::rowChunk;
+
+    // Everything the shell's terminal sent, as it came.
+    QByteArray read;
+
+protected:
+    void outputRead(const QByteArray& bytes) override { read += bytes; }
 };
 
 } // namespace
@@ -89,10 +108,17 @@ public:
 // widget.
 namespace {
 
-constexpr int kTimeoutMs = 30000;
-// A flood takes longer, but stays inside QtTest's per-function
-// watchdog (QTEST_FUNCTION_TIMEOUT), so a slow one fails cleanly.
-constexpr int kFloodTimeoutMs = 50000;
+// A QTRY that runs out waits twice as long again before it fails (to
+// report how long the condition took, if it ever came true), so it
+// takes three times its timeout, and a little more: it counts 50 ms a
+// step, and neither the step's wait running over (about 3 ms a step on
+// macOS, more on Windows) nor the time the condition takes counts. A
+// flood's 19 s wait took 60.5 s to fail. Each stays at a quarter of
+// QtTest's per-function watchdog (QTEST_FUNCTION_TIMEOUT, 60 s), the
+// floods' included (they pass in 2-3 s): a wait that never comes true
+// then fails with the terminal's text, rather than the watchdog
+// aborting the whole binary and the tests after it.
+constexpr int kTimeoutMs = 15000;
 
 QStringList rows(const TerminalWidget& terminal)
 {
@@ -186,10 +212,15 @@ constexpr Qt::KeyboardModifier kTerminalCtrl = Qt::ControlModifier;
 #endif
 
 // A shell the tests can rely on, whoever runs them: /bin/sh rather than
-// the user's $SHELL, with a prompt the tests know, no rc file, and HOME
-// a throwaway directory for any history it saves. start() hands the
-// shell this process's environment, so that is where it goes; the
-// destructor puts it back.
+// the user's $SHELL, with a prompt the tests know, no rc file of the
+// user's, and HOME a throwaway directory for any history it saves.
+// start() hands the shell this process's environment, so that is where
+// it goes; the destructor puts it back.
+//
+// A test that runs bash instead gets the prompt from HOME's .bashrc as
+// well: Debian's and Ubuntu's bash read /etc/bash.bashrc first, which
+// sets a PS1 of its own over the one in the environment, and ~/.bashrc
+// after it. dash, and bash run as sh, don't read it.
 class PlainShell {
 public:
     PlainShell()
@@ -200,6 +231,9 @@ public:
         set("ENV", {});
         set("BASH_ENV", {});
         set("HISTFILE", {});
+        QFile bashrc(home_.path() + QStringLiteral("/.bashrc"));
+        if (home_.isValid() && bashrc.open(QIODevice::WriteOnly))
+            bashrc.write("PS1='" + kShPrompt.toLatin1() + " '\n");
     }
 
     ~PlainShell()
@@ -213,6 +247,7 @@ public:
     }
 
     bool isValid() const { return home_.isValid(); }
+    QString home() const { return home_.path(); }
 
 private:
     struct Saved {
@@ -352,6 +387,22 @@ private slots:
             << QByteArray("a\x01" "b\x0e" "c") << QStringLiteral("abc");
         QTest::newRow("an unhandled ESC pair is dropped")
             << QByteArray("a\x1b=b") << QStringLiteral("ab");
+        QTest::newRow("CUB moves left")
+            << QByteArray("abcdef\x1b[2DX") << QStringLiteral("abcdXf");
+        QTest::newRow("CUF moves right, padding past the end")
+            << QByteArray("ab\x1b[3CX") << QStringLiteral("ab   X");
+        QTest::newRow("CHA moves to a column")
+            << QByteArray("abcdef\x1b[3GX") << QStringLiteral("abXdef");
+        QTest::newRow("ECH blanks without moving")
+            << QByteArray("abcdef\x1b[4G\x1b[2XZ") << QStringLiteral("abcZ f");
+        QTest::newRow("ICH inserts blanks")
+            << QByteArray("abcd\x1b[3G\x1b[2@X") << QStringLiteral("abX cd");
+        QTest::newRow("DCH deletes characters")
+            << QByteArray("abcdef\x1b[2G\x1b[2PX") << QStringLiteral("aXef");
+        QTest::newRow("EL 1 blanks to the cursor")
+            << QByteArray("abcdef\x1b[3G\x1b[1K") << QStringLiteral("   def");
+        QTest::newRow("EL 2 blanks the row")
+            << QByteArray("abcdef\x1b[3G\x1b[2KX") << QStringLiteral("  X");
         QTest::newRow("tab is kept")
             << QByteArray("a\tb") << QStringLiteral("a\tb");
         // PROMPT_SP: a reverse-video '%' and a row of spaces, which a
@@ -439,6 +490,107 @@ private slots:
         QCOMPARE(edits, 1);
     }
 
+    // The cursor stays where a read leaves it: git's progress meter ends
+    // each update with a CR for the next one to write over. On macOS and
+    // Linux every read used to start at the end of the text, so the
+    // updates piled up on one row.
+    void cursorStaysPutBetweenReads()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("Receiving objects:  10% (1/10)\r");
+        terminal.appendOutput("Receiving objects:  20% (2/10)\r");
+        terminal.appendOutput("Receiving objects: 100% (10/10), done.\r\n");
+        terminal.appendOutput("remote: Counting objects:  50% (1/2)\x1b[K\r");
+        terminal.appendOutput("remote: Counting objects: 100% (2/2), done.\x1b[K\r\n");
+        QCOMPARE(terminal.toPlainText(),
+                 QStringLiteral("Receiving objects: 100% (10/10), done.\n"
+                                "remote: Counting objects: 100% (2/2), done.\n"));
+    }
+
+    // Editing mid-line, as the shells' line editors draw it (recorded
+    // from zsh 5.9 and bash 3.2 under a PTY): each arrow key is a read
+    // of its own.
+    void lineEditorsEditMidLine_data()
+    {
+        QTest::addColumn<QList<QByteArray>>("reads");
+        QTest::addColumn<QString>("shown");
+
+        // abcd, Left, Left, X, Ctrl+A, Ctrl+E, Left x3, Y
+        QTest::newRow("zsh: backspaces and CUF")
+            << QList<QByteArray>{"P> ", "a\x08" "abcd", "\x08", "\x08", "Xcd\x08\x08",
+                                 "\x08\x08\x08", "\x1b[5C", "\x08\x08\x08", "YXcd\x08\x08\x08"}
+            << QStringLiteral("P> abYXcd");
+        // abcdefgh, Left x3, Backspace, Delete, X
+        QTest::newRow("bash: DCH and ICH")
+            << QList<QByteArray>{"P> ", "abcdefgh", "\x08\x08\x08", "\x08\x1b[1P",
+                                 "\x1b[1P", "\x1b[1@X"}
+            << QStringLiteral("P> abcdXgh");
+        // zsh's Ctrl+U: back to the start, blank the line, CUB back
+        QTest::newRow("zsh: kill line")
+            << QList<QByteArray>{"P> abcdefgh", "\x08\x08\x08\x08\x08\x08\x08\x08        \x1b[8D", "x"}
+            << QStringLiteral("P> x       ");
+    }
+
+    void lineEditorsEditMidLine()
+    {
+        QFETCH(QList<QByteArray>, reads);
+        QFETCH(QString, shown);
+        FedTerminal terminal;
+        for (const QByteArray& read : reads)
+            terminal.appendOutput(read);
+        QCOMPARE(terminal.toPlainText(), shown);
+    }
+
+    // A command line longer than the terminal, as bash's readline types
+    // it: at the right margin it sends the key, a space and a CR, for a
+    // terminal that wraps to put the cursor at the start of the next
+    // row. Rows don't wrap here (the line is one row), and the CR went
+    // to its start: the keys after it overwrote the prompt. The widget
+    // was never shown, so it has the default 80 columns.
+    void longCommandLineStaysWhole()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("ConPTY's screen wraps its rows itself");
+#else
+        FedTerminal terminal;
+        const QByteArray prompt = "P> ";
+        const QByteArray first(80 - prompt.size() - 1, 'x');   // to the last column but one
+        terminal.appendOutput(prompt);
+        for (const char c : first)
+            terminal.appendOutput(QByteArray(1, c));
+        terminal.appendOutput("y \r");                        // the last column, and the wrap
+        for (const char c : QByteArrayLiteral("echo"))
+            terminal.appendOutput(QByteArray(1, c));
+        // A second wrap.
+        const QByteArray second(80 - 4 - 1, 'z');
+        terminal.appendOutput(second + "w \r" + "tail");
+        QCOMPARE(terminal.toPlainText(),
+                 QString::fromLatin1(prompt + first + "y" + "echo" + second + "w" + "tail"));
+
+        // A CR right after the last column: the cursor hasn't wrapped
+        // yet, so it goes to the start of that row, not of the next. One
+        // character on, it's the next row's.
+        FedTerminal margin;
+        margin.appendOutput(QByteArray(80, 'a') + "\rB");
+        QCOMPARE(margin.toPlainText(), QStringLiteral("B") + QString(79, QLatin1Char('a')));
+        margin.appendOutput("\r\n" + QByteArray(80, 'a') + "b\rC");
+        QCOMPARE(margin.toPlainText().section(QLatin1Char('\n'), 1),
+                 QString(80, QLatin1Char('a')) + QStringLiteral("C"));
+#endif
+    }
+
+    // An OSC (a title, an OSC 8 link) cut by a read, anywhere up to its
+    // terminator's last byte, used to print its text on macOS and Linux.
+    void oscSplitAcrossReads()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("a\x1b]0;ti");
+        terminal.appendOutput("tle\x07" "b");
+        terminal.appendOutput("\x1b]8;;https://example.com\x1b");
+        terminal.appendOutput("\\c\x1b]8;;\x1b\\d");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("abcd"));
+    }
+
     // Windows wraps a long run a row at a time, a UTF-16 unit to a
     // column. The cut used to fall wherever the units ran out, so a
     // character at the edge could lose half its surrogate pair, or its
@@ -495,6 +647,83 @@ private slots:
             twoReads.appendOutput(row.toUtf8());
             twoReads.appendOutput((character + QStringLiteral("y")).toUtf8());
             QCOMPARE(twoReads.toPlainText(), shown);
+        }
+#endif
+    }
+
+    // And with what real conhost paints: cmd types out a row of x's that
+    // ends in the character at the last column, then a y. No row may
+    // start with half a surrogate pair (UTF-8 can't carry one, so only
+    // the widget's cut could put it there), and nothing may be lost or
+    // reordered. conhost itself may give a combining mark a cell of its
+    // own, and so paint it at the start of the next row, which the
+    // widget can only show as it comes: that is reported, not failed.
+    // So is an astral character conhost doesn't send whole: build 26100
+    // gives each half of the surrogate pair a cell, and ConPTY sends
+    // the halves on either side of the wrap, as bytes that aren't
+    // UTF-8 (the widget shows U+FFFD for them). Whether the character
+    // came whole is read off what ConPTY sent (outputRead); one that
+    // did must show whole.
+    void conhostWrapKeepsCharactersWhole()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        FedTerminal terminal;
+        terminal.start(QDir::tempPath());
+        showAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const int columns = terminal.gridSize().width();
+        QVERIFY(columns > 1);
+
+        int round = 0;
+        for (const QString& character : {QString::fromUtf16(u"\U0001D400"),
+                                         QString::fromUtf16(u"é")}) {
+            const QString line =
+                QString(columns - 1, QLatin1Char('x')) + character + QStringLiteral("y");
+            QFile file(dir.filePath(QStringLiteral("wrap%1.txt").arg(++round)));
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write(line.toUtf8() + "\r\n");
+            file.close();
+
+            // `type` copies the file's bytes; code page 65001 makes
+            // conhost read them as the UTF-8 they are.
+            const qsizetype before = prompts(terminal);
+            terminal.read.clear();
+            QTest::keyClicks(&terminal, QStringLiteral("chcp 65001>nul & type \"%1\"")
+                                            .arg(QDir::toNativeSeparators(file.fileName())));
+            QTest::keyClick(&terminal, Qt::Key_Return);
+            QTRY_VERIFY2_WITH_TIMEOUT(prompts(terminal) > before && atPrompt(terminal),
+                                      qPrintable(terminal.toPlainText()), kTimeoutMs);
+
+            for (const QString& row : terminal.toPlainText().split(QLatin1Char('\n'))) {
+                QVERIFY2(row.isEmpty() || !row.front().isLowSurrogate(),
+                         qPrintable(terminal.toPlainText()));
+                if (!row.isEmpty() && row.front() == QChar(u'́'))
+                    qInfo("conhost put the combining mark at the start of a row");
+            }
+            const QString shown = rows(terminal).join(QString());
+            if (!terminal.read.contains(character.toUtf8())) {
+                // Broken before the widget got it: what came after the
+                // x's, in hex, for the record.
+                const QByteArray xs(columns - 1, 'x');
+                const qsizetype at = terminal.read.lastIndexOf(xs);
+                qInfo("conhost didn't send U+%04X whole; after the x's it sent: %s",
+                      character.toUcs4().value(0),
+                      at < 0 ? "(no row of x's)"
+                             : terminal.read.mid(at + xs.size(), 24).toHex(' ').constData());
+                // The rest came, in order.
+                QVERIFY2(shown.contains(QString(columns - 1, QLatin1Char('x')))
+                             && shown.indexOf(QLatin1Char('y'),
+                                              shown.indexOf(QString(columns - 1, QLatin1Char('x'))))
+                                    > 0,
+                         qPrintable(terminal.toPlainText()));
+                continue;
+            }
+            QVERIFY2(shown.contains(line), qPrintable(terminal.toPlainText()));
         }
 #endif
     }
@@ -600,7 +829,7 @@ private slots:
             const QList<int> shown = numberedRows(terminal, QStringLiteral("gbtype"));
             return atPrompt(terminal) && !shown.isEmpty() && shown.last() == kLines;
         };
-        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kFloodTimeoutMs);
+        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kTimeoutMs);
         ticker.stop();
         longestGap = qMax(longestGap, clock.elapsed() - lastTick);  // and since the last turn
 
@@ -693,7 +922,7 @@ private slots:
                    && prompt.previous().text()
                           == QStringLiteral("gbflood%1").arg(kPtyFloodLines);
         };
-        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kFloodTimeoutMs);
+        QTRY_VERIFY2_WITH_TIMEOUT(done(), qPrintable(lastRow(terminal)), kTimeoutMs);
         ticker.stop();
         longestGap = qMax(longestGap, clock.elapsed() - lastTick);  // and since the last turn
 
@@ -712,6 +941,69 @@ private slots:
         // trimmed the document dozens of times a wake: a PTY hands over
         // as little as a kilobyte a read.
         QCOMPARE(wakes.mostEditsInAWake(), 1);
+#endif
+    }
+
+    // A progress meter over a real PTY: its updates come in reads of
+    // their own, each ending in a CR for the next to write over.
+    void ptyProgressMeterRedrawsInPlace()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        // In a script, so the line typed is short: a terminal that was
+        // never shown tells the shell its default size, about 44
+        // columns, whatever resize() asked for, and the shell would
+        // wrap a longer one, which this widget's rows don't.
+        QFile script(QDir(shell.home()).filePath(QStringLiteral("meter.sh")));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("printf 'gbmeter 1\\r'; sleep 1; printf 'gbmeter 2\\n'\n");
+        script.close();
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral(". \"$HOME/meter.sh\""));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbmeter 2")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QVERIFY2(!terminal.toPlainText().contains(QStringLiteral("gbmeter 1")),
+                 qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // A command line longer than the terminal, typed into bash over a
+    // real PTY: readline's wrap at the right margin (the key, a space, a
+    // CR) took the line back to the prompt, which the rest of the
+    // command overwrote. 0.9.5 showed it whole.
+    void ptyLongCommandLineStaysWhole()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        if (!QFileInfo::exists(QStringLiteral("/bin/bash")))
+            QSKIP("no /bin/bash");
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        // bash's readline, whose wrap this is (PlainShell puts SHELL
+        // back on the way out).
+        qputenv("SHELL", "/bin/bash");
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        // Past the margin (the terminal tells the shell its size, about
+        // 44 columns never shown) twice.
+        const QString command = QStringLiteral("echo ") + QString(90, QLatin1Char('x'))
+                              + QStringLiteral("END");
+        QTest::keyClicks(&terminal, command);
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.toPlainText().contains(QStringLiteral("END")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QTest::qWait(200);
+        QVERIFY2(rows(terminal).contains(kShPrompt + QLatin1Char(' ') + command),
+                 qPrintable(terminal.toPlainText()));
 #endif
     }
 

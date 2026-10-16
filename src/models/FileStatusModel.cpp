@@ -1,5 +1,8 @@
 #include "models/FileStatusModel.h"
 
+#include <QGuiApplication>
+#include <QPalette>
+
 #include <QFileInfo>
 #include <QPainter>
 #include <QPixmap>
@@ -196,18 +199,30 @@ QColor FileStatusModel::statusColor(const gitbolt::git::StatusEntry& entry,
 {
     using FS = gitbolt::git::FileStatus;
 
+    // The light theme's red and blue read at 2.6:1 to 3.2:1 on the dark
+    // theme's lists: the dark theme gets GitHub-dark's, at 5:1 or more
+    // on either row colour (the lists alternate them). Read at paint
+    // time, so a theme switch shows at the next repaint.
+    const QPalette app = QGuiApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    const QColor red   = dark ? QColor(0xff, 0x7b, 0x72) : QColor(204, 0, 0);
+    const QColor green = dark ? QColor(0x3f, 0xb9, 0x50) : QColor(0, 170, 0);
+    const QColor blue  = dark ? QColor(0x58, 0xa6, 0xff) : QColor(0, 102, 204);
+    const QColor gray  = dark ? QColor(0x9e, 0x9e, 0x9e) : QColor(128, 128, 128);
+
     if (hasFlag(entry.status, FS::Conflicted))
-        return QColor(204, 0, 0);   // red
+        return red;
 
     if (staged) {
-        if (hasFlag(entry.status, FS::IndexNew))        return QColor(0, 170, 0);    // green
-        if (hasFlag(entry.status, FS::IndexDeleted))     return QColor(204, 0, 0);    // red
-        return QColor(0, 102, 204); // blue
+        if (hasFlag(entry.status, FS::IndexNew))        return green;
+        if (hasFlag(entry.status, FS::IndexDeleted))     return red;
+        return blue;
     }
 
-    if (hasFlag(entry.status, FS::WtNew))       return QColor(128, 128, 128); // gray
-    if (hasFlag(entry.status, FS::WtDeleted))    return QColor(204, 0, 0);
-    return QColor(0, 102, 204);
+    if (hasFlag(entry.status, FS::WtNew))       return gray;
+    if (hasFlag(entry.status, FS::WtDeleted))    return red;
+    return blue;
 }
 
 QIcon FileStatusModel::statusIcon(const gitbolt::git::StatusEntry& entry,

@@ -28,6 +28,8 @@ class QTimer;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
+namespace gitbolt::services { struct StopFacts;     }
+namespace gitbolt::widgets  { class RepoOperationBar; }
 namespace gitbolt::conf     { class SettingsService;}
 namespace gitbolt::conf     { class ThemeService;   }
 namespace gitbolt::dialogs  { class CommitDialog;   }
@@ -95,17 +97,20 @@ private:
     void finishRemoteOpFeedback(const QString& successMsg);
 
     /// Run a network git op (fetch/pull/push/remote-branch delete) on a
-    /// pool thread with inline-indicator + status-bar narration. `after`
-    /// runs on the GUI thread once the op finishes, success or failure.
+    /// pool thread with inline-indicator + status-bar narration. `op`
+    /// returns whether it succeeded (GitService's remote ops do).
+    /// `after` runs on the GUI thread once the op finishes, success or
+    /// failure.
     void runRemoteOp(QAction* sourceAction, const QString& startMsg,
-                     const QString& successMsg, std::function<void()> op,
+                     const QString& successMsg, std::function<bool()> op,
                      std::function<void()> after = {});
 
     /// The part of a remote op that every caller shares: marks it
     /// running and runs `op` on a pool thread as remoteOp_ (which the
     /// destructor cancels and waits for); `finished` runs on the GUI
-    /// thread afterwards. Callers check remoteOpRunning_ first.
-    void startRemoteOp(std::function<void()> op,
+    /// thread afterwards, with lastRemoteOpFailed_ set from what `op`
+    /// returned. Callers check remoteOpRunning_ first.
+    void startRemoteOp(std::function<bool()> op,
                        std::function<void()> finished);
 
     /// Periodic fetch tick: a quiet fetch through startRemoteOp().
@@ -130,11 +135,33 @@ private:
     /// if the repo actions are on (setRepoActionsEnabled); if they are
     /// off, whatever turns them on brings it back.
     void reenableAfterRemoteOp(QAction* action);
+    /// Whether the inline label narrates a running remote op (a quiet
+    /// auto-fetch is no such op): a local op then leaves it be.
+    bool remoteOpNarrated() const;
+    /// A local op that started under a narrated remote op, and outlived
+    /// it: its message goes back on the label (unless a failure is
+    /// sticky there) and the status bar, a while after the remote op's
+    /// outcome went up (finishRemoteOpFeedback).
+    void resumeLocalOpNarration();
+
+    /// Commands > Merge branches and the sidebar's Merge: `git merge
+    /// <branch>` as a local op (repoCmd_), offering the conflict
+    /// resolver if git stopped on conflicts.
+    void mergeBranch(const QString& branch);
+
+    /// The sidebar's "Checkout as local branch" on `remoteBranch`
+    /// ("origin/x"): checks out local "x", created to track it, as a
+    /// local op (repoCmd_), unless it exists.
+    void checkoutAsLocalBranch(const QString& remoteBranch);
 
     /// Confirm with the user, then delete `remoteBranch` ("origin/x")
-    /// on its remote through runRemoteOp.
+    /// on its remote through runRemoteOp, if the repository open is
+    /// still the one with `key` (taken before any picker that came
+    /// first: GitService::openKey(), copied; the reference it returns
+    /// follows the open repository).
     void confirmAndDeleteRemoteBranch(const QString& remoteBranch,
-                                      QAction* sourceAction);
+                                      QAction* sourceAction,
+                                      std::string key);
 
 
 private:
@@ -162,6 +189,50 @@ private:
     /// async repository open is in flight (so Pull/Commit can't
     /// fire against the previous repo mid-open).
     void setRepoActionsEnabled(bool on);
+    /// For entry points that run git or libgit2 on the repository
+    /// straight away (the sidebar's checkout, branch create and delete,
+    /// push): while a local op runs, or a step of the service's
+    /// (gitStepRunning()), says so on the status bar, as
+    /// RepoCommandController's refusal does, and returns true. The
+    /// menus and toolbar are off then; these weren't, and a libgit2
+    /// checkout ran under a merge.
+    bool refuseWhileLocalOpRuns();
+    /// A step runs on the open repository (GitService::
+    /// rebaseStepRunning()): a commit and its hooks, a rebase step, an
+    /// abort. The repo actions and menus are off then, as for a local
+    /// op: a toolbar branch switch during a commit's pre-commit hook
+    /// made the commit land on the other branch.
+    bool gitStepRunning() const;
+    /// Applies localOpRunning_ and gitStepRunning() to the repo actions,
+    /// menus and sidebar again, keeping what repoActionsEnabled_ says.
+    void reapplyRepoActionLocks();
+    /// For a flow that asks first (a question, an editor, a picker) and
+    /// then runs git on the open repository: whether that is no longer
+    /// the repository it asked about (`key`, GitService::openKey() taken
+    /// before asking) — another was opened, or is opening, meanwhile (a
+    /// second launch hands its path over while the question is up).
+    /// Says so on the status bar, `notDone` saying what wasn't done.
+    /// Asked once the answer is in: git ran on whatever repository was
+    /// open then, and Edit patterns applied one repository's sparse
+    /// patterns to another, whose files went.
+    bool repositoryChangedSince(const std::string& key, const QString& notDone);
+    /// Closes `window`, a modeless one of the repository with `key`,
+    /// once another repository is open (or none is).
+    void closeWithRepository(QWidget* window, const std::string& key);
+    /// For the in-progress bar's Skip and Abort, and its Continue of a
+    /// paused sequence (`continuing`): finds the stop's
+    /// services::StopFacts on a worker, the bar busy meanwhile, then
+    /// calls `ask` with them and the open repository's key (for
+    /// repositoryChangedSince() after its question), if that repository
+    /// is still open and nothing else has started on it.
+    void inspectStopThen(
+        widgets::RepoOperationBar* bar,
+        std::function<void(const services::StopFacts&, const std::string&)> ask,
+        bool continuing = false);
+    /// Keeps `apply` told whether the repository is busy (a local op or
+    /// a step runs), for as long as `context` lives: the modeless
+    /// windows' buttons (stashes, submodules) went to git under the op.
+    void followRepoBusy(QObject* context, std::function<void(bool busy)> apply);
 
     /// Walk every named leaf action under the menu bar, record its
     /// factory-default shortcut, and apply any user override saved
@@ -246,6 +317,10 @@ private:
         QString  path;                 // non-empty while in flight
         QWidget* widgetBefore = nullptr;  // revert target on failure
         QString  titleBefore;
+        // The repository actions were on: a repository was on screen,
+        // or File > Home left its actions on. Not GitService::isOpen(),
+        // which Close leaves true.
+        bool     actionsBefore = false;
         bool     awaitingInitialLog = false;  // spinner latch
         quint64       generation = 0;     // GitService::openRepositoryAsync's
         QElapsedTimer started;            // invalid: nothing being timed
@@ -256,6 +331,7 @@ private:
             path.clear();
             widgetBefore = nullptr;
             titleBefore.clear();
+            actionsBefore = false;
             awaitingInitialLog = false;
             stopTiming();
         }
@@ -296,6 +372,9 @@ private:
     QMenu*     navMenu_        = nullptr;
     QMenu*     viewMenu_       = nullptr;
     QMenu*     cmdMenu_        = nullptr;
+    // Its repository actions are off with the others'; Periodic
+    // background fetch (a setting) and Plugin Manager stay on.
+    QMenu*     pluginsMenu_    = nullptr;
     QAction*   refreshAction_  = nullptr;  // repo-dependent
     QAction*   fetchAction_    = nullptr;  // repo-dependent
     QAction*   pullAction_     = nullptr;  // repo-dependent
@@ -367,8 +446,9 @@ private:
     // The running auto-fetch's own stop flag (GitService::fetch's
     // `cancel`), which disowning it sets.
     std::shared_ptr<std::atomic<bool>> autoFetchCancel_;
-    // The git dir of the repository the running auto-fetch fetches,
-    // for onRepositoryOpened to tell whether a revealed one's is gone.
+    // The key (GitService::openKey(), its git dir) of the repository
+    // the running auto-fetch fetches, for onRepositoryOpened to tell
+    // whether a revealed one's is gone.
     std::string autoFetchRepo_;
     // A remote op clicked while a disowned auto-fetch wound down
     // (runRemoteOp); that fetch's finished handler starts it.
@@ -376,15 +456,24 @@ private:
     // git's message from the last failed auto-fetch, flagged on
     // periodicFetchStatus_ until one succeeds.
     QString autoFetchError_;
+    // The running auto-fetch has failed, as a quiet one: its failure is
+    // in, so a Fetch click no longer reveals it (revealAutoFetch).
+    bool autoFetchFailed_ = false;
+    // The repository key (autoFetchRepo_) of a revealed auto-fetch
+    // that ended while an open was pending: its outcome went up over
+    // the loading screen, and goes once another repository is open
+    // (onRepositoryOpened).
+    std::string revealedFetchEndedRepo_;
 
-    // Set true by the operationFailed handler when fetch/pull/push
-    // emit a failure. Read by the toolbar action handlers right
-    // after the synchronous git op returns: if the flag is still
-    // false the op succeeded silently and we show our own
-    // confirmation message; if true, the failed-message that the
-    // operationFailed handler put on the status bar stays.
+    // Whether the last remote op failed: its own outcome, from what
+    // its op returned (startRemoteOp). If true, the failed-message
+    // that the operationFailed handler put on the status bar stays;
+    // otherwise we show our own confirmation message.
     bool lastRemoteOpFailed_ = false;
     bool remoteOpRunning_ = false;
+    // The action that started the running remote op (runRemoteOp): it
+    // stays off until the op ends, whatever turns the others on.
+    QAction* remoteOpAction_ = nullptr;
     // What setRepoActionsEnabled last set: whether there's a repository
     // for the repo actions (and the repo-only menus, which go with
     // them) to act on. A remote op's end re-enables its action only
@@ -392,7 +481,27 @@ private:
     bool repoActionsEnabled_ = false;
     // The running (or last) remote op's pool-thread job: the destructor
     // waits for it, since it runs inside gitService_.
-    QFuture<void> remoteOp_;
+    QFuture<bool> remoteOp_;
+    // A local op (repoCmd_) is running: the repo actions and menus are
+    // off until it ends. What it says it does, and whether it says so
+    // on the inline label (not over a remote op's narration).
+    bool localOpRunning_ = false;
+    // A repoStateReady came while a local op ran, and the in-progress
+    // bar didn't take it: a status refresh follows the op's end.
+    bool barStateHeld_ = false;
+    QString localOpMessage_;
+    bool localOpNarrated_ = false;
+    // GitService::stepWarning of the step about to report: git's
+    // warnings on a step that went through.
+    QString stepWarning_;
+    // The bar's Abort of a cherry-pick or revert sequence paused after a
+    // commit made during it, which git stops without rewinding: its
+    // outcome says so.
+    bool abortKeepsCommits_ = false;
+    // A Skip or an Abort of the in-progress bar is looking at the stop
+    // (inspectStopThen()); each look, and each open, a generation.
+    bool inspectingStop_ = false;
+    quint64 stopInspection_ = 0;
 
     // Real shortcut registry: every named leaf menu action, with the
     // shortcut it was constructed with. Built by
@@ -414,7 +523,8 @@ private:
     // the auto-clear timer that three sites used to hand-roll.
     InlineOpIndicator* opIndicator_ = nullptr;
     // Shared guard→run→report→refresh spine for menu actions that
-    // shell out to git.
+    // shell out to git: local ops, on a pool thread, one at a time.
+    // The destructor waits for the running one.
     RepoCommandController* repoCmd_ = nullptr;
 
     // Usage statistics (setTelemetry). Owned by main(), declared there

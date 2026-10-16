@@ -63,10 +63,11 @@ QVariant CommitLogModel::data(const QModelIndex& index, int role) const {
                     if (secs < 86400)
                         return tr("%1 hr ago").arg(secs / 3600);
                     if (secs < 86400LL * 30)
-                        return tr("%1 day(s) ago").arg(secs / 86400);
+                        return tr("%n day(s) ago", nullptr, static_cast<int>(secs / 86400));
                     if (secs < 86400LL * 365)
                         return tr("%1 mo ago").arg(secs / (86400LL * 30));
-                    return tr("%1 yr(s) ago").arg(secs / (86400LL * 365));
+                    return tr("%n yr(s) ago", nullptr,
+                              static_cast<int>(secs / (86400LL * 365)));
                 }
                 return when.toString("yyyy-MM-dd hh:mm");
             }
@@ -133,7 +134,11 @@ void CommitLogModel::clear() {
     beginResetModel();
     commits_.clear();
     graphData_.clear();
-    hasMore_ = true;
+    // Nothing pages until setCommits brings a first page. An open
+    // clears the model while the service still has the PREVIOUS
+    // repository, and the view's fetchMore would page that one's
+    // history in under the new title.
+    hasMore_ = false;
     fetchPending_ = false;
     endResetModel();
 }

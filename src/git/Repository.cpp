@@ -1,10 +1,13 @@
 #include "git/Repository.h"
 #include <QFile>
+#include <QFileInfo>
+#include <QScopeGuard>
 #include <QString>
 #include <git2.h>
 #include <cstring>
 #include <sstream>
 #include <string_view>
+#include <utility>
 
 namespace gitbolt::git {
 
@@ -485,6 +488,40 @@ void reloadIndex(git_repository* repo) {
     if (freshIndex(&index, repo) == 0)
         git_index_free(index);
 }
+
+// Whether git's state file `name` (MERGE_HEAD, CHERRY_PICK_HEAD, …) is
+// in the git dir: a linked worktree's own, where git keeps them.
+bool hasStateFile(git_repository* repo, const char* name) {
+    return QFileInfo::exists(QString::fromUtf8(git_repository_path(repo))
+                             + QLatin1String(name));
+}
+
+// The operation git's sequencer still has commits to go for, by the
+// first verb of its todo list, as `git status` reads it: "pick" (or
+// "p") for a cherry-pick, "revert" for a revert. None without one.
+RepoState sequenceState(git_repository* repo) {
+    QFile todo(QString::fromUtf8(git_repository_path(repo))
+               + QLatin1String("sequencer/todo"));
+    if (!todo.open(QIODevice::ReadOnly))
+        return RepoState::None;
+    const std::string text = todo.read(4096).toStdString();
+    const auto isBlank = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    size_t start = 0;
+    while (start < text.size() && isBlank(text[start]))
+        ++start;
+    size_t end = start;
+    while (end < text.size() && !isBlank(text[end]))
+        ++end;
+    // git wants the verb followed by a space or a tab.
+    if (end == text.size() || (text[end] != ' ' && text[end] != '\t'))
+        return RepoState::None;
+    const std::string_view verb(text.data() + start, end - start);
+    if (verb == "pick" || verb == "p")
+        return RepoState::CherryPick;
+    if (verb == "revert")
+        return RepoState::Revert;
+    return RepoState::None;
+}
 } // namespace
 
 Result<void> Repository::stageFile(const std::string& path) {
@@ -506,7 +543,15 @@ Result<void> Repository::unstageFile(const std::string& path) {
     git_strarray arr = {const_cast<char**>(paths), 1};
     int err = git_reset_default(repo_, headCommit, &arr);
     if (headCommit) git_object_free(headCommit);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        // The reset is made in the copy, then written. When the write
+        // failed (another git holds index.lock), the copy kept the
+        // file unstaged while the index file didn't, and status read
+        // the copy (see Index.cpp).
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
     return Result<void>::success();
 }
 
@@ -532,14 +577,27 @@ Result<void> Repository::discardWorkdirChanges(const std::string& path) {
 }
 
 Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
+    if (amend) {
+        if (std::string problem = amendProblem(); !problem.empty())
+            return GitError(GitErrorCode::Unmerged, std::move(problem));
+    }
+
     git_index* index = nullptr;
     int err = freshIndex(&index, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
 
     git_oid treeOid;
     err = git_index_write_tree(&treeOid, index);
+    const bool indexEmpty = git_index_entrycount(index) == 0;
     git_index_free(index);
     if (err < 0) return GitError::fromLibgit2(err);
+
+    // Whether the commit would change nothing next to `base` (with no
+    // base, next to the empty tree), which `git commit` refuses: with
+    // nothing staged, this made an empty commit.
+    const auto changesNothing = [&](const git_commit* base) {
+        return base ? git_oid_equal(&treeOid, git_commit_tree_id(base)) != 0 : indexEmpty;
+    };
 
     git_tree* tree = nullptr;
     err = git_tree_lookup(&tree, repo_, &treeOid);
@@ -548,6 +606,10 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
     git_signature* sig = nullptr;
     err = git_signature_default(&sig, repo_);
     if (err < 0) { git_tree_free(tree); return GitError::fromLibgit2(err); }
+    const auto release = qScopeGuard([&] {
+        git_signature_free(sig);
+        git_tree_free(tree);
+    });
 
     git_oid commitOid;
     if (amend) {
@@ -557,20 +619,35 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
         // crash on the very first commit with "Amend" ticked.
         git_reference* headRef = nullptr;
         err = git_repository_head(&headRef, repo_);
-        if (err < 0) {
-            git_signature_free(sig);
-            git_tree_free(tree);
+        if (err < 0)
             return GitError::fromLibgit2(err);
-        }
         git_commit* headCommit = nullptr;
         err = git_reference_peel(reinterpret_cast<git_object**>(&headCommit), headRef, GIT_OBJECT_COMMIT);
         git_reference_free(headRef);
-        if (err < 0) {
-            git_signature_free(sig);
-            git_tree_free(tree);
+        if (err < 0)
             return GitError::fromLibgit2(err);
+        // Amended to its parent's tree, the commit would be empty, and
+        // git refuses that too. A merge's may be: its parents are what
+        // it records.
+        bool empty = false;
+        if (git_commit_parentcount(headCommit) <= 1) {
+            git_commit* parent = nullptr;
+            if (git_commit_parentcount(headCommit) == 0
+                || git_commit_parent(&parent, headCommit, 0) == 0)
+                empty = changesNothing(parent);
+            git_commit_free(parent);
         }
-        err = git_commit_amend(&commitOid, headCommit, "HEAD", sig, sig, nullptr, message.c_str(), tree);
+        if (empty) {
+            git_commit_free(headCommit);
+            return GitError(GitErrorCode::GenericError,
+                            "Amending would leave the last commit empty.");
+        }
+        // No author: libgit2 then keeps the commit's own (name, email
+        // and date), as `git commit --amend` does, and only the
+        // committer is the user. Given the user's signature, the amend
+        // made the user the author, dated now.
+        err = git_commit_amend(&commitOid, headCommit, "HEAD", nullptr, sig, nullptr,
+                               message.c_str(), tree);
         git_commit_free(headCommit);
     } else {
         std::vector<git_commit*> parents;
@@ -597,6 +674,17 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
                 return 0;
             },
             &mergeHeads);
+        // Nothing staged. A merge may conclude so ("-s ours", or every
+        // change already here): its second parent is the point.
+        if (mergeHeads.empty() && changesNothing(parents.empty() ? nullptr : parents.front())) {
+            for (auto* p : parents)
+                git_commit_free(p);
+            if (hasStateFile(repo_, "CHERRY_PICK_HEAD"))
+                return GitError(GitErrorCode::Applied,
+                                "The cherry-picked changes are already on this branch; "
+                                "abort the cherry-pick.");
+            return GitError(GitErrorCode::GenericError, "Nothing to commit: no changes are staged.");
+        }
         for (const auto& oid : mergeHeads) {
             git_commit* mergeParent = nullptr;
             if (git_commit_lookup(&mergeParent, repo_, &oid) == 0)
@@ -644,10 +732,159 @@ Result<ObjectId> Repository::commit(const std::string& message, bool amend) {
         }
     }
 
-    git_signature_free(sig);
-    git_tree_free(tree);
     if (err < 0) return GitError::fromLibgit2(err);
     return ObjectId(&commitOid);
+}
+
+std::string Repository::amendProblem() const {
+    // By the files, as commit() clears them: state() names a rebase
+    // before anything else. At a rebase's stop a CHERRY_PICK_HEAD is
+    // the rebase's own pick (older gits wrote one), not one to finish.
+    if (hasStateFile(repo_, "MERGE_HEAD"))
+        return "You are in the middle of a merge -- cannot amend.";
+    if (hasStateFile(repo_, "CHERRY_PICK_HEAD") && state() != RepoState::Rebase)
+        return "You are in the middle of a cherry-pick -- cannot amend.";
+    if (hasStateFile(repo_, "REVERT_HEAD"))
+        return "You are in the middle of a revert -- cannot amend.";
+    return {};
+}
+
+std::string Repository::preparedMessage() const {
+    // A pick's message is the picked commit's own; a merge's and a
+    // revert's are git's (or libgit2's), written for it.
+    bool picked = false;
+    switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_CHERRYPICK:
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+        picked = true;
+        break;
+    case GIT_REPOSITORY_STATE_MERGE:
+    case GIT_REPOSITORY_STATE_REVERT:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+        break;
+    default:
+        return {};
+    }
+    QFile file(QString::fromUtf8(git_repository_path(repo_)) + QLatin1String("MERGE_MSG"));
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+
+    // What git starts its comment lines with. git 2.45 and later take
+    // core.commentChar and core.commentString as one setting, a string
+    // for either; older gits read core.commentChar alone, so they
+    // write '#' where only core.commentString is set. The git that
+    // wrote MERGE_MSG may be the terminal's or GitBolt's, so each
+    // prefix it may have used counts: every value of both keys, at
+    // every level, except "auto" (ignoring case, as git matches it:
+    // only `git commit` picks a character then, and MERGE_MSG has the
+    // one set before it, or '#'). '#' where none is set. The prefix of
+    // git's note of the conflicts, below, settles which git wrote it.
+    // Where there is no note (a merge stopped by --no-commit or a
+    // hook), core.commentString alone means a git that reads it wrote
+    // the message, as that's whose setting it is: a '#' line is the
+    // message's own then, as that git's `git commit` keeps it, and an
+    // older git's '#' lines show in the prefill, to be deleted, rather
+    // than a line of the message going unseen.
+    QList<QByteArray> comments;
+    git_config* config = nullptr;
+    if (git_repository_config_snapshot(&config, repo_) == 0) {
+        for (const char* key : {"core.commentString", "core.commentChar"}) {
+            git_config_get_multivar_foreach(
+                config, key, nullptr,
+                [](const git_config_entry* entry, void* payload) -> int {
+                    auto* values = static_cast<QList<QByteArray>*>(payload);
+                    const QByteArray value(entry->value ? entry->value : "");
+                    if (!value.isEmpty() && qstricmp(value.constData(), "auto") != 0
+                        && !values->contains(value))
+                        *values << value;
+                    return 0;
+                },
+                &comments);
+        }
+        git_config_free(config);
+    }
+    if (comments.isEmpty())
+        comments << QByteArrayLiteral("#");
+    // libgit2's note of the conflicts (GitBolt's own merge or pick)
+    // has '#' whatever the setting.
+    QList<QByteArray> notes = comments;
+    if (!notes.contains(QByteArrayLiteral("#")))
+        notes << QByteArrayLiteral("#");
+    // A comment line's text, after its prefix (the one of `markers` it
+    // starts with, in `marker`); none for other lines.
+    const auto commentText = [](const QByteArray& line, const QList<QByteArray>& markers,
+                                QByteArray* text, QByteArray* marker = nullptr) {
+        for (const QByteArray& prefix : markers) {
+            if (line.startsWith(prefix)) {
+                *text = line.mid(prefix.size()).trimmed();
+                if (marker)
+                    *marker = prefix;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    QList<QByteArray> lines = file.readAll().split('\n');
+    // CRLF line ends: git's own cleanup drops the CRs.
+    for (QByteArray& line : lines) {
+        if (line.endsWith('\r'))
+            line.chop(1);
+    }
+    // git's note of the conflicts at the end ("# Conflicts:", libgit2's
+    // "#Conflicts:", the files under it), or a scissors line and what
+    // follows it (commit.cleanup=scissors): from there on there are only
+    // comment lines and blank ones. That goes, and nothing else of a
+    // pick's: its "#42 Fix login" subject, or "# Notes" heading, is the
+    // commit's own, as a clean `git cherry-pick` commits it.
+    //
+    // git writes its note with a space after the prefix ("; Conflicts:");
+    // libgit2's "#Conflicts:" has none, and '#' whatever the setting.
+    // The prefix of git's note is the one git wrote all its comment
+    // lines with, so it alone marks a merge's or a revert's comments:
+    // a '#' line is the message's own where the note has ';' (from
+    // core.commentString, which only git 2.45 and later read), and a
+    // ';' line is where the note has '#' (a core.commentChar ';' that
+    // a '#' set after it outranks).
+    qsizetype end = lines.size();
+    QByteArray gitsPrefix;
+    for (qsizetype i = lines.size() - 1; i >= 0; --i) {
+        QByteArray text;
+        QByteArray prefix;
+        if (!commentText(lines.at(i), notes, &text, &prefix)) {
+            if (lines.at(i).trimmed().isEmpty())
+                continue;
+            break;
+        }
+        if (text == "Conflicts:" || text == "------------------------ >8 ------------------------") {
+            end = i;
+            gitsPrefix = lines.at(i).mid(prefix.size()).startsWith(' ') ? prefix : QByteArray();
+        }
+    }
+    lines.resize(end);
+    if (!gitsPrefix.isEmpty())
+        comments = {gitsPrefix};
+
+    std::string message;
+    for (const QByteArray& line : std::as_const(lines)) {
+        // A merge's or a revert's comment lines are git's notes too (a
+        // signed tag's "gpg:" lines, revert.reference's placeholder for
+        // a title), which a terminal's `git commit` drops.
+        QByteArray text;
+        if (!picked && commentText(line, comments, &text))
+            continue;
+        // Leading blank lines, which git's own cleanup drops: the one
+        // under revert.reference's placeholder, say.
+        if (message.empty() && line.trimmed().isEmpty())
+            continue;
+        message.append(line.constData(), static_cast<size_t>(line.size()));
+        message += '\n';
+    }
+    // Trailing blank lines (git's own cleanup drops them too).
+    while (!message.empty() && (message.back() == '\n' || message.back() == ' '
+                                || message.back() == '\r' || message.back() == '\t'))
+        message.pop_back();
+    return message;
 }
 
 Result<std::vector<BranchInfo>> Repository::branches(BranchType filter) const {
@@ -946,7 +1183,11 @@ Result<MergeResult> Repository::merge(const ObjectId& theirHead, MergePreference
 RepoState Repository::state() const {
     switch (git_repository_state(repo_)) {
     case GIT_REPOSITORY_STATE_NONE:
-        return RepoState::None;
+        // libgit2 knows a cherry-pick or revert of several commits only
+        // while one of them waits for its commit. Paused between two
+        // (see sequencePaused()), it read as no operation at all: the
+        // in-progress bar went away with commits still to come.
+        return sequenceState(repo_);
     case GIT_REPOSITORY_STATE_MERGE:
         return RepoState::Merge;
     case GIT_REPOSITORY_STATE_REVERT:
@@ -962,6 +1203,48 @@ RepoState Repository::state() const {
     default:
         return RepoState::Other;
     }
+}
+
+bool Repository::sequencePaused() const {
+    return git_repository_state(repo_) == GIT_REPOSITORY_STATE_NONE
+        && sequenceState(repo_) != RepoState::None;
+}
+
+// git's sequencer_skip(): with CHERRY_PICK_HEAD (or REVERT_HEAD) there
+// is a commit to drop. Without, it skips only while rollback_is_safe():
+// HEAD equals the id in sequencer/abort-safety, a missing file counting
+// as the null id. Committing the stopped commit moves HEAD past it, and
+// the Skip offered then only ever failed.
+bool Repository::sequenceSkippable() const {
+    switch (git_repository_state(repo_)) {
+    case GIT_REPOSITORY_STATE_CHERRYPICK_SEQUENCE:
+    case GIT_REPOSITORY_STATE_REVERT_SEQUENCE:
+        return sequenceState(repo_) != RepoState::None;
+    case GIT_REPOSITORY_STATE_NONE:
+        if (sequenceState(repo_) == RepoState::None)
+            return false;
+        break;
+    default:
+        return false;
+    }
+    QFile safety(QString::fromUtf8(git_repository_path(repo_))
+                 + QLatin1String("sequencer/abort-safety"));
+    std::string expected;
+    if (safety.open(QIODevice::ReadOnly))
+        expected = safety.read(256).trimmed().toLower().toStdString();
+    else if (safety.exists())
+        return false;   // git dies on a file it can't read
+    git_oid head;
+    std::string actual;
+    if (git_reference_name_to_id(&head, repo_, "HEAD") == 0)
+        actual = git_oid_tostr_s(&head);
+    // The null id, either way round, matches only the other null id.
+    const auto isNull = [](const std::string& id) {
+        return id.empty() || id.find_first_not_of('0') == std::string::npos;
+    };
+    if (isNull(expected) || isNull(actual))
+        return isNull(expected) && isNull(actual);
+    return expected == actual;
 }
 
 Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
@@ -1128,7 +1411,8 @@ Result<std::vector<TagInfo>> Repository::tags() const {
                     git_object_free(peeled);
                 }
                 const char* message = git_tag_message(tag);
-                info.message = message ? message : "";
+                info.message = std::string(
+                    tagMessageWithoutSignature(message ? message : ""));
                 info.tagger = Signature::fromGit(git_tag_tagger(tag));
             }
             git_object_free(obj);
@@ -1367,6 +1651,28 @@ Result<void> Repository::stashDrop(size_t index) {
 }
 
 Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
+    // On top of an operation in progress, libgit2 writes its own
+    // CHERRY_PICK_HEAD and MERGE_MSG over that operation's, and a pick
+    // that then fails (an earlier pick's changes in the way) deletes
+    // them: the merge, or the earlier pick, was gone without a word,
+    // and its commit went in as an ordinary one. Refused, as git
+    // refuses it, before anything is written.
+    const char* operation = nullptr;
+    switch (state()) {
+    case RepoState::None:       break;
+    case RepoState::Merge:      operation = "merge"; break;
+    case RepoState::Revert:     operation = "revert"; break;
+    case RepoState::CherryPick: operation = "cherry-pick"; break;
+    case RepoState::Rebase:     operation = "rebase"; break;
+    case RepoState::Other:
+        return GitError(GitErrorCode::Unmerged,
+                        "Another git operation (git am or bisect) is in progress. "
+                        "Finish it first.");
+    }
+    if (operation)
+        return GitError(GitErrorCode::Unmerged,
+                        std::string("A ") + operation + " is in progress. Finish or abort it first.");
+
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
     git_commit* commit = nullptr;
@@ -1396,6 +1702,26 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
         return GitError::fromLibgit2(err);
     CherryPickResult result;
     result.hasConflicts = git_index_has_conflicts(index) != 0;
+    // A pick whose changes are on the branch already changes nothing.
+    // It was reported a success, and left in progress for a commit that
+    // git then refused ("The previous cherry-pick is now empty…"), with
+    // advice (--allow-empty, `git cherry-pick --skip`) GitBolt doesn't
+    // offer. Nothing is left in progress: there's nothing to commit.
+    if (!result.hasConflicts) {
+        git_oid treeOid;
+        git_reference* headRef = nullptr;
+        git_commit* head = nullptr;
+        if (git_index_write_tree(&treeOid, index) == 0
+            && git_repository_head(&headRef, repo_) == 0
+            && git_reference_peel(reinterpret_cast<git_object**>(&head), headRef,
+                                  GIT_OBJECT_COMMIT) == 0
+            && git_oid_equal(&treeOid, git_commit_tree_id(head))) {
+            result.alreadyApplied = true;
+            git_repository_state_cleanup(repo_);
+        }
+        git_commit_free(head);
+        git_reference_free(headRef);
+    }
     git_index_free(index);
     return result;
 }

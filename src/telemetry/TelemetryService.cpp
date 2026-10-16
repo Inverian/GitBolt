@@ -23,10 +23,12 @@ constexpr qsizetype kMaxDistinctCommands = 512;
 } // namespace
 
 TelemetryService::TelemetryService(Config config, std::function<QString()> installIdProvider,
-                                   bool enabled, QObject* parent)
+                                   bool enabled, std::function<bool()> switchReader,
+                                   QObject* parent)
     : QObject(parent),
       config_(std::move(config)),
       installIdProvider_(std::move(installIdProvider)),
+      switchReader_(std::move(switchReader)),
       client_{config_.appVersion, Environment::current()},
       userAgent_(userAgent(client_)),
       complete_(config_.isComplete()),
@@ -149,7 +151,11 @@ void TelemetryService::scheduleFlush() {
     if (!isActive() || inCycle_ || backingOff_ || flushTimer_.isActive()
         || sentThisTick_ >= config_.maxPerFlush)
         return;
-    flushTimer_.start(config_.firstFlushDelayMs);
+    // A crash summary (the queue keeps it in front) goes at once: the
+    // crash may come back within seconds, and the next one replaces a
+    // summary still queued, so a crash loop would never be reported.
+    const bool crash = !queue_->isEmpty() && queue_->front().isCrash();
+    flushTimer_.start(crash ? 0 : config_.firstFlushDelayMs);
 }
 
 void TelemetryService::beginCycle() {
@@ -157,13 +163,13 @@ void TelemetryService::beginCycle() {
     // send again before the next retry tick.
     if (!isActive() || inCycle_ || backingOff_)
         return;
+    // Every cycle, the first flush's and each retry tick's, idle or
+    // not: the switch may have been turned off in another process.
+    // (With records to send, sendFront() reads it, before each one.)
     if (queue_->isEmpty()) {
-        queue_->sync();
+        if (!switchedOffElsewhere())
+            queue_->sync();
         return;
-    }
-    if (!network_) {
-        network_ = new QNetworkAccessManager(this);
-        network_->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     }
     inCycle_ = true;
     sendFront();
@@ -172,9 +178,19 @@ void TelemetryService::beginCycle() {
 void TelemetryService::sendFront() {
     if (!isActive() || !inCycle_)
         return;
+    // At every step of the cycle, before each request, not just as it
+    // starts: a cycle paces up to maxPerFlush of them (a minute's
+    // worth, shipped), and the switch turned off in another process
+    // meanwhile let the rest go out all the same.
+    if (switchedOffElsewhere())
+        return;
     if (queue_->isEmpty() || sentThisTick_ >= config_.maxPerFlush) {
         endCycle();
         return;
+    }
+    if (!network_) {
+        network_ = new QNetworkAccessManager(this);
+        network_->setRedirectPolicy(QNetworkRequest::ManualRedirectPolicy);
     }
 
     const QueuedRecord& record = queue_->front();
@@ -195,6 +211,14 @@ void TelemetryService::sendFront() {
     QNetworkReply* reply =
         network_->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     reply_ = reply;
+    // Whether any of the request got onto a connection: an error with
+    // nothing sent never reached a server (classify()). Delivered ahead
+    // of finished(), from the same thread.
+    replySent_ = false;
+    connect(reply, &QNetworkReply::uploadProgress, this, [this, reply](qint64 sent, qint64) {
+        if (reply == reply_ && sent > 0)
+            replySent_ = true;
+    });
     // By id, not "the front": a record appended meanwhile can push the
     // queue over its caps, which may drop this very record.
     connect(reply, &QNetworkReply::finished, this,
@@ -213,7 +237,7 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
         return;
 
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    switch (classify(status, reply->error())) {
+    switch (classify(status, reply->error(), replySent_)) {
     case Outcome::Sent:
     case Outcome::Drop:
         queue_->remove(recordId);
@@ -221,6 +245,12 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
         return;
     case Outcome::Retry:
         queue_->bumpAttempts(recordId);
+        backingOff_ = true;
+        endCycle();
+        return;
+    case Outcome::Unreachable:
+        // As a Retry, but the record keeps its attempts: time offline
+        // costs it nothing, and adds nothing for endCycle to write.
         backingOff_ = true;
         endCycle();
         return;
@@ -282,6 +312,10 @@ void TelemetryService::setUserEnabled(bool enabled) {
 }
 
 void TelemetryService::persistPending() {
+    // Turned off in another process since the last cycle: the queue is
+    // deleted, as by the switch, rather than written once more.
+    if (isActive())
+        switchedOffElsewhere();
     if (!isActive()) {
         abortInFlight();
         stopTimers();
@@ -312,6 +346,13 @@ void TelemetryService::stopTimers() {
     retryTimer_.stop();
     paceTimer_.stop();
     countTimer_.stop();
+}
+
+bool TelemetryService::switchedOffElsewhere() {
+    if (!switchReader_ || switchReader_())
+        return false;
+    setUserEnabled(false);   // stops, and deletes the queue
+    return true;
 }
 
 } // namespace gitbolt::telemetry

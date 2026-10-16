@@ -1,5 +1,7 @@
 #include "widgets/MergeConflictWidget.h"
 
+#include <QApplication>
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -10,14 +12,83 @@
 
 namespace gitbolt::widgets {
 
-static const QColor kOursColor(173, 216, 230, 60);    // light blue
-static const QColor kBaseColor(211, 211, 211, 60);    // light gray
-static const QColor kTheirsColor(144, 238, 144, 60);  // light green
+namespace {
+
+// The panes' tints and their headings' colours, for the light theme
+// or the dark one. The light ones on the dark theme put mid-tone
+// headings on near-black: the result's brown read at 2.4:1.
+struct ConflictColors {
+    QColor oursBg;
+    QColor baseBg;
+    QColor theirsBg;
+    QColor oursFg;
+    QColor baseFg;
+    QColor theirsFg;
+    QColor resultFg;
+};
+
+ConflictColors conflictColorsFor(const QPalette& palette) {
+    const bool dark = palette.color(QPalette::WindowText).lightness()
+                      > palette.color(QPalette::Window).lightness();
+    if (dark) {
+        // The diff viewer's dark blue and green (editor/DiffColors.cpp).
+        return {QColor(0x1d, 0x2d, 0x4a), QColor(0x2d, 0x2d, 0x2d), QColor(0x1f, 0x3d, 0x2a),
+                QColor(0x79, 0xc0, 0xff), QColor(0x9e, 0x9e, 0x9e), QColor(0x7e, 0xe7, 0x87),
+                QColor(0xf0, 0x88, 0x3e)};
+    }
+    // Light blue, light gray and light green; a blue, a gray, a green
+    // and saddle brown, the headings' at 4.5:1 or more on the window
+    // (royal blue, gray and forest green read at 3.4:1 to 4.2:1).
+    return {QColor(173, 216, 230, 60), QColor(211, 211, 211, 60), QColor(144, 238, 144, 60),
+            QColor(0x35, 0x58, 0xc8), QColor(0x6a, 0x6a, 0x6a), QColor(0x1c, 0x7a, 0x1c),
+            QColor(0x8b, 0x45, 0x13)};
+}
+
+// Every character of `document` on `color`, leaving its editor's
+// cursor and scroll position where they are.
+void tint(QTextDocument* document, const QColor& color) {
+    QTextCharFormat fmt;
+    fmt.setBackground(color);
+    QTextCursor cursor(document);
+    cursor.select(QTextCursor::Document);
+    cursor.setCharFormat(fmt);
+}
+
+} // namespace
 
 MergeConflictWidget::MergeConflictWidget(QWidget* parent)
     : QWidget(parent)
 {
     setupUI();
+    applyColors();
+}
+
+void MergeConflictWidget::changeEvent(QEvent* event) {
+    QWidget::changeEvent(event);
+    // A theme switch: the PaletteChange the window passes down
+    // (RepoOperationBar::changeEvent).
+    if (event->type() == QEvent::PaletteChange && oursLabel_)
+        applyColors();
+}
+
+void MergeConflictWidget::applyColors() {
+    const ConflictColors colors = conflictColorsFor(QApplication::palette());
+    // Style sheets, not palettes: the theme's application style sheet,
+    // set right after its palette, repolishes every widget, and that
+    // puts back the palette a widget had at its last polish.
+    const auto heading = [](QLabel* label, const QColor& color) {
+        label->setStyleSheet(
+            QStringLiteral("font-weight: bold; color: %1;").arg(color.name()));
+    };
+    heading(oursLabel_, colors.oursFg);
+    heading(baseLabel_, colors.baseFg);
+    heading(theirsLabel_, colors.theirsFg);
+    heading(resultLabel_, colors.resultFg);
+    if (currentConflict_ >= 0) {
+        tint(oursEditor_->document(), colors.oursBg);
+        tint(baseEditor_->document(), colors.baseBg);
+        tint(theirsEditor_->document(), colors.theirsBg);
+    }
 }
 
 void MergeConflictWidget::setupUI() {
@@ -42,9 +113,8 @@ void MergeConflictWidget::setupUI() {
     auto* oursContainer = new QWidget(this);
     auto* oursLayout = new QVBoxLayout(oursContainer);
     oursLayout->setContentsMargins(0, 0, 0, 0);
-    auto* oursLabel = new QLabel(tr("Ours (Local)"), this);
-    oursLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #4169E1;"));
-    oursLayout->addWidget(oursLabel);
+    oursLabel_ = new QLabel(tr("Ours (Local)"), this);
+    oursLayout->addWidget(oursLabel_);
     oursEditor_ = new QPlainTextEdit(this);
     oursEditor_->setReadOnly(true);
     oursEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -55,9 +125,8 @@ void MergeConflictWidget::setupUI() {
     auto* baseContainer = new QWidget(this);
     auto* baseLayout = new QVBoxLayout(baseContainer);
     baseLayout->setContentsMargins(0, 0, 0, 0);
-    auto* baseLabel = new QLabel(tr("Base (Common Ancestor)"), this);
-    baseLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #808080;"));
-    baseLayout->addWidget(baseLabel);
+    baseLabel_ = new QLabel(tr("Base (Common Ancestor)"), this);
+    baseLayout->addWidget(baseLabel_);
     baseEditor_ = new QPlainTextEdit(this);
     baseEditor_->setReadOnly(true);
     baseEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -68,9 +137,8 @@ void MergeConflictWidget::setupUI() {
     auto* theirsContainer = new QWidget(this);
     auto* theirsLayout = new QVBoxLayout(theirsContainer);
     theirsLayout->setContentsMargins(0, 0, 0, 0);
-    auto* theirsLabel = new QLabel(tr("Theirs (Remote)"), this);
-    theirsLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #228B22;"));
-    theirsLayout->addWidget(theirsLabel);
+    theirsLabel_ = new QLabel(tr("Theirs (Remote)"), this);
+    theirsLayout->addWidget(theirsLabel_);
     theirsEditor_ = new QPlainTextEdit(this);
     theirsEditor_->setReadOnly(true);
     theirsEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -85,9 +153,8 @@ void MergeConflictWidget::setupUI() {
     auto* resultContainer = new QWidget(this);
     auto* resultLayout = new QVBoxLayout(resultContainer);
     resultLayout->setContentsMargins(0, 0, 0, 0);
-    auto* resultLabel = new QLabel(tr("Merged Result (editable)"), this);
-    resultLabel->setStyleSheet(QStringLiteral("font-weight: bold; color: #8B4513;"));
-    resultLayout->addWidget(resultLabel);
+    resultLabel_ = new QLabel(tr("Merged Result (editable)"), this);
+    resultLayout->addWidget(resultLabel_);
     resultEditor_ = new QPlainTextEdit(this);
     resultEditor_->setObjectName(QStringLiteral("conflict.result"));
     resultEditor_->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -214,9 +281,10 @@ void MergeConflictWidget::showConflict(int index) {
     }
 
     // Apply background highlights
-    applyHighlighting(oursEditor_, kOursColor);
-    applyHighlighting(baseEditor_, kBaseColor);
-    applyHighlighting(theirsEditor_, kTheirsColor);
+    const ConflictColors colors = conflictColorsFor(QApplication::palette());
+    applyHighlighting(oursEditor_, colors.oursBg);
+    applyHighlighting(baseEditor_, colors.baseBg);
+    applyHighlighting(theirsEditor_, colors.theirsBg);
 
     updateNavigationState();
 

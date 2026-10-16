@@ -29,6 +29,7 @@ set(SOURCES
     Submodule.cpp
     Tag.cpp
     Worktree.cpp
+    Askpass.h
     Blame.h
     Branch.h
     Cherrypick.h

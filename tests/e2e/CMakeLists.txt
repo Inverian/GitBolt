@@ -3,6 +3,8 @@
 #
 # Unix-only: the harness reaches QLocalServer's named socket as a
 # unix-domain socket, which has no Windows equivalent (named pipes).
+# The single-instance hand-off, which these tests also drive, is tested
+# on every platform, Windows included, by tests/app/TestSingleInstance.cpp.
 if(WIN32)
     message(STATUS "GitBolt: e2e tests skipped on Windows (unix sockets)")
     return()
@@ -16,15 +18,25 @@ endif()
 
 set(E2E_TESTS
     test_auto_fetch
+    test_auto_fetch_credentials
     test_auto_fetch_disowned
     test_branch_switch
     test_clone_dialog
     test_commit_flow
+    test_commit_hooks
+    test_crash_box_handoff
+    test_desktop_identity
+    test_dialog_guards
+    test_home_isolated
     test_instance_lock
+    test_local_op_async
+    test_local_op_guards
     test_quit_during_fetch
+    test_quit_during_rebase
     test_rebase_dialog
     test_rebase_progress
     test_remote_branches
+    test_remote_op_feedback
     test_remote_op_leave_repo
     test_settings_after_open
     test_single_instance

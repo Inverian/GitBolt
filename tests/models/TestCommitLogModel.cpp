@@ -254,6 +254,39 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // A cleared model has no first page, so it has nothing to page in.
+    // MainWindow clears the model as an open begins, while GitService
+    // still holds the PREVIOUS repository: a fetchMore then would walk
+    // that one's history (requestMoreCommits(0) → refreshLog(0)) and
+    // show its first page under the new repository's title. Only the
+    // first page, from setCommits, may turn paging back on.
+    // -----------------------------------------------------------------
+    void clearDoesNotPage() {
+        gitbolt::models::CommitLogModel model;
+        QVERIFY(!model.canFetchMore(QModelIndex()));   // never populated
+
+        model.setCommits({
+            makeCommit('B', {'A'}),
+            makeCommit('A'),
+        });
+        model.clear();
+        QVERIFY(!model.canFetchMore(QModelIndex()));
+
+        // A full first page: there may be more behind it.
+        std::vector<gitbolt::git::CommitData> page;
+        for (int i = 0; i < gitbolt::models::CommitLogModel::PAGE_SIZE; ++i) {
+            gitbolt::git::CommitData c;
+            c.id = gitbolt::git::ObjectId::fromHex(
+                QStringLiteral("%1").arg(i + 1, 40, 16, QLatin1Char('0')).toStdString());
+            c.parentIds.push_back(gitbolt::git::ObjectId::fromHex(
+                QStringLiteral("%1").arg(i + 2, 40, 16, QLatin1Char('0')).toStdString()));
+            page.push_back(std::move(c));
+        }
+        model.setCommits(std::move(page));
+        QVERIFY(model.canFetchMore(QModelIndex()));
+    }
+
+    // -----------------------------------------------------------------
     // Appending more commits to an already-populated model should
     // extend the row count rather than replace it.
     // -----------------------------------------------------------------

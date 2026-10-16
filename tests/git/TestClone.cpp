@@ -759,7 +759,7 @@ private slots:
 #endif
     }
 
-    // On Unix git's own SIGTERM handler usually cleans up a cancelled
+    // On Unix git's own SIGINT handler usually cleans up a cancelled
     // clone, leaving GitProcess::clone nothing to do. Here it can't:
     // an entry it isn't allowed to delete defeats it, as an open file
     // does on Windows (where TerminateJobObject gives git no chance at

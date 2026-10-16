@@ -27,8 +27,8 @@ struct QueuedRecord {
     /// comes, so "the front" can be another record by then.
     quint64 id = 0;
 
-    /// A GlitchTip crash event: the queue keeps at most one, and drops
-    /// it last when over its caps.
+    /// A GlitchTip crash event: the queue keeps at most one, in front
+    /// (it is sent first), and drops it last when over its caps.
     bool isCrash() const;
 };
 
@@ -48,7 +48,10 @@ struct QueuedRecord {
 /// time 0: a live owner's lock never expires by age, as for main.cpp's
 /// instance lock). Another live process holding it — main.cpp runs
 /// unguarded when the instance lock can't be created — leaves this
-/// queue unusable, and this process records and sends nothing.
+/// queue unusable, and this process records and sends nothing. A lock
+/// no PID check can prove stale (another machine's, or truncated) is
+/// cleared once it is two seconds old, as main.cpp clears its instance
+/// lock (util::removeUnprovableStaleLock); a live owner's never is.
 ///
 /// Never logs payloads.
 class EventQueue {
@@ -69,8 +72,9 @@ public:
     /// Takes the lock and loads the file. Malformed lines, lines with
     /// v != 1, records older than maxAgeDays and records that used up
     /// maxAttempts are dropped (the next sync() writes that back);
-    /// the caps are applied. False, and unusable, when the lock is
-    /// held by another live process or can't be created.
+    /// the crash, if any, goes in front; the caps are applied. False,
+    /// and unusable, when the lock is held by another live process or
+    /// can't be created.
     bool open();
     bool isUsable() const;
 
@@ -80,8 +84,10 @@ public:
     const QList<QueuedRecord>& records() const { return records_; }
 
     /// Appends to memory and to the file, and gives the record its id.
-    /// A crash record replaces the one already queued. Over maxQueued
-    /// or maxBytes, the oldest OpenPanel records go first, then the
+    /// A crash record replaces the one already queued and goes in
+    /// front: the crash that wrote it may come back within seconds,
+    /// and the next one replaces it unsent. Over maxQueued or
+    /// maxBytes, the oldest OpenPanel records go first, then the
     /// oldest errors, the crash last (memory only; the next sync()
     /// trims the file).
     void append(QueuedRecord record);

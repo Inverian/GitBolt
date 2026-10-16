@@ -15,8 +15,20 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace gitbolt::services {
+
+/// What the in-progress bar's Skip and Abort need to know before they
+/// ask (GitService::inspectStop()): GitProcess::committedRebaseStop(),
+/// hasTrackedChanges() and stagedWorkWithoutPick(). Its Continue of a
+/// paused sequence: GitProcess::unpickedSequenceStop(), alone.
+struct StopFacts {
+    QString committedRebaseStop;
+    bool trackedChanges = false;
+    bool stagedWithoutPick = false;
+    QString unpickedSequenceStop;
+};
 
 /// Threading rule. A GitService's state belongs to the thread it lives
 /// on (the GUI thread): repo_ is swapped there, the log scope and
@@ -32,6 +44,18 @@ namespace gitbolt::services {
 /// refreshStatus() & co.; the request lands behind any completion
 /// signal the worker emitted first, so handlers see e.g.
 /// rebaseStepFinished before the statusReady it causes.
+///
+/// What the refresh workers read goes out from the service's thread
+/// (deliverFor), and only while their repository is still the open one:
+/// the check on the worker alone let a result posted just before a swap
+/// reach the GUI after it, as the next repository's. A rebase step's or
+/// a cherry-pick's outcome goes the same way (reportTo), and waits for
+/// an open on its way to land or fail first.
+///
+/// While a step runs on the repository (rebaseStepRunning(): a commit
+/// and its hooks, a rebase step, an abort), the mutators that touch
+/// the index, HEAD or the work tree (staging, branches, stashes,
+/// checkout, cherry-pick) refuse with an operationFailed.
 class GitService : public QObject {
     Q_OBJECT
 public:
@@ -57,6 +81,17 @@ public:
     /// The generation of the latest open or close: equal to what
     /// openRepositoryAsync returned while that open is the latest.
     quint64 openGeneration() const { return openGeneration_; }
+
+    /// Which repository is open, by its git dir as libgit2 resolved it
+    /// (the same for every open of one repository, however its path was
+    /// typed), or empty when none is. Service thread only. Work started
+    /// for one repository reports to the open one if the keys match:
+    /// the same repository opened again (from Recent, or handed over by
+    /// a second launch) is still the one it was for.
+    const std::string& openKey() const { return openKey_; }
+
+    /// An openRepositoryAsync is in flight. Service thread only.
+    bool openPending() const { return openPending_; }
 
     void closeRepository();
     bool isOpen() const;
@@ -110,8 +145,15 @@ public:
     /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
     /// returns by value. Once you have the GitProcess object you can
     /// run shell commands on it without holding the lock — QProcess is
-    /// independent of libgit2 state.
+    /// independent of libgit2 state. Its commands stop on
+    /// cancelGitOps(), so a command run on a pool thread can't hold up
+    /// quitting.
     git::GitProcess process() const;
+
+    /// Whether a job the service runs (a refresh, a rebase step, a
+    /// checkout, Git Flow, maintenance) is still running. MainWindow
+    /// hides itself while quitting waits for them.
+    bool workRunning() const { return runner_.busy(); }
 
     void refreshStatus();
     /// Commits per history page (CommitLogModel pages by the same).
@@ -138,8 +180,8 @@ public:
     /// entries. Synchronous (file writes + index adds are fast);
     /// failures surface per-file via operationFailed. Ends with a
     /// status refresh. The caller then concludes the merge with a
-    /// normal commit — Repository::commit picks up MERGE_HEAD as a
-    /// second parent automatically.
+    /// normal commit — git commit (commitChanges) picks up MERGE_HEAD
+    /// as a second parent automatically.
     /// Returns false, having written nothing, while a rebase step runs
     /// on the repository (see rebaseStepRunning()), reported as an
     /// operationFailed.
@@ -149,9 +191,13 @@ public:
     /// Abort whatever conflicted operation is in progress, using
     /// the command that matches the repository state: merge /
     /// cherry-pick / rebase / revert --abort. No-op when the
-    /// repository is in a normal state.
-    /// Returns false, running nothing, while a rebase step runs on the
-    /// repository, reported as an operationFailed.
+    /// repository is in a normal state. git runs on a worker, as a
+    /// step (one git at a time; see rebaseStepRunning()) reported on
+    /// rebaseStepFinished as "rebase --abort", "merge --abort",
+    /// "cherry-pick --abort" or "revert --abort"; a failure comes as an
+    /// operationFailed of that name first, and the refreshes follow.
+    /// Returns false, running nothing, while a step runs on the
+    /// repository, reported as operationFailed("abort", …).
     bool abortConflictState();
 
     /// Choose which refs the log walk starts from. Default is
@@ -192,37 +238,89 @@ public:
     /// changed since it was rendered) surface via operationFailed.
     void applyPatchToIndex(const QString& patchText, bool reverse);
     void discardFile(const QString& path);
+    /// Commits the index through git itself (GitProcess::commit), on a
+    /// worker: the hooks may take minutes. Reports on commitComplete,
+    /// with git's own words (a hook's too) when it fails, then
+    /// refreshes. An amend that Repository::amendProblem() refuses
+    /// never reaches git, a revert's included, which git would allow.
+    /// When the merge concluded had stashed changes away
+    /// (merge.autoStash), git puts them back; if that conflicts, they
+    /// stay in the stash, reported as operationFailed("autostash").
+    /// The outcome goes out through reportTo(), as a rebase step's
+    /// does: while an open is on its way it waits for it, and nothing is
+    /// reported if another repository was opened meanwhile (the same
+    /// one opened again still gets it).
+    /// A step of its own (stepStarted("commit")): refused, with a
+    /// failed commitComplete, while a rebase step, a sequence's, an
+    /// abort or another commit runs on the repository, and those are
+    /// refused while it runs.
     void commitChanges(const QString& message, bool amend = false);
 
-    void createBranch(const QString& name);
+    /// A local branch `name` at the tip of the local branch
+    /// `startPoint`, or at HEAD when that is empty (the sidebar's "New
+    /// Branch from '<it>'", and its New Branch). Failures, an unborn
+    /// HEAD or a start point that is gone, go out as operationFailed.
+    void createBranch(const QString& name, const QString& startPoint = QString());
     void deleteBranch(const QString& name);
-    void checkoutBranch(const QString& name);
-    /// The sidebar's "Checkout as local branch" on `remoteBranch`
-    /// ("origin/feature/x"): the local branch named for it
-    /// ("feature/x"), created to track it unless it exists. Reports
-    /// failure as operationFailed("checkout", …).
-    void checkoutRemoteBranch(const QString& remoteBranch);
+    /// False when the checkout failed or was refused while a step runs
+    /// (either reported as an operationFailed), or no repository is
+    /// open.
+    bool checkoutBranch(const QString& name);
+    /// Whether the local branch `name` ("feature/x") exists. For the
+    /// sidebar's "Checkout as local branch", which checks an existing
+    /// one out as it is (checkoutBranch) and otherwise has git create
+    /// it, as a local op of MainWindow's: a first checkout can take
+    /// minutes, and as a job of the service's it ran with no busy state,
+    /// so a second one, or a commit, met its index.lock.
+    bool localBranchExists(const QString& name) const;
+
+    // The remote ops return false exactly when they reported a failure
+    // (operationFailed) or no repository is open: the outcome of the op
+    // MainWindow ran, whatever else failed meanwhile.
 
     /// Pushes `branch` (empty = the checked-out branch). A branch with
     /// no upstream yet is published with --set-upstream instead of
     /// failing. Safe off the GUI thread, like pull/fetch.
-    void push(const QString& remote, const QString& branch);
+    bool push(const QString& remote, const QString& branch);
     /// `git push <remote> --delete <branch>`: removes the branch on the
     /// server and, on success, the local remote-tracking ref. Failures
     /// surface as operationFailed("delete remote branch", …). Safe off
     /// the GUI thread.
-    void deleteRemoteBranch(const QString& remote, const QString& branch);
-    void pull(const QString& remote, const QString& branch);
+    bool deleteRemoteBranch(const QString& remote, const QString& branch);
+    bool pull(const QString& remote, const QString& branch);
+    /// Prunes the remote-tracking refs of branches deleted on the
+    /// server where git config doesn't say: with fetch.prune or
+    /// remote.<name>.prune set, git's own rules decide. Not where a
+    /// prune could reach further than refs/remotes/ (a remote's fetch
+    /// refspec writing tags or branches, a mirror's, or pruneTags set):
+    /// that fetch prunes nothing, as a plain `git fetch` doesn't, so
+    /// local tags and branches the server doesn't have stay. The same
+    /// goes for every initialized submodule, which the fetch may go on
+    /// into with the prune (git hands it on): one whose config would
+    /// let it reach further, or that sets fetch.prune itself, and the
+    /// fetch prunes nothing anywhere.
     /// `cancel`, when given, stops this fetch alone: set from any
-    /// thread, it ends git the way cancelRemoteOps() does (which stops
+    /// thread, it ends git the way cancelGitOps() does (which stops
     /// this fetch as well). MainWindow drops an auto-fetch with it.
-    void fetch(const QString& remote = "",
-               std::shared_ptr<std::atomic<bool>> cancel = nullptr);
-    /// Stops the git command of every running push, pull, fetch and
-    /// remote-branch delete (they fail with "Cancelled"), and makes
-    /// later ones fail at once. For shutdown: MainWindow calls it
-    /// before waiting for its remote-op thread. Thread-safe.
-    void cancelRemoteOps();
+    /// Without `allowPrompts` git and ssh ask the user nothing, and a
+    /// fetch that needs an answer fails (GitProcess::forbidPrompts):
+    /// for the auto-fetch, which nobody is waiting on.
+    bool fetch(const QString& remote = "",
+               std::shared_ptr<std::atomic<bool>> cancel = nullptr,
+               bool allowPrompts = true);
+    /// Stops every git command the service, or anyone with a process()
+    /// of it, runs: a push, pull, fetch or remote-branch delete, a
+    /// rebase step, a commit and its hooks, a checkout, Git Flow,
+    /// maintenance, a local op MainWindow runs on a pool thread. They
+    /// fail with "Cancelled", and later ones fail at once. git and its
+    /// hooks are interrupted as by Ctrl-C (SIGINT on Unix, a Ctrl-C on
+    /// their console on Windows; see GitProcess::run), so git rolls its
+    /// lockfiles back, a hook finishes cleaning up (pre-commit puts the
+    /// unstaged changes back), and a rebase stopped mid-step stays in
+    /// progress, to be carried on later. For shutdown: MainWindow calls it before
+    /// waiting for its pool threads, and the destructor before waiting
+    /// for the service's own. Thread-safe.
+    void cancelGitOps();
 
     // Interactive Rebase. Each step reports on rebaseStepFinished.
     // One step at a time per repository: another asked for while one
@@ -233,6 +331,28 @@ public:
     void rebaseAbort();
     void rebaseSkip();
 
+    /// GitProcess::committedRebaseStop() for the open repository: the
+    /// todo verb of the commit the rebase stopped at when that commit
+    /// is already in the branch (an `edit`, a reword a hook turned
+    /// down), where Skip keeps it; empty otherwise. Runs git there and
+    /// then (patch-ids, seconds on a big commit): not for the GUI
+    /// thread, where inspectStop() is the way.
+    QString committedRebaseStop() const;
+    /// GitProcess::hasTrackedChanges() for the open repository: whether
+    /// a tracked file has changes, staged or not, that a reset would
+    /// throw away (true when git can't tell). Runs git status there and
+    /// then: not for the GUI thread either.
+    bool hasTrackedChanges() const;
+
+    /// Finds the StopFacts of the open repository on a worker, and hands
+    /// them to `done` on the service's thread while that repository is
+    /// still the open one (reportTo; dropped otherwise). They run git:
+    /// git status, and two patch-ids at a reword's stop, which take
+    /// seconds on a big commit, and froze the window when the bar's
+    /// buttons asked on the GUI thread. With `continuing` (Continue of a
+    /// paused sequence), only StopFacts::unpickedSequenceStop.
+    void inspectStop(std::function<void(const StopFacts&)> done, bool continuing = false);
+
     /// Why `plan` can't run on the open repository as it is now, or an
     /// empty string when it can: HEAD has moved, or another branch is
     /// checked out, since the plan was made (or no repository is
@@ -242,11 +362,28 @@ public:
 
     /// Whether a rebase step is still running on the open repository —
     /// started on it, or on an earlier open of it (Recent, a hand-off
-    /// of the same path), whose outcome still comes.
+    /// of the same path), whose outcome still comes. A sequence's step,
+    /// an abort and a commit count too: one git at a time.
     bool rebaseStepRunning() const;
 
-    // Cherry-pick
-    void cherryPick(const std::vector<git::ObjectId>& commits);
+    /// A cherry-pick or revert of several commits paused between them
+    /// (Repository::sequencePaused()): `git cherry-pick --continue`
+    /// picks the rest (revert's reverts it). Skip leaves out the commit
+    /// it stopped at first, where git can (Repository::
+    /// sequenceSkippable(): at the stop itself too, a conflicted or an
+    /// empty pick). Steps as the rebase's are, one at a time,
+    /// reported on rebaseStepFinished as "cherry-pick --continue",
+    /// "revert --skip", ….
+    void sequenceContinue();
+    void sequenceSkip();
+
+    /// Stages `commit`'s changes: libgit2's cherry-pick never commits,
+    /// and the user's commit then concludes it, keeping its author.
+    /// Picking several this way can't work: the next one meets the
+    /// first one's uncommitted changes. While another operation is in
+    /// progress (a merge, a pick not committed yet) it is refused with
+    /// an operationFailed alone, as Repository::cherryPick refuses it.
+    void cherryPick(const git::ObjectId& commit);
 
     // Stash
     void stashSave(const QString& message, bool includeUntracked = false,
@@ -260,17 +397,18 @@ public:
     void refreshTags();
     /// `target` is any revision spec (branch, short or full SHA, …).
     /// `pushAfter` pushes the new tag to origin once creation
-    /// succeeds (same synchronous CLI path as push()).
-    void createTag(const QString& name, const QString& target,
+    /// succeeds (same synchronous CLI path as push()); MainWindow
+    /// pushes it as a remote op of its own instead. False when the tag
+    /// (or the push) failed, reported as an operationFailed.
+    bool createTag(const QString& name, const QString& target,
                    const QString& message, bool annotated,
                    bool pushAfter = false);
     /// `name` may be short ("v1.0") or the full "refs/tags/v1.0".
     void deleteTag(const QString& name);
 
-    // Submodules
+    // Submodules. Init and update are MainWindow's local ops (an update
+    // clones and checks out), as sync and deinit are.
     void refreshSubmodules();
-    void submoduleInit(const QString& name);
-    void submoduleUpdate(const QString& name);
 
     // Worktrees
     void refreshWorktrees();
@@ -322,8 +460,13 @@ signals:
     /// couldn't be read): the operation the repository is in the
     /// middle of, if any, and how many files are still conflicted.
     /// Also just before each rebaseStepFinished, with the state the
-    /// step left behind.
-    void repoStateReady(gitbolt::git::RepoState state, int conflicts);
+    /// step left behind. `sequencePaused`: `state` is a cherry-pick or
+    /// revert of several commits, paused between two of them
+    /// (Repository::sequencePaused()). `sequenceSkippable`: git's --skip
+    /// would leave out the commit such a sequence stopped at
+    /// (Repository::sequenceSkippable()).
+    void repoStateReady(gitbolt::git::RepoState state, int conflicts, bool sequencePaused,
+                        bool sequenceSkippable);
     void logReady(std::vector<gitbolt::git::CommitData> commits, int offset);
     /// Right behind the logReady(…, 0) of the first history page a
     /// successful openRepositoryAsync loads: that open's generation and
@@ -341,15 +484,31 @@ signals:
 
     // Phase 6 signals — Rebase / Cherry-pick / Stash
     /// After each rebase step — "rebase" (interactiveRebase),
-    /// "rebase --continue", "--skip" or "--abort". `success` is false
-    /// when git failed or stopped on a conflict, right after an
-    /// operationFailed with git's message. `rebasing`: the repository
-    /// is still mid-rebase — after a conflict, or after a successful
-    /// step that stopped where the plan said `edit`. Not emitted for a
-    /// step whose repository was closed or swapped for another while
-    /// git ran: the result would land on another one. (Opened again,
-    /// the same repository still gets it.)
-    void rebaseStepFinished(const QString& step, bool success, bool rebasing);
+    /// "rebase --continue", "--skip" or "--abort" — and each step of a
+    /// sequence of cherry-picks or reverts ("cherry-pick --continue",
+    /// "revert --skip", …). `success` is false when git failed or
+    /// stopped on a conflict, right after an operationFailed with git's
+    /// message. `inProgress`: the repository is still in the middle of
+    /// the step's operation — after a conflict, or after a successful
+    /// rebase step that stopped where the plan said `edit`. Not emitted
+    /// for a step whose repository was closed or swapped for another
+    /// while git ran: the result would land on another one. (Opened
+    /// again, the same repository still gets it.) A step that ends
+    /// while an open is on its way reports once that has landed or
+    /// failed, if its repository is the open one then.
+    void rebaseStepFinished(const QString& step, bool success, bool inProgress);
+    /// A step started on the open repository (see rebaseStepRunning()):
+    /// a rebase step, a sequence's, an abort, or a commit ("commit"). It
+    /// ends with rebaseStepFinished, or commitComplete for a commit.
+    void stepStarted(const QString& step);
+    /// Just before the rebaseStepFinished of a step that succeeded with
+    /// git's "warning:" lines on stderr (prefix removed, one per line).
+    /// A cherry-pick's or revert's --abort that didn't rewind says so
+    /// only there ("You seem to have moved HEAD. Not rewinding, check
+    /// your HEAD!") and exits 0.
+    void stepWarning(const QString& step, const QString& warning);
+    /// From the service's thread, to the repository the pick was made
+    /// in, as rebaseStepFinished is (reportTo).
     void cherryPickComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
 
@@ -396,28 +555,91 @@ private:
         return true;
     }
 
+    /// A refresh worker's way out: `emitResult` runs on the service's
+    /// thread, and only if `r` is still the open repository and no open
+    /// is pending. The swap happens on that thread too, so nothing can
+    /// come in between. Checked on the worker alone, a result posted
+    /// just before an open landed was delivered right after it: the
+    /// previous repository's history, status or branches under the next
+    /// one's name, and its first page let the loading overlay go.
+    /// While an open is pending the window shows neither repository,
+    /// and a failed one asks for every refresh again.
+    template <typename Fn>
+    void deliverFor(std::shared_ptr<git::Repository> r, Fn&& emitResult) {
+        QMetaObject::invokeMethod(
+            this,
+            [this, r = std::move(r), fn = std::forward<Fn>(emitResult)]() mutable {
+                if (repo_ == r && !openPending_)
+                    fn();
+            },
+            Qt::QueuedConnection);
+    }
+
+    /// True, having reported it as an operationFailed of `operation`,
+    /// when a step runs on the open repository (rebaseStepRunning()):
+    /// the staging, branch, stash and cherry-pick mutators start with
+    /// it.
+    bool refusedWhileAStepRuns(const QString& operation);
+
+    /// The way out for an operation's outcome (a rebase step's, a
+    /// cherry-pick's), on the service's thread: `report` runs if the
+    /// repository `key` (its git dir) is the open one, the same one
+    /// opened again included. While an open is on its way it waits for
+    /// that to land or fail, as a local op's outcome does
+    /// (RepoCommandController::deliver): delivered at once, a step that
+    /// ended while the next repository was opening said so, and offered
+    /// to resolve its conflicts, over that one's "Opening…", and the
+    /// offer outlived the swap. A close drops it.
+    void reportTo(std::string key, std::function<void()> report);
+    /// reportTo(), from any thread: `report` is posted to the service's
+    /// thread first. For a worker's outcome.
+    void postReport(std::string key, std::function<void()> report);
+    /// Runs or drops the reports waiting on an open (reportTo), once no
+    /// open is on its way any more.
+    void settleReports();
+
     /// Runs one rebase step on a worker (`step` names it in
     /// operationFailed and rebaseStepFinished): reports a failure,
     /// emits repoStateReady and rebaseStepFinished, and asks for the
     /// refreshes. `refusal`, run first under repoMutex_, says why the
     /// step must not run, if it mustn't; the step then fails with that
     /// and git never starts. Refused at once, with operationFailed
-    /// alone, while another step runs on the repository.
+    /// alone, while another step runs on the repository. `operation`
+    /// is what the step carries on (a sequence's steps run here too):
+    /// rebaseStepFinished's `inProgress` says the repository is still
+    /// in it.
     void runRebaseStep(
         const QString& step,
         std::function<git::Result<git::ProcessOutput>(const git::GitProcess&)> command,
-        std::function<QString(const git::Repository&)> refusal = {});
+        std::function<QString(const git::Repository&)> refusal = {},
+        git::RepoState operation = git::RepoState::Rebase);
+
+    /// sequenceContinue() and sequenceSkip(): `skip` picks which.
+    void runSequenceStep(bool skip);
 
     /// A GitProcess for the open repository, or nullopt when none is
     /// open. Checks and reads repo_ under repoMutex_, so the network
     /// ops can use it from MainWindow's pool thread. Its commands stop
-    /// on cancelRemoteOps(), and once `cancel` is set when given.
+    /// on cancelGitOps(), and once `cancel` is set when given.
     std::optional<git::GitProcess> processIfOpen(
         std::shared_ptr<std::atomic<bool>> cancel = nullptr) const;
 
-    /// Set by cancelRemoteOps(); shared with every processIfOpen().
-    const std::shared_ptr<std::atomic<bool>> remoteOpsCancelled_ =
+    /// Set by cancelGitOps(); added to every GitProcess the service
+    /// hands out or runs, a commit's included.
+    const std::shared_ptr<std::atomic<bool>> opsCancelled_ =
         std::make_shared<std::atomic<bool>>(false);
+
+    // An openRepositoryAsync is in flight (service thread only): no
+    // refresh result is delivered meanwhile (deliverFor), and outcomes
+    // wait in waitingReports_ (reportTo).
+    bool openPending_ = false;
+    // reportTo's reports waiting for the open on its way, by the key of
+    // the repository each is for (service thread only).
+    std::vector<std::pair<std::string, std::function<void()>>> waitingReports_;
+    // rebaseStepKey() of the open repository, empty when none is
+    // (service thread only): a rebase step's outcome is delivered only
+    // while it matches the step's.
+    std::string openKey_;
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_
@@ -446,8 +668,11 @@ private:
 
     // The repositories a rebase step is running on, by git dir
     // (Repository::path(): the same for every open of one). Under
-    // repoMutex_: a step's worker takes its own out when git is done.
+    // stepsMutex_, which the step's worker takes inside repoMutex_ when
+    // it reads the state it reports: a step's worker takes its own out
+    // when git is done. rebaseStepRunning() needs stepsMutex_ alone.
     std::set<std::string> rebaseSteps_;
+    mutable std::mutex stepsMutex_;
 
     LogScope logScope_ = LogScope::Head;
     QStringList selectedBranches_;

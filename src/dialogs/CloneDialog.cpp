@@ -2,6 +2,7 @@
 #include "conf/SettingsService.h"
 #include "git/GitProcess.h"
 
+#include <QApplication>
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDialogButtonBox>
@@ -63,9 +64,9 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
 
     // ----- Status + progress (both hidden until clone starts) -----
     statusLabel_ = new QLabel(this);
+    statusLabel_->setObjectName(QStringLiteral("clone.status"));
     statusLabel_->setWordWrap(true);
-    statusLabel_->setStyleSheet(QStringLiteral("QLabel { color: #666; }"));
-    statusLabel_->hide();
+    statusLabel_->hide();   // until setBusy() has something to say
     layout->addWidget(statusLabel_);
 
     progressBar_ = new QProgressBar(this);
@@ -441,10 +442,35 @@ void CloneDialog::setBusy(bool busy, const QString& message)
         return;
     }
     statusLabel_->setText(message);
-    statusLabel_->setStyleSheet(busy
-        ? QStringLiteral("QLabel { color: #1f6feb; }")    // info / in-flight
-        : QStringLiteral("QLabel { color: #d73a49; }"));  // error / idle
+    statusBusy_ = busy;
+    applyStatusColor();
     statusLabel_->show();
+}
+
+void CloneDialog::applyStatusColor()
+{
+    // Blue while in flight, red for an error; GitHub's dark-theme
+    // pair on the dark theme, where the light ones read at 3.6:1.
+    // In the style sheet, not the palette: the theme's application
+    // style sheet, set right after its palette, repolishes every
+    // widget, and that puts back the palette a widget had at its
+    // last polish.
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    // The light ones at 4.5:1 or more on the light window (#efefef), as
+    // the dark ones are on theirs: #1f6feb and #d73a49 read at 4.0:1.
+    const char* color = statusBusy_ ? (dark ? "#58a6ff" : "#0969da")
+                                    : (dark ? "#ff7b72" : "#cf222e");
+    statusLabel_->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; }").arg(QLatin1String(color)));
+}
+
+void CloneDialog::changeEvent(QEvent* event)
+{
+    QDialog::changeEvent(event);
+    if (event->type() == QEvent::PaletteChange && statusLabel_)
+        applyStatusColor();
 }
 
 // ---------------------------------------------------------------------------

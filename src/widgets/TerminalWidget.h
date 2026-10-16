@@ -4,10 +4,9 @@
 #include <QSize>
 #include <QString>
 #include <QStringDecoder>
-
-#ifdef Q_OS_WIN
 #include <QTextCursor>
 
+#ifdef Q_OS_WIN
 #include <memory>
 #else
 #include <sys/types.h>  // pid_t
@@ -25,11 +24,17 @@ class ConPtyProcess;
 /// (pseudo-terminal) and pipes its I/O through Qt so the user
 /// can run any command line tool, exactly like in iTerm/Terminal.app.
 ///
-/// The widget is intentionally minimal: it strips ANSI escape
-/// sequences (no color rendering yet), forwards keystrokes to the
-/// child shell, and resizes the PTY when the widget is resized.
-/// Full ANSI color, fullscreen TUI support (vim/htop), and a real
-/// SGR parser are intentional follow-ups.
+/// The widget is intentionally minimal: it keeps the shell's cursor
+/// between reads and honors the moves and erases within its row that
+/// line editors and progress meters use, strips the rest of the ANSI
+/// escape sequences (no color rendering yet), forwards keystrokes to
+/// the child shell, and resizes the PTY when the widget is resized.
+/// On macOS and Linux rows don't wrap and the moves between rows are
+/// dropped (see appendOutput): a line longer than the terminal is one
+/// row here, and only a CR knows where its screen rows start (so
+/// readline's long command lines stay whole; a move up into a wrapped
+/// line's earlier row is still lost). Full ANSI color, fullscreen TUI support
+/// (vim/htop), and a real SGR parser are intentional follow-ups.
 ///
 /// Lifecycle:
 ///   - Constructed in the disconnected state.
@@ -90,6 +95,12 @@ protected:
     /// than private so tests can feed it without a PTY.
     void appendOutput(const QByteArray& bytes);
 
+    /// Each read of the shell's terminal (the PTY, or ConPTY), as it
+    /// came, just before appendOutput() draws it. Does nothing; a test
+    /// overrides it to tell what the terminal sent from what the widget
+    /// made of it.
+    virtual void outputRead(const QByteArray& bytes) { Q_UNUSED(bytes); }
+
     /// How much of `run` (text that starts where a character does) goes
     /// on a screen row with `room` columns left, in UTF-16 units, which
     /// is how the Windows screen model counts columns: as much as fits
@@ -99,15 +110,17 @@ protected:
     /// everywhere so the tests can reach it.
     static qsizetype rowChunk(QStringView run, qsizetype room);
 
+    /// The character grid the viewport fits, the size the shell's
+    /// terminal is given; invalid until the font has metrics. Protected
+    /// so tests can write a row that ends at the terminal's last column.
+    QSize gridSize() const;
+
 private slots:
     void onPtyReadable();
     void onPtyWritable();
 
 private:
     void stopShell();
-    /// The character grid the viewport fits; invalid until the font
-    /// has metrics.
-    QSize gridSize() const;
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
     /// byte count written (stops at EAGAIN without dropping).
@@ -121,9 +134,11 @@ private:
     void trimBlankRows();
     void screenMoveTo(QTextCursor& cur, int row, int column);
     void screenLineFeed(QTextCursor& cur);
-    void screenCsi(QTextCursor& cur, ushort finalByte, QStringView params);
     void resizeScreen(const QSize& grid);
 #endif
+    /// Act on a CSI sequence: the moves and erases within a row
+    /// everywhere, and on Windows the screen's too.
+    void csi(QTextCursor& cur, ushort finalByte, QStringView params);
 
     int              masterFd_     = -1;   // stays -1 on Windows
 #ifdef Q_OS_WIN
@@ -136,12 +151,15 @@ private:
     /// (anything above is scrollback), ConPTY's cursor is at
     /// screenCursor_, and the size is the one ConPTY was last given.
     QTextCursor      screenTop_;
-    QTextCursor      screenCursor_;
-    int              screenColumns_ = 80;
     int              screenRows_    = 25;
 #else
     pid_t            childPid_     = -1;
 #endif
+    /// Where the shell's cursor is: the next read writes there. Null
+    /// until a shell's first read, which starts below what is shown.
+    QTextCursor      screenCursor_;
+    /// The columns the shell was last told its terminal has.
+    int              screenColumns_ = 80;
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY

@@ -60,7 +60,7 @@ Installers for every release are on the
 | macOS | `GitBolt-<version>-Darwin-arm64.dmg` | Apple Silicon, macOS 13 (Ventura) or later |
 | Windows | `GitBolt-<version>-Windows-AMD64.exe` | 64-bit installer |
 | Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, on distributions with GCC 13's C++ runtime or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later); make it executable and run it |
-| Ubuntu 24.04 | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 LTS and distributions based on it, such as Linux Mint 22 (it depends on that release's libgit2 1.7) |
+| Ubuntu / Debian | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 or later, Debian 13 and distributions based on them, such as Linux Mint 22 |
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 
@@ -74,7 +74,9 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 - File-level staging with per-file and stage-all/unstage-all flows
 - Interactive rebase with drag-and-drop reordering and
   continue / skip / abort controls for conflicted rebases
-- Cherry-pick with multi-commit selection
+- Cherry-pick a commit, with a preview of its details; a
+  `git cherry-pick` of several commits started in a terminal can be
+  continued, skipped or aborted from the operation bar
 - Stash save/apply/pop/drop with diff preview
 - Branch management (create, delete, rename, checkout, merge,
   push, set-upstream — from the sidebar context menu or Commands)
@@ -124,8 +126,7 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
   - Repository statistics summary
 
 ### Platform Integration
-- macOS Finder Sync extension ("Open in GitBolt" context menu)
-- Windows Explorer shell extension
+- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
 - Linux Nautilus extension and `.desktop` file
 - Cross-platform installers (DMG, NSIS, DEB, AppImage)
 
@@ -204,10 +205,10 @@ Each module is a separate CMake `STATIC` library, enforcing clean dependency bou
 | Decision | Rationale |
 |----------|-----------|
 | **Qt 6 + C++20** | Maximum native performance, mature widget system, hardware-accelerated rendering |
-| **libgit2 primary, git CLI fallback** | libgit2 for local repository access, including the hot path (log, diff, blame, status); the CLI for network operations (clone, fetch, pull, push, with git's own SSH and credential setup), interactive rebase, git-flow |
+| **libgit2 primary, git CLI fallback** | libgit2 for local repository access, including the hot path (log, diff, blame, status); the CLI for network operations (clone, fetch, pull, push, with git's own SSH and credential setup), commits (so the repository's hooks and commit signing apply), interactive rebase, git-flow |
 | **Headers and sources together** | Qt convention; matches Gittyup, KeePassXC, FreeCAD |
 | **PascalCase filenames** | Qt convention (`QMainWindow.h` style) |
-| **Background threading via QtConcurrent** | All git ops run on worker threads with QFutureWatcher signals back to UI |
+| **Background threading via QtConcurrent** | Network operations, commits, merges, rebase steps and other long git commands run on worker threads, with QFutureWatcher signals back to the UI; some local changes (staging, stashing, switching branches, creating or deleting branches and tags) still run on the UI thread |
 | **Paged commit log model** | `fetchMore()` with 256-row pages and incremental lane computation |
 | **Lane-based revision graph** | Greedy lane assignment with bezier merge curves, custom QStyledItemDelegate |
 
@@ -237,12 +238,12 @@ Required tools at a glance:
 
 On macOS with a current Xcode SDK, Qt before 6.9.2 fails to link: its CMake
 package still requests the AGL framework, which the SDK no longer ships.
-CI builds with Qt 6.10 on all three platforms and libgit2 1.7 on Linux; on
-macOS and Windows it builds libgit2 1.9.7 from source and links it
-statically. libgit2 only accesses local repositories: network operations
-run the `git` CLI, with git's own SSH and credential configuration. The
-macOS app runs on macOS 13 (Ventura) or later, the oldest release Qt 6.10
-supports.
+CI builds with Qt 6.10 on all three platforms, and on all three it builds
+libgit2 1.9.7 from source and links it statically, so no installer
+depends on a libgit2 package. libgit2 only accesses local repositories:
+network operations run the `git` CLI, with git's own SSH and credential
+configuration. The macOS app runs on macOS 13 (Ventura) or later, the
+oldest release Qt 6.10 supports.
 
 See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on your platform, configure CMake, run the tests, build installers, and troubleshoot common issues.
 

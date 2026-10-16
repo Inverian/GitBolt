@@ -1,12 +1,77 @@
 #include "conf/ThemeService.h"
 
 #include <QApplication>
+#include <QEvent>
 #include <QGuiApplication>
 #include <QPalette>
 #include <QStyle>
 #include <QStyleHints>
+#include <QWidget>
 
 namespace gitbolt::conf {
+
+namespace {
+
+// Re-applies a widget's themed style sheet on each PaletteChange (a
+// theme switch sets the application palette, and that reaches every
+// widget as one). Its own setStyleSheet() sends one too: it sets the
+// sheet only when the theme's differs, which ends there.
+class ThemedStyleSheet : public QObject {
+public:
+    ThemedStyleSheet(QWidget* widget, std::function<QString(bool)> sheet)
+        : QObject(widget), sheet_(std::move(sheet)) {
+        widget->installEventFilter(this);
+        apply(widget);
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::PaletteChange && watched == parent())
+            apply(static_cast<QWidget*>(watched));
+        return false;
+    }
+
+private:
+    void apply(QWidget* widget) {
+        const QString sheet = sheet_(ThemeService::paletteIsDark());
+        if (widget->styleSheet() != sheet)
+            widget->setStyleSheet(sheet);
+    }
+
+    std::function<QString(bool)> sheet_;
+};
+
+} // namespace
+
+bool ThemeService::paletteIsDark()
+{
+    const QPalette app = QApplication::palette();
+    return app.color(QPalette::WindowText).lightness() > app.color(QPalette::Window).lightness();
+}
+
+QColor ThemeService::mutedTextColor()
+{
+    return paletteIsDark() ? QColor(0x9a, 0x9a, 0x9a) : QColor(0x6a, 0x6a, 0x6a);
+}
+
+void ThemeService::keepThemedStyleSheet(QWidget* widget, std::function<QString(bool dark)> sheet)
+{
+    if (!widget || !sheet)
+        return;
+    // One per widget: a second call replaces the first.
+    const QObjectList children = widget->children();
+    for (QObject* child : children) {
+        if (auto* earlier = dynamic_cast<ThemedStyleSheet*>(child))
+            delete earlier;
+    }
+    new ThemedStyleSheet(widget, std::move(sheet));
+}
+
+void ThemeService::keepMutedText(QWidget* widget, const QString& sheet)
+{
+    keepThemedStyleSheet(widget, [sheet](bool dark) {
+        return sheet.arg(dark ? QStringLiteral("#9a9a9a") : QStringLiteral("#6a6a6a"));
+    });
+}
 
 ThemeService::ThemeService(QObject* parent)
     : QObject(parent)
