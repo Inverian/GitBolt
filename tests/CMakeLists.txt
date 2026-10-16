@@ -82,6 +82,14 @@ if(GITBOLT_LIBGIT2_PROVIDER STREQUAL "bundled")
     target_compile_definitions(test_libgit2_features PRIVATE
         GITBOLT_BUNDLED_LIBGIT2_VERSION="${GITBOLT_LIBGIT2_VERSION}")
 endif()
+# The bundled libgit2's patch script (cmake/PatchLibgit2.cmake) on a
+# stand-in tree: a fresh one, one it patched, one an earlier version of
+# it patched, one patched in a way it doesn't know. Needs no libgit2.
+add_test(NAME test_patch_libgit2
+    COMMAND ${CMAKE_COMMAND}
+        -DPATCH_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/PatchLibgit2.cmake
+        -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/patch-libgit2
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestPatchLibgit2.cmake)
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)

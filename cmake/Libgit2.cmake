@@ -136,8 +136,8 @@ function(gitbolt_add_bundled_libgit2)
            "git_futils_filestamp_set\\(&b->file\\.stamp, NULL\\);[ \t\n]*memset\\(b->file\\.checksum")
         target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_CONFIG_PATCHED)
     else()
-        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "
-            "cmake/PatchLibgit2.cmake's config fixes, one of them for a crash; "
+        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks one or both "
+            "of cmake/PatchLibgit2.cmake's config fixes (a crash, a stale config); "
             "run cmake -P ${_patch} in that directory")
     endif()
 

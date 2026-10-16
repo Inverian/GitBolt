@@ -837,6 +837,14 @@ jobs:
             public.ecr.aws/docker/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
             public.ecr.aws/docker/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
             echo "DEB on ${image%@*}"
+            # ECR Public rate-limits anonymous pulls ("toomanyrequests:
+            # Rate exceeded" failed a run): pull first, retrying with a
+            # growing wait, so docker run finds the image.
+            for attempt in 1 2 3 4 5; do
+              docker pull -q "$image" && break
+              [ "$attempt" -lt 5 ] || { echo "::error::could not pull $image"; exit 1; }
+              sleep $((attempt * 20))
+            done
             docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
               "$image" \
               bash -euo pipefail -c '
