@@ -48,7 +48,7 @@ constexpr int kNavWidth = 220;
 // What usage statistics collect, where they go, and how to have them
 // deleted (General › Usage statistics links here; so does About).
 constexpr char kPrivacyPolicyUrl[] =
-    "https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md";
+    "https://github.com/Inverian/GitBolt/blob/main/PRIVACY.md";
 
 // Indent the category header slightly so sub-section rows sit
 // clearly under it without looking flat.

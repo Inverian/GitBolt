@@ -5,16 +5,16 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ThePieMonster/GitBolt/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/ThePieMonster/GitBolt/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white"></a>
-  <a href="https://github.com/ThePieMonster/GitBolt/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/ThePieMonster/GitBolt?include_prereleases&sort=semver&label=release&color=ffb020"></a>
-  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/ThePieMonster/GitBolt?color=blue"></a>
+  <a href="https://github.com/Inverian/GitBolt/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/Inverian/GitBolt/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white"></a>
+  <a href="https://github.com/Inverian/GitBolt/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Inverian/GitBolt?include_prereleases&sort=semver&label=release&color=ffb020"></a>
+  <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/Inverian/GitBolt?color=blue"></a>
   <a href="#download"><img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6b7280"></a>
   <a href="https://www.gitbolt.com"><img alt="Website: gitbolt.com" src="https://img.shields.io/badge/website-gitbolt.com-ffb020?labelColor=0b0d10"></a>
   <br>
   <a href="https://www.qt.io"><img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white"></a>
   <a href="docs/BUILDING.md"><img alt="C++20" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white"></a>
   <a href="https://libgit2.org"><img alt="libgit2 1.7 or later" src="https://img.shields.io/badge/libgit2-1.7%2B-f34f29?logo=git&logoColor=white"></a>
-  <a href="https://github.com/ThePieMonster/GitBolt/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/ThePieMonster/GitBolt/main?color=5ac8ff"></a>
+  <a href="https://github.com/Inverian/GitBolt/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/Inverian/GitBolt/main?color=5ac8ff"></a>
 </p>
 
 <p align="center">
@@ -53,7 +53,7 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 ## Download
 
 Installers for every release are on the
-[Releases page](https://github.com/ThePieMonster/GitBolt/releases), newest first.
+[Releases page](https://github.com/Inverian/GitBolt/releases), newest first.
 
 | Platform | Download | Notes |
 |---|---|---|
@@ -221,7 +221,7 @@ For full step-by-step instructions on installing dependencies and building GitBo
 The short version, once your environment is set up:
 
 ```bash
-git clone https://github.com/ThePieMonster/GitBolt.git
+git clone https://github.com/Inverian/GitBolt.git
 cd GitBolt
 cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
 cmake --build build --parallel

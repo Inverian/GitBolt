@@ -154,7 +154,10 @@ jobs:
       # stay out of this public source and fork builds can't read them;
       # they can only send events, not read any. The host is public.
       # Step env, never the command line; cmake reads each from the
-      # environment on the first configure.
+      # environment on the first configure. Upstream is matched by its
+      # repository ID, not its name: the ID survives a transfer or a
+      # rename (ThePieMonster/GitBolt moved to Inverian/GitBolt on
+      # 2026-10-17), and a fork has an ID of its own.
       #
       # GITBOLT_REQUIRE_ENGLISH_PLURALS: fail here, not quietly show
       # "1 file(s)", if the Qt above ever lacks LinguistTools (aqt's
@@ -162,10 +165,10 @@ jobs:
       # archive).
       - name: Configure
         env:
-          GITBOLT_TELEMETRY_HOST: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
-          GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
-          GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
-          GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
+          GITBOLT_TELEMETRY_HOST: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
+          GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
+          GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
@@ -174,7 +177,7 @@ jobs:
       - name: Check telemetry wiring
         shell: bash
         env:
-          OFFICIAL: ${{ github.repository == 'ThePieMonster/GitBolt' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          OFFICIAL: ${{ github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           # tr: Windows' CMake writes CMakeCache.txt with CRLF, and Git
           # Bash's sed keeps the CR, which would pass for a value.
