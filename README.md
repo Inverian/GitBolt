@@ -264,6 +264,11 @@ such as a build from source or a fork, sends nothing.
 [PRIVACY.md](PRIVACY.md) lists exactly what is sent, how long it is
 kept, and how to have it deleted.
 
+## Security
+
+To report a security vulnerability, please don't open a public issue:
+see [SECURITY.md](SECURITY.md) for how to report it privately.
+
 ---
 
 ## License
