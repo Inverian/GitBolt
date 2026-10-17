@@ -4,7 +4,7 @@ This guide walks you through setting up a development environment and building G
 
 The Mac and Windows instructions are intentionally kept as parallel as possible. The same dependencies are installed in the same order, just through each platform's preferred package manager.
 
-> If you only want to **use** GitBolt and not develop it, download a pre-built installer from the [Releases page](https://github.com/ThePieMonster/GitBolt/releases) instead.
+> If you only want to **use** GitBolt and not develop it, download a pre-built installer from the [Releases page](https://github.com/Inverian/GitBolt/releases) instead.
 
 ---
 
@@ -144,7 +144,7 @@ pkg-config --modversion libgit2     # Should print 1.9.x or similar
 
 ```bash
 cd ~/Developer    # or wherever you keep code
-git clone https://github.com/ThePieMonster/GitBolt.git
+git clone https://github.com/Inverian/GitBolt.git
 cd GitBolt
 ```
 
@@ -250,7 +250,7 @@ echo %VCPKG_ROOT%
 cd %USERPROFILE%
 mkdir Developer
 cd Developer
-git clone https://github.com/ThePieMonster/GitBolt.git
+git clone https://github.com/Inverian/GitBolt.git
 cd GitBolt
 ```
 
@@ -610,7 +610,7 @@ After installing dependencies, the configure and build commands are identical to
 
 If you hit a build issue not covered above, please:
 
-1. Search [existing issues](https://github.com/ThePieMonster/GitBolt/issues) on GitHub.
+1. Search [existing issues](https://github.com/Inverian/GitBolt/issues) on GitHub.
 2. Open a new issue including:
    - Your OS and version
    - The exact CMake/build command that failed

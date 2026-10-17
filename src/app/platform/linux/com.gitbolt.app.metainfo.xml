@@ -13,8 +13,8 @@
   </developer>
   <launchable type="desktop-id">gitbolt.desktop</launchable>
   <url type="homepage">https://www.gitbolt.com</url>
-  <url type="bugtracker">https://github.com/ThePieMonster/GitBolt/issues</url>
-  <url type="vcs-browser">https://github.com/ThePieMonster/GitBolt</url>
+  <url type="bugtracker">https://github.com/Inverian/GitBolt/issues</url>
+  <url type="vcs-browser">https://github.com/Inverian/GitBolt</url>
   <provides>
     <binary>gitbolt</binary>
   </provides>

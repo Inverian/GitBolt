@@ -192,7 +192,7 @@ private slots:
         QVERIFY(!copy->isEnabled());
         QVERIFY(link->openExternalLinks());
         QVERIFY(link->text().contains(
-            QStringLiteral("https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md")));
+            QStringLiteral("https://github.com/Inverian/GitBolt/blob/main/PRIVACY.md")));
         // Shown for deletion requests, never created by looking.
         QVERIFY(settings.telemetryInstallId().isEmpty());
 

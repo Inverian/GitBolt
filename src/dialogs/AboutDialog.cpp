@@ -166,11 +166,11 @@ void AboutDialog::setupUi()
         "<p style='font-size:9pt;'>Copyright © 2026 GitBolt. "
         "Licensed under the <a href='https://www.gnu.org/licenses/gpl-3.0.html'>"
         "GNU General Public License v3.0</a>. "
-        "See the <a href='https://github.com/ThePieMonster/GitBolt/blob/main/LICENSE'>"
+        "See the <a href='https://github.com/Inverian/GitBolt/blob/main/LICENSE'>"
         "LICENSE</a> file for the full terms.</p>"
         "<p style='font-size:9pt;'>The name \"GitBolt\" and the GitBolt logo are "
         "trademarks, protected separately from the source code license. "
-        "See the <a href='https://github.com/ThePieMonster/GitBolt/blob/main/TRADEMARK.md'>"
+        "See the <a href='https://github.com/Inverian/GitBolt/blob/main/TRADEMARK.md'>"
         "trademark policy</a> for details.</p>"));
 
     linksLabel_ = new QLabel(this);
@@ -180,13 +180,13 @@ void AboutDialog::setupUi()
         "<p style='font-size:9pt;'>"
         "<a href='https://www.gitbolt.com'>Website</a>"
         " &nbsp;·&nbsp; "
-        "<a href='https://github.com/ThePieMonster/GitBolt'>Project repository</a>"
+        "<a href='https://github.com/Inverian/GitBolt'>Project repository</a>"
         " &nbsp;·&nbsp; "
-        "<a href='https://github.com/ThePieMonster/GitBolt/issues'>Report a bug</a>"
+        "<a href='https://github.com/Inverian/GitBolt/issues'>Report a bug</a>"
         " &nbsp;·&nbsp; "
-        "<a href='https://github.com/ThePieMonster/GitBolt/blob/main/CONTRIBUTING.md'>Contribute</a>"
+        "<a href='https://github.com/Inverian/GitBolt/blob/main/CONTRIBUTING.md'>Contribute</a>"
         " &nbsp;·&nbsp; "
-        "<a href='https://github.com/ThePieMonster/GitBolt/blob/main/PRIVACY.md'>Privacy</a>"
+        "<a href='https://github.com/Inverian/GitBolt/blob/main/PRIVACY.md'>Privacy</a>"
         "</p>"));
 
     // ----- Assemble the layout -------------------------------------------
