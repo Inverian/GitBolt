@@ -831,25 +831,32 @@ jobs:
           #    LD_LIBRARY_PATH or QT_PLUGIN_PATH to mask gaps). Debian 13
           #    and Ubuntu 26.04 catch a Depends entry only one release can
           #    satisfy, as libgit2-1.7 was.
-          #    Each image is pinned by digest (the multi-arch index, same
-          #    as Docker Hub's; `docker buildx imagetools inspect <image>`
-          #    prints it); its apt-get still installs today's packages,
-          #    which is what a user's install resolves against.
+          #    Each image is pinned by digest (the multi-arch index;
+          #    `docker buildx imagetools inspect <image>` prints it), so
+          #    every registry below serves the same bytes; its apt-get
+          #    still installs today's packages, which is what a user's
+          #    install resolves against.
+          #    Registries in turn: Google's Docker Hub mirror, then Docker
+          #    Hub, then ECR Public. Anonymous pulls are limited per runner
+          #    IP, and ECR Public has refused a run outright
+          #    ("toomanyrequests: Data limit exceeded"), which no retry
+          #    against the same registry outlasts; the next one answers.
           for image in \
-            public.ecr.aws/docker/library/ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
-            public.ecr.aws/docker/library/ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
-            public.ecr.aws/docker/library/debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
+            ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
+            ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
+            debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
             echo "DEB on ${image%@*}"
-            # ECR Public rate-limits anonymous pulls ("toomanyrequests:
-            # Rate exceeded" failed a run): pull first, retrying with a
-            # growing wait, so docker run finds the image.
-            for attempt in 1 2 3 4 5; do
-              docker pull -q "$image" && break
-              [ "$attempt" -lt 5 ] || { echo "::error::could not pull $image"; exit 1; }
-              sleep $((attempt * 20))
+            ref=
+            for registry in mirror.gcr.io/library docker.io/library public.ecr.aws/docker/library; do
+              for attempt in 1 2; do
+                if [ "$attempt" -gt 1 ]; then sleep 10; fi
+                if docker pull -q "$registry/$image"; then ref="$registry/$image"; break 2; fi
+              done
             done
+            [ -n "$ref" ] || { echo "::error::could not pull $image from any registry"; exit 1; }
+            echo "Pulled $ref"
             docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
-              "$image" \
+              "$ref" \
               bash -euo pipefail -c '
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update -qq

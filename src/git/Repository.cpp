@@ -1366,6 +1366,51 @@ Result<void> Repository::removeRemote(const std::string& name) {
     return Result<void>::success();
 }
 
+Result<void> Repository::setRemoteUrl(const std::string& name, const std::string& url) {
+    // git_remote_set_url writes remote.<name>.url whether or not the
+    // remote exists, which would conjure up a half-configured one.
+    git_remote* remote = nullptr;
+    int err = git_remote_lookup(&remote, repo_, name.c_str());
+    if (remote) git_remote_free(remote);
+    if (err < 0) return GitError::fromLibgit2(err);
+
+    // It also writes to this repository's own .git/config whatever
+    // level the remote comes from. A remote from the global or system
+    // config, or from a file .git/config includes, then got a second
+    // URL here: git fetched from the old one and pushed to both. `git
+    // remote set-url` refuses such a remote, and so does this.
+    git_config* config = nullptr;
+    if ((err = git_repository_config_snapshot(&config, repo_)) < 0)
+        return GitError::fromLibgit2(err);
+    git_config_entry* entry = nullptr;
+    const std::string key = "remote." + name + ".";
+    err = git_config_get_entry(&entry, config, (key + "url").c_str());
+    if (err == GIT_ENOTFOUND)
+        err = git_config_get_entry(&entry, config, (key + "pushurl").c_str());
+    std::string where;
+    if (err == 0) {
+        if (entry->include_depth > 0)
+            where = "a file that the repository's config includes";
+        else if (entry->level == GIT_CONFIG_LEVEL_GLOBAL || entry->level == GIT_CONFIG_LEVEL_XDG)
+            where = "your global git config";
+        else if (entry->level == GIT_CONFIG_LEVEL_SYSTEM || entry->level == GIT_CONFIG_LEVEL_PROGRAMDATA)
+            where = "the system git config";
+        else if (entry->level != GIT_CONFIG_LEVEL_LOCAL && entry->level != GIT_CONFIG_LEVEL_WORKTREE)
+            where = "a git config outside this repository";
+    }
+    git_config_entry_free(entry);
+    git_config_free(config);
+    if (err < 0) return GitError::fromLibgit2(err);
+    if (!where.empty())
+        return GitError(GitErrorCode::GenericError,
+                        "Remote '" + name + "' is defined in " + where
+                            + ", not in this repository; change its URL there.");
+
+    err = git_remote_set_url(repo_, name.c_str(), url.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    return Result<void>::success();
+}
+
 namespace {
 constexpr std::string_view kTagRefPrefix = "refs/tags/";
 } // namespace

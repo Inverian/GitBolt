@@ -180,6 +180,13 @@ public:
     Result<std::vector<RemoteInfo>> remotes() const;
     Result<void> addRemote(const std::string& name, const std::string& url);
     Result<void> removeRemote(const std::string& name);
+    /// Changes a remote's fetch URL, as `git remote set-url` does. Every
+    /// other setting stays: its push URL, refspecs and options, its
+    /// remote-tracking branches, and the branches that track it.
+    /// Fails, and writes nothing, if the remote doesn't exist or isn't
+    /// defined in this repository's own config (a global or system
+    /// remote, or one from an included file), as `git remote set-url`.
+    Result<void> setRemoteUrl(const std::string& name, const std::string& url);
 
     // Tags
     Result<std::vector<TagInfo>> tags() const;
