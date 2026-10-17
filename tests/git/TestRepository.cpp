@@ -1535,6 +1535,50 @@ private slots:
         QCOMPARE(value, 9);
 #endif
     }
+
+    // -----------------------------------------------------------------
+    // Edit URL changes the URL and nothing else, as `git remote set-url`
+    // does. It used to remove the remote and add it back, which also
+    // dropped every branch's upstream link to it (Pull then failed:
+    // "did not specify a branch"), its remote-tracking branches, and its
+    // push URL, options and extra refspecs.
+    // -----------------------------------------------------------------
+    void setRemoteUrlKeepsEverythingElse() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        auto& r = repo.repo();
+        QVERIFY(r.addRemote("origin", "https://example.com/old/repo.git").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const std::string head = output(git.run({"rev-parse", "HEAD"})).toStdString();
+        const std::string branch = output(git.run({"branch", "--show-current"})).toStdString();
+        QVERIFY(succeeded(git.run({"update-ref", "refs/remotes/origin/" + branch, head})));
+        QVERIFY(succeeded(git.run({"branch", "--set-upstream-to=origin/" + branch, branch})));
+        QVERIFY(succeeded(git.run({"config", "remote.origin.pushurl",
+                                   "https://example.com/push/repo.git"})));
+        QVERIFY(succeeded(git.run({"config", "remote.origin.prune", "true"})));
+        QVERIFY(succeeded(git.run({"config", "--add", "remote.origin.fetch",
+                                   "+refs/notes/*:refs/notes/*"})));
+
+        const auto ok = r.setRemoteUrl("origin", "https://example.com/new/repo.git");
+        QVERIFY2(ok.ok(), ok.ok() ? "" : ok.error().message().c_str());
+
+        QCOMPARE(output(git.run({"config", "remote.origin.url"})),
+                 QStringLiteral("https://example.com/new/repo.git"));
+        QCOMPARE(output(git.run({"config", "remote.origin.pushurl"})),
+                 QStringLiteral("https://example.com/push/repo.git"));
+        QCOMPARE(output(git.run({"config", "remote.origin.prune"})), QStringLiteral("true"));
+        QCOMPARE(output(git.run({"config", "--get-all", "remote.origin.fetch"})),
+                 QStringLiteral("+refs/heads/*:refs/remotes/origin/*\n+refs/notes/*:refs/notes/*"));
+        QCOMPARE(output(git.run({"config", "branch." + branch + ".remote"})), QStringLiteral("origin"));
+        QCOMPARE(output(git.run({"config", "branch." + branch + ".merge"})),
+                 QString::fromStdString("refs/heads/" + branch));
+        QCOMPARE(output(git.run({"rev-parse", "refs/remotes/origin/" + branch})),
+                 QString::fromStdString(head));
+
+        // An unknown remote is refused, and none is created.
+        QVERIFY(!r.setRemoteUrl("nope", "https://example.com/x.git").ok());
+        QVERIFY(!succeeded(git.run({"config", "remote.nope.url"})));
+    }
 };
 
 QTEST_MAIN(TestRepository)

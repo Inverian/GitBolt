@@ -544,39 +544,19 @@ void MainWindow::buildRepositoryMenu()
                                                     const QString& newUrl) {
                 if (repositoryChangedSince(key, tr("no URL was changed.")))
                     return;
-                // Remove + re-add, both halves under ONE repo lock
-                // so no background worker interleaves between them.
-                // If the remove succeeds but the add fails we
-                // surface the add error and the user is left without
-                // that remote — they can re-add manually. Reasonable
-                // trade-off vs. plumbing a setUrl path through
-                // Repository.
-                const auto outcome = gitService_->withRepository(
-                    [&](git::Repository& repo)
-                        -> std::pair<git::Result<void>,
-                                     git::Result<void>> {
-                        auto rm = repo.removeRemote(name.toStdString());
-                        if (!rm.ok())
-                            return {std::move(rm),
-                                    git::Result<void>::success()};
-                        auto add = repo.addRemote(
-                            name.toStdString(), newUrl.toStdString());
-                        return {std::move(rm), std::move(add)};
+                // Only the URL changes, as with `git remote set-url`.
+                // It used to remove the remote and add it back, which
+                // also dropped every branch's upstream link to it (Pull
+                // then had no branch to pull), its remote-tracking
+                // branches, and its push URL, refspecs and options.
+                const auto res = gitService_->withRepository(
+                    [&](git::Repository& repo) {
+                        return repo.setRemoteUrl(name.toStdString(),
+                                                 newUrl.toStdString());
                     });
-                const auto& rm = outcome.first;
-                if (!rm.ok()) {
+                if (!res.ok()) {
                     QMessageBox::warning(dlg, tr("Edit URL Failed"),
-                        QString::fromStdString(rm.error().message()));
-                    refresh();
-                    return;
-                }
-                const auto& add = outcome.second;
-                if (!add.ok()) {
-                    QMessageBox::warning(dlg, tr("Edit URL Failed"),
-                        tr("Removed remote but could not re-add "
-                           "with new URL: %1").arg(
-                            QString::fromStdString(
-                                add.error().message())));
+                        QString::fromStdString(res.error().message()));
                 }
                 refresh();
             });

@@ -1366,6 +1366,18 @@ Result<void> Repository::removeRemote(const std::string& name) {
     return Result<void>::success();
 }
 
+Result<void> Repository::setRemoteUrl(const std::string& name, const std::string& url) {
+    // git_remote_set_url writes remote.<name>.url whether or not the
+    // remote exists, which would conjure up a half-configured one.
+    git_remote* remote = nullptr;
+    int err = git_remote_lookup(&remote, repo_, name.c_str());
+    if (remote) git_remote_free(remote);
+    if (err < 0) return GitError::fromLibgit2(err);
+    err = git_remote_set_url(repo_, name.c_str(), url.c_str());
+    if (err < 0) return GitError::fromLibgit2(err);
+    return Result<void>::success();
+}
+
 namespace {
 constexpr std::string_view kTagRefPrefix = "refs/tags/";
 } // namespace
