@@ -4,7 +4,7 @@ Version 1.0
 
 This agreement is between you, the person submitting a contribution,
 and the maintainer of GitBolt: the owner of the official repository at
-<https://github.com/ThePieMonster/GitBolt>, and whoever maintains the
+<https://github.com/Inverian/GitBolt>, and whoever maintains the
 project after them (the "Maintainer").
 
 A "Contribution" is anything you submit to GitBolt for inclusion:

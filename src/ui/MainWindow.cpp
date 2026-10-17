@@ -3674,7 +3674,7 @@ void MainWindow::buildHelpMenu()
         a->setShortcut(QKeySequence::HelpContents);
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
-                "https://github.com/ThePieMonster/GitBolt#readme")));
+                "https://github.com/Inverian/GitBolt#readme")));
         });
         helpMenu->addAction(a);
     }
@@ -3716,7 +3716,7 @@ void MainWindow::buildHelpMenu()
         a->setObjectName(QStringLiteral("help.report-an-issue"));
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
-                "https://github.com/ThePieMonster/GitBolt/issues/new")));
+                "https://github.com/Inverian/GitBolt/issues/new")));
         });
         helpMenu->addAction(a);
     }
@@ -3733,7 +3733,7 @@ void MainWindow::buildHelpMenu()
         a->setObjectName(QStringLiteral("help.check-for-updates"));
         connect(a, &QAction::triggered, this, []() {
             QDesktopServices::openUrl(QUrl(QStringLiteral(
-                "https://github.com/ThePieMonster/GitBolt/releases")));
+                "https://github.com/Inverian/GitBolt/releases")));
         });
         helpMenu->addAction(a);
     }

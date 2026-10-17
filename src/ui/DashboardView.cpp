@@ -222,7 +222,7 @@ void DashboardView::setupUi()
     contributeRow->addWidget(
         makeLink(QString::fromUtf8("\xF0\x9F\x92\xBB"),   // 💻
                  tr("Develop"),
-                 QStringLiteral("https://github.com/ThePieMonster/GitBolt")));
+                 QStringLiteral("https://github.com/Inverian/GitBolt")));
     contributeRow->addWidget(
         makeLink(QString::fromUtf8("\xF0\x9F\x92\xB5"),   // 💵
                  tr("Donate"),
@@ -230,7 +230,7 @@ void DashboardView::setupUi()
     contributeRow->addWidget(
         makeLink(QString::fromUtf8("\xF0\x9F\x90\x9E"),   // 🐞 ladybug
                  tr("Issues"),
-                 QStringLiteral("https://github.com/ThePieMonster/GitBolt/issues")));
+                 QStringLiteral("https://github.com/Inverian/GitBolt/issues")));
     contributeRow->addStretch();
 
     root->addLayout(contributeRow);

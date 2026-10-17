@@ -49,7 +49,7 @@ elseif(WIN32)
     set(CPACK_NSIS_PACKAGE_NAME "GitBolt")
     set(CPACK_NSIS_INSTALLED_ICON_NAME "bin\\\\GitBolt.exe")
     set(CPACK_NSIS_URL_INFO_ABOUT "https://www.gitbolt.com")
-    set(CPACK_NSIS_HELP_LINK "https://github.com/ThePieMonster/GitBolt/issues")
+    set(CPACK_NSIS_HELP_LINK "https://github.com/Inverian/GitBolt/issues")
     # Not ON: bin\ holds Qt6*.dll and the MSVC runtime (plus vcpkg's
     # git2/pcre/z DLLs in a build against vcpkg's libgit2), which on the
     # system PATH could shadow other programs' DLLs, and a GUI app gains

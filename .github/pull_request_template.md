@@ -8,4 +8,4 @@
 
 ## Contributor License Agreement
 
-- [ ] I have read the [GitBolt Contributor License Agreement](https://github.com/ThePieMonster/GitBolt/blob/main/CLA.md) and agree to it for this and my future contributions.
+- [ ] I have read the [GitBolt Contributor License Agreement](https://github.com/Inverian/GitBolt/blob/main/CLA.md) and agree to it for this and my future contributions.
