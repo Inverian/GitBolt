@@ -36,14 +36,6 @@ Security reports are reviewed by
 - Please give us a reasonable time to ship the fix before you share
   details publicly, and tell us if you plan a disclosure date.
 
-## Supported versions
-
-GitBolt is in pre-release (0.9.x). Security fixes are made in the
-newest release only, the first one on the
-[Releases page](https://github.com/Inverian/GitBolt/releases), so please
-update to it before you report, and check that the problem is still
-there.
-
 ## Scope
 
 In scope:
