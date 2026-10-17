@@ -37,6 +37,9 @@ There are many ways to contribute to GitBolt:
 
 ## Reporting Bugs
 
+> **Security vulnerabilities:** don't open a public issue. Report them privately as
+> described in [SECURITY.md](SECURITY.md).
+
 Before opening a new issue, please:
 
 1. **Search existing issues** to see if the bug has already been reported
