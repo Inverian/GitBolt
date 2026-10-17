@@ -1579,6 +1579,59 @@ private slots:
         QVERIFY(!r.setRemoteUrl("nope", "https://example.com/x.git").ok());
         QVERIFY(!succeeded(git.run({"config", "remote.nope.url"})));
     }
+
+    // A remote this repository doesn't define itself, from a file its
+    // config includes or from the global config, is refused, as `git
+    // remote set-url` refuses it: writing .git/config gave it a second
+    // URL, and git then fetched from the old one and pushed to both.
+    void setRemoteUrlRefusesRemotesDefinedElsewhere() {
+        // From an included file.
+        {
+            gitbolt::test::TestRepo repo;
+            QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+            repo.writeFile(".git/extra.config", "[remote \"inc\"]\n\turl = https://example.com/inc.git\n");
+            gitbolt::git::GitProcess git(repo.path().toStdString());
+            QVERIFY(succeeded(git.run({"config", "include.path", "extra.config"})));
+            const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+            const auto res = repo.repo().setRemoteUrl("inc", "https://example.com/new.git");
+            QVERIFY(!res.ok());
+            QVERIFY2(QString::fromStdString(res.error().message()).contains(QLatin1String("includes")),
+                     res.error().message().c_str());
+            QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+        }
+        // From the global config: libgit2's global search path points at
+        // a config of the test's own for the length of this block.
+        {
+            git_buf saved = GIT_BUF_INIT;
+            QCOMPARE(git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved), 0);
+            const QByteArray savedPath(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+            git_buf_dispose(&saved);
+            const auto restore = qScopeGuard([&] {
+                git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, savedPath.constData());
+            });
+            QTemporaryDir home;
+            QVERIFY(home.isValid());
+            QFile global(home.filePath(QStringLiteral(".gitconfig")));
+            QVERIFY(global.open(QIODevice::WriteOnly));
+            global.write("[remote \"glob\"]\n\turl = https://example.com/glob.git\n");
+            global.close();
+            QCOMPARE(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                      QFile::encodeName(home.path()).constData()), 0);
+
+            gitbolt::test::TestRepo repo;
+            QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+            auto remotes = repo.repo().remotes();
+            QVERIFY(remotes.ok());
+            QVERIFY(std::any_of(remotes->begin(), remotes->end(),
+                                [](const auto& r) { return r.name == "glob"; }));
+            const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+            const auto res = repo.repo().setRemoteUrl("glob", "https://example.com/new.git");
+            QVERIFY(!res.ok());
+            QVERIFY2(QString::fromStdString(res.error().message()).contains(QLatin1String("global")),
+                     res.error().message().c_str());
+            QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+        }
+    }
 };
 
 QTEST_MAIN(TestRepository)

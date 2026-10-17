@@ -836,21 +836,21 @@ jobs:
           #    every registry below serves the same bytes; its apt-get
           #    still installs today's packages, which is what a user's
           #    install resolves against.
-          #    Registries in turn: ECR Public first, then Google's Docker
-          #    Hub mirror, then Docker Hub. Anonymous pulls are limited
-          #    per runner IP, and ECR Public has refused a run outright
+          #    Registries in turn: Google's Docker Hub mirror, then Docker
+          #    Hub, then ECR Public. Anonymous pulls are limited per runner
+          #    IP, and ECR Public has refused a run outright
           #    ("toomanyrequests: Data limit exceeded"), which no retry
-          #    against the same registry outlasts.
+          #    against the same registry outlasts; the next one answers.
           for image in \
             ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3 \
             ubuntu:26.04@sha256:f144425ff09be612d6d9ad965196e9cdc23dae1f42110a8a11a3e9a8198759f7 \
             debian:13@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5; do
             echo "DEB on ${image%@*}"
             ref=
-            for registry in public.ecr.aws/docker/library mirror.gcr.io/library docker.io/library; do
+            for registry in mirror.gcr.io/library docker.io/library public.ecr.aws/docker/library; do
               for attempt in 1 2; do
+                if [ "$attempt" -gt 1 ]; then sleep 10; fi
                 if docker pull -q "$registry/$image"; then ref="$registry/$image"; break 2; fi
-                sleep $((attempt * 10))
               done
             done
             [ -n "$ref" ] || { echo "::error::could not pull $image from any registry"; exit 1; }
