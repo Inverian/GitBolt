@@ -13,13 +13,10 @@ namespace gitbolt::dialogs {
 /// Modeless dialog for managing the set of remotes on the open
 /// repository. Shows name + URL in a two-column table and exposes
 /// Add / Edit URL / Remove. The host wires the buttons to
-/// Repository::addRemote / removeRemote and refreshes the list.
-///
-/// Edit URL is implemented as remove + add against the same name —
-/// libgit2 doesn't expose a "set URL" verb on Repository today and
-/// the round-trip is harmless: refspecs and push URLs default back
-/// to git's standard layout, which is what the dialog is showing
-/// anyway.
+/// Repository::addRemote / setRemoteUrl / removeRemote and refreshes
+/// the list. Edit URL changes only the fetch URL, as `git remote
+/// set-url` does: the push URL, refspecs, options, remote-tracking
+/// branches and the branches' upstream links all stay.
 class RemotesDialog : public QDialog {
     Q_OBJECT
 public:
