@@ -6,7 +6,7 @@ Please report security problems privately. Don't open a public issue,
 pull request or discussion for them.
 
 Report through GitHub: open the repository's
-[Security tab](https://github.com/Inverian/GitBolt/security) and click
+[security page](https://github.com/Inverian/GitBolt/security) and click
 **Report a vulnerability**, or go straight to
 [the reporting form](https://github.com/Inverian/GitBolt/security/advisories/new).
 Only you and the security reviewers can see the report.
@@ -39,9 +39,10 @@ Security reports are reviewed by
 ## Supported versions
 
 GitBolt is in pre-release (0.9.x). Security fixes are made in the
-[latest release](https://github.com/Inverian/GitBolt/releases) only, so
-please update to it before you report, and check that the problem is
-still there.
+newest release only, the first one on the
+[Releases page](https://github.com/Inverian/GitBolt/releases), so please
+update to it before you report, and check that the problem is still
+there.
 
 ## Scope
 
