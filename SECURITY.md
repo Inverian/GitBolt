@@ -40,7 +40,7 @@ Security reports are reviewed by
 
 In scope:
 
-- the GitBolt desktop application in this repository, including the
+- The GitBolt desktop application in this repository, including the
   installers and packages on the Releases page;
 - GitBolt's handling of repositories, remotes, credentials and the
   commands it runs, and its usage statistics and crash reports (see
