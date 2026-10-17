@@ -44,8 +44,7 @@ In scope:
   installers and packages on the Releases page;
 - GitBolt's handling of repositories, remotes, credentials and the
   commands it runs, and its usage statistics and crash reports (see
-  [PRIVACY.md](PRIVACY.md) for what those send);
-- www.gitbolt.com and GitBolt's usage-statistics servers.
+  [PRIVACY.md](PRIVACY.md) for what those send).
 
 Problems in git, libgit2, Qt or your operating system themselves
 belong with those projects. If GitBolt makes one exploitable, for
