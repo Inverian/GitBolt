@@ -27,6 +27,7 @@ set(E2E_TESTS
     test_crash_box_handoff
     test_desktop_identity
     test_dialog_guards
+    test_file_open
     test_home_isolated
     test_instance_lock
     test_local_op_async
@@ -51,6 +52,14 @@ if(APPLE)
     list(APPEND E2E_TESTS test_instance_busy_owner)
 endif()
 
+# Open events through LaunchServices to the real cocoa app. It registers
+# the build's GitBolt.app with LaunchServices, so it runs only where CI
+# asks for it (GITBOLT_E2E_LAUNCHSERVICES=1 on a throwaway runner) and
+# is skipped everywhere else.
+if(APPLE)
+    list(APPEND E2E_TESTS test_launchservices_open)
+endif()
+
 foreach(t IN LISTS E2E_TESTS)
     add_test(NAME e2e_${t}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${t}.py
@@ -62,3 +71,7 @@ foreach(t IN LISTS E2E_TESTS)
         TIMEOUT 120
         RUN_SERIAL TRUE)
 endforeach()
+
+if(APPLE)
+    set_tests_properties(e2e_test_launchservices_open PROPERTIES SKIP_RETURN_CODE 77)
+endif()

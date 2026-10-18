@@ -1,4 +1,5 @@
 #include "git/Repository.h"
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QScopeGuard>
@@ -90,6 +91,94 @@ Result<Repository> Repository::open(const std::string& path) {
     int err = git_repository_open(&repo, path.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
     return Repository(repo, path);
+}
+
+namespace {
+
+#ifdef Q_OS_WIN
+constexpr Qt::CaseSensitivity kPathCase = Qt::CaseInsensitive;
+#else
+constexpr Qt::CaseSensitivity kPathCase = Qt::CaseSensitive;
+#endif
+
+// `path` is `ceiling`, or a folder above it. libgit2 applies a ceiling
+// only to a search that starts below it: from $HOME itself it would
+// search on up, past the ceiling.
+bool atOrAbove(const std::string& path, const std::string& ceiling) {
+    const QString p = QFileInfo(QString::fromStdString(path)).canonicalFilePath();
+    const QString c = QFileInfo(QString::fromStdString(ceiling)).canonicalFilePath();
+    if (p.isEmpty() || c.isEmpty())
+        return false;
+    if (c.compare(p, kPathCase) == 0)
+        return true;
+    return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+}
+
+// The folder `found`, as `path` spells it: the nearest of `path`'s own
+// folders that is the same folder. libgit2 gives a repository it
+// searched for with symbolic links resolved (/private/var for macOS's
+// /var, a linked folder's target), and Recent and the title would get
+// a second spelling of it. Empty if none of them is.
+QString spelledAsAsked(const std::string& path, const std::string& found) {
+    const QString target = QFileInfo(QString::fromStdString(found)).canonicalFilePath();
+    if (target.isEmpty())
+        return {};
+    QString at = QDir::cleanPath(QFileInfo(QString::fromStdString(path)).absoluteFilePath());
+    for (;;) {
+        if (QFileInfo(at).canonicalFilePath().compare(target, kPathCase) == 0)
+            return at;
+        const QString up = QFileInfo(at).path();
+        if (up == at)
+            return {};
+        at = up;
+    }
+}
+
+} // namespace
+
+Result<Repository> Repository::openContaining(const std::string& path,
+                                              const std::string& ceiling,
+                                              std::string& root) {
+    // The exact open first, so a repository keeps the spelling it was
+    // asked for by (Recent, the title, the watchers).
+    git_repository* repo = nullptr;
+    int err = git_repository_open(&repo, path.c_str());
+    if (err == 0) {
+        root = path;
+        return Repository(repo, path);
+    }
+    // NotFound only when no repository was found ("could not find
+    // repository at …"), or the folder isn't there: libgit2 says the
+    // same of a repository it found broken, such as a worktree or
+    // submodule whose git dir is gone, and that is no folder outside
+    // any repository.
+    const auto failed = [&path](int code) {
+        const git_error* last = git_error_last();
+        const bool noneFound = last && last->klass == GIT_ERROR_REPOSITORY;
+        if (code == GIT_ENOTFOUND && !noneFound
+            && QFileInfo(QString::fromStdString(path)).isDir())
+            return GitError(GitErrorCode::GenericError,
+                            last ? last->message : "cannot open the repository");
+        return GitError::fromLibgit2(code);
+    };
+    if (err != GIT_ENOTFOUND)
+        return GitError::fromLibgit2(err);
+    if (!ceiling.empty() && atOrAbove(path, ceiling))
+        return failed(err);
+    err = git_repository_open_ext(&repo, path.c_str(), 0,
+                                  ceiling.empty() ? nullptr : ceiling.c_str());
+    if (err < 0)
+        return failed(err);
+    const char* top = git_repository_workdir(repo);
+    std::string found = top ? top : git_repository_path(repo);
+    // "/x/repo/" → "/x/repo"; a root ("/", "C:/") stays as it is.
+    if (found.size() > 1 && found.back() == '/' && found[found.size() - 2] != ':')
+        found.pop_back();
+    const QString asAsked = spelledAsAsked(path, found);
+    if (!asAsked.isEmpty())
+        found = asAsked.toStdString();
+    root = found;
+    return Repository(repo, found);
 }
 
 Result<Repository> Repository::init(const std::string& path, bool bare) {

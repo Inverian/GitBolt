@@ -76,6 +76,12 @@ public:
     /// one — the stale result is discarded without any signal.
     /// Returns this open's generation: initialLogLoaded carries it
     /// with the open's first history page.
+    ///
+    /// Both opens take a folder inside a repository for that
+    /// repository (git::Repository::openContaining, with $HOME as the
+    /// ceiling: a folder below $HOME never finds a repository at $HOME
+    /// or above it), and repositoryOpened then carries the
+    /// repository's top folder rather than `path`.
     quint64 openRepositoryAsync(const QString& path);
 
     /// The generation of the latest open or close: equal to what

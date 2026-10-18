@@ -89,13 +89,15 @@ GITBOLT_TEST_BRIDGE=1 ./build/src/app/GitBolt.app/Contents/MacOS/GitBolt /path/t
 tools/bridge.py dump-state
 tools/bridge.py list-actions          # every menu/toolbar action + slug
 tools/bridge.py trigger commands/resolve-conflicts
-tools/bridge.py list-widgets          # windows, buttons, views, editors (with classes)
+tools/bridge.py list-widgets          # windows (a message box's text too), buttons, views, editors (with classes)
 tools/bridge.py select-row QTableView:0 0     # the AX-impossible operation
 tools/bridge.py select-row commit.unstagedList 0,2,5   # multi-row (ExtendedSelection lists)
 tools/bridge.py click "Lock/Unlock"
 tools/bridge.py select-item toolbar.branchCombo feature/login   # exact text, or '#N'
 tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ decoded
 tools/bridge.py fire-timer periodicFetchTimer # the auto-fetch tick now, not in N minutes
+tools/bridge.py file-open /path/to/repo/sub   # a QFileOpenEvent, as a Dock drop or `open -a` sends
+tools/bridge.py service-open /path/to/repo    # Finder's Open in GitBolt (macOS, cocoa only)
 tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay issues
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```

@@ -122,6 +122,213 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // openContaining(): a folder inside a repository opens that
+    // repository, as git finds one from anywhere in its work tree
+    // (Finder's Open in GitBolt, a Dock drop or File › Open on a
+    // subfolder). `root` says what opened.
+    // -----------------------------------------------------------------
+    void openContainingKeepsARepositorysOwnPath() {
+        gitbolt::test::TestRepo repo;
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(repo.path().toStdString(), "", root);
+        QVERIFY(result.ok());
+        // As asked for, not as libgit2 resolves it: Recent and the
+        // title keep the spelling the user's path had.
+        QCOMPARE(QString::fromStdString(root), repo.path());
+    }
+
+    void openContainingFindsTheWorkTreeTop() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("src/app")));
+        const QString sub = QDir(repo.path()).filePath(QStringLiteral("src/app"));
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(sub.toStdString(), "", root);
+        QVERIFY2(result.ok(), result.ok() ? "" : result.error().message().c_str());
+        // Spelled as asked for, though libgit2 resolves the links in
+        // it (macOS's temp folder is /var/…, which is /private/var/…).
+        QCOMPARE(QString::fromStdString(root), QDir::cleanPath(repo.path()));
+        QCOMPARE(QFileInfo(QString::fromStdString(result->workdir())).canonicalFilePath(),
+                 QFileInfo(repo.path()).canonicalFilePath());
+    }
+
+    // The same through a linked folder: the link's spelling, not its
+    // target's, so Recent and the title don't get a second one.
+    void openContainingKeepsALinkedFoldersSpelling() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#endif
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString real = base.filePath(QStringLiteral("real/proj"));
+        QVERIFY(gitbolt::git::Repository::init(real.toStdString()).ok());
+        QVERIFY(QDir(real).mkpath(QStringLiteral("src")));
+        QVERIFY(QFile::link(base.filePath(QStringLiteral("real")), base.filePath(QStringLiteral("link"))));
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(
+            base.filePath(QStringLiteral("link/proj/src")).toStdString(), "", root);
+        QVERIFY(result.ok());
+        QCOMPARE(QString::fromStdString(root), base.filePath(QStringLiteral("link/proj")));
+    }
+
+    // A repository inside another one (or a submodule): the innermost.
+    void openContainingFindsTheInnermostRepository() {
+        gitbolt::test::TestRepo outer;
+        const QString inner = QDir(outer.path()).filePath(QStringLiteral("inner"));
+        QVERIFY(gitbolt::git::Repository::init(inner.toStdString()).ok());
+        QVERIFY(QDir(inner).mkpath(QStringLiteral("sub")));
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(
+            QDir(inner).filePath(QStringLiteral("sub")).toStdString(), "", root);
+        QVERIFY(result.ok());
+        QCOMPARE(QFileInfo(QString::fromStdString(root)).canonicalFilePath(),
+                 QFileInfo(inner).canonicalFilePath());
+    }
+
+    void openContainingFindsALinkedWorktree() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(!addFeatureBranch(repo).isEmpty());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QTemporaryDir worktreeParent;
+        QVERIFY(worktreeParent.isValid());
+        const QString worktree = worktreeParent.filePath(QStringLiteral("wt"));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", worktree.toStdString(), "feature"})));
+        QVERIFY(QDir(worktree).mkpath(QStringLiteral("sub")));
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(
+            QDir(worktree).filePath(QStringLiteral("sub")).toStdString(), "", root);
+        QVERIFY(result.ok());
+        QCOMPARE(QFileInfo(QString::fromStdString(root)).canonicalFilePath(),
+                 QFileInfo(worktree).canonicalFilePath());
+        QCOMPARE(QString::fromStdString(result->headBranchName().value()), QStringLiteral("feature"));
+    }
+
+    // A bare repository has no work tree: its git dir is what opens.
+    void openContainingFindsABareRepository() {
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString bare = tmp.filePath(QStringLiteral("repo.git"));
+        QVERIFY(gitbolt::git::Repository::init(bare.toStdString(), true).ok());
+        std::string root;
+        auto result = gitbolt::git::Repository::openContaining(
+            QDir(bare).filePath(QStringLiteral("refs")).toStdString(), "", root);
+        QVERIFY(result.ok());
+        QVERIFY(result->isBare());
+        const QString opened = QString::fromStdString(root);
+        QVERIFY2(!opened.endsWith(QLatin1Char('/')), qPrintable(opened));
+        QCOMPARE(QFileInfo(opened).canonicalFilePath(), QFileInfo(bare).canonicalFilePath());
+    }
+
+    // The ceiling ($HOME, in the app) is never searched: a dotfiles
+    // repository there doesn't claim a folder below it that is in no
+    // repository of its own. It still opens itself, and the search
+    // stops there however the ceiling is spelled (macOS's /var is
+    // /private/var).
+    void openContainingStopsBelowTheCeiling_data() {
+        QTest::addColumn<bool>("canonicalCeiling");
+        QTest::newRow("ceiling as given") << false;
+#ifndef Q_OS_WIN
+        // Not on Windows, where the runners' %TEMP% is an 8.3 short
+        // name that the canonical path spells out and libgit2 (like
+        // git) compares as it is.
+        QTest::newRow("ceiling canonical") << true;
+#endif
+    }
+
+    void openContainingStopsBelowTheCeiling() {
+        QFETCH(bool, canonicalCeiling);
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QVERIFY(gitbolt::git::Repository::init(home.path().toStdString()).ok());
+        QVERIFY(QDir(home.path()).mkpath(QStringLiteral("projects/plain")));
+        const QString ceiling = canonicalCeiling ? QFileInfo(home.path()).canonicalFilePath()
+                                                 : home.path();
+
+        std::string root;
+        auto below = gitbolt::git::Repository::openContaining(
+            QDir(home.path()).filePath(QStringLiteral("projects/plain")).toStdString(),
+            ceiling.toStdString(), root);
+        QVERIFY(!below.ok());
+        QCOMPARE(below.error().code(), gitbolt::git::GitErrorCode::NotFound);
+
+        auto itself = gitbolt::git::Repository::openContaining(
+            home.path().toStdString(), ceiling.toStdString(), root);
+        QVERIFY(itself.ok());
+        QCOMPARE(QString::fromStdString(root), home.path());
+    }
+
+    // The ceiling itself, or a folder above it, is no folder below it:
+    // it opens if it is a repository, and nothing is searched for.
+    // (libgit2 alone would search on up from the ceiling, into the
+    // repository around it.)
+    void openContainingNeverSearchesFromTheCeilingUp() {
+        gitbolt::test::TestRepo outer;
+        QVERIFY(QDir(outer.path()).mkpath(QStringLiteral("home/user")));
+        const QString home = QDir(outer.path()).filePath(QStringLiteral("home/user"));
+        std::string root;
+        auto itself = gitbolt::git::Repository::openContaining(
+            home.toStdString(), home.toStdString(), root);
+        QVERIFY(!itself.ok());
+        QCOMPARE(itself.error().code(), gitbolt::git::GitErrorCode::NotFound);
+        auto above = gitbolt::git::Repository::openContaining(
+            QDir(outer.path()).filePath(QStringLiteral("home")).toStdString(),
+            home.toStdString(), root);
+        QVERIFY(!above.ok());
+        QCOMPARE(above.error().code(), gitbolt::git::GitErrorCode::NotFound);
+        // A folder beside it is searched as any other.
+        QVERIFY(QDir(outer.path()).mkpath(QStringLiteral("src")));
+        auto beside = gitbolt::git::Repository::openContaining(
+            QDir(outer.path()).filePath(QStringLiteral("src")).toStdString(),
+            home.toStdString(), root);
+        QVERIFY(beside.ok());
+    }
+
+    // A repository found broken is not "no repository": a linked
+    // worktree whose main repository was moved away. libgit2 reports
+    // it as not found too, and the window would say the folder is in
+    // no repository instead of what is wrong with it.
+    void openContainingReportsABrokenWorktree() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(QStringLiteral("wt"));
+        QVERIFY(QDir().mkpath(main));
+        gitbolt::git::GitProcess git(main.toStdString());
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false",
+                                   "commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "topic", worktree.toStdString()})));
+        QVERIFY(QDir(worktree).mkpath(QStringLiteral("sub")));
+        QVERIFY(QDir().rename(main, base.filePath(QStringLiteral("moved"))));
+
+        for (const QString& path : {worktree, QDir(worktree).filePath(QStringLiteral("sub"))}) {
+            std::string root;
+            auto result = gitbolt::git::Repository::openContaining(path.toStdString(), "", root);
+            QVERIFY(!result.ok());
+            QVERIFY2(result.error().code() != gitbolt::git::GitErrorCode::NotFound,
+                     qPrintable(path));
+            QVERIFY2(!result.error().message().empty(), qPrintable(path));
+        }
+        // Gone altogether, a folder is still not found.
+        std::string root;
+        auto gone = gitbolt::git::Repository::openContaining(
+            base.filePath(QStringLiteral("nowhere")).toStdString(), "", root);
+        QVERIFY(!gone.ok());
+        QCOMPARE(gone.error().code(), gitbolt::git::GitErrorCode::NotFound);
+    }
+
+    void openContainingFailsOutsideAnyRepository() {
+        QTemporaryDir plain;
+        QVERIFY(plain.isValid());
+        std::string root = "untouched";
+        auto result = gitbolt::git::Repository::openContaining(
+            plain.path().toStdString(), QDir::tempPath().toStdString(), root);
+        QVERIFY(!result.ok());
+        QCOMPARE(result.error().code(), gitbolt::git::GitErrorCode::NotFound);
+        QCOMPARE(root, std::string("untouched"));
+    }
+
+    // -----------------------------------------------------------------
     // tags(): `name` is the short form createTag/deleteTag take and
     // the UI shows; `fullRefName` is the ref. git_tag_foreach reports
     // the full ref, and storing that as `name` broke Delete tag.

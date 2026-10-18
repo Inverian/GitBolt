@@ -1,3 +1,4 @@
+#include "OpenRequests.h"
 #include "SingleInstance.h"
 #include "TelemetryEndpoints.h"
 #include "TestBridge.h"
@@ -14,6 +15,10 @@
 #include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
+
+#ifdef Q_OS_MACOS
+#include "platform/macos/MacServices.h"
+#endif
 
 #include <memory>
 #include <string_view>
@@ -318,6 +323,34 @@ int main(int argc, char* argv[]) {
         initialRepoPath = gitbolt::app::repoPathArgument(positionalArgs.first());
     }
 
+    // Folders macOS asks a running GitBolt to open: open-documents
+    // events (a Dock drop, `open -a GitBolt <folder>`) and Finder's
+    // "Open in GitBolt" service. Taken from here on and held until the
+    // window is up (see OpenRequests.h).
+    gitbolt::app::OpenRequests openRequests;
+    app.installEventFilter(&openRequests);
+#ifdef Q_OS_MACOS
+    gitbolt::app::macos::installServicesProvider(
+        [&openRequests](const QStringList& folders) {
+            openRequests.submit(folders.first());
+        });
+    const auto servicesProviderGone = qScopeGuard([] {
+        gitbolt::app::macos::installServicesProvider({});
+    });
+    // A launch by Finder or LaunchServices has its folder in an event,
+    // not in argv, and the event comes once the event loop first
+    // turns. Turn it now, before the single-instance guard: a launch
+    // that finds GitBolt running hands its path over below and exits,
+    // and the folder would go with it. (BusyInstanceNotice turns the
+    // loop before any window exists, too.)
+    if (initialRepoPath.isEmpty()
+        && QGuiApplication::platformName() == QLatin1String("cocoa")) {
+        QCoreApplication::processEvents();
+        initialRepoPath = openRequests.takePending();
+    }
+    openRequests.setLaunchPath(initialRepoPath);
+#endif
+
     // Single-instance guard: a lock file in a per-user directory.
     //
     // It used to be QSharedMemory, i.e. a System V segment on macOS,
@@ -344,9 +377,11 @@ int main(int argc, char* argv[]) {
         runtimeDir.filePath(instanceName + QStringLiteral(".lock")));
     instanceLock.setStaleLockTime(0);
     // If another instance holds the lock, hand it our repo argument —
-    // this is how "Open in GitBolt" from Finder/Nautilus/Explorer
-    // reaches an already-open window: the shell extensions spawn a
-    // fresh process.
+    // this is how "Open in GitBolt" from Explorer or Nautilus, and a
+    // `gitbolt <path>`, reach an already-open window: each starts a
+    // fresh process. Finder's service and macOS's open events go to a
+    // running GitBolt directly (openRequests); a fresh process gets
+    // here only when it was launched for one (see above).
     BusyInstanceNotice busyNotice(initialRepoPath);
     const gitbolt::app::Claim claim = gitbolt::app::claimInstance(
         instanceLock, serverName, initialRepoPath, 10000, busyNotice.wait());
@@ -518,18 +553,23 @@ int main(int argc, char* argv[]) {
     // Second-instance handshake: a later `gitbolt <path>` (the shell
     // extensions, a plain CLI launch) hands its path over here instead
     // of opening a second window (see SingleInstance.h).
+    // The window comes to the front for each, whichever app asked.
+    const auto bringForwardAndOpen = [&window](const QString& path) {
+#ifdef Q_OS_MACOS
+        gitbolt::app::macos::activateApp();
+#endif
+        window.show();
+        window.raise();
+        window.activateWindow();
+        if (!path.isEmpty())
+            window.openRepositoryAtPath(path);
+    };
     gitbolt::app::InstanceServer instanceServer;
     if (instanceLock.isLocked()) {
         if (instanceServer.listen(serverName)) {
             QObject::connect(&instanceServer,
                              &gitbolt::app::InstanceServer::pathReceived,
-                             &window, [&window](const QString& path) {
-                                 window.show();
-                                 window.raise();
-                                 window.activateWindow();
-                                 if (!path.isEmpty())
-                                     window.openRepositoryAtPath(path);
-                             });
+                             &window, bringForwardAndOpen);
         } else {
             qWarning("Single-instance server: listen(%s) failed: %s",
                      qPrintable(serverName),
@@ -544,6 +584,12 @@ int main(int argc, char* argv[]) {
             window.openRepositoryAtPath(initialRepoPath);
         }, Qt::QueuedConnection);
     }
+
+    // And the folders macOS asks for, after it: one that came during
+    // launch is the newer request.
+    QObject::connect(&openRequests, &gitbolt::app::OpenRequests::openRequested,
+                     &window, bringForwardAndOpen);
+    openRequests.setReady();
 
     // The crash box, last: its exec() turns the event loop, so a launch
     // that hands over while it is up is answered and opened like any
