@@ -1998,6 +1998,94 @@ private slots:
 #endif
     }
 
+    // The same two levels down: submodule s (a clone of the repository
+    // itself, url = ./) has a submodule x whose path is a committed
+    // symlink to "..", which leads back to the superproject. s opened
+    // the superproject, which opened s, and so on.
+    void submoduleLoopingBackUpIsNotOpened() {
+#if !defined(GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#elif defined(Q_OS_WIN)
+        QSKIP("needs a symbolic link");
+#else
+        const char* const identity[] = {"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                        "-c", "commit.gpgsign=false"};
+        auto commit = [&](gitbolt::git::GitProcess& git, const std::string& message) {
+            std::vector<std::string> args(std::begin(identity), std::end(identity));
+            for (const char* a : {"commit", "-q", "-m"})
+                args.emplace_back(a);
+            args.push_back(message);
+            return succeeded(git.run(args));
+        };
+        // The commit s checks out: l -> "..", and x, a submodule at l.
+        QTemporaryDir src;
+        QVERIFY(src.isValid());
+        gitbolt::git::GitProcess srcGit(src.path().toStdString());
+        QVERIFY(succeeded(srcGit.run({"init", "-q"})));
+        QFile first(QDir(src.path()).filePath(QStringLiteral("a.txt")));
+        QVERIFY(first.open(QIODevice::WriteOnly));
+        first.write("a\n");
+        first.close();
+        QVERIFY(succeeded(srcGit.run({"add", "a.txt"})));
+        QVERIFY(commit(srcGit, "c0"));
+        const QString c0 = output(srcGit.run({"rev-parse", "HEAD"}));
+        QFile modules(QDir(src.path()).filePath(QStringLiteral(".gitmodules")));
+        QVERIFY(modules.open(QIODevice::WriteOnly));
+        modules.write("[submodule \"x\"]\n\tpath = l\n\turl = ./\n");
+        modules.close();
+        QVERIFY(QFile::link(QStringLiteral(".."), QDir(src.path()).filePath(QStringLiteral("l"))));
+        QVERIFY(succeeded(srcGit.run({"add", "-A"})));
+        QVERIFY(succeeded(srcGit.run({"update-index", "--add", "--cacheinfo",
+                                      ("160000," + c0 + ",x").toStdString()})));
+        QVERIFY(commit(srcGit, "loop"));
+        const QString c1 = output(srcGit.run({"rev-parse", "HEAD"}));
+
+        // The superproject, with s checked out at that commit.
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"clone", "-q", src.path().toStdString(), "s"})));
+        repo.writeFile(".gitmodules", "[submodule \"s\"]\n\tpath = s\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c1 + ",s").toStdString()})));
+        QVERIFY(commit(git, "s"));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());
+#endif
+    }
+
+    // A linked worktree of the repository inside its work tree, tracked
+    // as a submodule (a gh-pages checkout, say): a different working
+    // tree, opened as any submodule. Clean, it is no change.
+    void linkedWorktreeAsASubmoduleIsOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "pages", "public"})));
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile(".gitmodules", "[submodule \"public\"]\n\tpath = public\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",public").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "pages"})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto status = opened->status();
+        QVERIFY(status.ok());
+        for (const auto& entry : *status)
+            QVERIFY2(entry.path != "public", "the clean worktree shows as changed");
+#endif
+    }
+
     void valuelessInsteadOfIsIgnored() {
 #ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");

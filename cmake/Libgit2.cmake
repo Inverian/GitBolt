@@ -147,7 +147,7 @@ function(gitbolt_add_bundled_libgit2)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/repository.c _repository_c)
     if(_submodule_c MATCHES "if \\(entry->value && !strcmp\\(entry->value, data->path\\)\\)"
        AND _submodule_c MATCHES "if \\(\\*value && !looks_like_command_line_option\\(value\\)\\)"
-       AND _submodule_c MATCHES "is its own superproject"
+       AND _submodule_c MATCHES "is not inside its superproject"
        AND _remote_c MATCHES "if \\(!entry->value \\|\\| git__prefixcmp\\(url, entry->value\\)\\)"
        AND _repository_c MATCHES "missing value for 'extensions\\.objectformat'")
         target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)

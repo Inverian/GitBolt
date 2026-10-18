@@ -114,17 +114,20 @@ gitbolt_patch(src/libgit2/submodule.c
     "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {"
     "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (*value && !looks_like_command_line_option(value)) {"
     "in_config = 1;\n\t\t/\\* We would warn here if we had that API \\*/\n\t\tif \\(!looks_like_command_line_option")
-# A submodule whose folder is the superproject itself: `path = /`
-# (joined onto the work tree, it names the work tree), or a path through
-# a committed symlink to `.`. Status opened the superproject as its own
-# submodule, diffed it, met the submodule again, and so on until the
-# stack ran out: a clone of such a repository crashed on opening. git
-# never recurses there. Such a submodule now fails to open, which
-# status takes as a submodule not checked out.
+# A submodule whose folder is not strictly inside its superproject's:
+# `path = /` (joined onto the work tree, it names the work tree), or a
+# path through a committed symlink to `.` or `..`, one level down or
+# several. Status opened a repository it was already scanning as a
+# submodule of its own, diffed it, met the submodule again, and so on
+# until the stack ran out: a clone of such a repository crashed GitBolt
+# on opening. Now such a submodule isn't opened, and is taken as not
+# checked out. Every level opened lies strictly deeper in the file
+# system than the one before, so no loop can form. (git never follows
+# a submodule path through a symlink.)
 gitbolt_patch(src/libgit2/submodule.c
-    "\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\t/* if we opened"
-    "\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\tif (!error && !strcmp(git_repository_commondir(*subrepo),\n\t\t\tgit_repository_commondir(sm->repo))) {\n\t\tgit_repository_free(*subrepo);\n\t\t*subrepo = NULL;\n\t\tgit_str_dispose(&path);\n\t\tgit_error_set(GIT_ERROR_SUBMODULE,\n\t\t\t\"submodule '%s' is its own superproject\", sm->name);\n\t\treturn GIT_EINVALID;\n\t}\n\n\t/* if we opened"
-    "flags, wd\\);\n\n\t/\\* if we opened")
+    "\tif (bare)\n\t\tflags |= GIT_REPOSITORY_OPEN_BARE;\n\n\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);"
+    "\tif (bare)\n\t\tflags |= GIT_REPOSITORY_OPEN_BARE;\n\n\t/* GitBolt: the submodule's folder must be strictly inside its\n\t * superproject's: one that is the superproject, or leads out of it\n\t * (through a symlink to \".\" or \"..\"), loops back to a repository\n\t * being scanned, and status recursed until the stack ran out. */\n\t{\n\t\tgit_str dir = GIT_STR_INIT, real = GIT_STR_INIT, realwd = GIT_STR_INIT;\n\t\tint inside = 1;\n\n\t\tif (git_str_join(&dir, '/', wd, sm->path) < 0) {\n\t\t\tgit_str_dispose(&path);\n\t\t\treturn -1;\n\t\t}\n\t\tif (git_fs_path_prettify_dir(&real, dir.ptr, NULL) == 0 &&\n\t\t    git_fs_path_prettify_dir(&realwd, wd, NULL) == 0)\n\t\t\tinside = !git__prefixcmp(real.ptr, realwd.ptr) && real.size > realwd.size;\n\t\telse\n\t\t\tgit_error_clear();\n\t\tgit_str_dispose(&dir);\n\t\tgit_str_dispose(&real);\n\t\tgit_str_dispose(&realwd);\n\t\tif (!inside) {\n\t\t\tgit_str_dispose(&path);\n\t\t\tsm->flags |= GIT_SUBMODULE_STATUS__WD_SCANNED;\n\t\t\tgit_error_set(GIT_ERROR_SUBMODULE,\n\t\t\t\t\"submodule '%s' is not inside its superproject\", sm->name);\n\t\t\treturn GIT_EINVALID;\n\t\t}\n\t}\n\n\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);"
+    "OPEN_BARE;\n\n\terror = git_repository_open_ext\\(subrepo")
 # url.<base>.insteadOf / pushInsteadOf with no value: every remote lookup
 # (the Remote repositories list, Edit URL, Statistics) crashed.
 gitbolt_patch(src/libgit2/remote.c
