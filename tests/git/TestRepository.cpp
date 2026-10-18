@@ -1838,6 +1838,151 @@ private slots:
                      res.error().message().c_str());
             QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
         }
+        // From a file the global config includes: the global config is
+        // where to look, not the repository's (libgit2 gives the entry
+        // the global level and an include depth).
+        {
+            git_buf saved = GIT_BUF_INIT;
+            QCOMPARE(git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved), 0);
+            const QByteArray savedPath(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+            git_buf_dispose(&saved);
+            const auto restore = qScopeGuard([&] {
+                git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, savedPath.constData());
+            });
+            QTemporaryDir home;
+            QVERIFY(home.isValid());
+            QFile shared(home.filePath(QStringLiteral("shared.gitconfig")));
+            QVERIFY(shared.open(QIODevice::WriteOnly));
+            shared.write("[remote \"shared\"]\n\turl = https://example.com/shared.git\n");
+            shared.close();
+            QFile global(home.filePath(QStringLiteral(".gitconfig")));
+            QVERIFY(global.open(QIODevice::WriteOnly));
+            global.write("[include]\n\tpath = shared.gitconfig\n");
+            global.close();
+            QCOMPARE(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                      QFile::encodeName(home.path()).constData()), 0);
+
+            gitbolt::test::TestRepo repo;
+            QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+            const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+            const auto res = repo.repo().setRemoteUrl("shared", "https://example.com/new.git");
+            QVERIFY(!res.ok());
+            QVERIFY2(QString::fromStdString(res.error().message())
+                         .contains(QLatin1String("a file that your global git config includes")),
+                     res.error().message().c_str());
+            QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+        }
+    }
+
+    // A remote in a linked worktree's own config.worktree: libgit2
+    // writes the URL to the repository's config, where every other
+    // worktree gets it, while the worktree's own entry wins on there.
+    void setRemoteUrlRefusesAWorktreesOwnRemote() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(!addFeatureBranch(repo).isEmpty());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QTemporaryDir worktreeParent;
+        QVERIFY(worktreeParent.isValid());
+        const QString worktree = worktreeParent.filePath(QStringLiteral("wt"));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", worktree.toStdString(), "feature"})));
+        QVERIFY(succeeded(git.run({"config", "extensions.worktreeConfig", "true"})));
+        gitbolt::git::GitProcess wtGit(worktree.toStdString());
+        QVERIFY(succeeded(wtGit.run({"config", "--worktree", "remote.wtremote.url",
+                                     "https://example.com/wt-old.git"})));
+        QVERIFY(succeeded(wtGit.run({"config", "--worktree", "remote.wtremote.fetch",
+                                     "+refs/heads/*:refs/remotes/wtremote/*"})));
+
+        auto opened = gitbolt::git::Repository::open(worktree.toStdString());
+        QVERIFY(opened.ok());
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = opened->setRemoteUrl("wtremote", "https://example.com/wt-new.git");
+        QVERIFY(!res.ok());
+        QVERIFY2(QString::fromStdString(res.error().message()).contains(QLatin1String("config.worktree")),
+                 res.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+    }
+
+    // Several URLs (`git remote set-url --add`): refused as git does,
+    // saying so instead of libgit2's "not unique due to being a
+    // multivar", and nothing changes.
+    void setRemoteUrlRefusesARemoteWithSeveralUrls() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", "https://example.com/a.git"})));
+        QVERIFY(succeeded(git.run({"remote", "set-url", "--add", "origin",
+                                   "https://example.com/b.git"})));
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = repo.repo().setRemoteUrl("origin", "https://example.com/c.git");
+        QVERIFY(!res.ok());
+        const QString message = QString::fromStdString(res.error().message());
+        QVERIFY2(message.contains(QLatin1String("2 URLs"))
+                     && message.contains(QLatin1String("https://example.com/a.git"))
+                     && message.contains(QLatin1String("https://example.com/b.git")),
+                 qPrintable(message));
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+
+        // One URL in the global config, one in the repository's: `git
+        // remote set-url --delete` couldn't remove the global one, so
+        // the note says where it is instead.
+        git_buf saved = GIT_BUF_INIT;
+        QCOMPARE(git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved), 0);
+        const QByteArray savedPath(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+        git_buf_dispose(&saved);
+        const auto restore = qScopeGuard([&] {
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, savedPath.constData());
+        });
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QFile global(home.filePath(QStringLiteral(".gitconfig")));
+        QVERIFY(global.open(QIODevice::WriteOnly));
+        global.write("[remote \"mixed\"]\n\turl = https://example.com/global.git\n");
+        global.close();
+        QCOMPARE(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                  QFile::encodeName(home.path()).constData()), 0);
+        QVERIFY(succeeded(git.run({"config", "--local", "--add", "remote.mixed.url",
+                                   "https://example.com/local.git"})));
+        // Opened again: libgit2 read the global config with the first open.
+        auto reopened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened.ok());
+        const QByteArray before2 = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto mixed = reopened->setRemoteUrl("mixed", "https://example.com/c.git");
+        QVERIFY(!mixed.ok());
+        QVERIFY2(QString::fromStdString(mixed.error().message())
+                     .contains(QLatin1String("some of them in your global git config")),
+                 mixed.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before2);
+
+        // Both in the global config: listed, and where.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[remote \"both\"]\n\turl = https://example.com/g1.git\n"
+                     "\turl = https://example.com/g2.git\n");
+        global.close();
+        auto reopened2 = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened2.ok());
+        const auto both = reopened2->setRemoteUrl("both", "https://example.com/c.git");
+        QVERIFY(!both.ok());
+        const QString bothMessage = QString::fromStdString(both.error().message());
+        QVERIFY2(bothMessage.contains(QLatin1String("2 URLs"))
+                     && bothMessage.contains(QLatin1String(", in your global git config;")),
+                 qPrintable(bothMessage));
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before2);
+
+        // One global, one in a file the repository's config includes:
+        // both places named.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[remote \"spread\"]\n\turl = https://example.com/g.git\n");
+        global.close();
+        repo.writeFile(".git/spread.config", "[remote \"spread\"]\n\turl = https://example.com/i.git\n");
+        QVERIFY(succeeded(git.run({"config", "include.path", "spread.config"})));
+        auto reopened3 = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened3.ok());
+        const auto spread = reopened3->setRemoteUrl("spread", "https://example.com/c.git");
+        QVERIFY(!spread.ok());
+        const QString spreadMessage = QString::fromStdString(spread.error().message());
+        QVERIFY2(spreadMessage.contains(QLatin1String(
+                     "in your global git config and a file that the repository's config includes")),
+                 qPrintable(spreadMessage));
     }
 };
 

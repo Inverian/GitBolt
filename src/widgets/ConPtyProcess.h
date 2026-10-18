@@ -58,6 +58,8 @@ public:
         /// NAME/value pairs layered over our own environment. Names
         /// match case-insensitively, as Windows compares them.
         std::vector<std::pair<std::wstring, std::wstring>> environment;
+        /// Names dropped from our environment (case-insensitively).
+        std::vector<std::wstring> removed;
         int columns = 80;
         int rows    = 25;
     };

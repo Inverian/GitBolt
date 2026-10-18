@@ -25,6 +25,7 @@
 // test is a QSKIP, so the file still builds and shows up in ctest.
 //
 
+#include <QScopeGuard>
 #include <QTest>
 
 #ifdef Q_OS_WIN
@@ -222,6 +223,37 @@ private slots:
         QTest::qWait(300);
         QCOMPARE(capture.calls(), calls);
         QVERIFY(!capture.exitCode().has_value());
+#endif
+    }
+
+    // `removed` drops variables from what the shell inherits, matching
+    // names as Windows does (case-insensitively); `environment` sets them.
+    void dropsRemovedVariables()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        qputenv("GITBOLT_DROP_ME", "inherited");
+        qputenv("GITBOLT_KEEP_ME", "kept");
+        const auto restore = qScopeGuard([] {
+            qunsetenv("GITBOLT_DROP_ME");
+            qunsetenv("GITBOLT_KEEP_ME");
+        });
+        Capture capture;
+        ConPtyProcess pty;
+        ConPtyProcess::StartInfo info = cmdExe();
+        info.removed = {L"gitbolt_drop_me"};
+        info.environment = {{L"GITBOLT_SET_ME", L"set"}};
+        QVERIFY2(pty.start(info, capture.outputHandler(), capture.exitHandler()),
+                 qPrintable(QString::fromStdWString(pty.errorString())));
+        QTRY_VERIFY2_WITH_TIMEOUT(promptShown(capture, pty), qPrintable(capture.text(pty)),
+                                  kTimeoutMs);
+        QVERIFY(pty.write("echo [%GITBOLT_DROP_ME%][%GITBOLT_KEEP_ME%][%GITBOLT_SET_ME%]\r"));
+        // cmd leaves an unset %NAME% as it is.
+        QTRY_VERIFY2_WITH_TIMEOUT(
+            capture.text(pty).contains(QStringLiteral("[%GITBOLT_DROP_ME%][kept][set]")),
+            qPrintable(capture.text(pty)), kTimeoutMs);
+        QVERIFY(pty.stop(10000));
 #endif
     }
 

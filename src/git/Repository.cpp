@@ -5,6 +5,7 @@
 #include <QScopeGuard>
 #include <QString>
 #include <git2.h>
+#include <algorithm>
 #include <cstring>
 #include <sstream>
 #include <string_view>
@@ -196,6 +197,16 @@ std::string Repository::path() const {
 std::string Repository::workdir() const {
     const char* p = git_repository_workdir(repo_);
     return p ? p : "";
+}
+
+std::string Repository::commonDir() const {
+    const char* p = git_repository_commondir(repo_);
+    return p ? p : path();
+}
+
+std::string Repository::commandDir() const {
+    const std::string dir = workdir();
+    return dir.empty() ? path() : dir;
 }
 
 bool Repository::isBare() const { return git_repository_is_bare(repo_) != 0; }
@@ -1455,6 +1466,29 @@ Result<void> Repository::removeRemote(const std::string& name) {
     return Result<void>::success();
 }
 
+namespace {
+// Where a remote's config entry is, if it is not in the repository's
+// own config file: "" for one that is. libgit2 gives an included entry
+// the level of the config that includes it.
+std::string definedOutsideRepoConfig(git_config_level_t level, bool included) {
+    switch (level) {
+    case GIT_CONFIG_LEVEL_LOCAL:
+        return included ? "a file that the repository's config includes" : "";
+    case GIT_CONFIG_LEVEL_WORKTREE:
+        return included ? "a file that this worktree's config includes"
+                        : "this worktree's own config (config.worktree)";
+    case GIT_CONFIG_LEVEL_GLOBAL:
+    case GIT_CONFIG_LEVEL_XDG:
+        return included ? "a file that your global git config includes" : "your global git config";
+    case GIT_CONFIG_LEVEL_SYSTEM:
+    case GIT_CONFIG_LEVEL_PROGRAMDATA:
+        return included ? "a file that the system git config includes" : "the system git config";
+    default:
+        return "a git config outside this repository";
+    }
+}
+} // namespace
+
 Result<void> Repository::setRemoteUrl(const std::string& name, const std::string& url) {
     // git_remote_set_url writes remote.<name>.url whether or not the
     // remote exists, which would conjure up a half-configured one.
@@ -1465,35 +1499,74 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
 
     // It also writes to this repository's own .git/config whatever
     // level the remote comes from. A remote from the global or system
-    // config, or from a file .git/config includes, then got a second
-    // URL here: git fetched from the old one and pushed to both. `git
-    // remote set-url` refuses such a remote, and so does this.
+    // config, or from a file a config includes, would get a second URL
+    // here: git fetched from the old one and pushed to both. One from a
+    // worktree's config.worktree would keep its URL there, which wins,
+    // and every other worktree would get the new one. `git remote
+    // set-url` refuses a global or system remote, and changes the
+    // others that wrong way; this refuses all of them, and says where
+    // the remote is.
     git_config* config = nullptr;
     if ((err = git_repository_config_snapshot(&config, repo_)) < 0)
         return GitError::fromLibgit2(err);
-    git_config_entry* entry = nullptr;
+    const auto freeConfig = qScopeGuard([config] { git_config_free(config); });
     const std::string key = "remote." + name + ".";
+
+    // Several URLs (`git remote set-url --add`): fetch uses the first,
+    // push goes to every one. Like git, libgit2 won't replace one of
+    // several, and said only "entry is not unique due to being a
+    // multivar". Each may come from a config of its own.
+    struct Url { std::string value, where; };
+    std::vector<Url> urls;
+    git_config_get_multivar_foreach(
+        config, (key + "url").c_str(), nullptr,
+        [](const git_config_entry* e, void* payload) {
+            static_cast<std::vector<Url>*>(payload)->push_back(
+                {e->value, definedOutsideRepoConfig(e->level, e->include_depth > 0)});
+            return 0;
+        },
+        &urls);
+    if (urls.size() > 1) {
+        std::string list;
+        std::vector<std::string> places;   // each outside config, once
+        std::size_t outside = 0;
+        for (const auto& u : urls) {
+            list += (list.empty() ? "" : ", ") + u.value;
+            if (u.where.empty())
+                continue;
+            ++outside;
+            if (std::find(places.begin(), places.end(), u.where) == places.end())
+                places.push_back(u.where);
+        }
+        std::string elsewhere;
+        for (std::size_t i = 0; i < places.size(); ++i)
+            elsewhere += (i == 0 ? "" : i + 1 == places.size() ? " and " : ", ") + places[i];
+        std::string message = "Remote '" + name + "' has " + std::to_string(urls.size())
+                              + " URLs (" + list + ")";
+        if (outside == 0)
+            message += "; change them with `git remote set-url --add` and `--delete`.";
+        else if (outside == urls.size())
+            message += ", in " + elsewhere + "; change them there.";
+        else
+            message += ", some of them in " + elsewhere
+                       + "; change those there, and the rest with `git remote set-url"
+                         " --add` and `--delete`.";
+        return GitError(GitErrorCode::GenericError, message);
+    }
+
+    git_config_entry* entry = nullptr;
     err = git_config_get_entry(&entry, config, (key + "url").c_str());
     if (err == GIT_ENOTFOUND)
         err = git_config_get_entry(&entry, config, (key + "pushurl").c_str());
     std::string where;
-    if (err == 0) {
-        if (entry->include_depth > 0)
-            where = "a file that the repository's config includes";
-        else if (entry->level == GIT_CONFIG_LEVEL_GLOBAL || entry->level == GIT_CONFIG_LEVEL_XDG)
-            where = "your global git config";
-        else if (entry->level == GIT_CONFIG_LEVEL_SYSTEM || entry->level == GIT_CONFIG_LEVEL_PROGRAMDATA)
-            where = "the system git config";
-        else if (entry->level != GIT_CONFIG_LEVEL_LOCAL && entry->level != GIT_CONFIG_LEVEL_WORKTREE)
-            where = "a git config outside this repository";
-    }
+    if (err == 0)
+        where = definedOutsideRepoConfig(entry->level, entry->include_depth > 0);
     git_config_entry_free(entry);
-    git_config_free(config);
     if (err < 0) return GitError::fromLibgit2(err);
     if (!where.empty())
         return GitError(GitErrorCode::GenericError,
                         "Remote '" + name + "' is defined in " + where
-                            + ", not in this repository; change its URL there.");
+                            + ", not in the repository's config; change its URL there.");
 
     err = git_remote_set_url(repo_, name.c_str(), url.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
@@ -2015,7 +2088,10 @@ Config Repository::config() const {
 }
 
 GitProcess Repository::process() const {
-    return GitProcess(workdir());
+    GitProcess git(commandDir());
+    if (workdir().empty())
+        git.setGitDir(path());   // bare: named outright (safe.bareRepository)
+    return git;
 }
 
 } // namespace gitbolt::git

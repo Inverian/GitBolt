@@ -52,6 +52,7 @@ namespace gitbolt::app {
 ///                                    folder to the "Open in GitBolt"
 ///                                    service provider on a pasteboard,
 ///                                    as Finder does (queued open)
+///   minimize                         minimize the main window (queued)
 ///   dump-state                       repo path/state/branch/headOid,
 ///                                    conflict count, theme, log row
 ///                                    count, status-bar message, windows,

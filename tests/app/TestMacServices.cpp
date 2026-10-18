@@ -96,12 +96,12 @@ private slots:
     // With no cocoa NSApp (this test has no QGuiApplication at all),
     // nothing is installed, and there is nothing to send to.
     void nothingOffCocoa() {
-        gitbolt::app::macos::installServicesProvider([](const QStringList&) {});
+        gitbolt::app::macos::installServicesProvider([](const QStringList&) {}, true);
         gitbolt::app::macos::activateApp();
         QString error;
         QVERIFY(!gitbolt::app::macos::sendToServicesProvider({QDir::tempPath()}, error));
         QVERIFY(!error.isEmpty());
-        gitbolt::app::macos::installServicesProvider({});
+        gitbolt::app::macos::installServicesProvider({}, false);
     }
 };
 

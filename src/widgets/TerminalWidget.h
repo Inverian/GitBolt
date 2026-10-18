@@ -77,6 +77,11 @@ public:
     /// inherit the parent's cwd.
     void start(const QString& workingDirectory = {});
 
+    /// For a bare repository: GIT_DIR in the shell's environment, which
+    /// git needs where safe.bareRepository is "explicit". Empty: none
+    /// set (whatever the environment has). Takes effect at start().
+    void setGitDir(const QString& gitDir) { gitDir_ = gitDir; }
+
     /// Send `cd <path>\n` to the running shell. No-op if the
     /// shell is not running. Path is shell-quoted and prefixed
     /// with a leading space so the entry is excluded from history
@@ -183,6 +188,7 @@ private:
     // starts. Cached so RepositoryView can call setInitialPath
     // before the user ever opens the Console tab.
     QString          pendingCwd_;
+    QString          gitDir_;          // setGitDir
     bool             autoStarted_  = false;
 };
 

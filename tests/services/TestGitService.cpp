@@ -524,6 +524,55 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(), 10000);
     }
 
+    // A linked worktree, or a submodule opened on its own, has a .git
+    // file pointing at its git dir, and keeps its refs in a common dir
+    // elsewhere: the watcher looked for <repo>/.git as a directory and
+    // watched none of it, so a commit made outside GitBolt there never
+    // refreshed the window.
+    void worktreeAndSubmoduleCommitsRefresh_data() {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("a linked worktree") << QStringLiteral("worktree");
+        QTest::newRow("a submodule opened on its own") << QStringLiteral("submodule");
+    }
+
+    void worktreeAndSubmoduleCommitsRefresh() {
+        QFETCH(QString, kind);
+        const IsolatedGitConfig isolated;
+        const gitbolt::test::ScopedEnv authorName("GIT_AUTHOR_NAME", "T");
+        const gitbolt::test::ScopedEnv authorEmail("GIT_AUTHOR_EMAIL", "t@example.com");
+        const gitbolt::test::ScopedEnv committerName("GIT_COMMITTER_NAME", "T");
+        const gitbolt::test::ScopedEnv committerEmail("GIT_COMMITTER_EMAIL", "t@example.com");
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess main(repo->path().toStdString());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        QString opened;
+        if (kind == QLatin1String("worktree")) {
+            opened = outside.filePath(QStringLiteral("wt"));
+            QVERIFY(succeeded(main.run({"worktree", "add", "-q", "-b", "topic",
+                                        opened.toStdString()})));
+        } else {
+            opened = repo->path() + QStringLiteral("/sub");
+            gitbolt::git::GitProcess sub(opened.toStdString());
+            QVERIFY(succeeded(main.run({"init", "-q", "sub"})));
+            QVERIFY(succeeded(sub.run({"commit", "-q", "--allow-empty", "-m", "s1"})));
+            QVERIFY(succeeded(main.run({"submodule", "add", "-q", "./sub", "sub"})));
+            QVERIFY(succeeded(main.run({"submodule", "-q", "absorbgitdirs"})));
+        }
+        QVERIFY2(QFileInfo(opened + QStringLiteral("/.git")).isFile(), qPrintable(opened));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(opened));
+        QSignalSpy changed(&svc, &GitService::repositoryChanged);
+        QTest::qWait(1000);
+        changed.clear();
+
+        gitbolt::git::GitProcess there(opened.toStdString());
+        QVERIFY(succeeded(there.run({"commit", "-q", "--allow-empty", "-m", "outside"})));
+        QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(), 10000);
+    }
+
     // The walk leaves out .git, node_modules, build and the like
     // themselves, but still goes into them: what refreshes the status
     // above, and a tracked file in a subdirectory of build/, is watched

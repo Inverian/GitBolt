@@ -25,6 +25,7 @@
 #include "dialogs/TextEditorDialog.h"
 #include "dialogs/WorktreeDialog.h"
 #include "git/Error.h"
+#include "git/GitProcess.h"
 #include "git/GitProcessLog.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
@@ -490,9 +491,10 @@ void MainWindow::buildRepositoryMenu()
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
+            // A bare repository's git dir: it has no work tree.
             const QString path = QString::fromStdString(
                 gitService_->withRepository(
-                    [](git::Repository& r) { return r.workdir(); }));
+                    [](git::Repository& r) { return r.commandDir(); }));
             QDesktopServices::openUrl(QUrl::fromLocalFile(path));
         });
         repoMenu->addAction(a);
@@ -502,8 +504,8 @@ void MainWindow::buildRepositoryMenu()
     {
         // Remote repositories CRUD. RemotesDialog is modeless and
         // refreshes itself off Repository::remotes() after each
-        // Add / EditUrl / Remove. EditUrl is a remove-then-add
-        // round-trip since Repository doesn't expose a setUrl verb.
+        // Add / EditUrl / Remove. EditUrl changes only the URL
+        // (Repository::setRemoteUrl), as `git remote set-url` does.
         auto* a = new QAction(menuIcon(QStringLiteral("remote")),
                               tr("Remote &repositories..."), this);
         a->setObjectName(QStringLiteral("repository.remote-repositories"));
@@ -841,13 +843,25 @@ void MainWindow::buildRepositoryMenu()
         // we capture this once and pass the relative path. Creates
         // the file with empty content if it doesn't exist yet so the
         // user can start a fresh .gitignore from the menu.
+        // `inGitDir`: the file is in the git dir that the repository's
+        // worktrees share (info/exclude), not in the work tree. A linked
+        // worktree's .git is a file, so "<work tree>/.git/info/exclude"
+        // could be neither read nor written there.
         auto editConfigFile = [this](const QString& relativePath,
-                                     const QString& title) {
+                                     const QString& title, bool inGitDir) {
             if (!gitService_ || !gitService_->isOpen()) return;
-            const QString workdir = QString::fromStdString(
-                gitService_->withRepository(
-                    [](git::Repository& r) { return r.workdir(); }));
-            QString fullPath = workdir;
+            const auto [workdir, gitDir] = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return std::pair{QString::fromStdString(r.workdir()),
+                                     QString::fromStdString(r.commonDir())};
+                });
+            if (!inGitDir && workdir.isEmpty()) {
+                QMessageBox::information(this, title,
+                    tr("This repository is bare: it has no working tree "
+                       "for %1.").arg(relativePath));
+                return;
+            }
+            QString fullPath = inGitDir ? gitDir : workdir;
             if (!fullPath.endsWith('/')) fullPath += '/';
             fullPath += relativePath;
 
@@ -895,7 +909,7 @@ void MainWindow::buildRepositoryMenu()
         aGI->setObjectName(QStringLiteral("repository.edit-gitignore"));
         connect(aGI, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".gitignore"),
-                           tr("Edit .gitignore"));
+                           tr("Edit .gitignore"), false);
         });
         repoMenu->addAction(aGI);
 
@@ -903,8 +917,8 @@ void MainWindow::buildRepositoryMenu()
                                 tr("Edit .git/&info/exclude"), this);
         aEx->setObjectName(QStringLiteral("repository.edit-git-info-exclude"));
         connect(aEx, &QAction::triggered, this, [editConfigFile]() {
-            editConfigFile(QStringLiteral(".git/info/exclude"),
-                           tr("Edit .git/info/exclude"));
+            editConfigFile(QStringLiteral("info/exclude"),
+                           tr("Edit .git/info/exclude"), true);
         });
         repoMenu->addAction(aEx);
 
@@ -913,7 +927,7 @@ void MainWindow::buildRepositoryMenu()
         aAttr->setObjectName(QStringLiteral("repository.edit-gitattributes"));
         connect(aAttr, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".gitattributes"),
-                           tr("Edit .gitattributes"));
+                           tr("Edit .gitattributes"), false);
         });
         repoMenu->addAction(aAttr);
 
@@ -922,7 +936,7 @@ void MainWindow::buildRepositoryMenu()
         aMM->setObjectName(QStringLiteral("repository.edit-mailmap"));
         connect(aMM, &QAction::triggered, this, [editConfigFile]() {
             editConfigFile(QStringLiteral(".mailmap"),
-                           tr("Edit .mailmap"));
+                           tr("Edit .mailmap"), false);
         });
         repoMenu->addAction(aMM);
     }
@@ -958,11 +972,13 @@ void MainWindow::buildRepositoryMenu()
             // `git sparse-checkout set --stdin` so cone mode is
             // honored — writing the file directly works too but
             // skips git's own validation.
-            const QString workdir = QString::fromStdString(
+            // In the worktree's own git dir: a linked worktree's .git is
+            // a file, and each worktree has its own patterns.
+            const QString gitDir = QString::fromStdString(
                 gitService_->withRepository(
-                    [](git::Repository& r) { return r.workdir(); }));
-            const QString filePath = workdir +
-                QStringLiteral("/.git/info/sparse-checkout");
+                    [](git::Repository& r) { return r.path(); }));
+            const QString filePath = QDir(gitDir).filePath(
+                QStringLiteral("info/sparse-checkout"));
             QFile f(filePath);
             QString original;
             if (f.exists() && f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -3525,9 +3541,15 @@ void MainWindow::buildToolsMenu()
             layout->setContentsMargins(0, 0, 0, 0);
             auto* term = new widgets::TerminalWidget(dlg);
             layout->addWidget(term);
-            term->start(QString::fromStdString(
-                gitService_->withRepository(
-                    [](git::Repository& r) { return r.workdir(); })));
+            const auto [dir, bareGitDir] = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return std::pair{QString::fromStdString(r.commandDir()),
+                                     r.isBare() ? QString::fromStdString(r.path())
+                                                : QString()};
+                });
+            // A bare repository named outright (safe.bareRepository).
+            term->setGitDir(bareGitDir);
+            term->start(dir);
             dlg->show();
         });
         toolsMenu->addAction(a);
@@ -3542,11 +3564,25 @@ void MainWindow::buildToolsMenu()
         a->setObjectName(QStringLiteral("tools.gitk"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            const QString workdir = QString::fromStdString(
-                gitService_->withRepository(
-                    [](git::Repository& r) { return r.workdir(); }));
-            const bool ok = QProcess::startDetached(
-                QStringLiteral("gitk"), QStringList{}, workdir);
+            const auto [workdir, bareGitDir] = gitService_->withRepository(
+                [](git::Repository& r) {
+                    return std::pair{QString::fromStdString(r.commandDir()),
+                                     r.isBare() ? QString::fromStdString(r.path())
+                                                : QString()};
+                });
+            QProcess gitk;
+            gitk.setProgram(QStringLiteral("gitk"));
+            gitk.setWorkingDirectory(workdir);
+            // The open repository, never one GitBolt's own environment
+            // names (as for every git GitBolt runs), and a bare one
+            // named outright (safe.bareRepository).
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            for (const auto& name : git::GitProcess::repositoryEnvVars())
+                env.remove(QString::fromStdString(name));
+            if (!bareGitDir.isEmpty())
+                env.insert(QStringLiteral("GIT_DIR"), bareGitDir);
+            gitk.setProcessEnvironment(env);
+            const bool ok = gitk.startDetached();
             if (!ok) {
                 QMessageBox::warning(this, tr("Launch Failed"),
                     tr("Could not launch gitk. Is it installed and on "
@@ -3892,9 +3928,11 @@ void MainWindow::setRepoActionsEnabled(bool on)
     if (fetchAction_)
         fetchAction_->setEnabled(on && autoFetch_ != AutoFetch::Shown
                                  && fetchAction_ != remoteOpAction_);
-    if (pullAction_)    pullAction_->setEnabled(on && pullAction_ != remoteOpAction_);
+    // Pull and Commit need a work tree, which a bare repository hasn't.
+    if (pullAction_)
+        pullAction_->setEnabled(on && !openIsBare_ && pullAction_ != remoteOpAction_);
     if (pushAction_)    pushAction_->setEnabled(on && pushAction_ != remoteOpAction_);
-    if (commitAction_)  commitAction_->setEnabled(on);
+    if (commitAction_)  commitAction_->setEnabled(on && !openIsBare_);
     if (filterInput_)   filterInput_->setEnabled(on);
     if (branchCombo_)   branchCombo_->setEnabled(on);
     // The sidebar's New Branch and branch menu: they asked for a name or
@@ -5002,6 +5040,7 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     if (!pendingOpen_.active()) {
         pendingOpen_.widgetBefore  = centralStack_->currentWidget();
         pendingOpen_.titleBefore   = windowTitle();
+        pendingOpen_.pathLabelBefore = repoPathLabel_->text();
         pendingOpen_.actionsBefore = repoActionsEnabled_;
     }
     pendingOpen_.path   = path;
@@ -5157,6 +5196,8 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // single QAction shared between the Repository menu and the
     // toolbar, so one setEnabled() call toggles BOTH entry points
     // in lockstep (see MainWindow.h for the rationale).
+    openIsBare_ = gitService_->withRepository(
+        [](git::Repository& r) { return r.isBare(); });
     setRepoActionsEnabled(true);
 
     // Reveal the filter pair now that there's actually a
@@ -5266,20 +5307,20 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
 
         struct HeadInfo {
             bool open = false;
-            QString workdir;
             QString branch;
         };
         const HeadInfo info = gitService_->withRepository(
             [](git::Repository& r) {
                 HeadInfo h;
                 h.open = true;
-                h.workdir = QString::fromStdString(r.workdir());
                 if (auto branchResult = r.headBranchName(); branchResult)
                     h.branch = QString::fromStdString(*branchResult);
                 return h;
             });
         if (info.open) {
-            repoPathLabel_->setText(info.workdir);
+            // What it said before the open: the repository's path as it
+            // was opened (libgit2's work tree is empty for a bare one).
+            repoPathLabel_->setText(pendingOpen_.pathLabelBefore);
             branchLabel_->setText(info.branch.isEmpty()
                 ? tr("HEAD (detached)")
                 : tr("Branch: %1").arg(info.branch));
@@ -6026,7 +6067,8 @@ void MainWindow::reenableAfterRemoteOp(QAction* action)
     // so the action would act on the one left behind), and so does a
     // local op while it runs; whatever turns them back on brings this
     // one too. File > Home leaves them on: the repository stays open.
-    if (action && repoActionsEnabled_ && !localOpRunning_ && !gitStepRunning())
+    if (action && repoActionsEnabled_ && !localOpRunning_ && !gitStepRunning()
+        && !(openIsBare_ && action == pullAction_))
         action->setEnabled(true);
 }
 

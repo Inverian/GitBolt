@@ -4,7 +4,15 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [Unreleased]
+## [0.9.7] — 2026-10-18
+
+Open in GitBolt comes to Finder on macOS, and a folder inside a
+repository now opens that repository on every platform. Also: Fetch
+and Push run in a bare repository instead of wherever GitBolt was
+started, linked worktrees and submodules refresh on their own, Edit
+URL keeps a remote's upstream branches, GitBolt's links follow the
+project to its new home at github.com/Inverian/GitBolt, and there is a
+security policy for reporting vulnerabilities privately.
 
 ### Added
 
@@ -21,13 +29,75 @@ semver once 1.0 lands.
 ### Changed
 
 - **A folder inside a repository opens that repository**, from Finder,
-  File › Open, Explorer, Nautilus or `gitbolt <path>`. Before, only the
-  repository's own folder opened, and Nautilus offered Open in GitBolt
-  only there. The search stops at your home folder: a repository there
-  (dotfiles, say) never claims a folder below it that is in no
-  repository of its own.
+  File › Open Repository, Explorer, Nautilus or `gitbolt <path>`.
+  Before, only the repository's own folder opened, and Nautilus offered
+  Open in GitBolt only there. The search stops at your home folder: a
+  repository there (dotfiles, say) never claims a folder below it that
+  is in no repository of its own.
 - **A folder that is in no repository** now says so ("… is not in a
   Git repository."), instead of showing libgit2's error.
+- **A minimized window comes back** when a folder is sent to GitBolt
+  (Open in GitBolt from Finder or Explorer, a Dock drop,
+  `gitbolt <path>`, and Nautilus on X11). Before, the repository opened
+  in the window while it stayed minimized. Under Wayland GitBolt isn't
+  told that its window is minimized, so it can't bring it back there.
+- **Links**: the project moved to the Inverian organization on GitHub,
+  and GitBolt's links went with it: Help › User manual, Report an
+  issue and Check for updates, the About box, the home screen's
+  Develop and Issues links, the privacy policy link in Settings, the
+  Windows installer's help link and the Linux AppStream metadata now
+  point to github.com/Inverian/GitBolt. The old links still redirect
+  there.
+
+### Fixed
+
+- **Bare repositories**: with a bare repository open, Fetch, Push,
+  Pull, the background fetch and the other commands GitBolt runs
+  through git ran in GitBolt's own working folder instead of the
+  repository. Started from a terminal inside another repository, Push
+  pushed that repository's commits to its remote. They now run in the
+  bare repository, also where git's `safe.bareRepository` setting is
+  `explicit`. Pull and Commit, which need a working tree, are off
+  there. File Explorer, Git bash and GitK open the bare repository,
+  and Open Externally and Edit .gitignore (and the other working-tree
+  files) say it has no working tree.
+- **GIT_DIR, GIT_WORK_TREE and git's other repository variables in
+  GitBolt's own environment** (a shell that exports them for a bare
+  dotfiles repository, say) no longer reach the git commands GitBolt
+  runs, its Console and Git bash terminals, or GitK. They sent those to
+  that repository: Push pushed its commits while GitBolt showed the one
+  that was open. An exported GIT_CONFIG hid the repository's own fetch
+  settings from Fetch's prune check, so a fetch could delete local tags
+  that the server doesn't have.
+- **Linked worktrees and submodules** opened in GitBolt now refresh
+  when a commit, staging or a branch switch happens outside GitBolt.
+  Their `.git` is a file pointing elsewhere, and GitBolt never watched
+  the git dir it points to, so only changes to the files in the working
+  tree were noticed.
+- **Edit .git/info/exclude** works in a linked worktree (it edits the
+  repository's shared `info/exclude`), and **Sparse Working Copy › Edit
+  patterns** shows the worktree's own current patterns. Both looked
+  for a `.git` folder that a linked worktree doesn't have: the first
+  couldn't save, the second started empty.
+- **Edit URL** (Repository › Remote repositories) changes only the
+  remote's URL, as `git remote set-url` does. It used to remove the
+  remote and add it back, which also dropped every branch's upstream
+  link to it (Pull then failed, saying no branch was given), its
+  remote-tracking branches, and its push URL, refspecs and options.
+  A remote defined outside the repository's own config (in your global
+  git config, a file a config includes, or a worktree's own
+  config.worktree) is refused before anything changes, with a note
+  saying where it is defined; before, Edit URL failed on such a remote
+  only after dropping its remote-tracking branches and every branch's
+  upstream link to it. A remote with several URLs (`git remote set-url
+  --add`) is refused with a note that lists them and says where they
+  are, or how to change them.
+
+### Security
+
+- **Security policy**: SECURITY.md says how to report a vulnerability
+  privately, through GitHub's private vulnerability reporting, who
+  reviews reports, and what to expect.
 
 ## [0.9.6] — 2026-10-16
 

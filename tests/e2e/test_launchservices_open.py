@@ -11,6 +11,10 @@ events itself).
    takes its event before the single-instance guard and hands it over:
    repo-c opens in the first, and the second exits.
 4. Finder's service provider on the real NSApp (bridge service-open).
+5. The service itself goes to the user's GitBolt only: macOS gives it
+   to the first process that asks, so a GitBolt with an instance name
+   of its own (this test's, the dogfood driver's) must never register
+   it, and one in the default namespace must.
 
 `open` registers the build's GitBolt.app with LaunchServices, which
 only a throwaway CI runner may have done to it: the test runs only
@@ -42,6 +46,17 @@ def processes(binary: str) -> list[str]:
     return out.split()
 
 
+SERVICE = "com.gitbolt.app.ServiceProvider"
+
+
+def service_registered() -> bool:
+    """launchd has the service's endpoint (AppKit names it after the
+    bundle ID)."""
+    out = subprocess.run(["launchctl", "print", f"gui/{os.getuid()}"],
+                         capture_output=True, text=True).stdout
+    return SERVICE in out
+
+
 def same_dir(a: str, b: str) -> bool:
     return os.path.realpath(a.rstrip("/")) == os.path.realpath(b.rstrip("/"))
 
@@ -63,7 +78,7 @@ class Launched(App):
             return 0
 
     def __init__(self, binary: str, folder: str, runtime_dir: str,
-                 instance_name: str, label: str):
+                 instance_name: str | None, label: str):
         self.binary = binary
         self.label = label
         self.bridge_name = f"gb-ls-{uuid.uuid4().hex[:8]}"
@@ -72,8 +87,11 @@ class Launched(App):
         self._owns_runtime_dir = True
         self.runtime_dir = runtime_dir
         self.log_path = os.path.join(runtime_dir, f"{self.bridge_name}.log")
-        self.env = app_env(runtime_dir, instance_name, bridge_name=self.bridge_name,
+        self.env = app_env(runtime_dir, instance_name or "", bridge_name=self.bridge_name,
                            home=os.path.join(runtime_dir, "home"))
+        if not instance_name:
+            # The default namespace: the user's own GitBolt's.
+            del self.env["GITBOLT_INSTANCE_NAME"]
         self._log = open(self.log_path, "w")
         self.proc = self._NoProcess()
         launch(binary, folder, self.env, self.log_path, new_instance=True)
@@ -141,8 +159,26 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
         first.ok(f"service-open {repo_d}")
         first.wait_until(on_screen("repo-d"), "repo-d from the service provider", timeout=30)
+
+        if service_registered():
+            raise Failure(f"a GitBolt with an instance name of its own took {SERVICE}")
     finally:
         teardown(binary, first)
+
+    # The default namespace (its lock still in a runtime dir of its own).
+    default_dir = make_runtime_dir()
+    users = Launched(binary, repo_a, default_dir, None, "default namespace")
+    apps.append(users)
+    try:
+        users.wait_bridge(timeout=60)
+        users.wait_until(on_screen("repo-a"), "repo-a in the default namespace", timeout=30)
+        deadline = time.monotonic() + 15
+        while not service_registered():
+            if time.monotonic() > deadline:
+                raise Failure(f"the default-namespace GitBolt never registered {SERVICE}")
+            time.sleep(0.5)
+    finally:
+        teardown(binary, users)
 
 
 def read(path: str) -> str:
