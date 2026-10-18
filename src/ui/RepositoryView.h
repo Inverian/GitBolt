@@ -150,6 +150,9 @@ private:
     QWidget* buildGpgTab();
     QWidget* buildConsoleTab();
     void showCommitDetails(const git::CommitData& commit);
+    /// Sizes the Commit tab's top row and avatar to the metadata as
+    /// laid out; again whenever its laid-out size changes.
+    void fitCommitInfoTopRow();
     void showCommitDiff(const git::ObjectId& commitId);
 
     // Services

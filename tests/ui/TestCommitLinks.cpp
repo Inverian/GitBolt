@@ -12,7 +12,12 @@
 //     QTextBrowser look for a document at it, and blank the pane;
 //   - a click on an email hands its mailto: URL to the desktop and does
 //     nothing else, and a link to anything else isn't followed: the
-//     second href above loaded a local file into the pane.
+//     second href above loaded a local file into the pane;
+//   - a long author or committer, which wraps, leaves every row in view
+//     (or, past the pane's tallest, a scroll bar to reach them). The
+//     pane's height came from its count of rows, with no scroll bar, so
+//     the rows under a wrapped one went out of sight: the Committer row
+//     too, which is how the pane says someone else committed it.
 //
 // The URLs QDesktopServices would hand the desktop are caught. The
 // browsers are found by what they show, so this builds unchanged
@@ -23,12 +28,15 @@
 #include <QDesktopServices>
 #include <QFile>
 #include <QMainWindow>
+#include <QScrollBar>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextCursor>
+#include <QTextDocument>
+#include <QTextLayout>
 #include <QUrl>
 
 #include <algorithm>
@@ -107,6 +115,50 @@ QTextCharFormat textFormat(QTextBrowser* browser, const QString& text) {
         }
     }
     return {};
+}
+
+// The labels of the details pane's rows.
+const QStringList kRowLabels = {
+    QStringLiteral("Author:"), QStringLiteral("Date:"), QStringLiteral("Committer:"),
+    QStringLiteral("Commit hash:"), QStringLiteral("Parent:"), QStringLiteral("Child:")};
+
+// The rows, of those labelled `labels`, that the details pane has laid
+// out where the user can't see them, or doesn't show.
+QString rowsOutOfView(QTextBrowser* details, const QStringList& labels = kRowLabels) {
+    QStringList hidden;
+    for (const QString& label : labels) {
+        const QTextCursor found = details->document()->find(label);
+        if (found.isNull())
+            hidden << label + QStringLiteral(" (not shown at all)");
+        else if (!details->viewport()->rect().contains(details->cursorRect(found)))
+            hidden << label;
+    }
+    return hidden.join(QStringLiteral(", "));
+}
+
+// The details pane at its tallest: past it, its rows scroll.
+constexpr int kTallest = 180;
+
+// Every row of the details pane in view, or the pane at its tallest
+// with a scroll bar to reach them. Empty if so, else what isn't.
+QString rowsUnreachable(QTextBrowser* details) {
+    const bool scrolls = details->verticalScrollBar()->isVisible();
+    if (scrolls && details->height() == kTallest)
+        return {};
+    const QString hidden = rowsOutOfView(details);
+    if (hidden.isEmpty() && !scrolls)
+        return {};
+    return QStringLiteral("out of view: [%1], scroll bar %2, pane %3 px tall")
+        .arg(hidden, scrolls ? QStringLiteral("shown") : QStringLiteral("hidden"))
+        .arg(details->height());
+}
+
+// " word word …": a value that wraps over a line or more.
+QString words(int count) {
+    QString text;
+    for (int i = 0; i < count; ++i)
+        text += QStringLiteral(" word");
+    return text;
 }
 
 QTextBrowser* browserShowing(QWidget& view, const QString& text) {
@@ -328,6 +380,94 @@ private slots:
         QVERIFY(message->source().isEmpty());
         QVERIFY(message->toPlainText().contains(QStringLiteral("MESSAGE-LINK")));
         QVERIFY(desktop.urls.isEmpty());
+    }
+
+    // A long author name or email wraps; the rows under it, the
+    // Committer row among them, stay in view. As the window narrows
+    // it wraps over more lines, and past the pane's tallest the pane
+    // scrolls instead, with a scroll bar to say so.
+    void longAuthorKeepsRowsInView_data() {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<QString>("email");
+        QTest::newRow("email") << QStringLiteral("Ada")
+                               << QStringLiteral("ada@example.com") + words(20);
+        QTest::newRow("name") << QStringLiteral("Ada") + words(20)
+                              << QStringLiteral("ada@example.com");
+    }
+    void longAuthorKeepsRowsInView() {
+        QFETCH(QString, name);
+        QFETCH(QString, email);
+        CommitData commit = makeCommit(kParent, {kNotLoaded}, email.toStdString(),
+                                       "mallory@example.com");
+        commit.author.name = name.toStdString();
+        commit.committer.name = "Mallory";
+        CommitLogModel model;
+        model.setCommits({makeCommit(kChild, {kParent}, "ada@example.com"), commit});
+        RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(1200, 900);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QVERIFY(view.revisionGraph()->selectCommit(kParent));
+        QTextBrowser* details = browserShowing(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        QVERIFY(details->toPlainText().contains(QStringLiteral("mallory@example.com")));
+
+        QTRY_COMPARE(rowsOutOfView(details), QString());
+        QVERIFY(!details->verticalScrollBar()->isVisible());
+        // The value wrapped, or this shows nothing.
+        const QTextCursor value = details->document()->find(words(20).trimmed());
+        QVERIFY(!value.isNull());
+        const int lines = value.block().layout()->lineCount();
+        QVERIFY(lines > 1);
+
+        for (int width = 1150; width >= 700; width -= 50) {
+            view.resize(width, 900);
+            // Lays the pane out at the new width before it's looked at.
+            QTest::qWait(50);
+            QTRY_COMPARE(rowsUnreachable(details), QString());
+        }
+        // It wrapped further as the window narrowed.
+        QVERIFY(value.block().layout()->lineCount() > lines);
+    }
+
+    // A value too long for the pane at its tallest: the pane scrolls,
+    // so the rows under it can still be reached.
+    void tooLongAuthorScrolls() {
+        CommitData commit = makeCommit(kParent, {kNotLoaded},
+                                       ("ada@example.com" + words(400)).toStdString(),
+                                       "mallory@example.com");
+        commit.committer.name = "Mallory";
+        CommitData child = makeCommit(kChild, {kParent}, "ada@example.com",
+                                      "mallory@example.com");
+        child.committer.name = "Mallory";
+        CommitLogModel model;
+        model.setCommits({child, commit});
+        RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(1200, 900);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QVERIFY(view.revisionGraph()->selectCommit(kParent));
+        QTextBrowser* details = browserShowing(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+
+        QTRY_VERIFY(details->verticalScrollBar()->isVisible());
+        QCOMPARE(details->height(), kTallest);
+        QVERIFY(!rowsOutOfView(details, {QStringLiteral("Committer:")}).isEmpty());
+        // Scrolled to its end (again, while the layout settles), the
+        // rows under the value are in view.
+        const auto rowsAtEnd = [details] {
+            QScrollBar* bar = details->verticalScrollBar();
+            bar->setValue(bar->maximum());
+            return rowsOutOfView(details, {QStringLiteral("Date:"), QStringLiteral("Committer:")});
+        };
+        QTRY_COMPARE(rowsAtEnd(), QString());
+
+        // A commit that fits again takes the scroll bar away.
+        QVERIFY(view.revisionGraph()->selectCommit(kChild));
+        QTRY_VERIFY(!details->verticalScrollBar()->isVisible());
+        QTRY_COMPARE(rowsOutOfView(details), QString());
     }
 };
 

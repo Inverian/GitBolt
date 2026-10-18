@@ -17,6 +17,7 @@
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
 
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
@@ -45,10 +46,13 @@
 #include <QStandardItemModel>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QTreeView>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <set>
@@ -95,6 +99,21 @@ QString emailLink(const std::string& email)
         return address.toHtmlEscaped();
     return QStringLiteral("<a href=\"%1\">%2</a>")
         .arg(url.toString(QUrl::FullyEncoded).toHtmlEscaped(), address.toHtmlEscaped());
+}
+
+// The Commit tab avatar's colour: deterministic from a hash of the
+// author's email, so the same author always gets the same colour
+// across commits.
+QString avatarColor(const std::string& email)
+{
+    const QString key = QString::fromStdString(email);
+    if (key.isEmpty())
+        return QStringLiteral("#888");
+    // Deliberately the low 32 bits of the size_t hash; widening h
+    // would change every author's hue.
+    const auto h = static_cast<uint>(qHash(key));
+    const int hue = static_cast<int>(h % 360u);
+    return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
 }
 } // namespace
 
@@ -195,13 +214,14 @@ QWidget* RepositoryView::buildCommitInfoTab()
     v->setSpacing(8);
 
     // ----- Top: avatar + metadata --------------------------------
-    // The top row's height is set DYNAMICALLY in showCommitDetails
-    // based on the QTextDocument's natural laid-out height — that
-    // way the metadata block is always exactly tall enough to fit
-    // its content with no scrolling regardless of how many parent,
-    // child, or committer rows the commit has. The avatar's
-    // square size is updated in lockstep so it always exactly
-    // fills its allocated square.
+    // The top row's height is set DYNAMICALLY (fitCommitInfoTopRow)
+    // from the QTextDocument's laid-out height — that way the
+    // metadata block is always exactly tall enough to fit its
+    // content with no scrolling regardless of how many parent,
+    // child, or committer rows the commit has, or how many lines a
+    // long value wraps over, up to a ceiling past which it scrolls.
+    // The avatar's square size is updated in lockstep so it always
+    // exactly fills its allocated square.
     commitInfoTopRow_ = new QWidget(page);
     auto* h = new QHBoxLayout(commitInfoTopRow_);
     h->setContentsMargins(0, 0, 0, 0);
@@ -209,7 +229,7 @@ QWidget* RepositoryView::buildCommitInfoTab()
 
     avatarLabel_ = new QLabel(commitInfoTopRow_);
     // Initial size — overridden on first commit selection by
-    // showCommitDetails to match the actual metadata height.
+    // fitCommitInfoTopRow to match the actual metadata height.
     avatarLabel_->setFixedSize(120, 120);
     avatarLabel_->setAlignment(Qt::AlignCenter);
     avatarLabel_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -228,8 +248,17 @@ QWidget* RepositoryView::buildCommitInfoTab()
     connect(detailBrowser_, &QTextBrowser::anchorClicked,
             this, &RepositoryView::openCommitLink);
     detailBrowser_->setFrameShape(QFrame::NoFrame);
+    // No scroll bar while the row fits the metadata, as it does up to
+    // its ceiling (fitCommitInfoTopRow turns it on past that).
     detailBrowser_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     detailBrowser_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // The metadata re-wraps when the browser's width changes, and its
+    // height with it: fit the row to it again. Queued, as the fit
+    // resizes the avatar and so this browser, which lays the document
+    // out again from inside the resize.
+    connect(detailBrowser_->document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged,
+            this, &RepositoryView::fitCommitInfoTopRow, Qt::QueuedConnection);
     // Match the panel chrome instead of QTextBrowser's default
     // white. The HTML body's background is also set transparent
     // in the metadata HTML so the document doesn't paint over
@@ -1031,23 +1060,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     };
     const QString initials = initialsFor(QString::fromStdString(commit.author.name));
 
-    // Deterministic color from a hash of the email so the same
-    // author always gets the same avatar color across commits.
-    auto colorFor = [](const QString& key) -> QString {
-        if (key.isEmpty())
-            return QStringLiteral("#888");
-        // Deliberately the low 32 bits of the size_t hash; widening h
-        // would change every author's hue.
-        const auto h = static_cast<uint>(qHash(key));
-        const int hue = static_cast<int>(h % 360u);
-        return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
-    };
-    const QString avatarBg = colorFor(QString::fromStdString(commit.author.email));
-
     // Avatar text is set up-front; the size + stylesheet are
     // applied AFTER the metadata HTML is laid out so we can
     // match the avatar height to the actual content height
-    // (see the dynamic resize block at the bottom of this fn).
+    // (fitCommitInfoTopRow, at the bottom of this fn).
     if (avatarLabel_)
         avatarLabel_->setText(initials);
 
@@ -1239,11 +1255,6 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         "%3"   // childRows  (always; multiple at fork points)
     ).arg(fullHex, parentRows, childRows);
 
-    // Tallest column drives the dynamic top-row height below.
-    const int leftRowCount  = static_cast<int>(leftRows.count(QStringLiteral("<tr>")));
-    const int rightRowCount = static_cast<int>(rightRows.count(QStringLiteral("<tr>")));
-    const int maxRows       = std::max(leftRowCount, rightRowCount);
-
     const QString metadataHtml = QStringLiteral(R"HTML(
 <style>
   body {
@@ -1375,38 +1386,65 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     }
 
     // ----- Dynamic resize: top row + avatar fit content exactly -
-    // Sizing matches the GitExtensions Commit tab. Each row at
-    // our 11px body font is ~18 px tall in practice (13 px line
-    // height + 1 px top/bottom cell padding + ~3 px from QTextDoc
-    // line spacing). The 16 px estimate from the original pass was
-    // too tight — verified against a real commit with 4 rows of
-    // metadata where the bottom row (Stats) was being clipped. The
-    // +16 fudge accounts for the QTextBrowser document and viewport
-    // margins. The driver is the TALLER of the two columns (people
-    // vs hashes) — not the total <tr> count — since the two columns
-    // top-align inside the outer 2-cell table. Clamped to:
+    fitCommitInfoTopRow();
+}
+
+// The Commit tab's top row is as tall as the metadata in it, laid out
+// at the browser's width, and the avatar is a square of that height.
+// The height used to be worked out from the number of rows (18 px
+// each), and the browser has no scroll bar, so a value that wrapped
+// (a long author name or email, which may hold spaces) pushed the
+// rows under it out of sight with nothing to show they were there:
+// the Committer row among them, which is how the tab says someone
+// other than the author committed it.
+//
+// Run again whenever the metadata's laid-out size changes
+// (buildCommitInfoTab): a resized window or splitter re-wraps it. A
+// new height resizes the avatar, which narrows or widens the browser
+// beside it and so re-wraps it too; a taller row only ever makes for
+// a narrower browser, so this settles in a pass or two.
+void RepositoryView::fitCommitInfoTopRow()
+{
+    // Nothing on show: a cleared tab keeps its height, and its
+    // transparent avatar.
+    if (!commitInfoTopRow_ || !detailBrowser_ || !avatarLabel_ || !shownCommit_)
+        return;
+    // Clamped to:
     //   -  80 floor: even sparse root commits get a usable avatar
-    //   - 180 ceiling: an octopus merge with many parents/children
-    //     can't dominate the inspector
-    if (commitInfoTopRow_) {
-        const int needed = maxRows * 18 + 16;
-        const int finalH = std::max(80, std::min(needed, 180));
-        commitInfoTopRow_->setFixedHeight(finalH);
-        if (avatarLabel_) {
-            avatarLabel_->setFixedSize(finalH, finalH);
-            // Font size scales with the avatar — ~45% of the
-            // square's edge gives readable initials at every
-            // height in the clamped range.
-            const int fontPx = std::max(16, finalH * 9 / 20);
-            avatarLabel_->setStyleSheet(QStringLiteral(
-                "QLabel {"
-                "  background: %1;"
-                "  color: white;"
-                "  font-size: %2px;"
-                "  font-weight: bold;"
-                "}").arg(avatarBg).arg(fontPx));
-        }
-    }
+    //   - 180 ceiling: an octopus merge with many parents/children,
+    //     or a value that wraps over many lines, can't dominate the
+    //     inspector. Past it the browser scrolls, and shows a scroll
+    //     bar to say there is more.
+    constexpr int kMinHeight = 80;
+    constexpr int kMaxHeight = 180;
+
+    // The document's height at the browser's width: the browser only
+    // scrolls when it is taller than the viewport.
+    const int needed =
+        static_cast<int>(std::ceil(detailBrowser_->document()->size().height()));
+    const int finalH = std::clamp(needed, kMinHeight, kMaxHeight);
+
+    const Qt::ScrollBarPolicy scrolling =
+        needed > kMaxHeight ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff;
+    if (detailBrowser_->verticalScrollBarPolicy() != scrolling)
+        detailBrowser_->setVerticalScrollBarPolicy(scrolling);
+    commitInfoTopRow_->setFixedHeight(finalH);
+    avatarLabel_->setFixedSize(finalH, finalH);
+    // Font size scales with the avatar — ~45% of the
+    // square's edge gives readable initials at every
+    // height in the clamped range.
+    const int fontPx = std::max(16, finalH * 9 / 20);
+    const QString avatarStyle = QStringLiteral(
+        "QLabel {"
+        "  background: %1;"
+        "  color: white;"
+        "  font-size: %2px;"
+        "  font-weight: bold;"
+        "}").arg(avatarColor(shownCommit_->author.email)).arg(fontPx);
+    // Only when it changes: this runs on every re-wrap, and setting a
+    // style sheet re-polishes the label.
+    if (avatarLabel_->styleSheet() != avatarStyle)
+        avatarLabel_->setStyleSheet(avatarStyle);
 }
 
 void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
