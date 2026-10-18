@@ -161,6 +161,27 @@ function(gitbolt_add_bundled_libgit2)
             "cmake/PatchLibgit2.cmake's fixes for config lines with no value; "
             "run cmake -P ${_patch} in that directory")
     endif()
+    # And its limits on hostile content, wildmatch's budget and the tree
+    # depth: the tests of those skip without them.
+    file(READ ${libgit2_SOURCE_DIR}/src/util/wildmatch.c _wildmatch_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/iterator.c _iterator_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/tree.c _tree_c)
+    if(_wildmatch_c MATCHES "budget = 1000 \\+ 64 \\* "
+       AND _wildmatch_c MATCHES "do {\n\t+if \\(!p_ch \\|\\| --\\*budget <= 0\\)"
+       AND _wildmatch_c MATCHES "\\(\\*budget -= \\(long\\)\\(p - prev_p - 2\\)\\) <= 0"
+       AND _wildmatch_c MATCHES "return t_ch \\? WM_ABORT_TO_STARSTAR : WM_ABORT_ALL;"
+       AND _wildmatch_c MATCHES "matched == WM_ABORT_ALL\\)\\)\n\t+return matched;"
+       AND _wildmatch_c MATCHES "if \\(depth > WM_MAX_DEPTH\\)"
+       AND _wildmatch_c MATCHES "return error == WM_MATCH \\? WM_MATCH : WM_NOMATCH;"
+       AND _iterator_c MATCHES "if \\(\\(error = git_tree__descend_ok\\(iter->frames\\.size,"
+       AND _tree_c MATCHES "error = git_tree__descend_ok\\(depth,")
+        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_LIMITS_PATCHED)
+    else()
+        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "
+            "cmake/PatchLibgit2.cmake's limits on hostile content (a .gitattributes "
+            "pattern that never finishes matching, a tree nested too deep); "
+            "run cmake -P ${_patch} in that directory")
+    endif()
 
     # Say so at configure time, not as an #error deep in the build: a
     # Unix libgit2 with nanosecond times needs one of these fields.
