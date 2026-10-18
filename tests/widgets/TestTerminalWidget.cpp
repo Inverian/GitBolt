@@ -14,8 +14,10 @@
 //     that went on and on (an ESC [ and megabytes of digits) used to
 //     wait whole, walked again from its ESC on every read; one longer
 //     than any real one is now dropped as it arrives;
-//   - a count goes no further than the screen: ESC[50000000@ put fifty
-//     million blanks in the row;
+//   - ICH's count goes no further than the screen: ESC[50000000@ put
+//     fifty million blanks in the row. The other counts go as far along
+//     the row as they say, a line longer than the terminal included,
+//     which is one row on macOS and Linux;
 //   - the shell's cursor stays where a read leaves it, and the moves
 //     and erases within its row are honored: git's progress meter and
 //     the line editors' edits (recorded from zsh and bash) write over
@@ -43,7 +45,9 @@
 //     Ctrl+C is also the copy key, and with nothing selected it used
 //     to copy nothing rather than interrupt;
 //   - a progress meter's updates, reads of their own each ending in a
-//     CR, redraw one row instead of piling up on it.
+//     CR, redraw one row instead of piling up on it;
+//   - a shell started again while the old one's CSI was being dropped
+//     (see above) shows its output whole.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -689,6 +693,39 @@ private slots:
         }
     }
 
+    // On macOS and Linux a line longer than the terminal is one row (see
+    // longCommandLineStaysWhole), and a move, erase or delete goes along
+    // it as far as its count says. Only ICH's count stops at the
+    // screen's width. CUB's stopping there too would take ESC[1000D, a
+    // common way back to the start of a line, only a screen's width back
+    // from the end of a long one, and a progress meter's next update
+    // would land partway into the last; ECH and DCH would stop short of
+    // the row's end. The widget was never shown, so it has the default
+    // 80 columns.
+    void countsGoAlongALongRow()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("ConPTY's screen wraps its rows itself");
+#else
+        const QByteArray bar(90, '#');
+        FedTerminal back;
+        back.appendOutput("progress 1/3 " + bar);
+        back.appendOutput("\x1b[1000D");
+        back.appendOutput("progress 2/3 " + bar);
+        QCOMPARE(back.toPlainText(),
+                 QStringLiteral("progress 2/3 ") + QString(90, QLatin1Char('#')));
+
+        // From the third column of a 100-column row, to its end.
+        const QByteArray row = "ab" + QByteArray(98, 'x');
+        FedTerminal erased;
+        erased.appendOutput(row + "\x1b[3G\x1b[1000X");
+        QCOMPARE(erased.toPlainText(), QStringLiteral("ab") + QString(98, QLatin1Char(' ')));
+        FedTerminal deleted;
+        deleted.appendOutput(row + "\x1b[3G\x1b[1000P");
+        QCOMPARE(deleted.toPlainText(), QStringLiteral("ab"));
+#endif
+    }
+
     // Windows wraps a long run a row at a time, a UTF-16 unit to a
     // column. The cut used to fall wherever the units ran out, so a
     // character at the edge could lose half its surrogate pair, or its
@@ -1201,6 +1238,47 @@ private slots:
         terminal.changeRepository(work, {});
         type(echo.arg(QStringLiteral("gbstep4")));
         QVERIFY2(shows(QStringLiteral("gbstep4[][][work]")), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // A shell started again (a bare repository opened, so a new GIT_DIR)
+    // while the old one was partway through a CSI too long to be one,
+    // which the widget drops as it comes, as far as its final byte. That
+    // byte never comes now, and the new shell's output is no part of the
+    // old one's. Had the dropping gone on, the new shell's first letter,
+    // or the '[' of its first escape sequence, would have ended it, and
+    // gone with it: macOS's sh starts with ESC[?1034h, which then showed
+    // as "?1034h" before the prompt.
+    void ptyNewShellDropsNothingOfTheOld()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        // The CSI, and then nothing (no prompt) until the shell is
+        // started again: the shell itself waits, so nothing of the old
+        // one is left behind. In a script, so the line typed is short.
+        QFile script(QDir(shell.home()).filePath(QStringLiteral("csi.sh")));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("printf '\\033['; printf '%01000d' 0; read gbwait\n");
+        script.close();
+        FedTerminal terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral(". \"$HOME/csi.sh\""));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        const QByteArray csi = "\x1b[" + QByteArray(1000, '0');
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.read.contains(csi),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QCOMPARE(terminal.pendingOutputSize(), qsizetype(0));
+        QCOMPARE(lastRow(terminal), kShPrompt + QStringLiteral(" . \"$HOME/csi.sh\""));
+
+        terminal.start(QDir::tempPath());
+        QVERIFY(terminal.isRunning());
+        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
 #endif
     }
 

@@ -1026,19 +1026,17 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
         // edge of the screen, which is as far as anything goes (see
         // below), so it isn't read: toInt made one too big for an int
         // 0, the default, and one just under INT_MAX overflowed the
-        // sums below.
+        // sums below. Kept to that, a count can go in them as it is.
         const QStringView digits = args.at(index);
         return digits.size() > kMaxCountDigits ? kMaxCount : digits.toInt();
     };
     const int count  = qMax(1, arg(0));  // moves treat 0 as 1
-    // A count goes no further than the screen does, as on a terminal:
-    // past its edge there is nothing more to move over, erase, insert
-    // or scroll. ESC[50000000@ inserted fifty million blanks. (A
-    // position, CHA's or CUP's, stops at the edge further down.)
-    const int cells  = qMin(count, qMax(1, screenColumns_));
     const int column = cur.positionInBlock() + 1;
     const int length = cur.block().length() - 1;
 #ifdef Q_OS_WIN
+    // SU scrolls a screen's worth at most, as a terminal does: it adds a
+    // row at the bottom for each row, and past that it would only push
+    // blank rows into the scrollback, as many as it asked for (see ICH).
     const int lines  = qMin(count, qMax(1, screenRows_));
     const int row    = cur.blockNumber() - screenTop_.blockNumber() + 1;
     const auto toColumn = [&](int to) { screenMoveTo(cur, row, to); };
@@ -1053,8 +1051,8 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
 #endif
 
     switch (finalByte) {
-    case 'C': toColumn(column + cells); break;  // CUF
-    case 'D': toColumn(column - cells); break;  // CUB
+    case 'C': toColumn(column + count); break;  // CUF
+    case 'D': toColumn(column - count); break;  // CUB
     case 'G':                                   // CHA
     case '`': toColumn(count); break;           // HPA
     case 'K': {  // EL: 0 cursor to end, 1 start to cursor, 2 whole row
@@ -1069,18 +1067,26 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
         break;
     }
     case 'X':  // ECH: blank cells from the cursor on, without moving
-        blankCells(cur, column - 1, qMin(column - 1 + cells, length));
+        blankCells(cur, column - 1, qMin(column - 1 + count, length));
         break;
     case '@':  // ICH: blanks in at the cursor, the rest of the row right
+        // A screen's width at most: on a terminal, blanks past that
+        // only push the rest of the row off its edge, which fewer do
+        // too. ESC[50000000@ put fifty million in. The other counts
+        // need no such cap, a move stopping at the row's start or the
+        // screen's edge and an erase or delete at the row's end, and
+        // must not have one: here a line longer than the terminal is
+        // one row (see appendOutput), and with a screen's width as the
+        // most, ESC[1000D took the cursor only partway back to its start.
         if (column <= length) {
             const int at = cur.position();
-            cur.insertText(QString(cells, QLatin1Char(' ')));
+            cur.insertText(QString(qMin(count, qMax(1, screenColumns_)), QLatin1Char(' ')));
             cur.setPosition(at);
         }
         break;
     case 'P': {  // DCH: the cursor's characters out, the rest of the row left
         QTextCursor erase = cur;
-        for (int k = 0; k < cells && !erase.atBlockEnd(); ++k)
+        for (int k = 0; k < count && !erase.atBlockEnd(); ++k)
             erase.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
         erase.removeSelectedText();
         break;
@@ -1090,8 +1096,8 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
     case 'f':  // HVP
         screenMoveTo(cur, qMax(1, arg(0)), qMax(1, arg(1)));
         break;
-    case 'A': screenMoveTo(cur, row - lines, column); break;  // CUU
-    case 'B': screenMoveTo(cur, row + lines, column); break;  // CUD
+    case 'A': screenMoveTo(cur, row - count, column); break;  // CUU
+    case 'B': screenMoveTo(cur, row + count, column); break;  // CUD
     case 'd': screenMoveTo(cur, count, column); break;        // VPA
     case 'J':  // ED
         if (arg(0) == 0) {  // cursor to the end of the screen
