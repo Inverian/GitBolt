@@ -4,11 +4,14 @@
 #include <QScopeGuard>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QThread>
 #include "../TestRepoHelper.h"
 #include "git/GitProcess.h"
 #include "git/Repository.h"
 
 #include <algorithm>
+#include <memory>
+#include <optional>
 
 namespace {
 
@@ -2519,38 +2522,61 @@ private slots:
 
     // -----------------------------------------------------------------
     // Hostile repository content the bundled libgit2 is patched against
-    // (cmake/PatchLibgit2.cmake): a .gitattributes pattern that never
-    // finishes matching, and a tree nested so deep it exhausts memory or
-    // the stack. A system libgit2 lacks the patches, so these skip
-    // there.
+    // (cmake/PatchLibgit2.cmake): a .gitattributes or .gitignore pattern
+    // that never finishes matching or recurses too deep, and a tree
+    // nested so deep it exhausts memory or the stack. A system libgit2
+    // lacks the patches, so these skip there.
     // -----------------------------------------------------------------
 
     // A committed .gitattributes pattern of a dozen stars and a literal
     // that never comes (`*a...*a*Q`) made libgit2's wildmatch backtrack
     // exponentially against a long path. Selecting such a commit froze
     // GitBolt for good at full CPU, computing its diff on the GUI
-    // thread. The parent has a file of forty a's; HEAD installs the
-    // pattern and deletes the file, so diffCommit looks the "diff"
-    // attribute up for that path. It must return promptly now.
+    // thread. The parent has files named with forty a's; HEAD installs
+    // the pattern and deletes them, so diffCommit looks the "diff"
+    // attribute up for each path. It must return promptly now, and so
+    // must the same pattern with each star a run of ten thousand: a run
+    // went by for one step of a match's budget, and every retry of a
+    // star read it all again.
+    void hostileGitattributesDiffsPromptly_data() {
+        QTest::addColumn<QByteArray>("attributes");
+        QTest::addColumn<int>("files");
+
+        QByteArray stars;
+        for (int i = 0; i < 12; ++i)
+            stars += "*a";
+        QTest::newRow("dozen stars") << stars + "*Q diff=x text\n" << 1;
+
+        const QByteArray run(10000, '*');
+        QByteArray runs;
+        for (int i = 0; i < 12; ++i)
+            runs += run + "a";
+        runs += run + "Q diff=x\n";
+        QTest::newRow("runs of stars") << runs + runs << 3;
+    }
+
     void hostileGitattributesDiffsPromptly() {
 #ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
 #else
+        QFETCH(QByteArray, attributes);
+        QFETCH(int, files);
+
         gitbolt::test::TestRepo repo;
-        const QString longName = QString(40, QLatin1Char('a')) + QStringLiteral(".txt");
+        QStringList names;
+        for (int i = 0; i < files; ++i)
+            names << QString(40, QLatin1Char('a')) + QString::number(i) + QStringLiteral(".txt");
         repo.writeFile(".gitattributes", "# benign\n");
-        repo.writeFile(longName, "hello\n");
+        for (const QString& name : names)
+            repo.writeFile(name, "hello\n");
         gitbolt::git::GitProcess git(repo.path().toStdString());
         QVERIFY(succeeded(git.run({"add", "-A"})));
         QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
                                    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "A"})));
 
-        QByteArray pattern;
-        for (int i = 0; i < 12; ++i)
-            pattern += "*a";
-        pattern += "*Q diff=x text\n";
-        repo.writeFile(".gitattributes", pattern);
-        repo.deleteFile(longName);
+        repo.writeFile(".gitattributes", attributes);
+        for (const QString& name : names)
+            repo.deleteFile(name);
         QVERIFY(succeeded(git.run({"add", "-A"})));
         QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
                                    "-c", "commit.gpgsign=false", "commit", "-q", "-m", "B"})));
@@ -2565,17 +2591,82 @@ private slots:
         const auto diff = opened->diffCommit(*head);
         const qint64 elapsed = timer.elapsed();
         QVERIFY2(diff.ok(), diff.ok() ? "" : diff.error().message().c_str());
-        // The budget caps a hostile match at milliseconds per path;
-        // without it this never returns. Generous, for a loaded CI box.
+        QCOMPARE(diff->files.size(), static_cast<size_t>(files + 1));
+        // Microseconds a path now; without the patches this never
+        // returns. Generous, for a loaded CI box.
         QVERIFY2(elapsed < 5000, qPrintable(QStringLiteral("diffCommit took %1 ms").arg(elapsed)));
 #endif
     }
 
-    // The budget leaves ordinary patterns matching as before, through
-    // the same attribute lookup the diff driver uses: a committed
-    // `*.lisp diff=lisp` still gives a .lisp file that driver, a file it
-    // doesn't name has none, and a `binary` glob still sets -diff. A
-    // hostile pattern earlier in the file does not disturb the others.
+    // Thousands of hostile .gitattributes lines, each of a kind that
+    // made wildmatch try again what could no longer match. Every rule is
+    // tried against every path looked up, so a few microseconds a rule
+    // froze a commit's diff for seconds a file (nine megabytes of the
+    // dozen-stars line, three files: 25 s). Each kind now costs a step
+    // or so per character, and the rule after them still applies.
+    void hostileGitattributesLookupsStayCheap_data() {
+        QTest::addColumn<QByteArray>("line");
+        QTest::addColumn<QString>("pathPrefix");
+        QTest::addColumn<int>("paths");
+
+        // The literal after the last star isn't in the path: each star
+        // before it tried all its other places.
+        QTest::newRow("stars") << QByteArray("*a*a*a*a*a*a*a*a*a*a*a*a*Q x\n")
+                               << QString(40, QLatin1Char('a')) << 450;
+        // Each `**/` tried as no directories, its rest unable to match
+        // anywhere, then again after every slash.
+        QTest::newRow("double-star chain") << QByteArray("**/**/**/**/**/**/**/**/Q x\n")
+                                           << QStringLiteral("a/").repeated(40) << 160;
+        // A star-slash with no slash left in the path: each star before
+        // it tried again, reading the rest of the path every time.
+        QTest::newRow("star slash") << QByteArray("*a*/x x\n")
+                                    << QString(4000, QLatin1Char('a')) << 300;
+    }
+
+    void hostileGitattributesLookupsStayCheap() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        QFETCH(QByteArray, line);
+        QFETCH(QString, pathPrefix);
+        QFETCH(int, paths);
+#ifdef Q_OS_WIN
+        if (pathPrefix.size() > 200)
+            QSKIP("libgit2 refuses a work tree path past MAX_PATH on Windows");
+#endif
+
+        gitbolt::test::TestRepo repo;
+        repo.writeFile(".gitattributes", line.repeated(5000) + "*.txt txt\n");
+        git_repository* raw = repo.repo().raw();
+
+        QElapsedTimer timer;
+        timer.start();
+        for (int i = 0; i < paths; ++i) {
+            const QByteArray path =
+                (pathPrefix + QString::number(i) + QStringLiteral(".txt")).toUtf8();
+            const char* value = nullptr;
+            QCOMPARE(git_attr_get(&value, raw, 0, path.constData(), "x"), 0);
+            QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_UNSPECIFIED);
+        }
+        const qint64 elapsed = timer.elapsed();
+
+        const QByteArray path = (pathPrefix + QStringLiteral("0.txt")).toUtf8();
+        const char* value = nullptr;
+        QCOMPARE(git_attr_get(&value, raw, 0, path.constData(), "txt"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_TRUE);
+        // Well under a second here; without the patches, a quarter of
+        // a minute.
+        QVERIFY2(elapsed < 5000, qPrintable(QStringLiteral("%1 lookups took %2 ms")
+                                                .arg(paths).arg(elapsed)));
+#endif
+    }
+
+    // Ordinary patterns match as before, through the same attribute
+    // lookup the diff driver uses: a committed `*.lisp diff=lisp` still
+    // gives a .lisp file that driver, a file it doesn't name has none,
+    // and a `binary` glob still sets -diff. A hostile pattern earlier in
+    // the file does not disturb the others. Nor do long paths stop
+    // patterns from applying, which a match's budget of steps did.
     void ordinaryGitattributesStillApply() {
 #ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
@@ -2587,6 +2678,9 @@ private slots:
         attrs += "*Q diff=x\n";          // the hostile pattern, up top
         attrs += "*.lisp diff=lisp\n";
         attrs += "*.bin binary\n";
+        attrs += "**/*_*_*_*.bak bak\n";
+        attrs += "**/*a* has_a\n";
+        attrs += "**/*.scm scheme\n";
         QVERIFY(repo.writeAndCommit(".gitattributes", attrs, "attrs").ok());
 
         auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
@@ -2605,6 +2699,110 @@ private slots:
         value = nullptr;
         QCOMPARE(git_attr_get(&value, opened->raw(), 0, "blob.bin", "diff"), 0);
         QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_FALSE);
+
+#ifndef Q_OS_WIN
+        // Not on Windows, where libgit2 refuses a work tree path past
+        // MAX_PATH.
+        auto isSet = [&](const QString& path, const char* attr) {
+            const QByteArray utf8 = path.toUtf8();
+            const char* v = nullptr;
+            return git_attr_get(&v, opened->raw(), 0, utf8.constData(), attr) == 0
+                && git_attr_value(v) == GIT_ATTR_VALUE_TRUE;
+        };
+        // Paths that take more than a match's first 1000 steps get 64 a
+        // character on a second try.
+        QVERIFY(isSet(QStringLiteral("dir/").repeated(300) + QStringLiteral("x.scm"), "scheme"));
+        value = nullptr;
+        const QByteArray longLisp =
+            (QStringLiteral("src/") + QString(1500, QLatin1Char('l')) + QStringLiteral(".lisp")).toUtf8();
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, longLisp.constData(), "diff"), 0);
+        QCOMPARE(QString::fromUtf8(value), QStringLiteral("lisp"));
+        // Snake_case directories with underscores aplenty: each star's
+        // literal ran out at the end of a directory, and every star
+        // before it tried its other places until the budget ran out.
+        QVERIFY(isSet(QStringLiteral(
+            "user_util_view_api_model_data_index/event_view_server_view_api_event_util_log_"
+            "data_core_util_view/view_util_log_user_log_test_user_client_api_api_test_client_"
+            "api_server_view_server/cache_client_view_log_parse_test/model_test_user_parse_"
+            "build_event_api_cache_core_server_index_index_view/view_parse_data_parse_test_"
+            "data.bak"), "bak"));
+        // Directories of a's: a trailing star with a slash after it was
+        // tried at each 'a', each try reading on to the slash.
+        const QString as(255, QLatin1Char('a'));
+        QVERIFY(isSet(as + QLatin1Char('/') + as + QLatin1Char('/') + as + QStringLiteral("/xa.txt"),
+                      "has_a"));
+#endif
+#endif
+    }
+
+    // A .gitignore line of 5,000 `**/` (15 KB): wildmatch recursed once
+    // for each, and status, which opening a repository runs on a worker
+    // thread (512 KB of stack on macOS), ran out of stack and crashed.
+    // It stops at 256 now; the pattern doesn't apply, the one after it
+    // does.
+    void hostileGitignoreLeavesStatusTheStack() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        repo.writeFile(".gitignore", QByteArray("**/").repeated(5000) + "Q\n*.log\n");
+        repo.writeFile("file.txt", "x\n");
+        repo.writeFile("noise.log", "x\n");
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+
+        std::optional<gitbolt::git::Result<std::vector<gitbolt::git::StatusEntry>>> status;
+        std::unique_ptr<QThread> worker(QThread::create([&] { status = opened->status(); }));
+        worker->setStackSize(512 * 1024);
+        worker->start();
+        QVERIFY(worker->wait(60000));
+        QVERIFY(status.has_value());
+        QVERIFY2(status->ok(), status->ok() ? "" : status->error().message().c_str());
+
+        QStringList paths;
+        for (const auto& entry : status->value())
+            paths << QString::fromStdString(entry.path);
+        paths.sort();
+        QCOMPARE(paths, (QStringList{QStringLiteral(".gitignore"), QStringLiteral("file.txt")}));
+#endif
+    }
+
+    // A file whose name reads as a negated pathspec, "!*b[ab]". Unstaging
+    // passes its path as a pathspec; libgit2 takes the '!' to negate
+    // `*b[ab]`, then falls back to the name itself when that pattern
+    // doesn't match it, but only when the match said WM_NOMATCH. Matches
+    // like this one now stop early, in an abort, and unstaging the file
+    // did nothing; wildmatch() says WM_NOMATCH for any failure.
+    void unstageFileNamedLikeANegatedPathspec() {
+#if !defined(GITBOLT_LIBGIT2_LIMITS_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#elif defined(Q_OS_WIN)
+        QSKIP("a Windows file name can't hold '*'");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("base.txt", "base\n", "base").ok());
+        const QString name = QStringLiteral("!*b[ab]");
+        repo.writeFile(name, "x\n");
+        QVERIFY(repo.stageFile(name).ok());
+
+        auto entryFor = [&]() -> std::optional<gitbolt::git::StatusEntry> {
+            const auto status = repo.repo().status();
+            if (!status.ok())
+                return std::nullopt;
+            for (const auto& entry : status.value())
+                if (entry.path == name.toStdString())
+                    return entry;
+            return std::nullopt;
+        };
+        auto before = entryFor();
+        QVERIFY(before.has_value());
+        QVERIFY(before->isStaged());
+
+        QVERIFY(repo.repo().unstageFile(name.toStdString()).ok());
+        auto after = entryFor();
+        QVERIFY(after.has_value());
+        QVERIFY2(!after->isStaged(), "the file is still staged");
+        QVERIFY(after->isUntracked());
 #endif
     }
 

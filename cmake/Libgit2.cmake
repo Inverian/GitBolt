@@ -168,6 +168,11 @@ function(gitbolt_add_bundled_libgit2)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/tree.c _tree_c)
     if(_wildmatch_c MATCHES "budget = 1000 \\+ 64 \\* "
        AND _wildmatch_c MATCHES "do {\n\t+if \\(!p_ch \\|\\| --\\*budget <= 0\\)"
+       AND _wildmatch_c MATCHES "\\(\\*budget -= \\(long\\)\\(p - prev_p - 2\\)\\) <= 0"
+       AND _wildmatch_c MATCHES "return t_ch \\? WM_ABORT_TO_STARSTAR : WM_ABORT_ALL;"
+       AND _wildmatch_c MATCHES "matched == WM_ABORT_ALL\\)\\)\n\t+return matched;"
+       AND _wildmatch_c MATCHES "if \\(depth > WM_MAX_DEPTH\\)"
+       AND _wildmatch_c MATCHES "return error == WM_MATCH \\? WM_MATCH : WM_NOMATCH;"
        AND _iterator_c MATCHES "if \\(\\(error = git_tree__descend_ok\\(iter->frames\\.size,"
        AND _tree_c MATCHES "error = git_tree__descend_ok\\(depth,")
         target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_LIMITS_PATCHED)

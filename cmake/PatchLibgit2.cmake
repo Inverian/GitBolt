@@ -204,33 +204,54 @@ gitbolt_patch(src/libgit2/repository.c
 # brings it, and selecting a commit whose diff has such a path (the diff
 # driver is an attribute) froze GitBolt for good at full CPU; with the
 # path checked out, so did status, on opening. git's own wildmatch hangs
-# on it too. A match now has a budget of steps: a pattern character
-# tried, a character of the path skipped, a character of a [class] read.
-# Spent, the pattern doesn't match (WM_ABORT_ALL, which every caller
-# takes as no match). It counts characters, not calls: a budget of a
-# million calls still let one match against a 65,000-character name take
-# 17 s. The budget is 1000 steps, then 64 per character of pattern and
-# path; ordinary patterns take one to three per character of the path,
-# and a hostile one now costs microseconds, milliseconds for that name.
+# on it too. When the literal after a star wasn't in the rest of the
+# path, the star said WM_NOMATCH, and every star before it went on to
+# try all its other places, each as hopeless. Now it stops them all
+# (WM_ABORT_ALL; up to a `**` when a slash ended the search, as the
+# star's own loop does). So do the other hopeless retries of the kind: a
+# trailing star with a slash still to come, a star-slash with none to
+# come, and the try of a `**/` as no directories when its rest can't
+# match further on either (in a chain of them, that doubled the work at
+# each). Each of these now takes a step or so per character of the path,
+# and of twelve million fuzzed patterns and paths, every one the old
+# matcher finishes matches as before.
+#
+# As a backstop, a match has a budget of steps: a pattern character
+# tried, a character of the path skipped, a character of a [class] or of
+# a run of stars read. Spent, the pattern doesn't match. It counts
+# characters, not calls: a budget of a million calls still let one match
+# against a 65,000-character name take 17 s, and a run of thousands of
+# stars went by for one step. The budget is 1000 steps, then 64 per
+# character of pattern and path. wildmatch() says WM_NOMATCH for any
+# failure: pathspec_match_one() tries its fallbacks on that value alone,
+# and the matches that now stop early used to end in it.
+#
+# And at most 256 stars match at once, each a level of recursion: a
+# .gitignore line of 5,000 `**/` ran a worker thread computing status out
+# of stack, a crash on opening.
 gitbolt_patch(src/util/wildmatch.c
-    "static int dowild(const uchar *p, const uchar *text, unsigned int flags)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n"
-    "static int dowild(const uchar *p, const uchar *text, unsigned int flags, long *budget)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\t/* GitBolt: a hostile pattern backtracks exponentially, so a\n\t\t * match has a budget of steps (see wildmatch()), spent here and\n\t\t * in every loop that skips over the path or the pattern. Spent,\n\t\t * the pattern doesn't match. */\n\t\tif (--*budget <= 0)\n\t\t\treturn WM_ABORT_ALL;\n"
+    "/* Match pattern \"p\" against \"text\" */\nstatic int dowild(const uchar *p, const uchar *text, unsigned int flags)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n"
+    "/*\n * GitBolt: how many of a pattern's stars may be matching at once, each\n * a level of recursion. Thousands of <star star slash> in a pattern ran\n * a thread out of stack; no real pattern comes near this.\n */\n#define WM_MAX_DEPTH 256\n\n/* Match pattern \"p\" against \"text\" */\nstatic int dowild(const uchar *p, const uchar *text, unsigned int flags, long *budget, unsigned int depth)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tif (depth > WM_MAX_DEPTH)\n\t\treturn WM_ABORT_ALL;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\t/* GitBolt: a match has a budget of steps (see wildmatch()),\n\t\t * spent here and in every loop that skips over the path or the\n\t\t * pattern, in case a pattern still finds a way to take long.\n\t\t * Spent, the pattern doesn't match. */\n\t\tif (--*budget <= 0)\n\t\t\treturn WM_ABORT_ALL;\n"
     "static int dowild\\(const uchar \\*p, const uchar \\*text, unsigned int flags\\)")
 gitbolt_patch(src/util/wildmatch.c
-    "dowild(p + 1, text, flags) == WM_MATCH)"
-    "dowild(p + 1, text, flags, budget) == WM_MATCH)"
+    "\t\t\t\tconst uchar *prev_p = p - 2;\n\t\t\t\twhile (*++p == '*') {}\n\t\t\t\tif (!(flags & WM_PATHNAME))\n"
+    "\t\t\t\tconst uchar *prev_p = p - 2;\n\t\t\t\twhile (*++p == '*') {}\n\t\t\t\t/* GitBolt: and a step for each star of the run after\n\t\t\t\t * the first: each try of the star skipped thousands of\n\t\t\t\t * them for one. */\n\t\t\t\tif ((*budget -= (long)(p - prev_p - 2)) <= 0)\n\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\tif (!(flags & WM_PATHNAME))\n"
+    "while \\(\\*\\+\\+p == '\\*'\\) {}\n\t+if \\(!\\(flags & WM_PATHNAME\\)\\)")
+gitbolt_patch(src/util/wildmatch.c
+    "\t\t\t\t\tif (p[0] == '/' &&\n\t\t\t\t\t    dowild(p + 1, text, flags) == WM_MATCH)\n\t\t\t\t\t\treturn WM_MATCH;\n"
+    "\t\t\t\t\t/*\n\t\t\t\t\t * GitBolt: and if the rest can't match here or\n\t\t\t\t\t * anywhere further on (WM_ABORT_ALL), it can't\n\t\t\t\t\t * after a slash further on either: stop. Trying\n\t\t\t\t\t * that anyway doubled the work at each of a\n\t\t\t\t\t * chain of these.\n\t\t\t\t\t */\n\t\t\t\t\tif (p[0] == '/' &&\n\t\t\t\t\t    ((matched = dowild(p + 1, text, flags, budget, depth + 1)) == WM_MATCH ||\n\t\t\t\t\t     matched == WM_ABORT_ALL))\n\t\t\t\t\t\treturn matched;\n"
     "dowild\\(p \\+ 1, text, flags\\)")
 gitbolt_patch(src/util/wildmatch.c
     "\t\t\t\tif (!match_slash) {\n\t\t\t\t\tif (strchr((char*)text, '/') != NULL)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n"
-    "\t\t\t\tif (!match_slash) {\n\t\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\t\tif (slash != NULL) {\n\t\t\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t\t}\n\t\t\t\t}\n"
+    "\t\t\t\tif (!match_slash) {\n\t\t\t\t\t/* GitBolt: and no later start of it or of the\n\t\t\t\t\t * stars before it, short of a '**', gets past\n\t\t\t\t\t * that slash (WM_ABORT_TO_STARSTAR). */\n\t\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\t\tif (slash != NULL) {\n\t\t\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\t\t\treturn WM_ABORT_TO_STARSTAR;\n\t\t\t\t\t}\n\t\t\t\t}\n"
     "if \\(strchr\\(\\(char\\*\\)text, '/'\\) != NULL\\)")
 gitbolt_patch(src/util/wildmatch.c
     "\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash)\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\ttext = (const uchar*)slash;\n"
-    "\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash) {\n\t\t\t\t\t*budget -= (long)strlen((char*)text);\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\ttext = (const uchar*)slash;\n"
+    "\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash) {\n\t\t\t\t\t/* GitBolt: nor after any later start. */\n\t\t\t\t\t*budget -= (long)strlen((char*)text);\n\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t}\n\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\ttext = (const uchar*)slash;\n"
     "if \\(!slash\\)\n\t+return WM_NOMATCH;")
 gitbolt_patch(src/util/wildmatch.c
     "\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags)) != WM_NOMATCH) {"
-    "\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tif (--*budget <= 0)\n\t\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags, budget)) != WM_NOMATCH) {"
+    "\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tif (--*budget <= 0)\n\t\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\t/*\n\t\t\t\t\t * GitBolt: the literal isn't in the rest of the\n\t\t\t\t\t * path, so no later start of this star or of the\n\t\t\t\t\t * ones before it finds it either (WM_ABORT_ALL);\n\t\t\t\t\t * when a slash stopped the search, a '**' further\n\t\t\t\t\t * out may still get past it (WM_ABORT_TO_STARSTAR).\n\t\t\t\t\t * WM_NOMATCH had each star before this one try all\n\t\t\t\t\t * its other places, in vain: a dozen stars and a\n\t\t\t\t\t * literal that never comes took forever.\n\t\t\t\t\t */\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn t_ch ? WM_ABORT_TO_STARSTAR : WM_ABORT_ALL;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags, budget, depth + 1)) != WM_NOMATCH) {"
     "matched = dowild\\(p, text, flags\\)\\)")
 gitbolt_patch(src/util/wildmatch.c
     "\t\t\tdo {\n\t\t\t\tif (!p_ch)\n\t\t\t\t\treturn WM_ABORT_ALL;\n"
@@ -242,7 +263,7 @@ gitbolt_patch(src/util/wildmatch.c
     "/\\*SHARED ITERATOR\\*/\n\t+if \\(!p_ch\\)\n")
 gitbolt_patch(src/util/wildmatch.c
     "int wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags);\n}"
-    "int wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\t/* GitBolt: an ordinary pattern takes one to three steps per\n\t * character of the path. A match gets 1000, and if they run out,\n\t * starts over with 64 per character of the pattern and the path. */\n\tlong budget = 1000;\n\tsize_t len;\n\tint error = dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n\n\tif (error != WM_ABORT_ALL || budget > 0)\n\t\treturn error;\n\tlen = strlen(pattern) + strlen(text);\n\tbudget = 1000 + 64 * (long)(len < 1000000 ? len : 1000000);\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n}"
+    "int wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\t/* GitBolt: an ordinary pattern takes one to three steps per\n\t * character of the path. A match gets 1000, and if they run out,\n\t * starts over with 64 per character of the pattern and the path. */\n\tlong budget = 1000;\n\tint error = dowild((const uchar*)pattern, (const uchar*)text, flags, &budget, 0);\n\n\tif (error == WM_ABORT_ALL && budget <= 0) {\n\t\tsize_t len = strlen(pattern) + strlen(text);\n\t\tbudget = 1000 + 64 * (long)(len < 1000000 ? len : 1000000);\n\t\terror = dowild((const uchar*)pattern, (const uchar*)text, flags, &budget, 0);\n\t}\n\t/*\n\t * GitBolt: callers ask only whether it matched, but\n\t * pathspec_match_one() tries its fallbacks (such as a file whose\n\t * name starts with '!') on WM_NOMATCH alone, and matches that used\n\t * to end in it now end in an abort above. So any failure says it.\n\t */\n\treturn error == WM_MATCH ? WM_MATCH : WM_NOMATCH;\n}"
     "return dowild\\(\\(const uchar\\*\\)pattern, \\(const uchar\\*\\)text, flags\\);")
 
 # A tree nested thousands of levels deep, one directory in each (a few
