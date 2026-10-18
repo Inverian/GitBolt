@@ -103,6 +103,17 @@ gitbolt_patch(src/libgit2/submodule.c
     "\tif (!strcmp(entry->value, data->path)) {"
     "\tif (entry->value && !strcmp(entry->value, data->path)) {"
     "if \\(!strcmp\\(entry->value, data->path\\)\\)")
+# And reading the submodule's own config, libgit2 takes a `path` with no
+# value as "" (git_config_get_string), as it does `path =`: the
+# submodule's folder was the superproject's, and status, which every
+# open runs, opened the superproject as its own submodule, over and
+# over, until the stack ran out (a clone of such a repository: on
+# opening). An empty path is ignored: the submodule keeps its name as
+# its path, as when there is none. (Upstream crashes on `path =` too.)
+gitbolt_patch(src/libgit2/submodule.c
+    "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {"
+    "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (*value && !looks_like_command_line_option(value)) {"
+    "in_config = 1;\n\t\t/\\* We would warn here if we had that API \\*/\n\t\tif \\(!looks_like_command_line_option")
 # url.<base>.insteadOf / pushInsteadOf with no value: every remote lookup
 # (the Remote repositories list, Edit URL, Statistics) crashed.
 gitbolt_patch(src/libgit2/remote.c

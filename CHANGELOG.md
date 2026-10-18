@@ -72,13 +72,15 @@ security policy for reporting vulnerabilities privately.
   that the server doesn't have, and it left Settings › Git › Git Config
   empty, with Apply saving nothing.
 - **Crashes on config lines with no value** (a name and no `= value`,
-  which git refuses): a committed `.gitmodules` whose `path` had none
+  which git reads as `true`, and refuses where it needs text): a
+  committed `.gitmodules` whose `path` had none, or an empty one,
   crashed GitBolt as it opened the repository, a freshly cloned one
   included, and so did an `extensions.objectformat` with none. A
-  `url.<base>.insteadOf` or `pushInsteadOf` with none crashed
-  Repository › Remote repositories, and a `branch.<name>.remote` with
-  none crashed removing a remote. The repository now opens, or, for
-  `objectformat`, says what is wrong with it.
+  `url.<base>.insteadOf` or `pushInsteadOf` with none, in any git
+  config, your global one included, crashed Repository › Remote
+  repositories and Plugins › Statistics, and a `branch.<name>.remote`
+  with none crashed removing a remote. The repository now opens, or,
+  for `objectformat`, says what is wrong with it.
 - **Linked worktrees and submodules** opened in GitBolt now refresh
   when a commit, staging or a branch switch happens outside GitBolt.
   Their `.git` is a file pointing elsewhere, and GitBolt never watched

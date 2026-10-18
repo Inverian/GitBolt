@@ -1530,8 +1530,9 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
         },
         &urls);
     // One alone is replaced below, which repairs the remote. Beside
-    // others, git can't read the config at all ("missing value"), so
-    // no git command would help: the line has to go.
+    // others libgit2 won't replace it (a multivar), and git's remote
+    // commands stop on it ("missing value"), so `git remote set-url
+    // --delete` can't take it out either: the line has to be deleted.
     if (urls.size() > 1) {
         for (const auto& u : urls) {
             if (u.valueless)
@@ -1539,8 +1540,8 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
                                 "Remote '" + name + "' has a `url` line with no value in "
                                     + (u.where.empty() ? std::string("the repository's config")
                                                        : u.where)
-                                    + ", which git can't read; delete that line, then change "
-                                      "the URL again.");
+                                    + ", which git's remote commands can't read; delete that "
+                                      "line, then change the URL again.");
         }
     }
     if (urls.size() > 1) {

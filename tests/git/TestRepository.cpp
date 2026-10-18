@@ -1917,18 +1917,43 @@ private slots:
     // config; GitBolt must not go down on it. A .gitmodules is committed,
     // so a cloned repository can bring one.
     // -----------------------------------------------------------------
-    void valuelessSubmodulePathIsSkipped() {
+    // .gitmodules with a `path` line and no value (or `path =`), and the
+    // submodule's gitlink and folder there, as a clone has them: libgit2
+    // took the path as "", the superproject's own folder, and status
+    // (which every open runs) recursed into it until the stack ran out.
+    void valuelessSubmodulePathIsIgnored_data() {
+        QTest::addColumn<QByteArray>("pathLine");
+        QTest::newRow("path with no value") << QByteArray("\tpath\n");
+        QTest::newRow("path =") << QByteArray("\tpath =\n");
+    }
+
+    void valuelessSubmodulePathIsIgnored() {
 #ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
 #else
+        QFETCH(QByteArray, pathLine);
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit(".gitmodules",
-                                    "[submodule \"x\"]\n\tpath\n\turl = https://example.com/x.git\n",
-                                    "a .gitmodules with a path line and no value").ok());
+                                    "[submodule \"x\"]\n" + pathLine
+                                        + "\turl = https://example.com/x.git\n",
+                                    "a .gitmodules with an empty path").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(!head.isEmpty());
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "gitlink"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));   // as a clone leaves it
+
         auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
         QVERIFY(opened.ok());
-        const auto subs = opened->submodules();   // every open runs this
-        QVERIFY2(subs.ok(), subs.ok() ? "" : subs.error().message().c_str());
+        const auto subs = opened->submodules();
+        QVERIFY(subs.ok());
+        QCOMPARE(subs->size(), std::size_t(1));
+        QCOMPARE(QString::fromStdString(subs->front().path), QStringLiteral("x"));
+        QVERIFY(opened->status().ok());
+        QVERIFY(opened->diffIndexToWorkdir().ok());
 #endif
     }
 
@@ -2017,8 +2042,8 @@ private slots:
         QCOMPARE(QString::fromStdString(origin->url), QStringLiteral("https://example.com/fixed.git"));
     }
 
-    // A valueless `url` beside a real one: git can't read the config,
-    // so the note says to delete the line (no git command would work).
+    // A valueless `url` beside a real one: git's remote commands stop on
+    // it ("missing value"), so the note says to delete the line.
     void setRemoteUrlNamesAValuelessUrlAmongOthers() {
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
