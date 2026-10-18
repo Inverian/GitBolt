@@ -276,6 +276,14 @@ void RepositoryView::openFileExternally(const QString& path)
     const QString workdir = QString::fromStdString(
         gitService_->withRepository(
             [](git::Repository& r) { return r.workdir(); }));
+    // Bare: no working tree, and an empty one would be GitBolt's own
+    // working folder, maybe another repository with that file in it.
+    if (workdir.isEmpty()) {
+        QMessageBox::information(this, tr("Open Externally"),
+            tr("This repository is bare: it has no working tree to open "
+               "%1 from.").arg(path));
+        return;
+    }
     const QString full = QDir(workdir).filePath(path);
     if (!QFileInfo::exists(full)) {
         QMessageBox::information(this, tr("Open Externally"),

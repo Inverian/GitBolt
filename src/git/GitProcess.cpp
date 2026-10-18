@@ -115,8 +115,30 @@ char commentCharFor(const std::vector<std::string>& messages) {
 GitProcess::GitProcess(const std::string& workingDirectory)
     : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
 
+const std::vector<std::string>& GitProcess::repositoryEnvVars() {
+    // `git rev-parse --local-env-vars`, less GIT_CONFIG_PARAMETERS and
+    // GIT_CONFIG_COUNT (`git -c` settings: how git is to behave, not
+    // where). GIT_CONFIG goes too: it is the one file a plain `git
+    // config` then reads, so the fetch-prune check read nothing of the
+    // repository's and let a fetch delete local tags.
+    static const std::vector<std::string> names{
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+        "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+        "GIT_INTERNAL_SUPER_PREFIX", "GIT_SHALLOW_FILE"};
+    return names;
+}
+
 void GitProcess::applyEnvironment(QProcess& process, bool allowPrompts) {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // Where the repository is comes from the working directory (and
+    // GIT_DIR for a bare one, runImpl), never from GitBolt's own
+    // environment: started from a shell that exports GIT_DIR (a bare
+    // dotfiles setup), from a git alias or a hook, every command went
+    // to that repository, while libgit2, which ignores these, showed
+    // the one that is open.
+    for (const auto& name : repositoryEnvVars())
+        env.remove(QString::fromStdString(name));
     // The login shell's PATH ahead of the session's (util/LoginPath.h):
     // launched from the Dock, GitBolt has launchd's, and a hook that
     // runs node, npx or anything else from Homebrew, nvm or volta
@@ -726,8 +748,10 @@ Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, 
     QProcess process;
     process.setWorkingDirectory(workDir);
     applyEnvironment(process, !promptsForbidden_);
-    if (!extraEnv.empty()) {
+    if (!extraEnv.empty() || !gitDir_.empty()) {
         QProcessEnvironment env = process.processEnvironment();
+        if (!gitDir_.empty())
+            env.insert(QStringLiteral("GIT_DIR"), QString::fromStdString(gitDir_));
         for (const auto& [name, value] : extraEnv)
             env.insert(QString::fromStdString(name), QString::fromStdString(value));
         process.setProcessEnvironment(env);

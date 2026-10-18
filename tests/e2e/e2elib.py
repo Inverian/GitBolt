@@ -229,7 +229,9 @@ class App:
                  instance_name: str | None = None,
                  runtime_dir: str | None = None,
                  label: str = "app",
-                 home: str | None = None):
+                 home: str | None = None,
+                 cwd: str | None = None,
+                 extra_env: dict | None = None):
         tag = uuid.uuid4().hex[:8]
         self.binary = binary
         self.label = label
@@ -256,13 +258,16 @@ class App:
         self.env = app_env(self.runtime_dir, self.instance_name,
                            bridge_name=self.bridge_name,
                            config_home=config_home, home=home)
+        # extra_env: on top, as a shell that exports them would have it.
+        self.env.update(extra_env or {})
 
         args = [binary] + ([repo] if repo else [])
         self._log = open(self.log_path, "w")
         # stdin from nowhere, as a desktop launch has it: no terminal.
+        # cwd: where the app starts, as from a terminal in a folder.
         self.proc = subprocess.Popen(
             args, env=self.env, stdin=subprocess.DEVNULL, stdout=self._log,
-            stderr=subprocess.STDOUT)
+            stderr=subprocess.STDOUT, cwd=cwd)
 
     @property
     def lock_path(self) -> str:
@@ -545,7 +550,8 @@ def run(test_fn) -> None:
     if len(sys.argv) < 2:
         print(f"usage: {sys.argv[0]} <path-to-gitbolt-binary>")
         sys.exit(2)
-    binary = sys.argv[1]
+    # Absolute: a test may start the app in a folder of its own (cwd).
+    binary = os.path.abspath(sys.argv[1])
     if not os.access(binary, os.X_OK):
         print(f"FAIL: not executable: {binary}")
         sys.exit(1)

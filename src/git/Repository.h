@@ -71,6 +71,15 @@ public:
 
     std::string path() const;
     std::string workdir() const;
+    /// The git dir that a repository's linked worktrees share: refs,
+    /// packed-refs, config and info/ are there. path() for any other
+    /// repository. With a trailing "/".
+    std::string commonDir() const;
+    /// Where git commands for this repository run: the work tree's
+    /// top, or the git dir of a bare repository, which has none. Never
+    /// empty: git run with no working directory runs in GitBolt's own,
+    /// which can be another repository.
+    std::string commandDir() const;
     bool isBare() const;
     bool isHeadDetached() const;
     bool isHeadUnborn() const;

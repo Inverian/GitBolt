@@ -29,35 +29,48 @@ FileWatcher::FileWatcher(QObject* parent) : QObject(parent) {
     connect(&watcher_, &QFileSystemWatcher::directoryChanged, this, &FileWatcher::onDirectoryChanged);
 }
 
-void FileWatcher::watchRepository(const QString& repoPath) {
-    watchGitInternals(repoPath);
+void FileWatcher::watchRepository(const QString& repoPath, const QString& gitDir,
+                                  const QString& commonDir) {
+    watchGitInternals(repoPath, gitDir, commonDir);
     addWatchPaths(repoPath, enumerateWatchDirs(repoPath));
 }
 
-void FileWatcher::watchGitInternals(const QString& repoPath) {
+void FileWatcher::watchGitInternals(const QString& repoPath, const QString& gitDirGiven,
+                                    const QString& commonDirGiven) {
     stop();
     repoPath_ = repoPath;
 
-    // Watch .git/ internals so we notice commits, checkouts, and index
-    // updates made by external tools (or by our own GitService after
-    // a stage/commit cycle).
-    const QString gitDir = repoPath + "/.git";
+    // Watch the git dir's internals so we notice commits, checkouts,
+    // and index updates made by external tools (or by our own
+    // GitService after a stage/commit cycle). In a linked worktree or
+    // a submodule, .git is a file: the git dir is wherever libgit2
+    // found it, and nothing was watched when this looked for
+    // <repo>/.git as a directory.
+    const QString gitDir = QDir::cleanPath(
+        gitDirGiven.isEmpty() ? repoPath + "/.git" : gitDirGiven);
+    const QString commonDir = commonDirGiven.isEmpty()
+                                  ? gitDir : QDir::cleanPath(commonDirGiven);
     if (QDir(gitDir).exists()) {
         gitDir_ = gitDir;
+        commonDir_ = QDir(commonDir).exists() ? commonDir : gitDir;
 
         // Files git rewrites atomically (lockfile + rename-over).
         // On inotify backends the rename DELETES the watch — see
         // onFileChanged, which re-adds each path after it fires.
-        addFileIfExists(gitDir + "/index");
-        addFileIfExists(gitDir + "/HEAD");
-        addFileIfExists(gitDir + "/packed-refs");
-        addFileIfExists(gitDir + "/FETCH_HEAD");
+        // index, HEAD and FETCH_HEAD are each worktree's own;
+        // packed-refs and refs/ are shared, in the common dir.
+        addFileIfExists(gitDir_ + "/index");
+        addFileIfExists(gitDir_ + "/HEAD");
+        addFileIfExists(gitDir_ + "/FETCH_HEAD");
+        addFileIfExists(commonDir_ + "/packed-refs");
 
-        // The .git directory itself: catches creation of files that
-        // may not exist yet (FETCH_HEAD before the first fetch,
-        // packed-refs before the first pack) — onDirectoryChanged
-        // re-arms their file watches when they appear.
-        watcher_.addPath(gitDir);
+        // The git dir itself: catches creation of files that may not
+        // exist yet (FETCH_HEAD before the first fetch, packed-refs
+        // before the first pack) — onDirectoryChanged re-arms their
+        // file watches when they appear.
+        watcher_.addPath(gitDir_);
+        if (commonDir_ != gitDir_)
+            watcher_.addPath(commonDir_);
 
         // Every directory under refs/. directoryChanged only fires
         // for a watched directory's OWN listing: a watch on refs/
@@ -73,9 +86,9 @@ void FileWatcher::watchGitInternals(const QString& repoPath) {
 }
 
 void FileWatcher::watchRefsSubtree() {
-    if (gitDir_.isEmpty())
+    if (commonDir_.isEmpty())
         return;
-    const QString refsRoot = gitDir_ + "/refs";
+    const QString refsRoot = commonDir_ + "/refs";
     if (!QDir(refsRoot).exists())
         return;
     QStringList dirs{refsRoot};
@@ -199,6 +212,7 @@ void FileWatcher::stop() {
     pendingDirs_.clear();
     repoPath_.clear();
     gitDir_.clear();
+    commonDir_.clear();
     if (!watcher_.files().isEmpty()) watcher_.removePaths(watcher_.files());
     if (!watcher_.directories().isEmpty()) watcher_.removePaths(watcher_.directories());
 }
@@ -220,12 +234,12 @@ void FileWatcher::onFileChanged(const QString& path) {
 
 void FileWatcher::onDirectoryChanged(const QString& path) {
     if (!gitDir_.isEmpty()) {
-        if (path == gitDir_) {
+        if (path == gitDir_ || path == commonDir_) {
             // FETCH_HEAD / packed-refs may have just been created
             // (first fetch, first ref pack) — arm their watches.
-            addFileIfExists(gitDir_ + "/packed-refs");
+            addFileIfExists(commonDir_ + "/packed-refs");
             addFileIfExists(gitDir_ + "/FETCH_HEAD");
-        } else if (path.startsWith(gitDir_ + QStringLiteral("/refs"))) {
+        } else if (path.startsWith(commonDir_ + QStringLiteral("/refs"))) {
             // A refs/ directory changed its listing — possibly a
             // brand-new subdirectory (first feature/* branch, a
             // remote's first fetch). Re-scan so the new dir gets

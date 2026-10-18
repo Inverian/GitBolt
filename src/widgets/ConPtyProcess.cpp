@@ -125,7 +125,8 @@ int compareNames(std::wstring_view a, std::wstring_view b)
 // CreateProcessW takes: sorted by name, case-insensitively, each entry
 // NUL-terminated and the whole block terminated by one more NUL.
 std::wstring environmentBlock(
-    const std::vector<std::pair<std::wstring, std::wstring>>& overrides)
+    const std::vector<std::pair<std::wstring, std::wstring>>& overrides,
+    const std::vector<std::wstring>& removed)
 {
     std::vector<std::wstring> entries;
     if (wchar_t* inherited = GetEnvironmentStringsW()) {
@@ -135,7 +136,11 @@ std::wstring environmentBlock(
                 overrides.begin(), overrides.end(), [&](const auto& o) {
                     return compareNames(nameOf(entry), o.first) == CSTR_EQUAL;
                 });
-            if (!overridden)
+            const bool dropped = std::any_of(
+                removed.begin(), removed.end(), [&](const std::wstring& name) {
+                    return compareNames(nameOf(entry), name) == CSTR_EQUAL;
+                });
+            if (!overridden && !dropped)
                 entries.emplace_back(entry);
         }
         FreeEnvironmentStringsW(inherited);
@@ -402,7 +407,7 @@ bool ConPtyProcess::start(const StartInfo& info, OutputHandler onOutput,
     startup.lpAttributeList = list;
 
     std::wstring commandLine = info.commandLine;  // CreateProcessW may write to it
-    std::wstring environment = environmentBlock(info.environment);
+    std::wstring environment = environmentBlock(info.environment, info.removed);
     PROCESS_INFORMATION child{};
     const BOOL started = CreateProcessW(
         nullptr, commandLine.data(), nullptr, nullptr, FALSE,

@@ -70,6 +70,7 @@
 #include <QRegularExpression>
 #include <QSocketNotifier>
 #include <QStringList>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBlock>
@@ -1004,6 +1005,51 @@ private slots:
         QTest::qWait(200);
         QVERIFY2(rows(terminal).contains(kShPrompt + QLatin1Char(' ') + command),
                  qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // The shell's repository is the one it starts in: GIT_DIR and
+    // GIT_WORK_TREE in GitBolt's own environment (a shell exporting them
+    // for a bare dotfiles repository) are left out, and a bare
+    // repository's own GIT_DIR (setGitDir) goes in.
+    void ptyShellGetsNoInheritedGitVariables_data()
+    {
+        QTest::addColumn<QString>("gitDir");
+        QTest::addColumn<QString>("expected");
+        QTest::newRow("a repository with a work tree") << QString() << QStringLiteral("gbenv[][]");
+        QTest::newRow("a bare repository")
+            << QStringLiteral("/tmp/bare.git") << QStringLiteral("gbenv[/tmp/bare.git][]");
+    }
+
+    void ptyShellGetsNoInheritedGitVariables()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        QFETCH(QString, gitDir);
+        QFETCH(QString, expected);
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        const QByteArray savedDir = qgetenv("GIT_DIR");
+        const QByteArray savedTree = qgetenv("GIT_WORK_TREE");
+        const bool hadDir = qEnvironmentVariableIsSet("GIT_DIR");
+        const bool hadTree = qEnvironmentVariableIsSet("GIT_WORK_TREE");
+        const auto restore = qScopeGuard([&] {
+            if (hadDir) qputenv("GIT_DIR", savedDir); else qunsetenv("GIT_DIR");
+            if (hadTree) qputenv("GIT_WORK_TREE", savedTree); else qunsetenv("GIT_WORK_TREE");
+        });
+        qputenv("GIT_DIR", "/elsewhere/.git");
+        qputenv("GIT_WORK_TREE", "/elsewhere");
+
+        TerminalWidget terminal;
+        terminal.setGitDir(gitDir);
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral("echo gbenv[$GIT_DIR][$GIT_WORK_TREE]"));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(expected),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
 #endif
     }
 

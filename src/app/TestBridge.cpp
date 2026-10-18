@@ -339,6 +339,12 @@ QByteArray TestBridge::handleLine(const QString& line)
         return cmdFileOpen(line.section(QLatin1Char(' '), 1));
     if (verb == QStringLiteral("service-open") && parts.size() >= 2)
         return cmdServiceOpen(line.section(QLatin1Char(' '), 1));
+    if (verb == QStringLiteral("minimize")) {
+        // As the Dock's yellow button does; queued like trigger.
+        QMetaObject::invokeMethod(window_, &QWidget::showMinimized, Qt::QueuedConnection);
+        return jsonLine({{QStringLiteral("ok"), true},
+                         {QStringLiteral("dispatched"), true}});
+    }
     if (verb == QStringLiteral("dump-state"))
         return cmdDumpState();
     if (verb == QStringLiteral("quit"))
@@ -780,6 +786,7 @@ QByteArray TestBridge::cmdDumpState()
             windows.append(top->windowTitle());
     }
     state[QStringLiteral("windows")] = windows;
+    state[QStringLiteral("minimized")] = window_->isMinimized();
     state[QStringLiteral("ok")] = true;
     return jsonLine(state);
 }

@@ -317,6 +317,7 @@ private:
         QString  path;                 // non-empty while in flight
         QWidget* widgetBefore = nullptr;  // revert target on failure
         QString  titleBefore;
+        QString  pathLabelBefore;     // the status bar's path, restored too
         // The repository actions were on: a repository was on screen,
         // or File > Home left its actions on. Not GitService::isOpen(),
         // which Close leaves true.
@@ -331,6 +332,7 @@ private:
             path.clear();
             widgetBefore = nullptr;
             titleBefore.clear();
+            pathLabelBefore.clear();
             actionsBefore = false;
             awaitingInitialLog = false;
             stopTiming();
@@ -479,6 +481,9 @@ private:
     // them) to act on. A remote op's end re-enables its action only
     // then (reenableAfterRemoteOp).
     bool repoActionsEnabled_ = false;
+    // The open repository is bare: Pull and Commit, which need a work
+    // tree, stay off (git: "this operation must be run in a work tree").
+    bool openIsBare_ = false;
     // The running (or last) remote op's pool-thread job: the destructor
     // waits for it, since it runs inside gitService_.
     QFuture<bool> remoteOp_;

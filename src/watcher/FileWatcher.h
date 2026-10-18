@@ -19,7 +19,8 @@ public:
     /// with potentially large repos should instead run
     /// enumerateWatchDirs() on a worker and feed the result to
     /// addWatchPaths() (see GitService::openRepositoryAsync).
-    void watchRepository(const QString& repoPath);
+    void watchRepository(const QString& repoPath, const QString& gitDir = {},
+                         const QString& commonDir = {});
 
     /// Cheap, immediate part of watch setup: watches .git itself
     /// (FETCH_HEAD / packed-refs creation), .git/index, .git/HEAD,
@@ -29,7 +30,15 @@ public:
     /// refs/heads/main), and the repo root. External commits,
     /// fetches, branch creations and tag updates all land in one of
     /// these.
-    void watchGitInternals(const QString& repoPath);
+    ///
+    /// `gitDir` and `commonDir` are where they are: libgit2's
+    /// repository path and common dir. A linked worktree's .git, and
+    /// an absorbed submodule's, is a file pointing elsewhere, and its
+    /// refs and packed-refs are in the common dir; a bare repository's
+    /// git dir is the repository itself. Empty: `repoPath`/.git, as for
+    /// a plain repository.
+    void watchGitInternals(const QString& repoPath, const QString& gitDir = {},
+                           const QString& commonDir = {});
 
     /// Registers working-tree directories with the OS watcher.
     /// Must be called on this object's thread. No-ops if repoPath
@@ -73,7 +82,8 @@ private:
     QFileSystemWatcher watcher_;
     QTimer debounceTimer_;
     QString repoPath_;
-    QString gitDir_;            // empty when no .git dir is watched
+    QString gitDir_;            // empty when no git dir is watched
+    QString commonDir_;         // refs/ and packed-refs; gitDir_ unless a linked worktree
     QStringList pendingDirs_;   // queued for chunked addPaths
 };
 

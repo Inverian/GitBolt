@@ -1,7 +1,10 @@
 #include "widgets/TerminalWidget.h"
 
+#include "git/GitProcess.h"
+
 #include <QApplication>
 #include <QClipboard>
+#include <QFile>
 #include <QFontDatabase>
 #include <QFontMetrics>
 #include <QKeyEvent>
@@ -43,6 +46,7 @@
 #endif
 #endif
 
+#include <algorithm>
 #include <vector>
 
 #ifdef Q_OS_MACOS
@@ -223,6 +227,12 @@ void TerminalWidget::start(const QString& workingDirectory)
     // as xterm-256color, and TERM is what Git for Windows' less and vim
     // go by.
     info.environment = {{L"TERM", L"xterm-256color"}, {L"GITBOLT_TERM", L"1"}};
+    // The repository is the one the shell starts in, as for every git
+    // GitBolt runs (git::GitProcess::repositoryEnvVars).
+    for (const auto& name : git::GitProcess::repositoryEnvVars())
+        info.removed.push_back(QString::fromStdString(name).toStdWString());
+    if (!gitDir_.isEmpty())
+        info.environment.emplace_back(L"GIT_DIR", QDir::toNativeSeparators(gitDir_).toStdWString());
     if (const QSize grid = gridSize(); grid.isValid()) {
         info.columns = grid.width();
         info.rows    = grid.height();
@@ -300,15 +310,24 @@ void TerminalWidget::start(const QString& workingDirectory)
     // emit SGR sequences — we strip non-SGR CSI for now, so
     // fullscreen TUIs won't render properly (known follow-up).
     // GITBOLT_TERM lets dotfiles detect us.
+    // The repository is the one the shell starts in, as for every git
+    // GitBolt runs: git's variables that say otherwise are left out
+    // (git::GitProcess::repositoryEnvVars).
+    QList<QByteArray> dropped{QByteArrayLiteral("TERM="), QByteArrayLiteral("GITBOLT_TERM=")};
+    for (const auto& name : git::GitProcess::repositoryEnvVars())
+        dropped.append(QByteArray::fromStdString(name) + '=');
     QList<QByteArray> envBytes;
     for (char** e = hostEnviron(); e && *e; ++e) {
-        if (strncmp(*e, "TERM=", 5) == 0 ||
-            strncmp(*e, "GITBOLT_TERM=", 13) == 0)
+        const QByteArray entry(*e);
+        if (std::any_of(dropped.begin(), dropped.end(),
+                        [&entry](const QByteArray& prefix) { return entry.startsWith(prefix); }))
             continue;
-        envBytes.append(QByteArray(*e));
+        envBytes.append(entry);
     }
     envBytes.append(QByteArrayLiteral("TERM=xterm-256color"));
     envBytes.append(QByteArrayLiteral("GITBOLT_TERM=1"));
+    if (!gitDir_.isEmpty())
+        envBytes.append("GIT_DIR=" + QFile::encodeName(gitDir_));
 
     std::vector<char*> envp;
     envp.reserve(static_cast<size_t>(envBytes.size()) + 1);

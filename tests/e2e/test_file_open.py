@@ -106,6 +106,16 @@ def test(binary: str, scratch: str, apps: list) -> None:
     app.ok(f"file-open {os.path.join(repo_b, 'a.txt')}")
     opened(app, repo_b, "repo-b from a.txt")
 
+    # 4b) A minimized window comes back for it: the repository must
+    #     not open unseen in the Dock.
+    #     (Not repo-a: the launch folder asked for again within 2 s of
+    #     launch is taken for AppKit sending it back, and dropped.)
+    app.ok("minimize")
+    app.wait_until(lambda s: s.get("minimized"), "the window minimized")
+    app.ok(f"file-open {repo_c}")
+    opened(app, repo_c, "repo-c into a minimized window")
+    app.wait_until(lambda s: not s.get("minimized"), "the window restored")
+
     # 5) Two back to back, before either is opened: the second.
     app.batch(f"file-open {repo_c}", f"file-open {repo_d}")
     opened(app, repo_d, "repo-d after repo-c")

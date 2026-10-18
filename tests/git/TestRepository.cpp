@@ -88,6 +88,14 @@ QString addFeatureBranch(gitbolt::test::TestRepo& repo) {
     return tip;
 }
 
+// Appends `text` to the repository's .git/config (a test checks
+// QTest::currentTestFailed() after it).
+void appendConfig(const QString& repoPath, const QByteArray& text) {
+    QFile config(QDir(repoPath).filePath(QStringLiteral(".git/config")));
+    QVERIFY(config.open(QIODevice::Append));
+    config.write(text);
+}
+
 } // namespace
 
 class TestRepository : public QObject {
@@ -1838,6 +1846,512 @@ private slots:
                      res.error().message().c_str());
             QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
         }
+        // From a file the global config includes: the global config is
+        // where to look, not the repository's (libgit2 gives the entry
+        // the global level and an include depth).
+        {
+            git_buf saved = GIT_BUF_INIT;
+            QCOMPARE(git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved), 0);
+            const QByteArray savedPath(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+            git_buf_dispose(&saved);
+            const auto restore = qScopeGuard([&] {
+                git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, savedPath.constData());
+            });
+            QTemporaryDir home;
+            QVERIFY(home.isValid());
+            QFile shared(home.filePath(QStringLiteral("shared.gitconfig")));
+            QVERIFY(shared.open(QIODevice::WriteOnly));
+            shared.write("[remote \"shared\"]\n\turl = https://example.com/shared.git\n");
+            shared.close();
+            QFile global(home.filePath(QStringLiteral(".gitconfig")));
+            QVERIFY(global.open(QIODevice::WriteOnly));
+            global.write("[include]\n\tpath = shared.gitconfig\n");
+            global.close();
+            QCOMPARE(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                      QFile::encodeName(home.path()).constData()), 0);
+
+            gitbolt::test::TestRepo repo;
+            QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+            const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+            const auto res = repo.repo().setRemoteUrl("shared", "https://example.com/new.git");
+            QVERIFY(!res.ok());
+            QVERIFY2(QString::fromStdString(res.error().message())
+                         .contains(QLatin1String("a file that your global git config includes")),
+                     res.error().message().c_str());
+            QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+        }
+    }
+
+    // A remote in a linked worktree's own config.worktree: libgit2
+    // writes the URL to the repository's config, where every other
+    // worktree gets it, while the worktree's own entry wins on there.
+    void setRemoteUrlRefusesAWorktreesOwnRemote() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(!addFeatureBranch(repo).isEmpty());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QTemporaryDir worktreeParent;
+        QVERIFY(worktreeParent.isValid());
+        const QString worktree = worktreeParent.filePath(QStringLiteral("wt"));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", worktree.toStdString(), "feature"})));
+        QVERIFY(succeeded(git.run({"config", "extensions.worktreeConfig", "true"})));
+        gitbolt::git::GitProcess wtGit(worktree.toStdString());
+        QVERIFY(succeeded(wtGit.run({"config", "--worktree", "remote.wtremote.url",
+                                     "https://example.com/wt-old.git"})));
+        QVERIFY(succeeded(wtGit.run({"config", "--worktree", "remote.wtremote.fetch",
+                                     "+refs/heads/*:refs/remotes/wtremote/*"})));
+
+        auto opened = gitbolt::git::Repository::open(worktree.toStdString());
+        QVERIFY(opened.ok());
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = opened->setRemoteUrl("wtremote", "https://example.com/wt-new.git");
+        QVERIFY(!res.ok());
+        QVERIFY2(QString::fromStdString(res.error().message()).contains(QLatin1String("config.worktree")),
+                 res.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+    }
+
+    // -----------------------------------------------------------------
+    // Config lines with a name and no "= value": libgit2 gives them a
+    // NULL value, and crashed where it wanted a string (patched in the
+    // bundled libgit2, cmake/PatchLibgit2.cmake). git refuses such a
+    // config; GitBolt must not go down on it. A .gitmodules is committed,
+    // so a cloned repository can bring one.
+    // -----------------------------------------------------------------
+    // .gitmodules with a `path` line and no value (or `path =`), and the
+    // submodule's gitlink and folder there, as a clone has them: libgit2
+    // took the path as "", the superproject's own folder, and status
+    // (which every open runs) recursed into it until the stack ran out.
+    void valuelessSubmodulePathIsIgnored_data() {
+        QTest::addColumn<QByteArray>("pathLine");
+        QTest::newRow("path with no value") << QByteArray("\tpath\n");
+        QTest::newRow("path =") << QByteArray("\tpath =\n");
+    }
+
+    void valuelessSubmodulePathIsIgnored() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        QFETCH(QByteArray, pathLine);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(".gitmodules",
+                                    "[submodule \"x\"]\n" + pathLine
+                                        + "\turl = https://example.com/x.git\n",
+                                    "a .gitmodules with an empty path").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(!head.isEmpty());
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "gitlink"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));   // as a clone leaves it
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto subs = opened->submodules();
+        QVERIFY(subs.ok());
+        QCOMPARE(subs->size(), std::size_t(1));
+        QCOMPARE(QString::fromStdString(subs->front().path), QStringLiteral("x"));
+        QVERIFY(opened->status().ok());
+        QVERIFY(opened->diffIndexToWorkdir().ok());
+#endif
+    }
+
+    // A submodule whose folder is the superproject: `path = /`, or a
+    // path through a committed symlink to `.`. Status opened the
+    // superproject as its own submodule, over and over, until the stack
+    // ran out; a clone of such a repository crashed GitBolt on opening.
+    void submoduleThatIsItsSuperprojectIsNotOpened_data() {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("path = /") << QStringLiteral("root");
+#ifndef Q_OS_WIN
+        QTest::newRow("a path through a symlink to .") << QStringLiteral("symlink");
+#endif
+    }
+
+    void submoduleThatIsItsSuperprojectIsNotOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        QFETCH(QString, kind);
+        gitbolt::test::TestRepo repo;
+        const QByteArray path = kind == QLatin1String("root") ? "/" : "l";
+        repo.writeFile(".gitmodules", "[submodule \"x\"]\n\tpath = " + path
+                                          + "\n\turl = https://example.com/x.git\n");
+        if (kind == QLatin1String("symlink"))
+            QVERIFY(QFile::link(QStringLiteral("."), QDir(repo.path()).filePath(QStringLiteral("l"))));
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "modules"})));
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "gitlink"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));   // as a clone leaves it
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());   // the Commit dialog's
+#endif
+    }
+
+    // The same two levels down: submodule s (a clone of the repository
+    // itself, url = ./) has a submodule x whose path is a committed
+    // symlink to "..", which leads back to the superproject. s opened
+    // the superproject, which opened s, and so on.
+    void submoduleLoopingBackUpIsNotOpened() {
+#if !defined(GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#elif defined(Q_OS_WIN)
+        QSKIP("needs a symbolic link");
+#else
+        const char* const identity[] = {"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                        "-c", "commit.gpgsign=false"};
+        auto commit = [&](gitbolt::git::GitProcess& git, const std::string& message) {
+            std::vector<std::string> args(std::begin(identity), std::end(identity));
+            for (const char* a : {"commit", "-q", "-m"})
+                args.emplace_back(a);
+            args.push_back(message);
+            return succeeded(git.run(args));
+        };
+        // The commit s checks out: l -> "..", and x, a submodule at l.
+        QTemporaryDir src;
+        QVERIFY(src.isValid());
+        gitbolt::git::GitProcess srcGit(src.path().toStdString());
+        QVERIFY(succeeded(srcGit.run({"init", "-q"})));
+        QFile first(QDir(src.path()).filePath(QStringLiteral("a.txt")));
+        QVERIFY(first.open(QIODevice::WriteOnly));
+        first.write("a\n");
+        first.close();
+        QVERIFY(succeeded(srcGit.run({"add", "a.txt"})));
+        QVERIFY(commit(srcGit, "c0"));
+        const QString c0 = output(srcGit.run({"rev-parse", "HEAD"}));
+        QFile modules(QDir(src.path()).filePath(QStringLiteral(".gitmodules")));
+        QVERIFY(modules.open(QIODevice::WriteOnly));
+        modules.write("[submodule \"x\"]\n\tpath = l\n\turl = ./\n");
+        modules.close();
+        QVERIFY(QFile::link(QStringLiteral(".."), QDir(src.path()).filePath(QStringLiteral("l"))));
+        QVERIFY(succeeded(srcGit.run({"add", "-A"})));
+        QVERIFY(succeeded(srcGit.run({"update-index", "--add", "--cacheinfo",
+                                      ("160000," + c0 + ",x").toStdString()})));
+        QVERIFY(commit(srcGit, "loop"));
+        const QString c1 = output(srcGit.run({"rev-parse", "HEAD"}));
+
+        // The superproject, with s checked out at that commit.
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"clone", "-q", src.path().toStdString(), "s"})));
+        repo.writeFile(".gitmodules", "[submodule \"s\"]\n\tpath = s\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c1 + ",s").toStdString()})));
+        QVERIFY(commit(git, "s"));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());
+#endif
+    }
+
+    // An absorbed submodule whose core.worktree names the superproject's
+    // work tree (a hand edit gone wrong): the repository opened for it
+    // has the superproject's work tree, and status read it again as
+    // its own submodule, and so on.
+    void submoduleWorkTreeElsewhereIsNotOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString c0 = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile(".gitmodules", "[submodule \"s\"]\n\tpath = s\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c0 + ",s").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "s"})));
+        // s: a clone of the repository at that commit, its git dir
+        // absorbed under .git/modules/s, its core.worktree the superproject's.
+        QVERIFY(succeeded(git.run({"clone", "-q", repo.path().toStdString(), "s"})));
+        const QDir top(repo.path());
+        QVERIFY(top.mkpath(QStringLiteral(".git/modules")));
+        QVERIFY(QDir().rename(top.filePath(QStringLiteral("s/.git")),
+                              top.filePath(QStringLiteral(".git/modules/s"))));
+        QFile gitFile(top.filePath(QStringLiteral("s/.git")));
+        QVERIFY(gitFile.open(QIODevice::WriteOnly));
+        gitFile.write("gitdir: ../.git/modules/s\n");
+        gitFile.close();
+        QVERIFY(succeeded(git.run({"--git-dir=.git/modules/s", "config", "core.worktree",
+                                   "../../.."})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());
+#endif
+    }
+
+    // A submodule path through a symlink, even one to a folder inside
+    // the repository: git won't follow it, and neither does GitBolt (on
+    // Windows, where realpath doesn't resolve symlinks, it is what
+    // catches a symlink to "." or "..").
+    void submodulePathThroughASymlinkIsNotOpened() {
+#if !defined(GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#elif defined(Q_OS_WIN)
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("inner/a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString c0 = output(git.run({"rev-parse", "HEAD"}));
+        // inner/x: a real repository, with a commit of its own.
+        QVERIFY(succeeded(git.run({"clone", "-q", repo.path().toStdString(), "inner/x"})));
+        QVERIFY(QFile::link(QStringLiteral("inner"), QDir(repo.path()).filePath(QStringLiteral("l"))));
+        repo.writeFile(".gitmodules", "[submodule \"x\"]\n\tpath = l/x\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules", "l"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c0 + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "x"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));
+
+        git_repository* raw = nullptr;
+        QCOMPARE(git_repository_open(&raw, repo.path().toUtf8().constData()), 0);
+        git_submodule* sm = nullptr;
+        QCOMPARE(git_submodule_lookup(&sm, raw, "x"), 0);
+        git_repository* smRepo = nullptr;
+        const int opened = git_submodule_open(&smRepo, sm);
+        git_repository_free(smRepo);
+        git_submodule_free(sm);
+        git_repository_free(raw);
+        QVERIFY2(opened < 0, "opened a submodule through a symlink");
+#endif
+    }
+
+    // A linked worktree of the repository inside its work tree, tracked
+    // as a submodule (a gh-pages checkout, say): a different working
+    // tree, opened as any submodule. Clean, it is no change.
+    void linkedWorktreeAsASubmoduleIsOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        // Git for Windows' system config has core.autocrlf on: the CLI
+        // would check the worktree out with CRLF, which libgit2 (its
+        // system config kept out, TestRepo) takes for a change.
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "pages", "public"})));
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile(".gitmodules", "[submodule \"public\"]\n\tpath = public\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",public").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "pages"})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto status = opened->status();
+        QVERIFY(status.ok());
+        for (const auto& entry : *status)
+            QVERIFY2(entry.path != "public", "the clean worktree shows as changed");
+#endif
+    }
+
+    void valuelessInsteadOfIsIgnored() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n"
+                                  "[url \"https://z/\"]\n\tinsteadOf\n\tpushInsteadOf\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto remotes = opened->remotes();   // Remote repositories' list
+        QVERIFY(remotes.ok());
+        QCOMPARE(remotes->size(), std::size_t(1));
+        QCOMPARE(QString::fromStdString(remotes->front().url), QStringLiteral("https://example.com/a.git"));
+        QVERIFY(opened->setRemoteUrl("origin", "https://example.com/b.git").ok());
+#endif
+    }
+
+    void valuelessBranchRemoteLetsARemoteGo() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n"
+                                  "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+                                  "[branch \"main\"]\n\tremote\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto removed = opened->removeRemote("origin");
+        QVERIFY2(removed.ok(), removed.ok() ? "" : removed.error().message().c_str());
+#endif
+    }
+
+    void valuelessObjectFormatFailsToOpen() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("sub")));
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.repositoryformatversion", "1"})));
+        appendConfig(repo.path(), "[extensions]\n\tobjectformat\n");
+        if (QTest::currentTestFailed())
+            return;
+        const auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(!opened.ok());
+        QVERIFY2(QString::fromStdString(opened.error().message()).contains(QLatin1String("objectformat")),
+                 opened.error().message().c_str());
+        std::string root;
+        const auto fromSub = gitbolt::git::Repository::openContaining(
+            QDir(repo.path()).filePath(QStringLiteral("sub")).toStdString(), "", root);
+        QVERIFY(!fromSub.ok());
+#endif
+    }
+
+    // A `url` line with no "= value" (a slip in a hand edit): libgit2
+    // lists the remote with no URL, and gives the entry a null value.
+    // Edit URL crashed on it; it now repairs the remote.
+    void setRemoteUrlRepairsAValuelessUrl() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        QFile config(QDir(repo.path()).filePath(QStringLiteral(".git/config")));
+        QVERIFY(config.open(QIODevice::Append));
+        config.write("[remote \"origin\"]\n\turl\n");
+        config.close();
+        auto reopened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened.ok());
+        const auto res = reopened->setRemoteUrl("origin", "https://example.com/fixed.git");
+        QVERIFY2(res.ok(), res.ok() ? "" : res.error().message().c_str());
+        auto again = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(again.ok());
+        auto remotes = again->remotes();
+        QVERIFY(remotes.ok());
+        const auto origin = std::find_if(remotes->begin(), remotes->end(),
+                                         [](const auto& r) { return r.name == "origin"; });
+        QVERIFY(origin != remotes->end());
+        QCOMPARE(QString::fromStdString(origin->url), QStringLiteral("https://example.com/fixed.git"));
+    }
+
+    // A valueless `url` beside a real one: git's remote commands stop on
+    // it ("missing value"), so the note says to delete the line.
+    void setRemoteUrlNamesAValuelessUrlAmongOthers() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n\turl\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = opened->setRemoteUrl("origin", "https://example.com/b.git");
+        QVERIFY(!res.ok());
+        QVERIFY2(QString::fromStdString(res.error().message())
+                     .contains(QLatin1String("a `url` line with no value in the repository's config")),
+                 res.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+    }
+
+    // Several URLs (`git remote set-url --add`): refused as git does,
+    // saying so instead of libgit2's "not unique due to being a
+    // multivar", and nothing changes.
+    void setRemoteUrlRefusesARemoteWithSeveralUrls() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", "https://example.com/a.git"})));
+        QVERIFY(succeeded(git.run({"remote", "set-url", "--add", "origin",
+                                   "https://example.com/b.git"})));
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = repo.repo().setRemoteUrl("origin", "https://example.com/c.git");
+        QVERIFY(!res.ok());
+        const QString message = QString::fromStdString(res.error().message());
+        QVERIFY2(message.contains(QLatin1String("2 URLs"))
+                     && message.contains(QLatin1String("https://example.com/a.git"))
+                     && message.contains(QLatin1String("https://example.com/b.git")),
+                 qPrintable(message));
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
+
+        // One URL in the global config, one in the repository's: `git
+        // remote set-url --delete` couldn't remove the global one, so
+        // the note says where it is instead.
+        git_buf saved = GIT_BUF_INIT;
+        QCOMPARE(git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved), 0);
+        const QByteArray savedPath(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+        git_buf_dispose(&saved);
+        const auto restore = qScopeGuard([&] {
+            git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, savedPath.constData());
+        });
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        QFile global(home.filePath(QStringLiteral(".gitconfig")));
+        QVERIFY(global.open(QIODevice::WriteOnly));
+        global.write("[remote \"mixed\"]\n\turl = https://example.com/global.git\n");
+        global.close();
+        QCOMPARE(git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL,
+                                  QFile::encodeName(home.path()).constData()), 0);
+        QVERIFY(succeeded(git.run({"config", "--local", "--add", "remote.mixed.url",
+                                   "https://example.com/local.git"})));
+        // Opened again: libgit2 read the global config with the first open.
+        auto reopened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened.ok());
+        const QByteArray before2 = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto mixed = reopened->setRemoteUrl("mixed", "https://example.com/c.git");
+        QVERIFY(!mixed.ok());
+        QVERIFY2(QString::fromStdString(mixed.error().message())
+                     .contains(QLatin1String("some of them in your global git config")),
+                 mixed.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before2);
+
+        // Both in the global config: listed, and where.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[remote \"both\"]\n\turl = https://example.com/g1.git\n"
+                     "\turl = https://example.com/g2.git\n");
+        global.close();
+        auto reopened2 = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened2.ok());
+        const auto both = reopened2->setRemoteUrl("both", "https://example.com/c.git");
+        QVERIFY(!both.ok());
+        const QString bothMessage = QString::fromStdString(both.error().message());
+        QVERIFY2(bothMessage.contains(QLatin1String("2 URLs"))
+                     && bothMessage.contains(QLatin1String(", in your global git config;")),
+                 qPrintable(bothMessage));
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before2);
+
+        // One global, one in a file the repository's config includes:
+        // both places named.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[remote \"spread\"]\n\turl = https://example.com/g.git\n");
+        global.close();
+        repo.writeFile(".git/spread.config", "[remote \"spread\"]\n\turl = https://example.com/i.git\n");
+        QVERIFY(succeeded(git.run({"config", "include.path", "spread.config"})));
+        auto reopened3 = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened3.ok());
+        const auto spread = reopened3->setRemoteUrl("spread", "https://example.com/c.git");
+        QVERIFY(!spread.ok());
+        const QString spreadMessage = QString::fromStdString(spread.error().message());
+        QVERIFY2(spreadMessage.contains(QLatin1String(
+                     "in your global git config and a file that the repository's config includes")),
+                 qPrintable(spreadMessage));
     }
 };
 
