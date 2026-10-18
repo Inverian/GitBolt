@@ -43,8 +43,10 @@
 //     outlives its repository opened again by a path in another case;
 //   - Manage Submodules' and Manage Worktrees' Open opens the submodule
 //     or worktree in the window, and Open in File Explorer shows its
-//     folder (a submodule's path is relative to the work tree); the
-//     Console gets a bare repository's GIT_DIR.
+//     folder (a submodule's path is relative to the work tree), as
+//     Repository › File Explorer shows the work tree's, and the folder
+//     a bundle is in rather than launch it (a folder named Tool.app,
+//     on macOS); the Console gets a bare repository's GIT_DIR.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -492,7 +494,10 @@ private slots:
     // resolved against GitBolt's own folder and nothing opened; Manage
     // Worktrees' showed the worktree in the file manager. "Open in
     // GitBolt" opens it in the window, and "Open in File Explorer"
-    // shows it; a submodule not checked out is said so.
+    // shows it; a submodule not checked out is said so. A submodule's
+    // path is the repository's to choose, and one named Tool.app is a
+    // bundle to macOS, which launches it when asked to open it: the
+    // superproject's folder, with it in, is shown instead.
     void submoduleOpensInGitBolt() {
         QTemporaryDir scratch;
         QVERIFY(scratch.isValid());
@@ -507,10 +512,14 @@ private slots:
         QVERIFY(git(super, {"init", "-q"}));
         QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
         QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "gone"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "Tool.app"}));
         QVERIFY(git(super, {"commit", "-q", "-m", "with subs"}));
         QVERIFY(git(super, {"submodule", "deinit", "-q", "-f", "gone"}));
         const QString superFolder = QFileInfo(super).canonicalFilePath();
         const QString subFolder = QFileInfo(super + QStringLiteral("/sub")).canonicalFilePath();
+        const QString bundleFolder =
+            QFileInfo(super + QStringLiteral("/Tool.app")).canonicalFilePath();
+        QVERIFY(!bundleFolder.isEmpty());
 
         MainWindow window;
         auto* svc = openIn(window, super);
@@ -526,6 +535,19 @@ private slots:
             QCOMPARE(desktop.urls.size(), 1);
             QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
                      subFolder);
+        }
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(QStringLiteral("Tool.app"));
+            QCOMPARE(desktop.urls.size(), 1);
+#ifdef Q_OS_MACOS
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     superFolder);
+#else
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     bundleFolder);
+#endif
         }
 
         {
@@ -546,9 +568,16 @@ private slots:
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
         const QString linked = repo.path() + QStringLiteral("-linked");
-        const auto cleanup = qScopeGuard([&] { QDir(linked).removeRecursively(); });
+        // macOS launches a folder named like an app when asked to open
+        // it: the folder it is in is shown instead.
+        const QString bundle = repo.path() + QStringLiteral("-linked.app");
+        const auto cleanup = qScopeGuard([&] {
+            QDir(linked).removeRecursively();
+            QDir(bundle).removeRecursively();
+        });
         gitbolt::git::GitProcess git(repo.path().toStdString());
         QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "side", linked.toStdString()})));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "app", bundle.toStdString()})));
         const QString linkedFolder = QFileInfo(linked).canonicalFilePath();
 
         MainWindow window;
@@ -566,11 +595,59 @@ private slots:
             QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
                      linkedFolder);
             QCOMPARE(openFolder(svc), QFileInfo(repo.path()).canonicalFilePath());
+
+            emit widget->revealRequested(bundle);
+            QCOMPARE(desktop.urls.size(), 2);
+#ifdef Q_OS_MACOS
+            QCOMPARE(QFileInfo(desktop.urls.last().toLocalFile()).canonicalFilePath(),
+                     QFileInfo(QFileInfo(bundle).absolutePath()).canonicalFilePath());
+#else
+            QCOMPARE(QFileInfo(desktop.urls.last().toLocalFile()).canonicalFilePath(),
+                     QFileInfo(bundle).canonicalFilePath());
+#endif
         }
 
         emit widget->openRequested(linked);
         QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), linkedFolder, 15000);
         QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    // Repository › File Explorer shows the work tree's folder. A clone
+    // named after its URL can be called Tool.app, which macOS takes for
+    // an app and launches when asked to open it: the folder it is in is
+    // shown instead.
+    void fileExplorerShowsTheWorkTree_data() {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<bool>("bundle");
+        QTest::newRow("plain") << QStringLiteral("plain") << false;
+#ifdef Q_OS_MACOS
+        QTest::newRow("Tool.app") << QStringLiteral("Tool.app") << true;
+#else
+        QTest::newRow("Tool.app") << QStringLiteral("Tool.app") << false;
+#endif
+    }
+
+    void fileExplorerShowsTheWorkTree() {
+        QFETCH(QString, name);
+        QFETCH(bool, bundle);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString folder = scratch.filePath(name);
+        QVERIFY(QDir().mkpath(folder));
+        gitbolt::git::GitProcess git(folder.toStdString());
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, folder);
+        QVERIFY(svc);
+        QCOMPARE(openFolder(svc), QFileInfo(folder).canonicalFilePath());
+
+        UrlCatcher desktop;
+        action(window, "repository.file-explorer")->trigger();
+        QCOMPARE(desktop.urls.size(), 1);
+        QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                 QFileInfo(bundle ? scratch.path() : folder).canonicalFilePath());
     }
 
     // The Console's shell gets a bare repository's GIT_DIR, as Git bash

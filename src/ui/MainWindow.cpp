@@ -33,6 +33,7 @@
 #include "conf/ThemeService.h"
 #include "telemetry/EventSchema.h"
 #include "telemetry/TelemetryService.h"
+#include "util/DesktopOpen.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
@@ -491,11 +492,13 @@ void MainWindow::buildRepositoryMenu()
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
-            // A bare repository's git dir: it has no work tree.
+            // A bare repository's git dir: it has no work tree. A folder
+            // macOS takes for a bundle (a clone named Tool.app) isn't
+            // shown but launched, so the folder it is in is shown.
             const QString path = QString::fromStdString(
                 gitService_->withRepository(
                     [](git::Repository& r) { return r.commandDir(); }));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(path)));
         });
         repoMenu->addAction(a);
     }
@@ -715,10 +718,12 @@ void MainWindow::buildRepositoryMenu()
                         dlg->close();
                         openRepositoryAtPath(folder);
                     });
+            // A submodule's path is the repository's choice: one named
+            // Tool.app would be launched as an app, not shown.
             connect(widget, &widgets::SubmoduleWidget::revealRequested,
                     this, [workdir](const QString& p) {
-                        QDesktopServices::openUrl(
-                            QUrl::fromLocalFile(QDir(workdir).absoluteFilePath(p)));
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(
+                            util::folderToShow(QDir(workdir).absoluteFilePath(p))));
                     });
 
             // Its row actions are local ops: off while one runs (or a
@@ -856,7 +861,7 @@ void MainWindow::buildRepositoryMenu()
             });
             connect(widget, &widgets::WorktreeWidget::revealRequested,
                     this, [](const QString& p) {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+                QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(p)));
             });
 
             dlg->show();

@@ -102,6 +102,10 @@ gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
 gitbolt_add_test(test_english_plurals util/TestEnglishPlurals.cpp)
 target_compile_definitions(test_english_plurals PRIVATE
     GITBOLT_PLURALS_TS="${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts")
+# What GitBolt checks before it hands the desktop a path in a work tree
+# (util/DesktopOpen.h): a file that may run as a program when opened,
+# and the folder to show for a bundle (macOS launches one it opens).
+gitbolt_add_test(test_desktop_open util/TestDesktopOpen.cpp)
 
 # telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
 # Never a real endpoint: test binaries don't link src/app, where the
@@ -251,6 +255,13 @@ set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
 gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)
 target_link_libraries(test_file_history PRIVATE gitbolt_ui)
 set_property(TEST test_file_history APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# File Tree's Open Externally: a file that may run as a program (an
+# executable CHANGELOG, a .command file) is opened only once the user
+# says so, a link out of the work tree not at all, a text file as
+# before. Every file URL is caught (QDesktopServices::setUrlHandler).
+gitbolt_add_test(test_open_externally ui/TestOpenExternally.cpp)
+target_link_libraries(test_open_externally PRIVATE gitbolt_ui)
+set_property(TEST test_open_externally APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.
