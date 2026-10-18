@@ -25,7 +25,8 @@ namespace gitbolt::app {
 ///
 ///   list-actions                     menu/toolbar actions + slugs
 ///   trigger <slug-or-objectName>     queue a QAction::trigger
-///   list-widgets                     top-level windows + the active
+///   list-widgets                     top-level windows (a message
+///                                    box's text too) + the active
 ///                                    window's buttons/views/fields/
 ///                                    combo boxes (with their items)
 ///   click <objectName-or-text>       queue a QAbstractButton::click
@@ -44,6 +45,13 @@ namespace gitbolt::app {
 ///   fire-timer <objectName>          queue a running QTimer's timeout
 ///                                    (periodic work without waiting
 ///                                    out its interval)
+///   file-open <path…>                send qApp the QFileOpenEvent a
+///                                    Dock drop or `open -a GitBolt
+///                                    <folder>` gives (queued open)
+///   service-open <path…>             macOS, cocoa only: hand the
+///                                    folder to the "Open in GitBolt"
+///                                    service provider on a pasteboard,
+///                                    as Finder does (queued open)
 ///   dump-state                       repo path/state/branch/headOid,
 ///                                    conflict count, theme, log row
 ///                                    count, status-bar message, windows,
@@ -53,7 +61,7 @@ namespace gitbolt::app {
 ///                                    closeEvent, persists geometry —
 ///                                    clean exit for relaunch tests)
 ///
-/// trigger/click/select-item/fire-timer respond
+/// trigger/click/select-item/fire-timer/file-open/service-open respond
 /// {"ok":true,"dispatched":true} BEFORE the action runs (queued
 /// invocation): a triggered action may open a modal dialog whose
 /// exec() would otherwise hold the reply hostage.
@@ -82,6 +90,8 @@ private:
     QByteArray cmdSelectItem(const QString& comboSpec, const QString& item);
     QByteArray cmdType(const QString& widgetSpec, const QString& text);
     QByteArray cmdFireTimer(const QString& name);
+    QByteArray cmdFileOpen(const QString& path);
+    QByteArray cmdServiceOpen(const QString& path);
     QByteArray cmdDumpState();
     QByteArray cmdScreenshot(const QString& path);
     QByteArray cmdQuit();

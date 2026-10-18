@@ -52,6 +52,21 @@ public:
     Repository& operator=(Repository&& other) noexcept;
 
     static Result<Repository> open(const std::string& path);
+    /// Opens the repository at `path` or, when `path` is no repository
+    /// of its own, the one it is inside: libgit2 searches the parent
+    /// folders as git does, stopping at a filesystem boundary and
+    /// before `ceiling` (a folder; empty for no limit). A folder below
+    /// `ceiling` never finds a repository in it or above it (a
+    /// dotfiles repository at $HOME), and `ceiling` itself, or a folder
+    /// above it, opens only if it is a repository. `root` is set to
+    /// what was opened: `path` as given when it is a repository, else
+    /// the work tree's top (or a bare repository's git dir) spelled as
+    /// in `path`, without a trailing "/". NotFound means no repository
+    /// was found; one found broken (a worktree whose git dir is gone)
+    /// is an error of its own.
+    static Result<Repository> openContaining(const std::string& path,
+                                             const std::string& ceiling,
+                                             std::string& root);
     static Result<Repository> init(const std::string& path, bool bare = false);
 
     std::string path() const;

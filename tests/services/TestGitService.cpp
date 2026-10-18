@@ -565,6 +565,42 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // A folder inside a repository opens that repository, and the
+    // signal names the repository's top (what the title, Recent and
+    // the watchers want), not the folder asked for.
+    // -----------------------------------------------------------------
+    void asyncOpenOfASubfolderEmitsTheRepository() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QVERIFY(QDir(repo->path()).mkpath(QStringLiteral("src/app")));
+
+        GitService svc;
+        QSignalSpy openedSpy(&svc, &GitService::repositoryOpened);
+        QSignalSpy failedSpy(&svc, &GitService::repositoryOpenFailed);
+
+        svc.openRepositoryAsync(QDir(repo->path()).filePath(QStringLiteral("src/app")));
+        QVERIFY(openedSpy.wait(5000));
+        QCOMPARE(openedSpy.count(), 1);
+        // Spelled as the folder was: Recent keeps one entry for it.
+        QCOMPARE(openedSpy.first().at(0).toString(), QDir::cleanPath(repo->path()));
+        QCOMPARE(failedSpy.count(), 0);
+        QVERIFY(svc.isOpen());
+    }
+
+    void syncOpenOfASubfolderEmitsTheRepository() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QVERIFY(QDir(repo->path()).mkpath(QStringLiteral("docs")));
+
+        GitService svc;
+        QSignalSpy openedSpy(&svc, &GitService::repositoryOpened);
+        QVERIFY(svc.openRepository(QDir(repo->path()).filePath(QStringLiteral("docs"))));
+        QCOMPARE(openedSpy.count(), 1);
+        QCOMPARE(QFileInfo(openedSpy.first().at(0).toString()).canonicalFilePath(),
+                 QFileInfo(repo->path()).canonicalFilePath());
+    }
+
+    // -----------------------------------------------------------------
     // Async open of a directory that is not a repository: failure
     // signal, no open state, and the previous state is untouched.
     // -----------------------------------------------------------------

@@ -5,14 +5,28 @@ set(GITBOLT_APP_SOURCES
     resources/gitbolt.qrc
 )
 
-# The single-instance guard (lock, hand-off, listener): a library of
-# its own so tests/app/TestSingleInstance.cpp runs it on every platform,
+# The single-instance guard (lock, hand-off, listener) and the queue of
+# folders the system asks a running GitBolt to open (OpenRequests): a
+# library of their own so tests/app/ runs them on every platform,
 # Windows' named pipes included. The e2e tests that launch the app
 # twice are Unix-only.
-add_library(gitbolt_instance STATIC SingleInstance.cpp SingleInstance.h)
+add_library(gitbolt_instance STATIC
+    SingleInstance.cpp SingleInstance.h
+    OpenRequests.cpp OpenRequests.h)
 target_include_directories(gitbolt_instance PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(gitbolt_instance PUBLIC Qt6::Core Qt6::Network PRIVATE gitbolt_util)
+target_link_libraries(gitbolt_instance PUBLIC Qt6::Core Qt6::Gui Qt6::Network PRIVATE gitbolt_util)
 gitbolt_set_warnings(gitbolt_instance)
+
+# Finder's "Open in GitBolt" service (platform/macos/MacServices.h):
+# Objective-C++, with no Q_OBJECT for AUTOMOC to look for.
+if(APPLE)
+    add_library(gitbolt_macservices STATIC
+        platform/macos/MacServices.mm platform/macos/MacServices.h)
+    target_include_directories(gitbolt_macservices PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    target_compile_options(gitbolt_macservices PRIVATE -fobjc-arc)
+    target_link_libraries(gitbolt_macservices PUBLIC Qt6::Gui "-framework AppKit")
+    gitbolt_set_warnings(gitbolt_macservices)
+endif()
 
 # On macOS, bundle the .icns so the Dock and Finder show our app icon.
 # The source-file property MACOSX_PACKAGE_LOCATION places the file under
@@ -99,6 +113,7 @@ if(UNIX AND NOT APPLE)
 endif()
 
 if(APPLE)
+    target_link_libraries(gitbolt PRIVATE gitbolt_macservices)
     # Info.plist.in fills in LSMinimumSystemVersion from
     # CMAKE_OSX_DEPLOYMENT_TARGET (see the root CMakeLists.txt).
     set_target_properties(gitbolt PROPERTIES

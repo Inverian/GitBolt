@@ -6,11 +6,16 @@
 #include "telemetry/TelemetryGate.h"
 #include "ui/MainWindow.h"
 
+#ifdef Q_OS_MACOS
+#include "platform/macos/MacServices.h"
+#endif
+
 #include <QAbstractButton>
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QFileOpenEvent>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -20,12 +25,14 @@
 #include <QLocalSocket>
 #include <QMenu>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QStatusBar>
 #include <QTimer>
 #include <QToolBar>
+#include <QUrl>
 #include <QWindow>
 
 #include <functional>
@@ -328,6 +335,10 @@ QByteArray TestBridge::handleLine(const QString& line)
                        unescapeTypeText(line.section(QLatin1Char(' '), 2)));
     if (verb == QStringLiteral("fire-timer") && parts.size() >= 2)
         return cmdFireTimer(parts.at(1));
+    if (verb == QStringLiteral("file-open") && parts.size() >= 2)
+        return cmdFileOpen(line.section(QLatin1Char(' '), 1));
+    if (verb == QStringLiteral("service-open") && parts.size() >= 2)
+        return cmdServiceOpen(line.section(QLatin1Char(' '), 1));
     if (verb == QStringLiteral("dump-state"))
         return cmdDumpState();
     if (verb == QStringLiteral("quit"))
@@ -401,6 +412,12 @@ QByteArray TestBridge::cmdListWidgets()
         w[QStringLiteral("title")] = top->windowTitle();
         if (!top->objectName().isEmpty())
             w[QStringLiteral("objectName")] = top->objectName();
+        // What a message box says: on macOS its title is never set.
+        if (auto* box = qobject_cast<QMessageBox*>(top)) {
+            w[QStringLiteral("text")] = box->text();
+            if (!box->informativeText().isEmpty())
+                w[QStringLiteral("informativeText")] = box->informativeText();
+        }
         w[QStringLiteral("active")] = top->isActiveWindow();
         windows.append(w);
     }
@@ -647,6 +664,30 @@ QByteArray TestBridge::cmdFireTimer(const QString& name)
     QMetaObject::invokeMethod(timer, "timeout", Qt::QueuedConnection);
     return jsonLine({{QStringLiteral("ok"), true},
                      {QStringLiteral("dispatched"), true}});
+}
+
+QByteArray TestBridge::cmdFileOpen(const QString& path)
+{
+    // As Qt sends a Dock drop or `open -a GitBolt <folder>`: to the
+    // application object, where main()'s OpenRequests takes it.
+    QFileOpenEvent event(QUrl::fromLocalFile(path));
+    QCoreApplication::sendEvent(qApp, &event);
+    return jsonLine({{QStringLiteral("ok"), true},
+                     {QStringLiteral("dispatched"), true}});
+}
+
+QByteArray TestBridge::cmdServiceOpen(const QString& path)
+{
+#ifdef Q_OS_MACOS
+    QString error;
+    if (!macos::sendToServicesProvider({path}, error))
+        return errLine(QStringLiteral("service-open: ") + error);
+    return jsonLine({{QStringLiteral("ok"), true},
+                     {QStringLiteral("dispatched"), true}});
+#else
+    Q_UNUSED(path);
+    return errLine(QStringLiteral("service-open: macOS only"));
+#endif
 }
 
 QByteArray TestBridge::cmdDumpState()
