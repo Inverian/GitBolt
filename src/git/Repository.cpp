@@ -7,6 +7,7 @@
 #include <git2.h>
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -40,6 +41,31 @@ std::string libgit2Features() {
 
 
 namespace {
+
+// merge.conflictstyle or merge.default given as a name with no value
+// (`conflictstyle` alone, which git reads as "true"): libgit2 used the
+// missing value as a string, and every checkout (conflictstyle) or
+// cherry-pick (default) crashed. The bundled libgit2 now fails there as
+// git does, but only after stash save has written the stash, or
+// worktree add the worktree's folder, and a system libgit2 still
+// crashes. Refused here first, before anything is written.
+Result<void> refuseValueless(git_repository* repo, std::initializer_list<const char*> names) {
+    git_config* cfg = nullptr;
+    if (git_repository_config_snapshot(&cfg, repo) < 0)
+        return Result<void>::success();   // the operation itself says what is wrong
+    const auto release = qScopeGuard([cfg] { git_config_free(cfg); });
+    for (const char* name : names) {
+        git_config_entry* entry = nullptr;
+        if (git_config_get_entry(&entry, cfg, name) < 0)
+            continue;
+        const bool missing = entry->value == nullptr;
+        git_config_entry_free(entry);
+        if (missing)
+            return GitError(GitErrorCode::GenericError,
+                            std::string("missing value for '") + name + "'");
+    }
+    return Result<void>::success();
+}
 // libgit2 lifecycle owner.
 //
 // The GitBolt application ALSO calls git_libgit2_init/shutdown from
@@ -661,6 +687,8 @@ Result<void> Repository::stageAll() {
 }
 
 Result<void> Repository::discardWorkdirChanges(const std::string& path) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_checkout_options opts;
     git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_FORCE;
@@ -1111,6 +1139,8 @@ std::string worktreeOnBranch(git_repository* repo, const char* branchRef) {
 } // namespace
 
 Result<void> Repository::checkout(const std::string& branchOrRef) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     // git's rule for `git checkout <name>`: a LOCAL BRANCH name means
     // that branch, even when a tag (or anything else) has the same
     // name. The tree used to come from git_revparse_single, where
@@ -1989,6 +2019,8 @@ Result<std::vector<StashEntry>> Repository::stashes() const {
 
 Result<ObjectId> Repository::stashSave(const std::string& message, bool includeUntracked,
                                        bool keepIndex) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_signature* sig = nullptr;
     int err = git_signature_default(&sig, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
@@ -2010,6 +2042,8 @@ Result<ObjectId> Repository::stashSave(const std::string& message, bool includeU
 }
 
 Result<void> Repository::stashApply(size_t index) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     int err = git_stash_apply(repo_, index, nullptr);
     if (err < 0) {
         // libgit2 writes the stash's files, stages the ones the stash
@@ -2026,6 +2060,8 @@ Result<void> Repository::stashApply(size_t index) {
 }
 
 Result<void> Repository::stashPop(size_t index) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     int err = git_stash_pop(repo_, index, nullptr);
     if (err < 0) {
         // As in stashApply(); a stash that wasn't applied isn't dropped.
@@ -2064,6 +2100,8 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     if (operation)
         return GitError(GitErrorCode::Unmerged,
                         std::string("A ") + operation + " is in progress. Finish or abort it first.");
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle", "merge.default"}); !refused)
+        return refused.error();
 
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
@@ -2182,6 +2220,8 @@ Result<std::vector<WorktreeInfo>> Repository::worktrees() const {
 
 Result<void> Repository::addWorktree(const std::string& name, const std::string& path,
                                      const std::string& branch, bool createBranch) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_worktree_add_options opts;
     git_worktree_add_options_init(&opts, GIT_WORKTREE_ADD_OPTIONS_VERSION);
     git_reference* ref = nullptr;
