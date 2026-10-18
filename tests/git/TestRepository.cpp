@@ -9,6 +9,12 @@
 #include <git2.h>
 
 #include <algorithm>
+#include <cctype>
+#include <clocale>
+#include <string>
+#ifndef Q_OS_WIN
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -96,6 +102,41 @@ void appendConfig(const QString& repoPath, const QByteArray& text) {
     QVERIFY(config.open(QIODevice::Append));
     config.write(text);
 }
+
+// Writes `data` to `path`, its folders made first.
+bool writeFile(const QString& path, const QByteArray& data) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    return file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+           && file.write(data) == data.size();
+}
+
+// A repository at `main` with a.txt committed, and a linked worktree
+// "wt" of it at `worktree` on a new branch "side": added by git, or by
+// libgit2 as GitBolt adds one. False if that failed.
+bool addRepoWithWorktree(const QString& main, const QString& worktree, bool byGit = true) {
+    gitbolt::git::GitProcess git(main.toStdString());
+    if (!QDir().mkpath(main) || !writeFile(main + QStringLiteral("/a.txt"), "a\n")
+        || !succeeded(git.run({"init", "-q"}))
+        || !succeeded(git.run({"config", "core.autocrlf", "false"}))
+        || !succeeded(git.run({"add", "a.txt"}))
+        || !succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                               "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"})))
+        return false;
+    if (byGit)
+        return succeeded(git.run({"worktree", "add", "-q", "-b", "side", worktree.toStdString()}));
+    auto repo = gitbolt::git::Repository::open(main.toStdString());
+    return repo.ok() && repo->addWorktree("wt", worktree.toStdString(), "side", true).ok();
+}
+
+#ifndef Q_OS_WIN
+// A symbolic link at `link` to `target`, both given as bytes: a name
+// that isn't UTF-8 too, where the file system takes one (macOS's
+// doesn't).
+bool symlinkBytes(const QByteArray& target, const QByteArray& link) {
+    return ::symlink(target.constData(), link.constData()) == 0;
+}
+#endif
 
 } // namespace
 
@@ -2510,6 +2551,388 @@ private slots:
         QVERIFY2(spreadMessage.contains(QLatin1String(
                      "in your global git config and a file that the repository's config includes")),
                  qPrintable(spreadMessage));
+    }
+
+    // -----------------------------------------------------------------
+    // removeWorktree(): libgit2's prune deletes the folder holding the
+    // file that the worktree's gitdir file in .git/worktrees names, and
+    // checks nothing. Anyone who could write to .git could have Remove
+    // delete any folder, everything in it. A folder is deleted now only
+    // if git would delete it: the worktree's own, whose .git file
+    // points back.
+    // -----------------------------------------------------------------
+    void removeWorktreeDeletesItsFolderAndFiles_data() {
+        QTest::addColumn<bool>("byGit");
+        QTest::addColumn<bool>("changed");
+        QTest::addColumn<QString>("folder");
+        const QString wt = QStringLiteral("wt");
+        QTest::newRow("added by git") << true << false << wt;
+        QTest::newRow("added by git, uncommitted changes in it") << true << true << wt;
+        QTest::newRow("added by GitBolt") << false << false << wt;
+        // Its name in .git/worktrees ends in U+3000 too, and so does
+        // the path in its .git file pointing back: git takes no more
+        // than line ends off that file.
+        QTest::newRow("added by git, its name ending in U+3000")
+            << true << false << QStringLiteral("wt\u3000x\u3000");
+    }
+
+    void removeWorktreeDeletesItsFolderAndFiles() {
+        QFETCH(bool, byGit);
+        QFETCH(bool, changed);
+        QFETCH(QString, folder);
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(folder);
+        QVERIFY(addRepoWithWorktree(main, worktree, byGit));
+        if (changed) {
+            // Deleted all the same, as the question says.
+            QVERIFY(writeFile(worktree + QStringLiteral("/a.txt"), "changed\n"));
+            QVERIFY(writeFile(worktree + QStringLiteral("/new.txt"), "new\n"));
+        }
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        const auto listed = repo->worktrees();
+        QVERIFY(listed.ok());
+        QCOMPARE(listed->size(), std::size_t(1));
+        const std::string name = listed->front().name;
+        QCOMPARE(QString::fromStdString(name), byGit ? folder : QStringLiteral("wt"));
+        const auto removed = repo->removeWorktree(name, listed->front().path);
+        QVERIFY2(removed.ok(), removed.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(worktree));
+        QVERIFY(!QFileInfo::exists(main + QStringLiteral("/.git/worktrees/")
+                                   + QString::fromStdString(name)));
+        const auto after = repo->worktrees();
+        QVERIFY(after.ok());
+        QVERIFY(after->empty());
+        QCOMPARE(readFile(main, QStringLiteral("a.txt")), QByteArray("a\n"));
+    }
+
+    // A locked worktree is refused, as it was: unlock it first.
+    void removeWorktreeRefusesALockedOne() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(QStringLiteral("wt"));
+        QVERIFY(addRepoWithWorktree(main, worktree));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(main.toStdString())
+                              .run({"worktree", "lock", "--reason", "on a stick",
+                                    worktree.toStdString()})));
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        const auto removed = repo->removeWorktree("wt");
+        QVERIFY(!removed.ok());
+        QVERIFY2(QString::fromStdString(removed.error().message()).contains(QLatin1String("locked")),
+                 removed.error().message().c_str());
+        QCOMPARE(readFile(worktree, QStringLiteral("a.txt")), QByteArray("a\n"));
+        QVERIFY(QFileInfo::exists(main + QStringLiteral("/.git/worktrees/wt/locked")));
+    }
+
+    // A worktree whose .git file is gone loses its files in
+    // .git/worktrees, as `git worktree prune` takes them out, and
+    // nothing else: a folder still there keeps what is in it.
+    void removeWorktreeWhoseGitFileIsGone_data() {
+        QTest::addColumn<bool>("folderGone");
+        QTest::newRow("folder gone") << true;
+        QTest::newRow(".git file gone") << false;
+    }
+
+    void removeWorktreeWhoseGitFileIsGone() {
+        QFETCH(bool, folderGone);
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(QStringLiteral("wt"));
+        QVERIFY(addRepoWithWorktree(main, worktree));
+        if (folderGone)
+            QVERIFY(QDir(worktree).removeRecursively());
+        else
+            QVERIFY(QFile::remove(worktree + QStringLiteral("/.git")));
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        const auto removed = repo->removeWorktree("wt");
+        QVERIFY2(removed.ok(), removed.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(main + QStringLiteral("/.git/worktrees/wt")));
+        QCOMPARE(readFile(main, QStringLiteral("a.txt")), QByteArray("a\n"));
+        if (!folderGone)
+            QCOMPARE(readFile(worktree, QStringLiteral("a.txt")), QByteArray("a\n"));
+    }
+
+    // Some keep a bare repository's worktrees in its own folder: one
+    // there is removed as any other.
+    void removeWorktreeInsideABareRepository() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString bare = base.filePath(QStringLiteral("project.git"));
+        const QString worktree = bare + QStringLiteral("/side");
+        QVERIFY(addRepoWithWorktree(main, base.filePath(QStringLiteral("wt"))));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(base.path().toStdString())
+                              .run({"clone", "-q", "--bare", main.toStdString(),
+                                    bare.toStdString()})));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(bare.toStdString())
+                              .run({"worktree", "add", "-q", worktree.toStdString(), "side"})));
+        auto repo = gitbolt::git::Repository::open(bare.toStdString());
+        QVERIFY(repo.ok());
+        QVERIFY(repo->isBare());
+        const auto listed = repo->worktrees();
+        QVERIFY(listed.ok());
+        QCOMPARE(listed->size(), std::size_t(1));
+        const auto removed = repo->removeWorktree("side", listed->front().path);
+        QVERIFY2(removed.ok(), removed.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(worktree));
+        QVERIFY(!QFileInfo::exists(bare + QStringLiteral("/worktrees/side")));
+        QVERIFY(QFileInfo::exists(bare + QStringLiteral("/HEAD")));
+    }
+
+    // The folder deleted is the one the user was asked about: a
+    // worktree moved since is refused.
+    void removeWorktreeRefusesAnotherFolderThanAsked() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(QStringLiteral("wt"));
+        const QString moved = base.filePath(QStringLiteral("moved"));
+        QVERIFY(addRepoWithWorktree(main, worktree));
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        const auto listed = repo->worktrees();
+        QVERIFY(listed.ok());
+        QCOMPARE(listed->size(), std::size_t(1));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(main.toStdString())
+                              .run({"worktree", "move", worktree.toStdString(),
+                                    moved.toStdString()})));
+        const auto removed = repo->removeWorktree("wt", listed->front().path);
+        QVERIFY(!removed.ok());
+        QVERIFY2(QString::fromStdString(removed.error().message())
+                     .contains(QLatin1String("Nothing was deleted")),
+                 removed.error().message().c_str());
+        QCOMPARE(readFile(moved, QStringLiteral("a.txt")), QByteArray("a\n"));
+        QVERIFY(QFileInfo::exists(main + QStringLiteral("/.git/worktrees/wt/gitdir")));
+    }
+
+    // What the worktree's files in .git/worktrees say, written there
+    // by someone else: no folder but the worktree's own is deleted,
+    // and nothing is when it fails. The victim folder holds files that
+    // must stay, and so do the worktree and the repository.
+    void removeWorktreeDeletesNothingElse_data() {
+        QTest::addColumn<QString>("forgery");
+        QTest::newRow("gitdir naming a folder's .git") << QStringLiteral("folder .git");
+        QTest::newRow("gitdir naming a plain file") << QStringLiteral("plain file");
+        QTest::newRow("relative gitdir climbing out of .git") << QStringLiteral("relative");
+        QTest::newRow("gitdir naming another file of the worktree")
+            << QStringLiteral("other file");
+        QTest::newRow(".git file pointing elsewhere") << QStringLiteral("points elsewhere");
+        QTest::newRow("gitdir naming the main work tree's .git") << QStringLiteral("main");
+        QTest::newRow("a folder holding the repository, pointing back")
+            << QStringLiteral("holds repository");
+#ifndef Q_OS_WIN
+        // Windows' home folder isn't $HOME, and a link there takes a
+        // privilege.
+        QTest::newRow("the home folder, pointing back") << QStringLiteral("home");
+        QTest::newRow("a .git link to a file pointing back") << QStringLiteral("link");
+#endif
+        QTest::newRow("commondir naming another folder") << QStringLiteral("commondir");
+#ifndef Q_OS_WIN
+        // The check reads commondir and gitdir as libgit2 does, or it
+        // checks a path other than the one libgit2 deletes: each of
+        // these was this repository's .git, or the worktree's folder,
+        // to the check, and another folder to libgit2. (Links, so not
+        // on Windows either.)
+        QTest::newRow("commondir ending in U+3000") << QStringLiteral("wide space");
+        QTest::newRow("commondir ending in a byte isspace() takes off")
+            << QStringLiteral("isspace");
+        QTest::newRow("commondir that isn't UTF-8") << QStringLiteral("commondir not UTF-8");
+        QTest::newRow("commondir relative to the working directory")
+            << QStringLiteral("working directory");
+        QTest::newRow("gitdir with .. after a link") << QStringLiteral("dot dot");
+        QTest::newRow("gitdir that isn't UTF-8") << QStringLiteral("gitdir not UTF-8");
+#endif
+    }
+
+    void removeWorktreeDeletesNothingElse() {
+        QFETCH(QString, forgery);
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString root = QFileInfo(base.path()).canonicalFilePath();
+        const QString main = root + QStringLiteral("/main");
+        const QString worktree = root + QStringLiteral("/wt");
+        const QString victim = root + QStringLiteral("/victim");
+        QVERIFY(addRepoWithWorktree(main, worktree));
+        const QString admin = main + QStringLiteral("/.git/worktrees/wt");
+        const QByteArray pointingBack = "gitdir: " + admin.toUtf8() + '\n';
+        QStringList kept = {victim + QStringLiteral("/MARKER"),
+                            victim + QStringLiteral("/sub/MARKER2"),
+                            worktree + QStringLiteral("/a.txt"),
+                            main + QStringLiteral("/a.txt"),
+                            admin + QStringLiteral("/gitdir")};
+        QVERIFY(writeFile(victim + QStringLiteral("/MARKER"), "keep\n"));
+        QVERIFY(writeFile(victim + QStringLiteral("/sub/MARKER2"), "keep\n"));
+
+        QByteArray gitdir;
+        QString home;
+        QString workingDir;
+        std::string locale;
+        if (forgery == QLatin1String("folder .git")) {
+            QVERIFY(QDir().mkpath(victim + QStringLiteral("/.git")));
+            gitdir = (victim + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("plain file")) {
+            gitdir = (victim + QStringLiteral("/MARKER")).toUtf8();
+        } else if (forgery == QLatin1String("relative")) {
+            // From main/.git/worktrees/wt.
+            gitdir = "../../../../victim/MARKER";
+        } else if (forgery == QLatin1String("other file")) {
+            gitdir = (worktree + QStringLiteral("/a.txt")).toUtf8();
+        } else if (forgery == QLatin1String("points elsewhere")) {
+            QVERIFY(writeFile(victim + QStringLiteral("/.git"),
+                              "gitdir: " + (root + QStringLiteral("/elsewhere")).toUtf8() + '\n'));
+            gitdir = (victim + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("main")) {
+            gitdir = (main + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("holds repository")) {
+            QVERIFY(writeFile(root + QStringLiteral("/.git"), pointingBack));
+            gitdir = (root + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("home")) {
+            home = victim;
+            QVERIFY(writeFile(victim + QStringLiteral("/.git"), pointingBack));
+            gitdir = (victim + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("link")) {
+            const QString gitFile = root + QStringLiteral("/elsewhere/gitfile");
+            QVERIFY(writeFile(gitFile, pointingBack));
+            QVERIFY(QFile::link(gitFile, victim + QStringLiteral("/.git")));
+            gitdir = (victim + QStringLiteral("/.git")).toUtf8();
+        } else if (forgery == QLatin1String("commondir")) {
+            // The worktree's own gitdir, but prune would also delete
+            // <commondir>/worktrees/wt.
+            QVERIFY(writeFile(victim + QStringLiteral("/worktrees/wt/MARKER3"), "keep\n"));
+            kept.prepend(victim + QStringLiteral("/worktrees/wt/MARKER3"));
+            QVERIFY(writeFile(admin + QStringLiteral("/commondir"), victim.toUtf8() + '\n'));
+        }
+#ifndef Q_OS_WIN
+        const QByteArray mainBytes = main.toUtf8();
+        const QByteArray rootBytes = root.toUtf8();
+        const QString victimAdmin = victim + QStringLiteral("/worktrees/wt/MARKER3");
+        if (forgery == QLatin1String("wide space")) {
+            // U+3000 is white space to Qt; libgit2 takes off only what
+            // isspace() calls white space, a byte at a time, and keeps
+            // its E3 80 80. main/l is .git, main/l<U+3000> the victim,
+            // all in the repository.
+            QVERIFY(symlinkBytes(".git", mainBytes + "/l"));
+            QVERIFY(symlinkBytes("../victim", mainBytes + "/l\xE3\x80\x80"));
+            QVERIFY(writeFile(victimAdmin, "keep\n"));
+            kept.prepend(victimAdmin);
+            QVERIFY(writeFile(admin + QStringLiteral("/commondir"),
+                              "../../../l\xE3\x80\x80\n"));
+        } else if (forgery == QLatin1String("isspace")) {
+            // U+00A0 is C2 A0, and A0 is white space to isspace() in
+            // some locales (UTF-8 on macOS, Latin-1 elsewhere): libgit2
+            // takes it off there and reads main/l<C2>, the victim where
+            // the file system takes such a name (macOS's doesn't).
+            const std::string was = std::setlocale(LC_CTYPE, nullptr);
+            const bool takesA0 = std::setlocale(LC_CTYPE, "en_US.UTF-8")
+                                 && std::isspace(0xA0);
+            std::setlocale(LC_CTYPE, was.c_str());
+            if (!takesA0)
+                QSKIP("isspace() takes A0 for white space in no locale here");
+            locale = "en_US.UTF-8";
+            QVERIFY(symlinkBytes(".git", mainBytes + "/l"));
+            QVERIFY(symlinkBytes(".git", mainBytes + "/l\xC2\xA0"));
+            symlinkBytes("../victim", mainBytes + "/l\xC2");
+            QVERIFY(writeFile(victimAdmin, "keep\n"));
+            kept.prepend(victimAdmin);
+            QVERIFY(writeFile(admin + QStringLiteral("/commondir"), "../../../l\xC2\xA0\n"));
+        } else if (forgery == QLatin1String("commondir not UTF-8")) {
+            // Qt reads the byte FF as U+FFFD (EF BF BD), and libgit2
+            // keeps it: main/l<U+FFFD> is .git, main/l<FF> the victim
+            // where the file system takes such a name.
+            QVERIFY(symlinkBytes(".git", mainBytes + "/l\xEF\xBF\xBD"));
+            symlinkBytes("../victim", mainBytes + "/l\xFF");
+            QVERIFY(writeFile(victimAdmin, "keep\n"));
+            kept.prepend(victimAdmin);
+            QVERIFY(writeFile(admin + QStringLiteral("/commondir"), "../../../l\xFF\n"));
+        } else if (forgery == QLatin1String("working directory")) {
+            // libgit2 takes a path from .git/worktrees/wt only when it
+            // starts with ./ or ../: "l" is in GitBolt's working
+            // directory. Its l in .git/worktrees/wt is .git.
+            const QString cwdAdmin = root + QStringLiteral("/cwd/l/worktrees/wt/MARKER3");
+            QVERIFY(writeFile(cwdAdmin, "keep\n"));
+            kept.prepend(cwdAdmin);
+            QVERIFY(symlinkBytes("../..", admin.toUtf8() + "/l"));
+            QVERIFY(writeFile(admin + QStringLiteral("/commondir"), "l\n"));
+            workingDir = root + QStringLiteral("/cwd");
+        } else if (forgery == QLatin1String("dot dot")) {
+            // libgit2 keeps the ".." of an absolute gitdir, and the
+            // system takes it after the link before it: s/a is x, so
+            // s/a/../victim is the victim. Taken off as text, it was
+            // s/victim, a folder whose .git file points back.
+            QVERIFY(QDir().mkpath(root + QStringLiteral("/x")));
+            QVERIFY(QDir().mkpath(root + QStringLiteral("/s")));
+            QVERIFY(symlinkBytes(rootBytes + "/x", rootBytes + "/s/a"));
+            QVERIFY(QDir().mkpath(victim + QStringLiteral("/.git")));
+            QVERIFY(writeFile(root + QStringLiteral("/s/victim/.git"), pointingBack));
+            gitdir = rootBytes + "/s/a/../victim/.git";
+        } else if (forgery == QLatin1String("gitdir not UTF-8")) {
+            // The worktree's folder as Qt reads it has U+FFFD where
+            // libgit2's has the byte FF: l<FF>/victim is the victim
+            // where the file system takes such a name (l<FF> a link to
+            // the folder it is in), l<U+FFFD>/victim a folder whose .git
+            // file points back.
+            symlinkBytes(rootBytes, rootBytes + "/l\xFF");
+            QVERIFY(QDir().mkpath(victim + QStringLiteral("/.git")));
+            QVERIFY(writeFile(root + QStringLiteral("/l\uFFFD/victim/.git"), pointingBack));
+            gitdir = rootBytes + "/l\xFF/victim/.git";
+        }
+#endif
+        if (!gitdir.isEmpty())
+            QVERIFY(writeFile(admin + QStringLiteral("/gitdir"), gitdir + '\n'));
+
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        gitbolt::git::Result<void> removed;
+        {
+            const QByteArray savedHome = qgetenv("HOME");
+            const auto restoreHome = qScopeGuard([&] { qputenv("HOME", savedHome); });
+            if (!home.isEmpty())
+                qputenv("HOME", home.toUtf8());
+            const QString savedDir = QDir::currentPath();
+            const auto restoreDir = qScopeGuard([&] { QDir::setCurrent(savedDir); });
+            if (!workingDir.isEmpty())
+                QVERIFY(QDir::setCurrent(workingDir));
+            const std::string savedLocale = std::setlocale(LC_CTYPE, nullptr);
+            const auto restoreLocale =
+                qScopeGuard([&] { std::setlocale(LC_CTYPE, savedLocale.c_str()); });
+            if (!locale.empty())
+                QVERIFY(std::setlocale(LC_CTYPE, locale.c_str()));
+            removed = repo->removeWorktree("wt");
+        }
+        for (const QString& file : kept)
+            QVERIFY2(QFileInfo::exists(file), qPrintable(file + QStringLiteral(" is gone")));
+        QVERIFY(!removed.ok());
+        QVERIFY2(QString::fromStdString(removed.error().message())
+                     .contains(QLatin1String("Nothing was deleted")),
+                 removed.error().message().c_str());
+    }
+
+    // A worktree's name is a folder in .git/worktrees, not a path:
+    // libgit2 looks up whatever folder a path names from there (".."
+    // is .git itself), and prune deletes it.
+    void removeWorktreeTakesOnlyAName() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString main = base.filePath(QStringLiteral("main"));
+        const QString worktree = base.filePath(QStringLiteral("wt"));
+        QVERIFY(addRepoWithWorktree(main, worktree));
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        for (const char* name : {"wt/../wt", "..", ".", ""}) {
+            const auto removed = repo->removeWorktree(name);
+            QVERIFY2(!removed.ok(), name);
+            QVERIFY2(QString::fromStdString(removed.error().message())
+                         .contains(QLatin1String("not the name of a worktree")),
+                     removed.error().message().c_str());
+        }
+        QCOMPARE(readFile(worktree, QStringLiteral("a.txt")), QByteArray("a\n"));
+        QVERIFY(QFileInfo::exists(main + QStringLiteral("/.git/worktrees/wt/gitdir")));
     }
 };
 

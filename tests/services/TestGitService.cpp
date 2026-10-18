@@ -74,7 +74,9 @@
 //   - a conflicted merge is aborted off the GUI thread,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
-//     leaves out (.git, node_modules, build, …).
+//     leaves out (.git, node_modules, build, …),
+//   - removeWorktree deletes the folder the user was asked about or
+//     nothing, whatever the worktree's files in .git/worktrees say.
 //
 // Signal delivery: workers emit from pool threads, and QSignalSpy
 // records those on the emitting thread, so the tests wait for worker
@@ -571,6 +573,70 @@ private slots:
         gitbolt::git::GitProcess there(opened.toStdString());
         QVERIFY(succeeded(there.run({"commit", "-q", "--allow-empty", "-m", "outside"})));
         QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(), 10000);
+    }
+
+    // Remove deletes the worktree's folder that the user was asked
+    // about, or nothing: one elsewhere by now, or one whose gitdir file
+    // in .git/worktrees names a file in another folder (which libgit2
+    // deleted), is refused with an operationFailed.
+    void removeWorktreeDeletesOnlyTheFolderAsked() {
+        const IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString worktree = outside.filePath(QStringLiteral("wt"));
+        const QString victim = outside.filePath(QStringLiteral("victim"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(repo->path().toStdString())
+                              .run({"worktree", "add", "-q", "-b", "topic",
+                                    worktree.toStdString()})));
+        QVERIFY(QDir().mkpath(victim));
+        QFile marker(victim + QStringLiteral("/MARKER"));
+        QVERIFY(marker.open(QIODevice::WriteOnly));
+        marker.close();
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto listedPath = [&svc] {
+            const auto listed = svc.withRepository(
+                [](gitbolt::git::Repository& r) { return r.worktrees(); });
+            return listed.ok() && listed->size() == 1
+                       ? QString::fromStdString(listed->front().path) : QString();
+        };
+        const QString asked = listedPath();
+        QVERIFY(!asked.isEmpty());
+        QSignalSpy failed(&svc, &GitService::operationFailed);
+
+        svc.removeWorktree(QStringLiteral("wt"), victim);
+        QCOMPARE(failed.size(), 1);
+        QCOMPARE(failed.at(0).at(0).toString(), QStringLiteral("removeWorktree"));
+        QVERIFY2(failed.at(0).at(1).toString().contains(QLatin1String("Nothing was deleted")),
+                 qPrintable(failed.at(0).at(1).toString()));
+        QVERIFY(QFileInfo::exists(worktree + QStringLiteral("/f0.txt")));
+
+        const auto writeGitdir = [&repo](const QString& path) {
+            QSaveFile gitdir(repo->path() + QStringLiteral("/.git/worktrees/wt/gitdir"));
+            return gitdir.open(QIODevice::WriteOnly)
+                   && gitdir.write(QFile::encodeName(path) + '\n') > 0 && gitdir.commit();
+        };
+        QVERIFY(writeGitdir(victim + QStringLiteral("/MARKER")));
+        // As the list shows it now, and the question names it.
+        const QString shown = listedPath();
+        QCOMPARE(QFileInfo(shown).canonicalFilePath(), QFileInfo(victim).canonicalFilePath());
+        svc.removeWorktree(QStringLiteral("wt"), shown);
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(QFileInfo::exists(victim + QStringLiteral("/MARKER")));
+        QVERIFY(QFileInfo::exists(worktree + QStringLiteral("/f0.txt")));
+
+        QVERIFY(writeGitdir(asked + QStringLiteral("/.git")));
+        svc.removeWorktree(QStringLiteral("wt"), asked);
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(!QFileInfo::exists(worktree));
+        const auto after = svc.withRepository(
+            [](gitbolt::git::Repository& r) { return r.worktrees(); });
+        QVERIFY(after.ok());
+        QVERIFY(after->empty());
+        QVERIFY(QFileInfo::exists(victim + QStringLiteral("/MARKER")));
     }
 
     // The walk leaves out .git, node_modules, build and the like

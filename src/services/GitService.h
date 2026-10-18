@@ -423,7 +423,11 @@ public:
     /// requiring an existing branch.
     void addWorktree(const QString& name, const QString& path, const QString& branch,
                      bool createBranch = false);
-    void removeWorktree(const QString& name);
+    /// Deletes the worktree's folder, `folder`: the one the user was
+    /// asked about. A worktree that is elsewhere by now, or whose
+    /// folder isn't its own (Repository::removeWorktree), is refused
+    /// with an operationFailed, nothing deleted.
+    void removeWorktree(const QString& name, const QString& folder);
     void lockWorktree(const QString& name);
     void unlockWorktree(const QString& name);
 

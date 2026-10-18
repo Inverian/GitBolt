@@ -263,8 +263,16 @@ public:
                              const std::string& branch, bool createBranch = false);
     /// Prunes the worktree's administrative files AND deletes its
     /// working directory from disk. Refuses locked worktrees —
-    /// unlock first. Caller is expected to confirm with the user.
-    Result<void> removeWorktree(const std::string& name);
+    /// unlock first. Caller is expected to confirm with the user,
+    /// and passes the folder it named as `folder`: a worktree that
+    /// is elsewhere by now is refused. Deletes a folder only if it
+    /// is that worktree's, as `git worktree remove` checks: its .git
+    /// file points back to .git/worktrees/<name>, and it holds
+    /// neither this repository nor the home folder. One that fails
+    /// is refused, with nothing deleted; one whose .git file is gone
+    /// (its folder too, often) loses its administrative files alone.
+    Result<void> removeWorktree(const std::string& name,
+                                const std::string& folder = {});
     Result<void> lockWorktree(const std::string& name,
                               const std::string& reason = "");
     Result<void> unlockWorktree(const std::string& name);

@@ -851,17 +851,22 @@ void MainWindow::buildRepositoryMenu()
                                              addDlg.createNewBranch());
                 }
             });
+            // The question names the folder that is deleted: it named
+            // the worktree alone, and the folder its files in .git
+            // named was deleted whatever it was. GitService deletes
+            // that folder or nothing.
             connect(widget, &widgets::WorktreeWidget::removeRequested,
-                    this, [this, dlg, key](const QString& name) {
+                    this, [this, dlg, key](const QString& name, const QString& path) {
                 const auto answer = QMessageBox::question(
                     dlg, tr("Remove Worktree"),
-                    tr("Remove worktree '%1'?\n\nIts working "
-                       "directory is deleted from disk. Commits "
+                    tr("Remove worktree '%1'?\n\nThis folder is deleted "
+                       "from disk, with everything in it:\n%2\n\nCommits "
                        "made there stay in the repository, but "
-                       "uncommitted changes are lost.").arg(name));
+                       "uncommitted changes are lost.")
+                        .arg(name, QDir::toNativeSeparators(path)));
                 if (answer == QMessageBox::Yes
                     && !repositoryChangedSince(key, tr("no worktree was removed.")))
-                    gitService_->removeWorktree(name);
+                    gitService_->removeWorktree(name, path);
             });
             connect(widget, &widgets::WorktreeWidget::lockRequested,
                     this, [this, key](const QString& name) {

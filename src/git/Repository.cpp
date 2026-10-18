@@ -6,8 +6,10 @@
 #include <QString>
 #include <git2.h>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <initializer_list>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -2094,10 +2096,139 @@ Result<void> Repository::addWorktree(const std::string& name, const std::string&
     return Result<void>::success();
 }
 
-Result<void> Repository::removeWorktree(const std::string& name) {
+namespace {
+
+// `bytes`, a path libgit2 has, as a QString that Qt names the same
+// file by. None if there is no such QString: bytes that aren't UTF-8
+// are U+FFFD to Qt (on a file system that keeps such a name, the two
+// are different files), and libgit2's path ends at a NUL.
+std::optional<QString> exactPath(const QByteArray& bytes) {
+    QString path = QString::fromUtf8(bytes);
+    if (bytes.contains('\0') || path.toUtf8() != bytes)
+        return std::nullopt;
+    return path;
+}
+
+// The path in one of the files of a linked worktree's folder in
+// .git/worktrees ("gitdir", "commondir"), as libgit2 reads it for the
+// prune that deletes what it names (git_worktree__read_link): white
+// space taken off the end; then a path starting with "./" or "../"
+// taken from that folder, "." and ".." resolved as text, and any other
+// as written, even a relative one ("l" is in the folder GitBolt runs
+// in). None if the file can't be read, or if libgit2 might have
+// another path from it than this:
+// - libgit2 takes off whatever isspace() calls white space, a byte at
+//   a time: on Windows the six ASCII ones, elsewhere, in some locales,
+//   also the last byte of a longer character (A0, U+00A0's last, in
+//   UTF-8 on macOS). Qt's white space includes U+3000 and others that
+//   libgit2 keeps. So the ASCII six come off here, and a path ending
+//   in another byte that isspace() takes is none.
+// - On Windows, libgit2 resolves ".." between slashes, and Qt between
+//   backslashes too.
+std::optional<QString> worktreeAdminLink(const QString& adminDir, const QString& file) {
+    QFile f(adminDir + QLatin1Char('/') + file);
+    if (!f.open(QIODevice::ReadOnly))
+        return std::nullopt;
+    QByteArray link = f.readAll();
+    const auto asciiSpace = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+    };
+    while (!link.isEmpty() && asciiSpace(link.back()))
+        link.chop(1);
+    if (!link.isEmpty() && std::isspace(static_cast<unsigned char>(link.back())))
+        return std::nullopt;
+    const std::optional<QString> path = exactPath(link);
+    if (!path || !(link.startsWith("./") || link.startsWith("../")))
+        return path;
+#ifdef Q_OS_WIN
+    if (link.contains('\\'))
+        return std::nullopt;
+#endif
+    return QDir::cleanPath(adminDir + QLatin1Char('/') + *path);
+}
+
+// The path in a linked worktree's .git file ("gitdir: <path>"), read
+// as git reads it: line ends taken off the end and nothing else (a
+// worktree's name can end in U+3000, and so does this path then), and
+// against the worktree's folder when relative. Empty if it is no such
+// file.
+QString gitFileLink(const QString& dotGit) {
+    QFile f(dotGit);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    QByteArray text = f.readAll();
+    while (text.endsWith('\n') || text.endsWith('\r'))
+        text.chop(1);
+    if (!text.startsWith("gitdir: "))
+        return {};
+    const QString link = QString::fromUtf8(text.mid(8));
+    if (link.isEmpty() || QDir::isAbsolutePath(link))
+        return link;
+    return QFileInfo(dotGit).dir().filePath(link);
+}
+
+// Both name the same folder, once symbolic links are resolved. False
+// if either is missing.
+bool sameFolder(const QString& a, const QString& b) {
+    const QString ca = QFileInfo(a).canonicalFilePath();
+    const QString cb = QFileInfo(b).canonicalFilePath();
+    return !ca.isEmpty() && ca.compare(cb, kPathCase) == 0;
+}
+
+} // namespace
+
+Result<void> Repository::removeWorktree(const std::string& name,
+                                        const std::string& folder) {
+    const auto refuse = [&name](const std::string& why) {
+        return GitError(GitErrorCode::GenericError,
+                        "Worktree '" + name + "' was not removed: " + why
+                            + ". Nothing was deleted.");
+    };
+    // The worktree's files are in .git/worktrees/<name>, which libgit2
+    // takes as given: "." or ".." would be .git/worktrees or .git.
+    if (name.empty() || name == "." || name == ".."
+        || name.find_first_of("/\\") != std::string::npos)
+        return refuse("that is not the name of a worktree");
+
     git_worktree* wt = nullptr;
     int err = git_worktree_lookup(&wt, repo_, name.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeWorktree = qScopeGuard([wt] { git_worktree_free(wt); });
+
+    // libgit2's prune deletes the folder holding the file that
+    // .git/worktrees/<name>/gitdir names (the worktree's .git file,
+    // unless someone wrote another path there), and <commondir>/
+    // worktrees/<name>, commondir read from the file of that name
+    // beside it. It checks neither: a gitdir naming any file elsewhere,
+    // by an absolute path or a relative one climbing out of .git, made
+    // Remove delete the folder holding that file and everything in it,
+    // while the worktree stayed. So both are checked first, by the
+    // very paths libgit2 goes on to delete: a check of a path read
+    // another way (a ".." taken off as text, or U+3000 as white space)
+    // passed a folder that libgit2 then read as another.
+    const std::optional<QString> admin =
+        exactPath(QByteArray::fromStdString(commonDir() + "/worktrees/" + name));
+    if (!admin)
+        return refuse("the path of its files in .git/worktrees is not UTF-8");
+    const QString common = QString::fromStdString(commonDir());
+    const QString adminDir = QDir::cleanPath(*admin);
+    const char* wtPath = git_worktree_path(wt);
+    const QString workTree = QString::fromUtf8(wtPath ? wtPath : "");
+    const std::string where = workTree.toStdString();
+
+    // The folder the user agreed to lose: a worktree moved since (`git
+    // worktree move`) is another.
+    if (!folder.empty()
+        && QDir::cleanPath(QString::fromStdString(folder)) != QDir::cleanPath(workTree))
+        return refuse("it is at '" + where + "' now, not at '" + folder + "'");
+
+    const std::optional<QString> commondir =
+        worktreeAdminLink(adminDir, QStringLiteral("commondir"));
+    if (!commondir)
+        return refuse("its commondir file holds no path that can be checked");
+    if (!sameFolder(*commondir, common))
+        return refuse("its commondir file names '" + commondir->toStdString()
+                      + "', not this repository's .git");
 
     // Default prune options refuse to touch a valid (i.e. normal,
     // still-on-disk) worktree — they only clean up already-broken
@@ -2107,10 +2238,49 @@ Result<void> Repository::removeWorktree(const std::string& name) {
     // A LOCKED worktree is still refused — unlock first, which is
     // the same protection `git worktree remove` gives.
     git_worktree_prune_options opts = GIT_WORKTREE_PRUNE_OPTIONS_INIT;
-    opts.flags = GIT_WORKTREE_PRUNE_VALID
-               | GIT_WORKTREE_PRUNE_WORKING_TREE;
+    opts.flags = GIT_WORKTREE_PRUNE_VALID;
+
+    // A worktree whose .git file is gone, with its folder or not, loses
+    // its files in .git/worktrees alone, as `git worktree prune` takes
+    // them out: they name a file that isn't there. One whose .git file
+    // is there has its folder deleted only if git would delete it: the
+    // gitdir file names the .git file in the folder, a file (no folder,
+    // no link) that points back to .git/worktrees/<name>. git refuses
+    // a worktree that fails ("validation failed, cannot remove working
+    // tree"), and so does this, its files in .git/worktrees kept.
+    const std::optional<QString> gitLink =
+        worktreeAdminLink(adminDir, QStringLiteral("gitdir"));
+    if (!gitLink)
+        return refuse("its gitdir file holds no path that can be checked");
+    const QFileInfo gitLinkInfo(*gitLink);
+    if (gitLinkInfo.exists() || gitLinkInfo.isSymLink()) {
+        // The folder as libgit2 spells it, ".." and all: the system
+        // takes "a/../b" through a when a is a link, to another b than
+        // the one beside a.
+        const QString dotGit = workTree + QStringLiteral("/.git");
+        if (*gitLink != dotGit)
+            return refuse("its gitdir file names '" + gitLink->toStdString()
+                          + "', not the .git file of a worktree");
+        // Nor a folder that no worktree is, whatever its .git file
+        // says: the repository open, its .git, the home folder, or a
+        // folder holding any of them. (One inside a bare repository's
+        // folder is a worktree, as some put them there.)
+        for (const std::string& kept : {commonDir(), path(), workdir()}) {
+            if (!kept.empty() && atOrAbove(where, kept))
+                return refuse("'" + where + "' is the repository open, or holds it");
+        }
+        if (atOrAbove(where, QDir::homePath().toStdString()))
+            return refuse("'" + where + "' is the home folder, or holds it");
+        const QFileInfo dotGitInfo(dotGit);
+        if (dotGitInfo.isSymLink() || !dotGitInfo.isFile())
+            return refuse("'" + dotGit.toStdString() + "' is not a .git file");
+        if (!sameFolder(gitFileLink(dotGit), adminDir))
+            return refuse("'" + dotGit.toStdString() + "' does not point back to '"
+                          + adminDir.toStdString() + "'");
+        opts.flags |= GIT_WORKTREE_PRUNE_WORKING_TREE;
+    }
+
     err = git_worktree_prune(wt, &opts);
-    git_worktree_free(wt);
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
 }
