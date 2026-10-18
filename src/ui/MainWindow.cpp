@@ -33,6 +33,7 @@
 #include "conf/ThemeService.h"
 #include "telemetry/EventSchema.h"
 #include "telemetry/TelemetryService.h"
+#include "util/MessageText.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
@@ -2151,7 +2152,10 @@ void MainWindow::buildCommandsMenu()
                     res.ok()) {
                     for (const auto& s : res.value()) {
                         if (s.index == i) {
-                            message = QString::fromStdString(s.message);
+                            // HEAD's subject is in it (git's "WIP on
+                            // main: …"), maybe a line of megabytes the
+                            // box would lay out whole.
+                            message = util::elided(s.message);
                             break;
                         }
                     }

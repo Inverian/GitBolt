@@ -1,4 +1,5 @@
 #include "models/CommitLogModel.h"
+#include "util/MessageText.h"
 #include "util/PerformanceTimer.h"
 #include <QDateTime>
 #include <algorithm>
@@ -29,17 +30,21 @@ QVariant CommitLogModel::data(const QModelIndex& index, int role) const {
         switch (static_cast<CommitLogColumn>(index.column())) {
             case CommitLogColumn::Graph: return {};
             case CommitLogColumn::Message: {
+                // At most util::kMaxLineChars of it, more than a cell
+                // shows: the view lays the whole text out on every
+                // paint before eliding it, and a subject of one line
+                // of megabytes stalled the log each time.
                 if (showMessageBody_) {
                     // Full message includes the summary as its
                     // first line. If there's a body (anything past
                     // the first blank line) keep the cell as-is;
                     // otherwise fall back to summary-only so the
                     // toggle doesn't add a redundant copy.
-                    const QString full = QString::fromStdString(commit.message)
-                        .trimmed();
+                    const QString full = util::elidedText(
+                        commit.message, util::kMaxLineChars, util::kMaxLineChars).trimmed();
                     if (!full.isEmpty()) return full;
                 }
-                return QString::fromStdString(commit.summary);
+                return util::elided(commit.summary);
             }
             case CommitLogColumn::Author: return QString::fromStdString(commit.author.name);
             case CommitLogColumn::Date: {

@@ -7,6 +7,7 @@ set(SOURCES
     CrashHandler.cpp
     LockFiles.cpp
     LoginPath.cpp
+    MessageText.cpp
     TestSession.cpp
     Translations.cpp
     AsyncRunner.h
@@ -14,6 +15,7 @@ set(SOURCES
     LockFiles.h
     LoginPath.h
     LruCache.h
+    MessageText.h
     PerformanceTimer.h
     TestSession.h
     Translations.h

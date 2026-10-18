@@ -1,5 +1,6 @@
 #include "dialogs/CherryPickDialog.h"
 #include "conf/SettingsService.h"
+#include "util/MessageText.h"
 
 #include <QDateTime>
 #include <QDialogButtonBox>
@@ -80,7 +81,9 @@ QString CherryPickDialog::commitHash() const {
 
 void CherryPickDialog::setCommitDetails(const git::CommitData& commit) {
     hashLabel_->setText(QString::fromStdString(commit.id.toHex()));
-    summaryLabel_->setText(QString::fromStdString(
+    // At most util::kMaxLineChars: the label wraps its text, and laying
+    // out a subject of one line of megabytes froze the dialog.
+    summaryLabel_->setText(util::elided(
         commit.summary.empty() ? commit.message : commit.summary));
     authorLabel_->setText(QStringLiteral("%1 <%2>")
                               .arg(QString::fromStdString(commit.author.name))

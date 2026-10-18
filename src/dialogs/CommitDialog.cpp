@@ -8,6 +8,7 @@
 #include "git/Repository.h"
 #include "models/FileStatusModel.h"
 #include "services/GitService.h"
+#include "util/MessageText.h"
 #include "widgets/CommitMessageEdit.h"
 #include "widgets/DiffViewerWidget.h"
 
@@ -1012,12 +1013,32 @@ void CommitDialog::startFromPreparedMessage(bool onlyIfChanged)
         [](git::Repository& r) { return r.preparedMessage(); }));
     if (onlyIfChanged && prepared == preparedRead_)
         return;
+    // A pick's message is the picked commit's, which can be one line of
+    // megabytes: laid out in the editor, it froze the window. The editor
+    // gets at most util::elidedText of it, and the note under it says
+    // so; the commit takes what the editor holds, as ever. A note for
+    // the message read before goes with it.
+    const auto cutNote = [](const QString& message) {
+        return util::elidedText(message) == message
+            ? QString()
+            : tr("git's message for this commit is %L1 characters long: only part of it "
+                 "is in the editor, and the commit takes what the editor holds.")
+                  .arg(message.size());
+    };
+    if (const QString stale = cutNote(preparedRead_);
+        !stale.isEmpty() && errorLabel_->text() == stale)
+        errorLabel_->hide();
     preparedRead_ = prepared;
     const QString current = messageEdit_->toPlainText();
     if (!current.trimmed().isEmpty() && (prefilled_.isEmpty() || current != prefilled_))
         return;     // the user's own words
-    if (current != prepared)
-        messageEdit_->setPlainText(prepared);
+    const QString shown = util::elidedText(prepared);
+    if (const QString note = cutNote(prepared); !note.isEmpty()) {
+        errorLabel_->setText(note);
+        errorLabel_->show();
+    }
+    if (current != shown)
+        messageEdit_->setPlainText(shown);
     // As the editor gives it back: it holds a non-breaking space as a
     // space (and CRLF as "\n"), and the message filled in never
     // matched again, so it passed for the user's words and stayed for

@@ -7,7 +7,9 @@
 //   - every operation can be chosen for the selected commit, a reword
 //     takes its new message from the prompt (and the commit's own
 //     message undoes it; an empty one isn't taken), and commits move up
-//     and down;
+//     and down; a message of one line of megabytes is shown cut, in the
+//     list and in the prompt, and handed back untouched leaves the
+//     commit as it was;
 //   - planProblem() names a squash or fixup with no kept commit below
 //     it, which git would refuse;
 //   - a rebase turned down keeps the dialog open with its plan, and
@@ -38,6 +40,7 @@
 #include <QTimer>
 
 #include "dialogs/RebaseDialog.h"
+#include "util/MessageText.h"
 #include "util/Translations.h"
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/RepoOperationBar.h"
@@ -184,6 +187,46 @@ private slots:
         answerRewordPrompt(QStringLiteral("c2\n\nbody of c2"));
         widget.applyToSelected(RebaseOperationType::Reword);
         QCOMPARE(plan(widget).at(0), QStringLiteral("pick c2"));
+    }
+
+    // A message of one line of megabytes (256K here): the prompt's
+    // editor laid it out whole, with the window frozen. It gets the
+    // start of it, and says so; handed back untouched, the commit stays
+    // a pick with its own message, and new words still reword it. The
+    // plan's list shows the subject cut too.
+    void rewordOfAHugeMessageStartsFromItsStart() {
+        auto list = commits(1);
+        const std::string huge(256 * 1024, 'a');
+        list.front().summary = huge;
+        list.front().message = huge + "\n";
+        InteractiveRebaseWidget widget;
+        widget.setCommits(list, gitbolt::git::ObjectId(), gitbolt::git::ObjectId(), {});
+        auto* view = widget.findChild<QListView*>();
+        QVERIFY(view);
+        QVERIFY(view->model()->index(0, 0).data().toString().size()
+                < gitbolt::util::kMaxLineChars + 20);
+
+        QString shown;
+        QString label;
+        QTimer::singleShot(0, [&] {
+            auto* prompt = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            QVERIFY(prompt);
+            shown = prompt->textValue();
+            label = prompt->labelText();
+            prompt->accept();
+        });
+        widget.applyToSelected(RebaseOperationType::Reword);
+        QVERIFY2(shown.size() <= gitbolt::util::kMaxParagraphChars + 1, qPrintable(QString::number(shown.size())));
+        QVERIFY(shown.startsWith(QStringLiteral("aaaa")));
+        QVERIFY2(label.contains(QStringLiteral("characters long")), qPrintable(label));
+        QCOMPARE(widget.rebasePlan().operations.front().type, RebaseOperationType::Pick);
+        QVERIFY(widget.rebasePlan().operations.front().newMessage.empty());
+        QCOMPARE(widget.rebasePlan().operations.front().message, huge + "\n");
+
+        answerRewordPrompt(QStringLiteral("short"));
+        widget.applyToSelected(RebaseOperationType::Reword);
+        QCOMPARE(widget.rebasePlan().operations.front().type, RebaseOperationType::Reword);
+        QCOMPARE(widget.rebasePlan().operations.front().newMessage, std::string("short\n"));
     }
 
     // git makes no commit with an empty message; it stops the rebase.

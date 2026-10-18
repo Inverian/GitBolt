@@ -1,8 +1,13 @@
 #pragma once
 
 #include "git/ObjectId.h"
+#include "git/Tree.h"
 
 #include <QWidget>
+
+#include <atomic>
+#include <memory>
+#include <vector>
 
 class QEvent;
 class QLabel;
@@ -34,11 +39,11 @@ namespace gitbolt::widgets {
 ///     mirrors the GitExtensions one).
 ///   - Sizes shown alongside file names; directories are bold.
 ///
-/// All loads are synchronous and bounded by the size of the tree
-/// at the selected commit — for a libgit2-cached tree this is in
-/// the few-millisecond range even for the linux kernel. We don't
-/// background-thread the walk yet; that's a follow-up if a user
-/// hits the latency on a giant repo.
+/// The tree walk (and the sort of what it finds) runs on the service's
+/// read thread (GitService::readAsync): on the GUI thread, a commit
+/// with a huge tree froze the window for the walk, and one nested
+/// deeply enough overflowed its stack. A blob preview reads one blob,
+/// at most kMaxPreviewBytes of it, synchronously.
 class FileTreeWidget : public QWidget {
     Q_OBJECT
 public:
@@ -87,6 +92,8 @@ private:
     void setupUi();
     void applyColors();
     void rebuildTree();
+    /// The walk of currentCommit_ is in, sorted: fills the tree.
+    void showTree(const std::vector<git::TreeEntry>& entries);
     void showBlobPreview(const git::ObjectId& blobId, const QString& path,
                          quint64 size);
     static bool looksBinary(const QByteArray& data);
@@ -94,6 +101,11 @@ private:
 
     services::GitService* svc_     = nullptr;
     git::ObjectId    currentCommit_;
+    // Bumped by every walk asked for and by clear(), and shared with the
+    // worker: a walk's reply for an earlier commit is dropped, and one
+    // superseded before its turn doesn't run.
+    std::shared_ptr<std::atomic<quint64>> walkToken_ =
+        std::make_shared<std::atomic<quint64>>(0);
 
     QSplitter*             splitter_     = nullptr;
     QLineEdit*             filterInput_  = nullptr;

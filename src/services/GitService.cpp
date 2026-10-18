@@ -39,7 +39,9 @@ std::string searchCeiling() {
 } // namespace
 
 GitService::GitService(QObject* parent)
-    : QObject(parent), watcher_(this), runner_(this) {
+    : QObject(parent), watcher_(this), readRunner_(this, &readPool_), runner_(this) {
+    readPool_.setStackSize(8u * 1024 * 1024);
+    readPool_.setMaxThreadCount(1);
     connect(&watcher_, &watcher::FileWatcher::repositoryChanged, this, [this]() {
         refreshStatus();
         emit repositoryChanged();
@@ -85,6 +87,7 @@ bool GitService::openRepository(const QString& path) {
         std::lock_guard<std::mutex> lock(repoMutex_);
         repo_ = std::make_shared<git::Repository>(std::move(*result));
         openKey_ = rebaseStepKey(*repo_);
+        openProcess_ = repo_->process();
     }
     watcher_.watchRepository(root, gitDir, commonDir);
     emit repositoryOpened(root);
@@ -148,6 +151,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
                 std::lock_guard<std::mutex> lock(repoMutex_);
                 repo_ = std::move(outcome.repo);
                 openKey_ = rebaseStepKey(*repo_);
+                openProcess_ = repo_->process();
             }
 
             // Cheap, immediate watches (.git internals + repo root)
@@ -208,6 +212,7 @@ void GitService::closeRepository() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         repo_.reset();
         openKey_.clear();
+        openProcess_.reset();
     }
     waitingReports_.clear();
     emit repositoryClosed();
@@ -256,8 +261,17 @@ bool GitService::isOpen() const { return repo_ != nullptr; }
 git::Repository* GitService::repository() const { return repo_.get(); }
 
 git::GitProcess GitService::process() const {
-    std::lock_guard<std::mutex> lock(repoMutex_);
-    git::GitProcess proc = repo_->process();
+    // On the service's thread, the one made when the repository opened:
+    // waiting for repoMutex_ there waited for whatever a worker did with
+    // the repository (a whole-tree diff, readAsync), the window frozen.
+    // All a GitProcess takes from it is its paths, which don't change
+    // while it's open, and only that thread swaps it.
+    git::GitProcess proc = [this]() -> git::GitProcess {
+        if (QThread::currentThread() == thread() && openProcess_)
+            return *openProcess_;
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        return repo_->process();
+    }();
     proc.addCancelFlag(opsCancelled_);
     return proc;
 }

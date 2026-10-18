@@ -1,4 +1,5 @@
 #include "models/BranchModel.h"
+#include "util/MessageText.h"
 
 #include <QDateTime>
 #include <QString>
@@ -211,8 +212,11 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                     tip += QStringLiteral("\n") + tr("Tagger: %1 <%2>").arg(
                         QString::fromStdString(t.tagger.name),
                         QString::fromStdString(t.tagger.email));
-                // git ends a tag message with a newline.
-                const QString message = QString::fromStdString(t.message).trimmed();
+                // git ends a tag message with a newline. Cut where a
+                // line, or the whole of it, is too long for the tooltip
+                // to lay out without freezing the window
+                // (util::elidedText).
+                const QString message = util::elidedText(t.message).trimmed();
                 if (!message.isEmpty())
                     tip += QStringLiteral("\n") + message;
             }
@@ -256,13 +260,16 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         const auto& s = stashes_[static_cast<size_t>(row)];
 
         switch (role) {
+        // git puts HEAD's subject in a stash's message ("WIP on main:
+        // …"), and a subject can be one line of megabytes, which the
+        // tree laid out whole on every paint: util::kMaxLineChars of it.
         case Qt::DisplayRole:
-            return QString::fromStdString(s.message);
+            return util::elided(s.message);
         case Qt::DecorationRole:
             return QIcon::fromTheme(QStringLiteral("document-save"));
         case Qt::ToolTipRole: {
             QString tip = QStringLiteral("stash@{%1}").arg(s.index);
-            tip += QStringLiteral("\n") + QString::fromStdString(s.message);
+            tip += QStringLiteral("\n") + util::elidedText(s.message);
             return tip;
         }
         default:

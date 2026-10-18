@@ -102,6 +102,9 @@ gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
 gitbolt_add_test(test_english_plurals util/TestEnglishPlurals.cpp)
 target_compile_definitions(test_english_plurals PRIVATE
     GITBOLT_PLURALS_TS="${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts")
+# How much of a commit message the views lay out (util/MessageText.h):
+# a message that fits as it is, a longer one cut with "…".
+gitbolt_add_test(test_message_text util/TestMessageText.cpp)
 
 # telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
 # Never a real endpoint: test binaries don't link src/app, where the
@@ -251,6 +254,12 @@ set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
 gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)
 target_link_libraries(test_file_history PRIVATE gitbolt_ui)
 set_property(TEST test_file_history APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Selecting a commit: nothing waits for the repository (its diff and
+# file tree come from the service's read thread), and a subject of one
+# line of megabytes shows cut, there and in the other views. Off screen.
+gitbolt_add_test(test_commit_details ui/TestCommitDetails.cpp)
+target_link_libraries(test_commit_details PRIVATE gitbolt_ui)
+set_property(TEST test_commit_details APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.

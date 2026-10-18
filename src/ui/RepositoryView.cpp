@@ -8,6 +8,7 @@
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
+#include "util/MessageText.h"
 #include "widgets/BlameWidget.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
@@ -381,8 +382,10 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
         const QStringList cols = line.split(QLatin1Char('\t'));
         if (cols.size() < 5)
             continue;
+        // The subject at most util::kMaxLineChars long: the view lays a
+        // cell's text out whole, on every paint, before eliding it.
         auto* item = new QTreeWidgetItem(
-            {cols[1], cols[2], cols[3], cols[4]});
+            {cols[1], cols[2], cols[3], util::elided(cols[4])});
         item->setData(0, Qt::UserRole, cols[0]); // full sha
         tree->addTopLevelItem(item);
     }
@@ -558,6 +561,7 @@ QWidget* RepositoryView::buildDiffTab()
     leftLayout->addWidget(diffFilterInput_);
 
     changedFilesTree_ = new QTreeView(leftPane);
+    changedFilesTree_->setObjectName(QStringLiteral("diff.files"));
     changedFilesTree_->setHeaderHidden(true);
     changedFilesTree_->setUniformRowHeights(true);
     changedFilesTree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -696,7 +700,11 @@ void RepositoryView::resetInspectorTabs()
     // Commit tab — clear metadata and message. A "contained in" query
     // still out for the previous repository's commit is dropped: its
     // reply wrote that commit's message into this one's Commit tab.
+    // Its diff, the same.
     ++containsQueryToken_;
+    ++*diffQueryToken_;
+    shownStats_.reset();
+    statsPendingHtml_.clear();
     shownCommit_.reset();
     if (avatarLabel_) {
         avatarLabel_->clear();
@@ -860,6 +868,8 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
     // details, diff, and file-tree views get blanked.
     if (commitHash.isEmpty()) {
         ++containsQueryToken_;      // a query out for it is stale now
+        ++*diffQueryToken_;         // and its diff
+        statsPendingHtml_.clear();
         shownCommit_.reset();
         if (avatarLabel_) {
             avatarLabel_->clear();
@@ -935,10 +945,12 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const QString sepColor      = dark ? QStringLiteral("#3c3c3c") : QStringLiteral("#ddd");
     const QString containsColor = dark ? QStringLiteral("#b4b4b4") : QStringLiteral("#444");
     const QString mutedColor    = dark ? QStringLiteral("#9e9e9e") : QStringLiteral("#6a6a6a");
-    const QString addedColor    = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
-    const QString deletedColor  = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
 
-    const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
+    // At most util::kMaxParagraphChars of the subject: a subject of one
+    // line of megabytes froze the window while the browser laid it out.
+    const QString fullSummary = QString::fromStdString(commit.summary);
+    const QString shownSummary = util::elided(fullSummary, util::kMaxParagraphChars);
+    const QString summary = shownSummary.toHtmlEscaped();
     const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
     const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
@@ -1069,38 +1081,47 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             .arg(committerName, committerEmail, committerDate, mutedColor);
     }
 
-    // Diff stats — files-changed count + total +N/-M lines. Pulled
-    // straight from libgit2's diff result so we don't have to
-    // re-walk anything. The lookup is fast (libgit2 caches the
-    // tree pair) but only run when we actually have a repository.
+    // Diff stats — files-changed count + total +N/-M lines, from the
+    // commit's diff. That comes from a worker (showCommitDiff asks for
+    // it, for the Diff tab too): until it's in, the row says so, and
+    // showDiffStats puts the numbers in its place. A commit shown again
+    // (a theme switch) whose diff is in already gets them at once.
     QString statsRow;
-    if (gitService_ && gitService_->isOpen()) {
-        auto diffResult = gitService_->withRepository(
-            [&](git::Repository& r) { return r.diffCommit(commit.id); });
-        if (diffResult) {
-            const auto& d = *diffResult;
-            statsRow = QStringLiteral(
-                "<tr><td class='lbl'>Stats:</td>"
-                "<td class='val'>%1 file%2 changed, "
-                "<span style='color:%5;'>+%3</span> "
-                "<span style='color:%6;'>−%4</span></td></tr>")
-                .arg(d.files.size())
-                .arg(d.files.size() == 1 ? QString{} : QStringLiteral("s"))
-                .arg(d.totalAdditions)
-                .arg(d.totalDeletions)
-                .arg(addedColor, deletedColor);
-        }
+    statsPendingHtml_.clear();
+    statsPlaceholder_.clear();
+    if (shownStats_ && shownStats_->commit == commit.id) {
+        statsRow = statsRowHtml(*shownStats_);
+    } else if (gitService_ && gitService_->isOpen()) {
+        statsPlaceholder_ = QStringLiteral(
+            "<tr><td class='lbl'>Stats:</td>"
+            "<td class='val'><i style='color:%1;'>(counting…)</i></td></tr>")
+            .arg(mutedColor);
+        statsRow = statsPlaceholder_;
     }
 
-    // Commit message body (everything after the summary line).
+    // Commit message body (everything after the summary line), cut
+    // where a line or the whole of it is too long to lay out
+    // (util::elidedText), with a note under it that says so. The
+    // subject's note goes first.
     QString bodyHtml;
+    if (shownSummary != fullSummary) {
+        bodyHtml = QStringLiteral("<p><span class='muted'>%1</span></p>")
+            .arg(tr("This subject is %L1 characters long: only its start is shown.")
+                     .arg(fullSummary.size()));
+    }
     if (commit.message.size() > commit.summary.size()) {
         QString body = QString::fromStdString(commit.message).mid(
             static_cast<int>(commit.summary.size())).trimmed();
         if (!body.isEmpty()) {
-            bodyHtml = QStringLiteral(
+            const QString shown = util::elidedText(body);
+            bodyHtml += QStringLiteral(
                 "<div class='msgbody'><pre>%1</pre></div>")
-                .arg(body.toHtmlEscaped());
+                .arg(shown.toHtmlEscaped());
+            if (shown != body) {
+                bodyHtml += QStringLiteral("<p><span class='muted'>%1</span></p>")
+                    .arg(tr("This message is %L1 characters long: only part of it is shown.")
+                             .arg(body.size()));
+            }
         }
     }
 
@@ -1204,6 +1225,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         .arg(leftRows, rightRows, labelColor, linkColor);
 
     detailBrowser_->setHtml(metadataHtml);
+    if (!statsPlaceholder_.isEmpty())
+        statsPendingHtml_ = metadataHtml;
 
     // ----- Bottom browser: summary, message body, contained-in --
     const QString messageHtml = QStringLiteral(R"HTML(
@@ -1356,16 +1379,75 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
         changedFilesModel_->clear();
     diffWidget_->clear();
 
+    // A reply still out for the commit selected before is stale now.
+    const quint64 token = ++*diffQueryToken_;
     if (!gitService_ || !gitService_->isOpen())
         return;
 
-    auto diffResult = gitService_->withRepository(
-        [&](git::Repository& r) { return r.diffCommit(commitId); });
-    if (!diffResult)
+    // On the service's read thread: see diffQueryToken_. The Stats row
+    // waits for the same diff, so it's read once for both.
+    gitService_->readAsync(
+        this,
+        [commitId, token, latest = diffQueryToken_](git::Repository& r)
+            -> std::shared_ptr<git::DiffResult> {
+            if (latest->load() != token)
+                return nullptr;   // the selection moved on before its turn
+            auto diff = r.diffCommit(commitId);
+            return diff ? std::make_shared<git::DiffResult>(std::move(*diff)) : nullptr;
+        },
+        [this, commitId, token](std::shared_ptr<git::DiffResult> diff) {
+            if (token != diffQueryToken_->load())
+                return;           // for a commit no longer selected
+            showDiffStats(commitId, diff.get());
+            if (diff)
+                showDiffFiles(std::move(diff));
+        });
+}
+
+void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff)
+{
+    DiffStats stats;
+    stats.commit = commitId;
+    if (diff) {
+        stats.ok = true;
+        stats.files = diff->files.size();
+        stats.additions = diff->totalAdditions;
+        stats.deletions = diff->totalDeletions;
+    }
+    shownStats_ = stats;
+    if (!shownCommit_ || shownCommit_->id != commitId || statsPendingHtml_.isEmpty()
+        || !detailBrowser_)
         return;
+    QString html = statsPendingHtml_;
+    html.replace(statsPlaceholder_, statsRowHtml(stats));
+    statsPendingHtml_.clear();
+    detailBrowser_->setHtml(html);
+}
 
-    auto diff = std::make_shared<git::DiffResult>(std::move(*diffResult));
+QString RepositoryView::statsRowHtml(const DiffStats& stats)
+{
+    if (!stats.ok)
+        return {};
+    // As showCommitDetails picks its colours (readable on either theme).
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    const QString addedColor   = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
+    const QString deletedColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
+    return QStringLiteral(
+        "<tr><td class='lbl'>Stats:</td>"
+        "<td class='val'>%1 file%2 changed, "
+        "<span style='color:%5;'>+%3</span> "
+        "<span style='color:%6;'>−%4</span></td></tr>")
+        .arg(stats.files)
+        .arg(stats.files == 1 ? QString{} : QStringLiteral("s"))
+        .arg(stats.additions)
+        .arg(stats.deletions)
+        .arg(addedColor, deletedColor);
+}
 
+void RepositoryView::showDiffFiles(std::shared_ptr<git::DiffResult> diff)
+{
     // Build the changed-files tree. Two passes so directory rows
     // come before file rows at every level: pass 1 collects each
     // unique ancestor path into a sorted std::set and creates a

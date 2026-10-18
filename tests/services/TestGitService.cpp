@@ -72,6 +72,9 @@
 //     open (a job waiting on git lends its thread back),
 //   - the remote ops and checkoutBranch return their own outcome,
 //   - a conflicted merge is aborted off the GUI thread,
+//   - readAsync's reads walk a tree 6,000 levels deep on the read
+//     thread's stack, and an answer whose asker is gone, or whose
+//     repository was closed, goes nowhere,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
 //     leaves out (.git, node_modules, build, …).
@@ -778,6 +781,95 @@ private slots:
         QVERIFY2(!afterB.contains(QStringLiteral("status(a)"))
                      && !afterB.contains(QStringLiteral("log(a)")),
                  qPrintable(events.join(QStringLiteral(", "))));
+    }
+
+    // -----------------------------------------------------------------
+    // readAsync: a read on the service's read thread, its answer back
+    // on this one. The File Tree's walk runs there now, and libgit2's
+    // git_tree_walk recurses once per directory level: on a pool
+    // thread's default stack (512 KB on macOS) a tree some 4,500 levels
+    // deep crashed it, where the GUI thread's 8 MB, on which it ran
+    // before, took 60,000. 6,000 levels here. The walk may turn such a
+    // tree down; what mustn't happen is the crash.
+    // -----------------------------------------------------------------
+    void readAsyncWalksADeepTree() {
+        constexpr int kDepth = 6000;
+        gitbolt::test::TestRepo repo;
+        git_repository* raw = repo.repo().raw();
+        git_oid oid;
+        QCOMPARE(git_blob_create_from_buffer(&oid, raw, "x\n", 2), 0);
+        for (int level = 0; level <= kDepth; ++level) {
+            git_treebuilder* builder = nullptr;
+            QCOMPARE(git_treebuilder_new(&builder, raw, nullptr), 0);
+            const bool leaf = level == 0;
+            QCOMPARE(git_treebuilder_insert(nullptr, builder, leaf ? "leaf.txt" : "d", &oid,
+                                            leaf ? GIT_FILEMODE_BLOB : GIT_FILEMODE_TREE),
+                     0);
+            QCOMPARE(git_treebuilder_write(&oid, builder), 0);
+            git_treebuilder_free(builder);
+        }
+        git_tree* tree = nullptr;
+        QCOMPARE(git_tree_lookup(&tree, raw, &oid), 0);
+        git_signature* sig = nullptr;
+        QCOMPARE(git_signature_now(&sig, "Test User", "test@gitbolt.local"), 0);
+        git_oid commitOid;
+        const int made = git_commit_create(&commitOid, raw, "HEAD", sig, sig, nullptr, "deep",
+                                           tree, 0, nullptr);
+        git_signature_free(sig);
+        git_tree_free(tree);
+        QCOMPARE(made, 0);
+        const gitbolt::git::ObjectId commit(&commitOid);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        QObject context;
+        long entries = -2;   // -1: turned down
+        svc.readAsync(
+            &context,
+            [commit](gitbolt::git::Repository& r) -> long {
+                auto walk = r.walkTreeAtCommit(commit);
+                return walk ? static_cast<long>(walk->size()) : -1;
+            },
+            [&entries](long n) { entries = n; });
+        QTRY_VERIFY_WITH_TIMEOUT(entries != -2, 60000);
+        QVERIFY2(entries == kDepth + 1 || entries == -1, qPrintable(QString::number(entries)));
+    }
+
+    // An answer whose asker is gone, or whose repository was closed
+    // before it came, goes nowhere; one for a live asker comes.
+    void readAsyncDropsAnAnswerNobodyWaitsFor() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto read = [](gitbolt::git::Repository& r) { return r.workdir(); };
+
+        bool toTheGone = false;
+        auto* gone = new QObject;
+        svc.readAsync(gone, read, [&toTheGone](const std::string&) { toTheGone = true; });
+        // Read, and its answer posted to this thread, before the asker
+        // goes (no event is handled meanwhile).
+        QElapsedTimer waited;
+        waited.start();
+        while (svc.workRunning() && waited.elapsed() < 10000)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        QVERIFY(!svc.workRunning());
+        delete gone;
+        QTest::qWait(100);
+        QVERIFY(!toTheGone);
+
+        bool afterClose = false;
+        QObject alive;
+        svc.readAsync(&alive, read, [&afterClose](const std::string&) { afterClose = true; });
+        svc.closeRepository();
+        QTRY_VERIFY(!svc.workRunning());
+        QTest::qWait(100);
+        QVERIFY(!afterClose);
+
+        QVERIFY(svc.openRepository(repo->path()));
+        std::string workdir;
+        svc.readAsync(&alive, read, [&workdir](const std::string& w) { workdir = w; });
+        QTRY_VERIFY(!workdir.empty());
     }
 
     // -----------------------------------------------------------------
