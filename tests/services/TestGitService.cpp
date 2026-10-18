@@ -70,7 +70,9 @@
 //     open on its way (and reaches its own repository, opened again),
 //   - a commit waiting on its hook leaves the thread pool room for an
 //     open (a job waiting on git lends its thread back),
-//   - the remote ops and checkoutBranch return their own outcome,
+//   - the remote ops and checkoutBranch return their own outcome, and
+//     push and remote branch delete refuse a branch name git would read
+//     as an option before any git runs,
 //   - a conflicted merge is aborted off the GUI thread,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
@@ -99,6 +101,7 @@
 #include "git/Askpass.h"
 #include "git/Error.h"
 #include "git/GitProcess.h"
+#include "git/GitProcessLog.h"
 #include "services/GitService.h"
 
 #include <algorithm>
@@ -1609,6 +1612,64 @@ private slots:
         svc.closeRepository();
         QVERIFY(!svc.fetch());
         QVERIFY(!svc.checkoutBranch(QStringLiteral("other")));
+    }
+
+    // A branch named "-x" (git allows it, and a fetch keeps one a remote
+    // advertises as "origin/-x"): push's publish check gave it to
+    // rev-parse, and the push to git, which read it as an option. Push
+    // and remote branch delete refuse it now before any git runs, as
+    // operationFailed under their own op names; so does the toolbar's
+    // Push (no branch named) with it checked out. The server keeps it.
+    void remoteOpsRefuseANameGitWouldReadAsAnOption() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"push", "-q", "origin", "HEAD:refs/heads/-x"})));
+        QVERIFY(succeeded(work.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        const std::string onServer = tip(*origin, "refs/heads/-x");
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        // Every git of the service's that got the name.
+        QStringList ran;
+        bool watching = false;
+        QObject context;
+        QObject::connect(&gitbolt::git::GitProcessLog::instance(),
+                         &gitbolt::git::GitProcessLog::commandLogged, &context,
+                         [&ran, &watching](const QString&, const QStringList& args, int, qint64) {
+            if (watching && std::any_of(args.begin(), args.end(), [](const QString& a) {
+                    return a.contains(QLatin1String("-x"));
+                }))
+                ran << args.join(QLatin1Char(' '));
+        });
+        const auto refusedAs = [&failedSpy](const QString& op) {
+            return !failedSpy.isEmpty() && failedSpy.last().at(0).toString() == op
+                && failedSpy.last().at(1).toString().contains(QStringLiteral("begins with '-'"));
+        };
+        const auto lastFailure = [&failedSpy] {
+            return failedSpy.isEmpty() ? QStringLiteral("(none)")
+                                       : failedSpy.last().at(1).toString();
+        };
+
+        watching = true;
+        QVERIFY(!svc.push(QStringLiteral("origin"), QStringLiteral("-x")));
+        QVERIFY2(refusedAs(QStringLiteral("push")), qPrintable(lastFailure()));
+        watching = false;
+        QVERIFY(succeeded(work.run({"symbolic-ref", "HEAD", "refs/heads/-x"})));
+        watching = true;
+        QVERIFY(!svc.push(QStringLiteral("origin"), QString()));
+        QVERIFY2(refusedAs(QStringLiteral("push")), qPrintable(lastFailure()));
+        QVERIFY(!svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("-x")));
+        QVERIFY2(refusedAs(QStringLiteral("delete remote branch")), qPrintable(lastFailure()));
+        watching = false;
+        QCOMPARE(failedSpy.count(), 3);
+        QVERIFY2(ran.isEmpty(), qPrintable(ran.join(QStringLiteral(" | "))));
+        QCOMPARE(tip(*origin, "refs/heads/-x"), onServer);
     }
 
     // Fetch prunes: a branch deleted on the server (merged and deleted

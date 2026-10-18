@@ -1058,6 +1058,15 @@ bool GitService::push(const QString& remote, const QString& branch) {
             target = QString::fromStdString(head.value().stdoutData)
                          .trimmed().toStdString();
     }
+    // Before the upstream is asked about: rev-parse took a branch named
+    // "-x" for an option of its own (GitProcess::checkOperand). The
+    // push itself checks them again.
+    for (const std::string& name : {remote.toStdString(), target}) {
+        if (auto refused = git::GitProcess::checkOperand(name); !refused) {
+            emit operationFailed("push", QString::fromStdString(refused.error().message()));
+            return false;
+        }
+    }
     bool publish = false;
     if (!target.empty()) {
         auto upstream = proc.run({"rev-parse", "--abbrev-ref",
@@ -1084,8 +1093,7 @@ bool GitService::deleteRemoteBranch(const QString& remote, const QString& branch
     const auto snapshot = processIfOpen();
     if (!snapshot) return false;
     const git::GitProcess& proc = *snapshot;
-    auto result = proc.run({"push", remote.toStdString(), "--delete",
-                            branch.toStdString()}, 120000);
+    auto result = proc.deleteRemoteBranch(remote.toStdString(), branch.toStdString());
     if (!result) {
         emit operationFailed(QStringLiteral("delete remote branch"),
                              QString::fromStdString(result.error().message()));

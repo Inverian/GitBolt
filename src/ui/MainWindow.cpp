@@ -2811,6 +2811,8 @@ void MainWindow::buildCommandsMenu()
             if (!ok) return;
             const QString ref = revision.trimmed().isEmpty()
                 ? QStringLiteral("HEAD") : revision.trimmed();
+            if (refuseOptionLikeNames(tr("Archive Failed"), {ref}))
+                return;
             const QString outFile = QFileDialog::getSaveFileName(
                 this, tr("Save Archive As"), QDir::homePath(),
                 tr("Zip archive (*.zip);;Tar archive (*.tar)"));
@@ -2819,9 +2821,11 @@ void MainWindow::buildCommandsMenu()
                 return;
             const std::string format = outFile.endsWith(".tar")
                 ? "tar" : "zip";
+            // The revision typed is the tree-ish, never an option of
+            // archive's (--remote, --exec).
             repoCmd_->runAsync({"archive", "--format=" + format,
                                 "-o", outFile.toStdString(),
-                                ref.toStdString()},
+                                "--end-of-options", ref.toStdString()},
                                tr("Archive Failed"),
                                RepoCommandController::RefreshNone,
                                tr("Archiving %1…").arg(ref));
@@ -2914,13 +2918,16 @@ void MainWindow::buildCommandsMenu()
                 this, tr("Bisect Start"),
                 tr("Good commit (where the bug doesn't exist):"),
                 QLineEdit::Normal, QString(), &ok);
+            const QString bad = badRev.trimmed().isEmpty() ? QStringLiteral("HEAD")
+                                                           : badRev.trimmed();
+            // bisect start takes options of its own (--no-checkout,
+            // --term-good=…) among the revisions, and has no
+            // --end-of-options: one that begins with '-' is refused.
             if (!ok || goodRev.trimmed().isEmpty()
-                || repositoryChangedSince(key, tr("no bisect was started.")))
+                || repositoryChangedSince(key, tr("no bisect was started."))
+                || refuseOptionLikeNames(tr("Bisect Start Failed"), {bad, goodRev.trimmed()}))
                 return;
-            runBisect({"start",
-                       badRev.trimmed().isEmpty() ? "HEAD"
-                                                  : badRev.trimmed(),
-                       goodRev.trimmed()},
+            runBisect({"start", bad, goodRev.trimmed()},
                       tr("Bisect Start Failed"));
         });
         sub->addAction(startA);
@@ -2975,16 +2982,20 @@ void MainWindow::buildCommandsMenu()
                    "HEAD~5..HEAD):"),
                 QLineEdit::Normal,
                 QStringLiteral("origin/main..HEAD"), &ok);
-            if (!ok || range.trimmed().isEmpty()) return;
+            if (!ok || range.trimmed().isEmpty()
+                || refuseOptionLikeNames(tr("Format Patch Failed"), {range.trimmed()}))
+                return;
             const QString outDir = QFileDialog::getExistingDirectory(
                 this, tr("Choose output directory for patches"),
                 QDir::homePath());
             if (outDir.isEmpty()
                 || repositoryChangedSince(key, tr("no patches were written.")))
                 return;
+            // The range last, after --end-of-options: the revisions typed
+            // are revisions, never options of format-patch's.
             repoCmd_->runAsync(
-                {"format-patch", range.trimmed().toStdString(),
-                 "-o", outDir.toStdString()},
+                {"format-patch", "-o", outDir.toStdString(),
+                 "--end-of-options", range.trimmed().toStdString()},
                 tr("Format Patch Failed"),
                 RepoCommandController::RefreshNone,
                 tr("Writing patches…"),
@@ -3041,6 +3052,7 @@ void MainWindow::buildCommandsMenu()
 
             std::vector<std::string> args;
             args.push_back(useAm ? "am" : "apply");
+            args.emplace_back("--");    // the files are files, whatever they're called
             for (const auto& f : files) args.push_back(f.toStdString());
             repoCmd_->runAsync(args, tr("Apply Patch Failed"),
                                RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
@@ -3837,6 +3849,18 @@ bool MainWindow::refuseWhileLocalOpRuns()
         return false;
     statusBar()->showMessage(tr("Another operation is still running…"), 3000);
     return true;
+}
+
+bool MainWindow::refuseOptionLikeNames(const QString& failTitle, const QStringList& names)
+{
+    for (const QString& name : names) {
+        if (auto refused = git::GitProcess::checkOperand(name.toStdString()); !refused) {
+            QMessageBox::warning(this, failTitle,
+                                 QString::fromStdString(refused.error().message()));
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MainWindow::gitStepRunning() const
@@ -4983,16 +5007,20 @@ void MainWindow::setupConnections()
                 this, [this](const QString& oldName, const std::string& key) {
             const QString notDone = tr("branch %1 was not renamed.").arg(oldName);
             if (!gitService_ || !gitService_->isOpen()
-                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns()
+                || refuseOptionLikeNames(tr("Rename Branch Failed"), {oldName}))
                 return;
             bool ok = false;
             const QString newName = QInputDialog::getText(
                 this, tr("Rename Branch"), tr("New name for '%1':").arg(oldName),
                 QLineEdit::Normal, oldName, &ok).trimmed();
             if (!ok || newName.isEmpty() || newName == oldName
-                || repositoryChangedSince(key, notDone))
+                || repositoryChangedSince(key, notDone)
+                || refuseOptionLikeNames(tr("Rename Branch Failed"), {newName}))
                 return;
-            repoCmd_->runAsync({"branch", "-m", oldName.toStdString(),
+            // "--": a branch the repository named "-x" (git allows it)
+            // went to git as an option. The names are checked above too.
+            repoCmd_->runAsync({"branch", "-m", "--", oldName.toStdString(),
                                 newName.toStdString()},
                                tr("Rename Branch Failed"),
                                RepoCommandController::RefreshBranches,
@@ -5012,18 +5040,22 @@ void MainWindow::setupConnections()
                 this, [this](const QString& branch, const std::string& key) {
             const QString notDone = tr("the upstream of %1 was not set.").arg(branch);
             if (!gitService_ || !gitService_->isOpen()
-                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns()
+                || refuseOptionLikeNames(tr("Set Upstream Failed"), {branch}))
                 return;
             bool ok = false;
             const QString upstream = QInputDialog::getText(
                 this, tr("Set Upstream"),
                 tr("Upstream for '%1' (e.g., origin/%1):").arg(branch),
                 QLineEdit::Normal, QStringLiteral("origin/") + branch, &ok).trimmed();
-            if (!ok || upstream.isEmpty() || repositoryChangedSince(key, notDone))
+            if (!ok || upstream.isEmpty() || repositoryChangedSince(key, notDone)
+                || refuseOptionLikeNames(tr("Set Upstream Failed"), {upstream}))
                 return;
+            // The upstream is part of its option; the branch comes after
+            // "--", as in Rename above.
             repoCmd_->runAsync({"branch",
                                 "--set-upstream-to=" + upstream.toStdString(),
-                                branch.toStdString()},
+                                "--", branch.toStdString()},
                                tr("Set Upstream Failed"),
                                RepoCommandController::RefreshBranches,
                                tr("Setting the upstream of %1…").arg(branch));
@@ -5784,9 +5816,15 @@ void MainWindow::offerConflictResolution(const QString& operation)
 // post-merge hook froze the window until git's 30 s timeout, which then
 // killed git (and orphaned the hook) and reported the merge, done by
 // then, as failed, with an offer to resolve conflicts it never had.
+//
+// The branch comes after "--", and one git would read as an option is
+// refused first: `git merge -x`, a branch the repository named so, went
+// to git as an option.
 void MainWindow::mergeBranch(const QString& branch)
 {
-    repoCmd_->runAsync({"merge", branch.toStdString()},
+    if (refuseOptionLikeNames(tr("Merge Failed"), {branch}))
+        return;
+    repoCmd_->runAsync({"merge", "--", branch.toStdString()},
                        tr("Merge Failed"),
                        RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
                            | RepoCommandController::RefreshBranches,
@@ -5818,12 +5856,17 @@ void MainWindow::checkoutAsLocalBranch(const QString& remoteBranch)
     if (slash <= 0 || slash == remoteBranch.size() - 1)
         return;
     const QString local = remoteBranch.mid(slash + 1);
+    if (refuseOptionLikeNames(tr("Checkout Failed"), {remoteBranch, local}))
+        return;
     if (gitService_->localBranchExists(local)) {
         gitService_->checkoutBranch(local);
         return;
     }
+    // The start point as a full ref, which can't begin with '-' as a
+    // remote's name can: checkout has no "--" for it (one means that
+    // paths follow).
     repoCmd_->runAsync({"checkout", "-b", local.toStdString(), "--track",
-                        remoteBranch.toStdString()},
+                        "refs/remotes/" + remoteBranch.toStdString()},
                        tr("Checkout Failed"),
                        RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
                            | RepoCommandController::RefreshBranches,
@@ -5843,6 +5886,10 @@ void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
     if (slash <= 0 || slash == remoteBranch.size() - 1) return;
     const QString remote = remoteBranch.left(slash);
     const QString branch = remoteBranch.mid(slash + 1);
+    // Before the question: GitService refuses it too, but only once the
+    // user has said yes to deleting it.
+    if (refuseOptionLikeNames(tr("Delete Remote Branch"), {remote, branch}))
+        return;
 
     const auto confirm = QMessageBox::question(
         this, tr("Delete Remote Branch"),

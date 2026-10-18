@@ -44,7 +44,11 @@
 //   - Manage Submodules' and Manage Worktrees' Open opens the submodule
 //     or worktree in the window, and Open in File Explorer shows its
 //     folder (a submodule's path is relative to the work tree); the
-//     Console gets a bare repository's GIT_DIR.
+//     Console gets a bare repository's GIT_DIR;
+//   - a branch whose name begins with '-' never reaches git from the
+//     sidebar (Merge, Rename, Set Upstream, Checkout as local branch,
+//     Delete from remote, Push), where git read it as an option: each
+//     says so instead, and nothing changes.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -83,6 +87,7 @@
 #include <QUrl>
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "../TestProcessHelper.h"
@@ -1104,6 +1109,89 @@ private slots:
         QCOMPARE(asked, QStringLiteral("Rename Branch"));
         QTRY_COMPARE_WITH_TIMEOUT(branches(), QStringLiteral("from-feature\nmade-here\nmain\nrenamed"),
                                   10000);
+    }
+
+    // Branches whose names begin with '-': git allows them, and a fetch
+    // keeps one a remote advertises ("origin/-y"). The sidebar's Merge,
+    // Rename, Set Upstream, Checkout as local branch, Delete from remote
+    // and Push gave them to git, which read them as options. Each says
+    // so now, as its failure would, before it asks anything, and runs
+    // nothing: the repository and the server are as they were.
+    void sidebarRefusesBranchNamesGitWouldReadAsOptions() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString server = scratch.filePath(QStringLiteral("server.git"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        gitbolt::git::GitProcess git(work.toStdString());
+        gitbolt::git::GitProcess serverGit(server.toStdString());
+        serverGit.setGitDir(server.toStdString());
+        QVERIFY(QDir().mkpath(work));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "main"})));
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        QVERIFY(succeeded(serverGit.run({"update-ref", "--", "refs/heads/-y", "main"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+        QCOMPARE(output(git.run({"rev-parse", "--verify", "refs/remotes/origin/-y"})),
+                 output(git.run({"rev-parse", "HEAD"})));
+        const QString before = fingerprint(work);
+        const QString serverBefore = output(serverGit.run({"for-each-ref"}));
+
+        MainWindow window;
+        auto* svc = openIn(window, work);
+        QVERIFY(svc);
+        auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
+        QVERIFY(tree);
+        // What the window asks or says: a message box is noted and
+        // closed, a text question noted and cancelled.
+        QStringList asked;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->reject();
+            }
+        });
+        answer.start();
+        // All that is to be said: that `name` would be read as an option.
+        const auto refusalOf = [](const QString& name) {
+            return QStringList{QLatin1Char('"') + name + QStringLiteral(
+                "\" begins with '-', which git would read as an option, not a name, so "
+                "GitBolt doesn't pass it to git.")};
+        };
+
+        emit tree->mergeRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
+        emit tree->renameBranchRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
+        emit tree->setUpstreamRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
+        emit tree->checkoutRemoteRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-y")));
+        emit tree->deleteRemoteBranchRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-y")));
+        // Push is a remote op: refused by the service, on the status bar.
+        emit tree->pushRequested(QStringLiteral("origin"), QStringLiteral("-x"),
+                                 tree->repositoryKey());
+        QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().startsWith(
+                                     QStringLiteral("push failed: \"-x\" begins with '-'")),
+                                 10000);
+        QVERIFY2(asked.isEmpty(), qPrintable(asked.join(QStringLiteral(" | "))));
+
+        // Whatever a local op or a remote op would have run, it has had
+        // time to.
+        QTest::qWait(500);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+        QCOMPARE(fingerprint(work), before);
+        QCOMPARE(output(serverGit.run({"for-each-ref"})), serverBefore);
     }
 
     // A branch's context menu in the sidebar, up when a second launch
