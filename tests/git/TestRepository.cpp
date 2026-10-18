@@ -1957,6 +1957,47 @@ private slots:
 #endif
     }
 
+    // A submodule whose folder is the superproject: `path = /`, or a
+    // path through a committed symlink to `.`. Status opened the
+    // superproject as its own submodule, over and over, until the stack
+    // ran out; a clone of such a repository crashed GitBolt on opening.
+    void submoduleThatIsItsSuperprojectIsNotOpened_data() {
+        QTest::addColumn<QString>("kind");
+        QTest::newRow("path = /") << QStringLiteral("root");
+#ifndef Q_OS_WIN
+        QTest::newRow("a path through a symlink to .") << QStringLiteral("symlink");
+#endif
+    }
+
+    void submoduleThatIsItsSuperprojectIsNotOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        QFETCH(QString, kind);
+        gitbolt::test::TestRepo repo;
+        const QByteArray path = kind == QLatin1String("root") ? "/" : "l";
+        repo.writeFile(".gitmodules", "[submodule \"x\"]\n\tpath = " + path
+                                          + "\n\turl = https://example.com/x.git\n");
+        if (kind == QLatin1String("symlink"))
+            QVERIFY(QFile::link(QStringLiteral("."), QDir(repo.path()).filePath(QStringLiteral("l"))));
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "modules"})));
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + head + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "gitlink"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));   // as a clone leaves it
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());   // the Commit dialog's
+#endif
+    }
+
     void valuelessInsteadOfIsIgnored() {
 #ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");

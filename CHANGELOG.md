@@ -81,6 +81,11 @@ security policy for reporting vulnerabilities privately.
   repositories and Plugins › Statistics, and a `branch.<name>.remote`
   with none crashed removing a remote. The repository now opens, or,
   for `objectformat`, says what is wrong with it.
+- **A submodule that is its own repository**: a `.gitmodules` whose
+  submodule path is `/`, or goes through a committed symlink to `.`,
+  made GitBolt open the repository as its own submodule, over and over,
+  until it crashed, as it opened the repository, a freshly cloned one
+  included. Such a submodule is now taken as not checked out.
 - **Linked worktrees and submodules** opened in GitBolt now refresh
   when a commit, staging or a branch switch happens outside GitBolt.
   Their `.git` is a file pointing elsewhere, and GitBolt never watched

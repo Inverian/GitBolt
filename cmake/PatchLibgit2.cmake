@@ -114,6 +114,17 @@ gitbolt_patch(src/libgit2/submodule.c
     "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {"
     "\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (*value && !looks_like_command_line_option(value)) {"
     "in_config = 1;\n\t\t/\\* We would warn here if we had that API \\*/\n\t\tif \\(!looks_like_command_line_option")
+# A submodule whose folder is the superproject itself: `path = /`
+# (joined onto the work tree, it names the work tree), or a path through
+# a committed symlink to `.`. Status opened the superproject as its own
+# submodule, diffed it, met the submodule again, and so on until the
+# stack ran out: a clone of such a repository crashed on opening. git
+# never recurses there. Such a submodule now fails to open, which
+# status takes as a submodule not checked out.
+gitbolt_patch(src/libgit2/submodule.c
+    "\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\t/* if we opened"
+    "\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\tif (!error && !strcmp(git_repository_commondir(*subrepo),\n\t\t\tgit_repository_commondir(sm->repo))) {\n\t\tgit_repository_free(*subrepo);\n\t\t*subrepo = NULL;\n\t\tgit_str_dispose(&path);\n\t\tgit_error_set(GIT_ERROR_SUBMODULE,\n\t\t\t\"submodule '%s' is its own superproject\", sm->name);\n\t\treturn GIT_EINVALID;\n\t}\n\n\t/* if we opened"
+    "flags, wd\\);\n\n\t/\\* if we opened")
 # url.<base>.insteadOf / pushInsteadOf with no value: every remote lookup
 # (the Remote repositories list, Edit URL, Statistics) crashed.
 gitbolt_patch(src/libgit2/remote.c
