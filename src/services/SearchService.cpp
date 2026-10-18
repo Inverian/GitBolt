@@ -182,7 +182,7 @@ void SearchService::searchByFileContent(git::Repository* repo, const QString& qu
     emit searchStarted();
 
     // Use git CLI: git log -S"text" --format="%H|%an|%ae|%at|%s"
-    std::string workdir = repo->workdir();
+    std::string workdir = repo->commandDir();   // a bare repository has no work tree
     std::string queryStr = query.toStdString();
 
     runner_.runWithResult<std::vector<git::CommitData>>(
@@ -219,7 +219,7 @@ void SearchService::searchByFilePath(git::Repository* repo, const QString& path)
     emit searchStarted();
 
     // Use git CLI: git log -- path --format="%H|%an|%ae|%at|%s"
-    std::string workdir = repo->workdir();
+    std::string workdir = repo->commandDir();   // a bare repository has no work tree
     std::string pathStr = path.toStdString();
 
     runner_.runWithResult<std::vector<git::CommitData>>(

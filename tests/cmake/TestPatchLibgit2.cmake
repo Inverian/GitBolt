@@ -26,14 +26,31 @@ set(_config_file_from
     "out:\n\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
 set(_config_file_to
     "out:\n\tgit_config_list_free(config_list);\n\tif (error < 0) {\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\t\tmemset(b->file.checksum, 0, sizeof(b->file.checksum));\n\t}\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
-# A tree with the four files: <suffix> picks each one's text (_from or _to),
-# <config_file> config_file.c's.
+# The config-lines-with-no-value fixes.
+set(_submodule_from
+    "\twhile ((error = git_config_next(&entry, iter)) == 0) {\n\t\tconst char *fdot, *ldot;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {\n}\n\tif (!strcmp(entry->value, data->path)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"path\")) == 0) {\n\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"url\")) == 0) {\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {\n\tif (bare)\n\t\tflags |= GIT_REPOSITORY_OPEN_BARE;\n\n\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\t/* if we opened the submodule successfully, grab HEAD OID, etc. */\n")
+set(_submodule_to
+    "\twhile ((error = git_config_next(&entry, iter)) == 0) {\n\t\tconst char *fdot, *ldot;\n\n\t\tif (!entry->value)\n\t\t\tcontinue;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {\n}\n\tif (entry->value && !strcmp(entry->value, data->path)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"path\")) == 0) {\n\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (*value && !looks_like_command_line_option(value)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"url\")) == 0) {\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {\n\tif (bare)\n\t\tflags |= GIT_REPOSITORY_OPEN_BARE;\n\n\t/* GitBolt: a submodule is opened only strictly inside its\n\t * superproject, and never through a symlink (git's own rule). One that\n\t * is the superproject (`path = /`), or leads out of it (a symlink to\n\t * \".\" or \"..\"), opened a repository status was already reading, and\n\t * status recursed until the stack ran out. */\n\t{\n\t\tgit_str dir = GIT_STR_INIT, real = GIT_STR_INIT, realwd = GIT_STR_INIT;\n\t\tconst char *p = sm->path;\n\t\tint inside = 1, oom = git_str_puts(&dir, wd) < 0;\n\n\t\twhile (!oom && *p && inside) {\n\t\t\tconst char *slash = strchr(p, '/');\n\t\t\tsize_t len = slash ? (size_t)(slash - p) : strlen(p);\n\t\t\tstruct stat st;\n\n\t\t\tif (len) {\n\t\t\t\tif ((dir.size && dir.ptr[dir.size - 1] != '/' &&\n\t\t\t\t     git_str_putc(&dir, '/') < 0) ||\n\t\t\t\t    git_str_put(&dir, p, len) < 0) {\n\t\t\t\t\toom = 1;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t\tif (p_lstat(dir.ptr, &st) == 0 && S_ISLNK(st.st_mode))\n\t\t\t\t\tinside = 0;\n\t\t\t}\n\t\t\tif (!slash)\n\t\t\t\tbreak;\n\t\t\tp = slash + 1;\n\t\t}\n\t\tif (!oom && inside &&\n\t\t    git_fs_path_prettify_dir(&real, dir.ptr, NULL) == 0 &&\n\t\t    git_fs_path_prettify_dir(&realwd, wd, NULL) == 0)\n\t\t\tinside = !git__prefixcmp(real.ptr, realwd.ptr) && real.size > realwd.size;\n\t\tif (git_str_oom(&real) || git_str_oom(&realwd))\n\t\t\toom = 1;\n\t\tif (!oom)\n\t\t\tgit_error_clear();\n\t\tgit_str_dispose(&dir);\n\t\tgit_str_dispose(&real);\n\t\tgit_str_dispose(&realwd);\n\t\tif (oom) {\n\t\t\tgit_str_dispose(&path);\n\t\t\treturn -1;\n\t\t}\n\t\tif (!inside) {\n\t\t\tgit_str_dispose(&path);\n\t\t\tsm->flags |= GIT_SUBMODULE_STATUS__WD_SCANNED;\n\t\t\tgit_error_set(GIT_ERROR_SUBMODULE,\n\t\t\t\t\"submodule '%s' is not inside its superproject\", sm->name);\n\t\t\treturn GIT_EINVALID;\n\t\t}\n\t}\n\n\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\t/* GitBolt: nor may the repository opened have its work tree at the\n\t * superproject's, or above it (core.worktree, or a worktree's gitdir\n\t * file, can put it there): status would read the superproject again. */\n\tif (!error && !bare && git_repository_workdir(*subrepo)) {\n\t\tgit_str real = GIT_STR_INIT, realwd = GIT_STR_INIT;\n\t\tint loops = 0, oom = 0;\n\n\t\tif (git_fs_path_prettify_dir(&real, git_repository_workdir(*subrepo), NULL) == 0 &&\n\t\t    git_fs_path_prettify_dir(&realwd, wd, NULL) == 0)\n\t\t\tloops = !git__prefixcmp(realwd.ptr, real.ptr);\n\t\telse if (git_str_oom(&real) || git_str_oom(&realwd))\n\t\t\toom = 1;\n\t\telse\n\t\t\tgit_error_clear();\n\t\tgit_str_dispose(&real);\n\t\tgit_str_dispose(&realwd);\n\t\tif (oom || loops) {\n\t\t\tgit_repository_free(*subrepo);\n\t\t\t*subrepo = NULL;\n\t\t\tgit_str_dispose(&path);\n\t\t\tif (oom)\n\t\t\t\treturn -1;\n\t\t\tsm->flags |= GIT_SUBMODULE_STATUS__WD_SCANNED;\n\t\t\tgit_error_set(GIT_ERROR_SUBMODULE,\n\t\t\t\t\"submodule '%s' is not inside its superproject\", sm->name);\n\t\t\treturn GIT_EINVALID;\n\t\t}\n\t}\n\n\t/* if we opened the submodule successfully, grab HEAD OID, etc. */\n")
+set(_remote_from
+    "\t\tif (git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
+set(_remote_to
+    "\t\tif (!entry->value || git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (!entry->value || strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (!entry->value || strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
+set(_repository_from
+    "\n\tif ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
+set(_repository_to
+    "\n\tif (!entry->value) {\n\t\tgit_error_set(GIT_ERROR_REPOSITORY,\n\t\t\t\"missing value for 'extensions.objectformat'\");\n\t\terror = GIT_EINVALID;\n\t} else if ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
+
+# A tree with the seven files: <suffix> picks each one's text (_from or
+# _to), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
     file(WRITE ${dir}/cmake/DefaultCFlags.cmake "${_cflags${suffix}}")
     file(WRITE ${dir}/include/git2/common.h "${_common${suffix}}")
     file(WRITE ${dir}/src/libgit2/config.c "${_config${suffix}}")
     file(WRITE ${dir}/src/libgit2/config_file.c "${config_file}")
+    file(WRITE ${dir}/src/libgit2/submodule.c "${_submodule${suffix}}")
+    file(WRITE ${dir}/src/libgit2/remote.c "${_remote${suffix}}")
+    file(WRITE ${dir}/src/libgit2/repository.c "${_repository${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -46,7 +63,9 @@ endfunction()
 
 function(expect_patched what dir)
     foreach(_pair "cmake/DefaultCFlags.cmake;_cflags_to" "include/git2/common.h;_common_to"
-                  "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to")
+                  "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to"
+                  "src/libgit2/submodule.c;_submodule_to" "src/libgit2/remote.c;_remote_to"
+                  "src/libgit2/repository.c;_repository_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)

@@ -5,6 +5,7 @@
 #include <QtConcurrent>
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "git/GitProcess.h"
 
 #include <QAction>
 #include <QApplication>
@@ -39,6 +40,20 @@
 namespace gitbolt::dialogs {
 
 namespace {
+
+// The environment `git config --global` runs in: GitBolt's, less git's
+// repository variables (git::GitProcess::repositoryEnvVars), as for
+// every git GitBolt runs. An exported GIT_CONFIG made git refuse
+// ("only one config file at a time"): the fields came up empty and
+// Apply saved nothing.
+QProcessEnvironment gitEnvironment()
+{
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const auto& name : git::GitProcess::repositoryEnvVars())
+        env.remove(QString::fromStdString(name));
+    return env;
+}
+
 
 // Visual tuning constant. The dialog's actual width/height come
 // from SettingsService::defaultDialogSize() — this is just the
@@ -1169,6 +1184,7 @@ void SettingsDialog::loadGitConfig()
     watcher->setFuture(QtConcurrent::run([]() {
         auto readConfig = [](const QString& key) -> QString {
             QProcess proc;
+            proc.setProcessEnvironment(gitEnvironment());
             proc.start(QStringLiteral("git"),
                        {QStringLiteral("config"),
                         QStringLiteral("--global"), key});
@@ -1191,6 +1207,7 @@ void SettingsDialog::saveGitConfig()
         if (value.isEmpty())
             return;
         QProcess proc;
+        proc.setProcessEnvironment(gitEnvironment());
         proc.start(QStringLiteral("git"),
                     {QStringLiteral("config"), QStringLiteral("--global"), key, value});
         proc.waitForFinished(3000);

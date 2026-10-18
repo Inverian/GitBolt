@@ -77,6 +77,8 @@ bool GitService::openRepository(const QString& path) {
         return false;
     }
     const QString root = QString::fromStdString(found);
+    const QString gitDir = QString::fromStdString(result->path());
+    const QString commonDir = QString::fromStdString(result->commonDir());
     {
         // Swap under the libgit2 mutex so an in-flight refresh
         // worker can't have the old repo destroyed mid-call.
@@ -84,7 +86,7 @@ bool GitService::openRepository(const QString& path) {
         repo_ = std::make_shared<git::Repository>(std::move(*result));
         openKey_ = rebaseStepKey(*repo_);
     }
-    watcher_.watchRepository(root);
+    watcher_.watchRepository(root, gitDir, commonDir);
     emit repositoryOpened(root);
     refreshStatus();
     refreshLog();
@@ -106,6 +108,8 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
         QString error;
         int errorCode = 0;   // git::GitErrorCode
         QString root;        // what opened: `path`, or the repository it is in
+        QString gitDir;      // its git dir and common dir, for the watcher
+        QString commonDir;
     };
 
     runner_.runWithResult<OpenOutcome>(
@@ -118,9 +122,12 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
             if (!result)
                 return { nullptr,
                          QString::fromStdString(result.error().message()),
-                         static_cast<int>(result.error().code()), QString() };
+                         static_cast<int>(result.error().code()), QString(),
+                         QString(), QString() };
+            const QString gitDir = QString::fromStdString(result->path());
+            const QString commonDir = QString::fromStdString(result->commonDir());
             return { std::make_shared<git::Repository>(std::move(*result)),
-                     QString(), 0, QString::fromStdString(found) };
+                     QString(), 0, QString::fromStdString(found), gitDir, commonDir };
         },
         [this, path, gen](OpenOutcome outcome) {
             // Main thread. A newer open/close superseded us — drop
@@ -148,7 +155,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
             // From here on the path is the repository's: a subfolder
             // asked for is not what opened.
             const QString root = outcome.root;
-            watcher_.watchGitInternals(root);
+            watcher_.watchGitInternals(root, outcome.gitDir, outcome.commonDir);
             startWatchEnumeration(root, gen);
 
             // Emit BEFORE kicking refreshes: onRepositoryOpened

@@ -20,7 +20,17 @@ using FolderHandler = std::function<void(const QStringList& folders)>;
 /// from inside the service call: it should only queue them. An empty
 /// handler takes the provider away again. Does nothing off the cocoa
 /// platform (offscreen, minimal), where there is no NSApp.
-void installServicesProvider(FolderHandler onFolders);
+///
+/// `registerWithSystem`: whether Finder's requests come here. macOS
+/// gives the service to one process per user, the first to ask, until
+/// that process exits (taking the provider away doesn't give it back),
+/// and a process whose ask failed never gets it. So only the GitBolt
+/// that opens things asks, once it knows it is the one, and never while
+/// another process has the service (a GitBolt still quitting, say): it
+/// waits for it to be free, checking every 250 ms for 30 s and every
+/// 5 s after that. Without it, the provider only answers
+/// sendToServicesProvider().
+void installServicesProvider(FolderHandler onFolders, bool registerWithSystem);
 
 /// Brings GitBolt in front of the app that asked it to open something.
 void activateApp();

@@ -6,6 +6,7 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "git/Askpass.h"
+#include "git/GitProcess.h"
 #include "telemetry/EventQueue.h"
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
@@ -227,6 +228,15 @@ int main(int argc, char* argv[]) {
     if (qgetenv(gitbolt::git::kAskpassModeEnv) == gitbolt::git::kAskpassRefuse)
         return 1;
 
+    // Which repository git works in is the open one's business, never
+    // GitBolt's environment's: a shell that exports GIT_DIR or
+    // GIT_WORK_TREE (a bare dotfiles setup) sent git's commands to that
+    // repository. Gone for the whole process, so nothing it starts
+    // inherits them, an editor that Open Externally starts included.
+    // (GitProcess, the terminals and GitK leave them out as well.)
+    for (const auto& name : gitbolt::git::GitProcess::repositoryEnvVars())
+        qunsetenv(name.c_str());
+
     // Install crash handler before anything else. Its report header
     // says whether a later launch may upload the report: official
     // build, no environment opt-out, not a test session. There is no
@@ -324,19 +334,13 @@ int main(int argc, char* argv[]) {
     }
 
     // Folders macOS asks a running GitBolt to open: open-documents
-    // events (a Dock drop, `open -a GitBolt <folder>`) and Finder's
-    // "Open in GitBolt" service. Taken from here on and held until the
-    // window is up (see OpenRequests.h).
+    // events (a Dock drop, `open -a GitBolt <folder>`), taken from here
+    // on, and Finder's "Open in GitBolt" service (set up below, once
+    // this launch is the one that opens things). Held until the window
+    // is up (see OpenRequests.h).
     gitbolt::app::OpenRequests openRequests;
     app.installEventFilter(&openRequests);
 #ifdef Q_OS_MACOS
-    gitbolt::app::macos::installServicesProvider(
-        [&openRequests](const QStringList& folders) {
-            openRequests.submit(folders.first());
-        });
-    const auto servicesProviderGone = qScopeGuard([] {
-        gitbolt::app::macos::installServicesProvider({});
-    });
     // A launch by Finder or LaunchServices has its folder in an event,
     // not in argv, and the event comes once the event loop first
     // turns. Turn it now, before the single-instance guard: a launch
@@ -406,6 +410,23 @@ int main(int argc, char* argv[]) {
         reportUnresponsiveInstance();
         return 1;
     }
+
+#ifdef Q_OS_MACOS
+    // Finder's "Open in GitBolt", only now that this is the GitBolt
+    // that opens things: macOS gives the service to the first process
+    // that asks, for as long as it runs. A launch that then handed its
+    // folder over, or a test or the dogfood driver (an instance name of
+    // their own), would have kept it from the user's GitBolt. Those
+    // keep the provider for the test bridge's service-open only.
+    gitbolt::app::macos::installServicesProvider(
+        [&openRequests](const QStringList& folders) {
+            openRequests.submit(folders.first());
+        },
+        instanceOverride.isEmpty());
+    const auto servicesProviderGone = qScopeGuard([] {
+        gitbolt::app::macos::installServicesProvider({}, false);
+    });
+#endif
 
     // The PATH git's children get, a commit's hooks among them: the
     // login shell's, asked in the background now, well before the
@@ -558,6 +579,13 @@ int main(int argc, char* argv[]) {
 #ifdef Q_OS_MACOS
         gitbolt::app::macos::activateApp();
 #endif
+        // Out of the Dock (or the taskbar) first, keeping it maximized
+        // or full screen if it was: show() and raise() leave a
+        // minimized window where it is, and the repository opened in
+        // it unseen.
+        if (window.windowState() & Qt::WindowMinimized)
+            window.setWindowState((window.windowState() & ~Qt::WindowMinimized)
+                                  | Qt::WindowActive);
         window.show();
         window.raise();
         window.activateWindow();

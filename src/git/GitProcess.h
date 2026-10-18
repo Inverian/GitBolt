@@ -69,6 +69,17 @@ public:
     /// "Permission denied". Credential helpers still answer.
     void forbidPrompts() { promptsForbidden_ = true; }
 
+    /// git's variables that say where the repository is, or its config
+    /// (`git rev-parse --local-env-vars`, less GIT_CONFIG_PARAMETERS and
+    /// GIT_CONFIG_COUNT). No git child, terminal or gitk inherits them
+    /// from GitBolt's own environment.
+    static const std::vector<std::string>& repositoryEnvVars();
+
+    /// For a bare repository: GIT_DIR names it, rather than git finding
+    /// it from the working directory, which git refuses where
+    /// safe.bareRepository is "explicit" ("cannot use bare repository").
+    void setGitDir(const std::string& gitDir) { gitDir_ = gitDir; }
+
     /// Like run(), but feeds `stdinData` to the child's stdin and
     /// closes the write channel. Needed for commands that read a
     /// payload from stdin, e.g. `git apply --cached -` with a patch
@@ -332,6 +343,7 @@ private:
     void keepRewordMessage() const;
 
     std::string workDir_;
+    std::string gitDir_;   // GIT_DIR, if set (setGitDir)
     std::string gitPath_;
     std::vector<std::shared_ptr<std::atomic<bool>>> cancelFlags_;
     bool promptsForbidden_ = false;

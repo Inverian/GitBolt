@@ -20,6 +20,7 @@ set(E2E_TESTS
     test_auto_fetch
     test_auto_fetch_credentials
     test_auto_fetch_disowned
+    test_bare_repo
     test_branch_switch
     test_clone_dialog
     test_commit_flow

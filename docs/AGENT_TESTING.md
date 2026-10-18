@@ -98,6 +98,7 @@ tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ dec
 tools/bridge.py fire-timer periodicFetchTimer # the auto-fetch tick now, not in N minutes
 tools/bridge.py file-open /path/to/repo/sub   # a QFileOpenEvent, as a Dock drop or `open -a` sends
 tools/bridge.py service-open /path/to/repo    # Finder's Open in GitBolt (macOS, cocoa only)
+tools/bridge.py minimize              # the main window to the Dock; dump-state's `minimized` says
 tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay issues
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```
