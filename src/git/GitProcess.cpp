@@ -215,7 +215,16 @@ Result<ProcessOutput> GitProcess::runWithInput(
     return runImpl(args, timeout.value_or(defaultTimeoutMs()), &stdinData);
 }
 
+Result<void> GitProcess::checkOperand(const std::string& name) {
+    if (name.empty() || name.front() != '-')
+        return Result<void>::success();
+    return GitError(GitErrorCode::InvalidSpec,
+                    "\"" + name + "\" begins with '-', which git would read as an option, "
+                    "not a name, so GitBolt doesn't pass it to git.");
+}
+
 Result<std::vector<std::string>> GitProcess::logOneline(const std::string& range, int maxCount) const {
+    if (auto refused = checkOperand(range); !refused) return refused.error();
     std::vector<std::string> args = {"log", "--oneline", "--format=%H %s"};
     if (maxCount > 0) { args.emplace_back("-n"); args.push_back(std::to_string(maxCount)); }
     if (!range.empty()) args.push_back(range);
@@ -232,12 +241,15 @@ Result<std::vector<std::string>> GitProcess::logOneline(const std::string& range
 }
 
 Result<std::string> GitProcess::diffRaw(const std::string& from, const std::string& to) const {
-    auto result = run({"diff", from, to});
+    for (const std::string* rev : {&from, &to})
+        if (auto refused = checkOperand(*rev); !refused) return refused.error();
+    auto result = run({"diff", from, to, "--"});
     if (!result) return result.error();
     return result->stdoutData;
 }
 
 Result<std::string> GitProcess::showFile(const std::string& revision, const std::string& path) const {
+    if (auto refused = checkOperand(revision); !refused) return refused.error();
     auto result = run({"show", revision + ":" + path});
     if (!result) return result.error();
     return result->stdoutData;
@@ -253,29 +265,63 @@ Result<ProcessOutput> GitProcess::push(const std::string& remote, const std::str
     // reserve() instead of `= {"push"}`: growing a vector built from a
     // one-element initializer list trips GCC 13's -Warray-bounds false
     // positive inside <basic_string.h> (same in pull/fetch below).
+    //
+    // The names come from the repository: a branch in the sidebar, the
+    // remote it was pushed to. A branch named "--receive-pack=<command>"
+    // (git allows the name) went to git as an option, and against a
+    // remote on a local path git ran the command. So they are checked
+    // first, the operands come after "--", and the branch goes as a
+    // full ref, which can't begin with '-' either. A full ref also
+    // pushes the branch where a tag shares its name, which the short
+    // one refused as matching more than one ref.
+    for (const std::string* name : {&remote, &branch})
+        if (auto refused = checkOperand(*name); !refused) return refused.error();
     std::vector<std::string> args;
-    args.reserve(5);
+    args.reserve(6);
     args.emplace_back("push");
     if (force) args.emplace_back("--force-with-lease");
     if (setUpstream) args.emplace_back("--set-upstream");
+    if (!remote.empty() || !branch.empty()) args.emplace_back("--");
     if (!remote.empty()) args.push_back(remote);
-    if (!branch.empty()) args.push_back(branch);
+    if (!branch.empty())
+        args.push_back(branch.rfind("refs/", 0) == 0 ? branch : "refs/heads/" + branch);
     return run(args, 120000);
+}
+
+Result<ProcessOutput> GitProcess::deleteRemoteBranch(const std::string& remote,
+                                                     const std::string& branch) const {
+    // As push() above: `git push <remote> --delete <branch>` read a
+    // branch named "-x" (a remote's "origin/-x") as an option. The
+    // short name stays: git deletes a full ref the server doesn't have
+    // without a word, and a branch someone else deleted already is to
+    // be reported as such.
+    //
+    // Only the remote is checked. After "--" the branch is a refspec
+    // and nothing else, which --delete makes ":<branch>", so a branch
+    // named like an option is deleted as any other; refusing it left
+    // such a branch, on a server everyone fetches from, for the shell
+    // to clear away.
+    if (auto refused = checkOperand(remote); !refused) return refused.error();
+    return run({"push", "--delete", "--", remote, branch}, 120000);
 }
 
 Result<ProcessOutput> GitProcess::pull(const std::string& remote, const std::string& branch) const {
     // Same empty-arg avoidance as push — `git pull origin ""` errors
     // out, but bare `git pull origin` (or just `git pull`) honors the
-    // tracking branch.
+    // tracking branch. Same check of the names, too.
+    for (const std::string* name : {&remote, &branch})
+        if (auto refused = checkOperand(*name); !refused) return refused.error();
     std::vector<std::string> args;
-    args.reserve(3);
+    args.reserve(4);
     args.emplace_back("pull");
+    if (!remote.empty() || !branch.empty()) args.emplace_back("--");
     if (!remote.empty()) args.push_back(remote);
     if (!branch.empty()) args.push_back(branch);
     return run(args, 120000);
 }
 
 Result<ProcessOutput> GitProcess::fetch(const std::string& remote, bool pruneByDefault) const {
+    if (auto refused = checkOperand(remote); !refused) return refused.error();
     // `-c fetch.prune=true`, not --prune: a remote's own
     // remote.<name>.prune outranks fetch.prune even from -c, so a
     // remote set not to prune keeps its refs, where --prune would
@@ -1087,6 +1133,11 @@ QString GitProcess::stoppedRewordMessage(std::string* hash) const {
 // resolved to nothing) left an earlier commit with the same message
 // there ("wip", "wip"), and Continue renamed that one.
 std::optional<bool> GitProcess::headIsPickOf(const std::string& hash) const {
+    // `hash` is read from git's rebase state in the repository, which
+    // holds whatever was written there: a word that begins with '-'
+    // went to log and diff-tree below as an option.
+    if (!checkOperand(hash))
+        return std::nullopt;
     const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
     if (!ids || !ids->success())
         return std::nullopt;
@@ -1194,6 +1245,8 @@ std::string GitProcess::committedRebaseStop() const {
 // git's own record of the stop where it keeps one (rebase-merge/amend),
 // else HEAD's reflog, else, with no reflog either, the message.
 bool GitProcess::headIsTheRewordStop(const std::string& hash) const {
+    if (!checkOperand(hash))    // as in headIsPickOf()
+        return false;
     const auto ids = run({"rev-parse", "HEAD", hash + "^{commit}"});
     if (!ids || !ids->success())
         return false;
@@ -1392,6 +1445,9 @@ std::string GitProcess::unpickedSequenceStop() const {
         revert = true;
     else if (verb != "pick" && verb != "p")
         return {};
+    // From the repository's sequencer state, as headIsPickOf()'s hash is.
+    if (!checkOperand(stop))
+        return {};
     const auto full = run({"rev-parse", "--verify", "--quiet", stop + "^{commit}"});
     if (!full || !full->success())
         return {};
@@ -1525,13 +1581,24 @@ Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend)
     return result;
 }
 
+// git-flow parses its arguments with shFlags, which takes a name that
+// begins with '-' (a feature typed so, or one of the repository's
+// feature/ branches named so) for a flag of its own.
+namespace {
+Result<ProcessOutput> gitFlow(const GitProcess& git, const char* kind, const char* verb,
+                              const std::string& name) {
+    if (auto refused = GitProcess::checkOperand(name); !refused) return refused.error();
+    return git.run({"flow", kind, verb, name});
+}
+} // namespace
+
 Result<ProcessOutput> GitProcess::gitFlowInit() const { return run({"flow", "init", "-d"}); }
-Result<ProcessOutput> GitProcess::gitFlowFeatureStart(const std::string& n) const { return run({"flow", "feature", "start", n}); }
-Result<ProcessOutput> GitProcess::gitFlowFeatureFinish(const std::string& n) const { return run({"flow", "feature", "finish", n}); }
-Result<ProcessOutput> GitProcess::gitFlowReleaseStart(const std::string& v) const { return run({"flow", "release", "start", v}); }
-Result<ProcessOutput> GitProcess::gitFlowReleaseFinish(const std::string& v) const { return run({"flow", "release", "finish", v}); }
-Result<ProcessOutput> GitProcess::gitFlowHotfixStart(const std::string& v) const { return run({"flow", "hotfix", "start", v}); }
-Result<ProcessOutput> GitProcess::gitFlowHotfixFinish(const std::string& v) const { return run({"flow", "hotfix", "finish", v}); }
+Result<ProcessOutput> GitProcess::gitFlowFeatureStart(const std::string& n) const { return gitFlow(*this, "feature", "start", n); }
+Result<ProcessOutput> GitProcess::gitFlowFeatureFinish(const std::string& n) const { return gitFlow(*this, "feature", "finish", n); }
+Result<ProcessOutput> GitProcess::gitFlowReleaseStart(const std::string& v) const { return gitFlow(*this, "release", "start", v); }
+Result<ProcessOutput> GitProcess::gitFlowReleaseFinish(const std::string& v) const { return gitFlow(*this, "release", "finish", v); }
+Result<ProcessOutput> GitProcess::gitFlowHotfixStart(const std::string& v) const { return gitFlow(*this, "hotfix", "start", v); }
+Result<ProcessOutput> GitProcess::gitFlowHotfixFinish(const std::string& v) const { return gitFlow(*this, "hotfix", "finish", v); }
 
 Result<ProcessOutput> GitProcess::gc() const { return run({"gc", "--auto"}, 300000); }
 Result<ProcessOutput> GitProcess::prune() const { return run({"prune"}, 120000); }

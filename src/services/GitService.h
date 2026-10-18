@@ -286,12 +286,16 @@ public:
 
     /// Pushes `branch` (empty = the checked-out branch). A branch with
     /// no upstream yet is published with --set-upstream instead of
-    /// failing. Safe off the GUI thread, like pull/fetch.
+    /// failing. Safe off the GUI thread, like pull/fetch. A remote or
+    /// branch name git would read as an option is refused before any
+    /// git runs (git::GitProcess::checkOperand), as operationFailed.
     bool push(const QString& remote, const QString& branch);
-    /// `git push <remote> --delete <branch>`: removes the branch on the
-    /// server and, on success, the local remote-tracking ref. Failures
-    /// surface as operationFailed("delete remote branch", …). Safe off
-    /// the GUI thread.
+    /// `git push --delete -- <remote> <branch>`: removes the branch on
+    /// the server and, on success, the local remote-tracking ref, a
+    /// branch whose name begins with '-' too. Failures, and a remote
+    /// name git would read as an option, surface as
+    /// operationFailed("delete remote branch", …). Safe off the GUI
+    /// thread.
     bool deleteRemoteBranch(const QString& remote, const QString& branch);
     bool pull(const QString& remote, const QString& branch);
     /// Prunes the remote-tracking refs of branches deleted on the

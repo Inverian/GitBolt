@@ -197,6 +197,13 @@ private:
     /// menus and toolbar are off then; these weren't, and a libgit2
     /// checkout ran under a merge.
     bool refuseWhileLocalOpRuns();
+    /// For a local op that hands git branch, remote or revision names
+    /// (`names`, from the repository or typed by the user): whether one
+    /// of them is a name git would read as an option
+    /// (git::GitProcess::checkOperand). Says so in a warning titled
+    /// `failTitle`, as the op's own failure would be, and returns true;
+    /// the caller then runs nothing.
+    bool refuseOptionLikeNames(const QString& failTitle, const QStringList& names);
     /// A step runs on the open repository (GitService::
     /// rebaseStepRunning()): a commit and its hooks, a rebase step, an
     /// abort. The repo actions and menus are off then, as for a local
