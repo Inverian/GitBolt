@@ -1495,12 +1495,74 @@ std::string workTreePathProblem(const QString& workdir, const std::string& path)
     }
     return {};
 }
+
+// `path` as a checkout's pathspec that matches it alone. libgit2 reads
+// a checkout's paths as patterns, GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH
+// or not: a backslash escapes the character after it (so x\y.txt was
+// looked for as xy.txt, and never written), a trailing space or
+// carriage return comes off, a line feed ends the pattern and a
+// leading # makes it a comment, which matches every path. Those, the
+// wildcards and a leading ! (a negation) are escaped here, and matched
+// as fnmatch patterns. A carriage return at the end comes off escaped
+// too, so it goes in as a bracket expression. So do backslashes right
+// before it: libgit2 walks only the paths that begin with the text
+// before the first wildcard, and takes a [ after an escaped backslash
+// for an escaped one. Nothing else goes in brackets: where case is
+// ignored, libgit2 lowercases the path's letter and not a bracket's.
+std::string literalPathspec(const std::string& path) {
+    size_t bracketed = path.size();
+    if (!path.empty() && path.back() == '\r') {
+        bracketed = path.size() - 1;
+        while (bracketed > 0 && path[bracketed - 1] == '\\')
+            --bracketed;
+    }
+    std::string spec;
+    spec.reserve(path.size() * 4);
+    for (size_t i = 0; i < path.size(); ++i) {
+        const char c = path[i];
+        if (i >= bracketed) {
+            spec += "[\\";
+            spec += c;
+            spec += ']';
+            continue;
+        }
+        if (std::string_view("\\*?[ \t\n\v\f\r").find(c) != std::string_view::npos
+            || (i == 0 && (c == '!' || c == '#')))
+            spec += '\\';
+        spec += c;
+    }
+    return spec;
+}
+
+// Another path a checkout of one path would write. libgit2 compares a
+// pattern with each path as plain text before it matches it as one, so
+// the escaped spelling of a\ (a\\) is also the name of a file a\\. The
+// checkout overwrote that file's changes, or, were it conflicted too,
+// deleted it from the work tree and the index. It stops at the first
+// such file now, before it writes anything.
+struct OnePathCheckout {
+    const char* path;
+    std::string other;
+
+    static int notify(git_checkout_notify_t, const char* notified, const git_diff_file*,
+                      const git_diff_file*, const git_diff_file*, void* payload) {
+        auto* self = static_cast<OnePathCheckout*>(payload);
+        if (std::strcmp(notified, self->path) == 0)
+            return 0;
+        self->other = notified;
+        return GIT_EUSER;
+    }
+};
 } // namespace
 
 Result<void> Repository::resolveConflict(const std::string& path, const std::string& content) {
     const QString workdir = QString::fromStdString(this->workdir());
     if (workdir.isEmpty())
         return GitError(GitErrorCode::BareRepo, "A bare repository has no work tree to resolve in.");
+    // The file is written by a checkout: refused before a link in the
+    // way goes, or anything is staged.
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
 
     git_index* index = nullptr;
     int err = freshIndex(&index, repo_);
@@ -1530,11 +1592,18 @@ Result<void> Repository::resolveConflict(const std::string& path, const std::str
                                    "in it, then stage it.");
     }
 
-    // The content goes in with ours' mode: an executable stays one. Ours
-    // is gone in a delete/modify conflict, and theirs' is the one left.
+    // The content goes in with the mode git's merge gives the file, as
+    // it left it in the work tree: one side's change of the executable
+    // bit wins over the side that kept the ancestor's, and ours' where
+    // both changed it or there is no ancestor. With ours' alone, a
+    // chmod +x on theirs was dropped, in a rebase the user's own. A
+    // delete/modify conflict has one side, whose mode it keeps.
     std::string staged = content;
-    const git_index_entry* modeSide = ours ? ours : theirs ? theirs : ancestor;
-    uint32_t mode = modeSide ? modeSide->mode : GIT_FILEMODE_BLOB;
+    uint32_t mode = GIT_FILEMODE_BLOB;
+    if (ours && theirs)
+        mode = ancestor && ours->mode == ancestor->mode ? theirs->mode : ours->mode;
+    else if (const git_index_entry* side = ours ? ours : theirs ? theirs : ancestor)
+        mode = side->mode;
     const auto isLinkEntry = [](const git_index_entry* e) {
         return e && e->mode == GIT_FILEMODE_LINK;
     };
@@ -1598,19 +1667,30 @@ Result<void> Repository::resolveConflict(const std::string& path, const std::str
     // Stages it and moves the conflict's entries to resolve-undo, as
     // `git add` does.
     err = git_index_add_from_buffer(index, &entry, staged.data(), staged.size());
+    OnePathCheckout checkout{path.c_str(), {}};
     if (err >= 0) {
         git_checkout_options opts;
         git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
-        opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH
+        // SKIP_UNMERGED: the path is resolved by now, and the others'
+        // conflicts are none of this checkout's business. Reading them,
+        // it checked the NAME entries libgit2's cherry-pick leaves for a
+        // rename against them, and failed on one naming a path resolved
+        // since or out of its paths: nothing in such a pick resolved.
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_SKIP_UNMERGED
                                  | GIT_CHECKOUT_DONT_WRITE_INDEX;
         // Against the index itself, as `git checkout-index -f` does: the
         // file is written wherever it differs from the index, or is
         // missing. Against HEAD, a path that had been a link there and
         // is a file now was left out once the link was gone.
         opts.baseline_index = index;
-        const char* paths[] = {path.c_str()};
+        const std::string spec = literalPathspec(path);
+        const char* paths[] = {spec.c_str()};
         opts.paths.strings = const_cast<char**>(paths);
         opts.paths.count = 1;
+        opts.notify_flags = GIT_CHECKOUT_NOTIFY_CONFLICT | GIT_CHECKOUT_NOTIFY_DIRTY
+                            | GIT_CHECKOUT_NOTIFY_UPDATED;
+        opts.notify_cb = &OnePathCheckout::notify;
+        opts.notify_payload = &checkout;
         err = git_checkout_index(repo_, index, &opts);
     }
     if (err >= 0)
@@ -1618,7 +1698,11 @@ Result<void> Repository::resolveConflict(const std::string& path, const std::str
     if (err < 0) {
         // The conflict stays: libgit2's copy of the index goes back to
         // the file's (see Index.cpp).
-        const GitError error = GitError::fromLibgit2(err);
+        const GitError error = checkout.other.empty()
+            ? GitError::fromLibgit2(err)
+            : GitError(GitErrorCode::GenericError,
+                       path + " was not resolved: writing it would also have written "
+                           + checkout.other + ".");
         git_index_read(index, /*force=*/1);
         return error;
     }

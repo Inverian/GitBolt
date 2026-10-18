@@ -237,6 +237,12 @@ set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Repository > Edit .gitignore, .gitattributes and .mailmap: a symbolic
+# link there (one a repository committed) is neither read nor written
+# through. Off screen; it answers the editor and the message boxes.
+gitbolt_add_test(test_edit_config_file ui/TestEditConfigFile.cpp)
+target_link_libraries(test_edit_config_file PRIVATE gitbolt_ui)
+set_property(TEST test_edit_config_file APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # A real MainWindow while git works on its repository: the actions,
 # the toolbar's branch switch and the sidebar off during a commit's
 # hooks; Checkout as local branch and a submodule's Update as local ops;
