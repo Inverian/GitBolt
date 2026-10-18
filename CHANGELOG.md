@@ -87,7 +87,8 @@ security policy for reporting vulnerabilities privately.
   open a repository it was already reading as a submodule of its own,
   over and over, until it crashed, as it opened the repository, a
   freshly cloned one included. Such a submodule is now taken as not
-  checked out.
+  checked out, and, like git, GitBolt no longer follows a submodule's
+  path through a symlink.
 - **Linked worktrees and submodules** opened in GitBolt now refresh
   when a commit, staging or a branch switch happens outside GitBolt.
   Their `.git` is a file pointing elsewhere, and GitBolt never watched

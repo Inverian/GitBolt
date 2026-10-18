@@ -2058,6 +2058,83 @@ private slots:
 #endif
     }
 
+    // An absorbed submodule whose core.worktree names the superproject's
+    // work tree (a hand edit gone wrong): the repository opened for it
+    // has the superproject's work tree, and status read it again as
+    // its own submodule, and so on.
+    void submoduleWorkTreeElsewhereIsNotOpened() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString c0 = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile(".gitmodules", "[submodule \"s\"]\n\tpath = s\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c0 + ",s").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "s"})));
+        // s: a clone of the repository at that commit, its git dir
+        // absorbed under .git/modules/s, its core.worktree the superproject's.
+        QVERIFY(succeeded(git.run({"clone", "-q", repo.path().toStdString(), "s"})));
+        const QDir top(repo.path());
+        QVERIFY(top.mkpath(QStringLiteral(".git/modules")));
+        QVERIFY(QDir().rename(top.filePath(QStringLiteral("s/.git")),
+                              top.filePath(QStringLiteral(".git/modules/s"))));
+        QFile gitFile(top.filePath(QStringLiteral("s/.git")));
+        QVERIFY(gitFile.open(QIODevice::WriteOnly));
+        gitFile.write("gitdir: ../.git/modules/s\n");
+        gitFile.close();
+        QVERIFY(succeeded(git.run({"--git-dir=.git/modules/s", "config", "core.worktree",
+                                   "../../.."})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(opened->status().ok());               // every open runs this
+        QVERIFY(opened->diffIndexToWorkdir().ok());
+#endif
+    }
+
+    // A submodule path through a symlink, even one to a folder inside
+    // the repository: git won't follow it, and neither does GitBolt (on
+    // Windows, where realpath doesn't resolve symlinks, it is what
+    // catches a symlink to "." or "..").
+    void submodulePathThroughASymlinkIsNotOpened() {
+#if !defined(GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#elif defined(Q_OS_WIN)
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("inner/a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        const QString c0 = output(git.run({"rev-parse", "HEAD"}));
+        // inner/x: a real repository, with a commit of its own.
+        QVERIFY(succeeded(git.run({"clone", "-q", repo.path().toStdString(), "inner/x"})));
+        QVERIFY(QFile::link(QStringLiteral("inner"), QDir(repo.path()).filePath(QStringLiteral("l"))));
+        repo.writeFile(".gitmodules", "[submodule \"x\"]\n\tpath = l/x\n\turl = ./\n");
+        QVERIFY(succeeded(git.run({"add", ".gitmodules", "l"})));
+        QVERIFY(succeeded(git.run({"update-index", "--add", "--cacheinfo",
+                                   ("160000," + c0 + ",x").toStdString()})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "x"})));
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("x")));
+
+        git_repository* raw = nullptr;
+        QCOMPARE(git_repository_open(&raw, repo.path().toUtf8().constData()), 0);
+        git_submodule* sm = nullptr;
+        QCOMPARE(git_submodule_lookup(&sm, raw, "x"), 0);
+        git_repository* smRepo = nullptr;
+        const int opened = git_submodule_open(&smRepo, sm);
+        git_repository_free(smRepo);
+        git_submodule_free(sm);
+        git_repository_free(raw);
+        QVERIFY2(opened < 0, "opened a submodule through a symlink");
+#endif
+    }
+
     // A linked worktree of the repository inside its work tree, tracked
     // as a submodule (a gh-pages checkout, say): a different working
     // tree, opened as any submodule. Clean, it is no change.
@@ -2068,6 +2145,10 @@ private slots:
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
         gitbolt::git::GitProcess git(repo.path().toStdString());
+        // Git for Windows' system config has core.autocrlf on: the CLI
+        // would check the worktree out with CRLF, which libgit2 (its
+        // system config kept out, TestRepo) takes for a change.
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
         QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "pages", "public"})));
         const QString head = output(git.run({"rev-parse", "HEAD"}));
         repo.writeFile(".gitmodules", "[submodule \"public\"]\n\tpath = public\n\turl = ./\n");
