@@ -8,6 +8,8 @@
 #include <QSet>
 #include <QString>
 #include <QWidget>
+#include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -132,6 +134,34 @@ private:
     // overwriting the newer commit's details.
     quint64 containsQueryToken_ = 0;
 
+    // The selected commit's diff is read on a worker (GitService::
+    // readAsync): Repository::diffCommit walks the whole tree of a root
+    // commit, and here on the GUI thread a commit with a huge or deeply
+    // nested tree froze the window, for minutes. It fills the Stats row
+    // and the Diff tab when it lands. Monotonic like the token above,
+    // and shared with the worker: a reply for an earlier selection is
+    // dropped, and a request the selection has left behind before its
+    // turn came doesn't run at all.
+    std::shared_ptr<std::atomic<quint64>> diffQueryToken_ =
+        std::make_shared<std::atomic<quint64>>(0);
+
+    // A commit's Stats row, once its diff is in (ok false: it couldn't
+    // be read, and the row is left out).
+    struct DiffStats {
+        git::ObjectId commit;
+        bool ok = false;
+        size_t files = 0;
+        size_t additions = 0;
+        size_t deletions = 0;
+    };
+    // The Stats of the latest diff in, to render the commit again with
+    // (a theme switch) without asking for it again.
+    std::optional<DiffStats> shownStats_;
+    // Until the diff of the commit on show is in: its metadata HTML and
+    // the placeholder in it that the Stats row replaces.
+    QString statsPendingHtml_;
+    QString statsPlaceholder_;
+
     // The files whose history showFileHistory is loading.
     QSet<QString> historyLoading_;
 
@@ -154,6 +184,12 @@ private:
     /// laid out; again whenever its laid-out size changes.
     void fitCommitInfoTopRow();
     void showCommitDiff(const git::ObjectId& commitId);
+    /// The diff of `commitId` is in (null: it couldn't be read): its
+    /// Stats row, and its files in the Diff tab.
+    void showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff);
+    void showDiffFiles(std::shared_ptr<git::DiffResult> diff);
+    /// The Stats row's HTML, in the colours of the theme in effect.
+    static QString statsRowHtml(const DiffStats& stats);
 
     // Services
     services::GitService*    gitService_  = nullptr;

@@ -35,6 +35,7 @@
 #include "telemetry/TelemetryService.h"
 #include "util/DesktopOpen.h"
 #include "util/ToolTip.h"
+#include "util/MessageText.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
@@ -2200,7 +2201,10 @@ void MainWindow::buildCommandsMenu()
                     res.ok()) {
                     for (const auto& s : res.value()) {
                         if (s.index == i) {
-                            message = QString::fromStdString(s.message);
+                            // HEAD's subject is in it (git's "WIP on
+                            // main: …"), maybe a line of megabytes the
+                            // box would lay out whole.
+                            message = util::elided(s.message);
                             break;
                         }
                     }
@@ -3513,8 +3517,10 @@ void MainWindow::buildPluginsMenu()
                     walk.pushHead();
                     walk.walk([&](const git::CommitData& c) {
                         ++s.commitCount;
-                        s.commitsByAuthor[QString::fromStdString(
-                            c.author.name)]++;
+                        // At most util::kMaxLineChars of a name: git
+                        // takes one of any length, and the box below
+                        // lays the top ones out.
+                        s.commitsByAuthor[util::elided(c.author.name)]++;
                         return true;
                     });
                     if (auto br = repo.branches(git::BranchType::Local);

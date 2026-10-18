@@ -206,7 +206,8 @@ private:
 
     // startFromPreparedMessage(): the message it filled in last, as
     // the editor holds it (CRLF as "\n", a non-breaking space as a
-    // space), and git's message as it read it last.
+    // space), and git's message as it read it last: what a commit
+    // takes when the editor holds it cut, untouched (onCommitClicked).
     QString prefilled_;
     QString preparedRead_;
 };

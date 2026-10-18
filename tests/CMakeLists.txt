@@ -106,6 +106,9 @@ target_compile_definitions(test_english_plurals PRIVATE
 # (util/DesktopOpen.h): a file that may run as a program when opened,
 # and the folder to show for a bundle (macOS launches one it opens).
 gitbolt_add_test(test_desktop_open util/TestDesktopOpen.cpp)
+# How much of a commit message the views lay out (util/MessageText.h):
+# a message that fits as it is, a longer one cut with "…".
+gitbolt_add_test(test_message_text util/TestMessageText.cpp)
 
 # telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
 # Never a real endpoint: test binaries don't link src/app, where the
@@ -289,6 +292,12 @@ set_property(TEST test_commit_links APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM
 gitbolt_add_test(test_open_externally ui/TestOpenExternally.cpp)
 target_link_libraries(test_open_externally PRIVATE gitbolt_ui)
 set_property(TEST test_open_externally APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Selecting a commit: nothing waits for the repository (its diff and
+# file tree come from the service's read thread), and a subject of one
+# line of megabytes shows cut, there and in the other views. Off screen.
+gitbolt_add_test(test_commit_details ui/TestCommitDetails.cpp)
+target_link_libraries(test_commit_details PRIVATE gitbolt_ui)
+set_property(TEST test_commit_details APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.

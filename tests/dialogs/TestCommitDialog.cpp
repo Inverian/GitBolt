@@ -10,7 +10,8 @@
 //     git's note of the conflicts; a pick's own lines that start with
 //     '#' kept), as a terminal's `git commit` does, and follows it while
 //     the dialog is open (an abort, a Skip, a merge started meanwhile);
-//     once the operation is over, a message filled in goes with it;
+//     once the operation is over, a message filled in goes with it; one
+//     of a line of megabytes is filled in cut, with a note;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
 //   - while the commit runs, nothing stages, unstages or commits, the
@@ -42,6 +43,7 @@
 #include "widgets/DiffViewerWidget.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
+#include "util/MessageText.h"
 
 using gitbolt::dialogs::CommitDialog;
 using gitbolt::services::GitService;
@@ -358,6 +360,114 @@ private slots:
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         QTRY_COMPARE(message->toPlainText(), QString());
+    }
+
+    // A pick's message of one line of megabytes (256K here): laid out
+    // whole in the editor, it froze the window. The editor gets its
+    // start, and the note under it says so, until the pick is given up.
+    void aHugePreparedMessageIsCut() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile(QStringLiteral("a.txt"), "side\n");
+        // From a file: one argument that long is past Linux's limit.
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString messageFile = scratch.filePath(QStringLiteral("message"));
+        QFile file(messageFile);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QByteArray(256 * 1024, 'a') + '\n');
+        file.close();
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "--cleanup=verbatim", "-F",
+                                   messageFile.toStdString()})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile(QStringLiteral("a.txt"), "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+        QVERIFY(!succeeded(git.run({"cherry-pick", "side"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        auto* note = child<QLabel>(dialog, "commit.error");
+        QVERIFY(message && note);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_VERIFY(message->toPlainText().startsWith(QStringLiteral("aaaa")));
+        QVERIFY2(message->toPlainText().size() <= gitbolt::util::kMaxParagraphChars + 1,
+                 qPrintable(QString::number(message->toPlainText().size())));
+        QVERIFY(note->isVisible());
+        QVERIFY2(note->text().contains(QStringLiteral("characters long")), qPrintable(note->text()));
+
+        // Closed, and the pick given up: the note goes with it.
+        dialog.close();
+        QVERIFY(succeeded(git.run({"cherry-pick", "--abort"})));
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_COMPARE(message->toPlainText(), QString());
+        QVERIFY(!note->isVisible());
+    }
+
+    // An ordinary message with one line too long for the editor (a data
+    // URL of 5,000 characters): the editor has it cut. Committed as it
+    // is, the commit has git's message whole; the cut text with its "…"
+    // went in instead. Edited, the commit takes what the editor holds.
+    void aCutMessageLeftAsItIsCommitsWhole_data() {
+        QTest::addColumn<bool>("edited");
+        QTest::newRow("left as it is") << false;
+        QTest::newRow("edited") << true;
+    }
+
+    void aCutMessageLeftAsItIsCommitsWhole() {
+        QFETCH(bool, edited);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "base\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile(QStringLiteral("a.txt"), "side\n");
+        const QString original = QStringLiteral("Add generated fixture\n\ndata:image/png;base64,")
+                                 + QString(5000, QLatin1Char('A'))
+                                 + QStringLiteral("\n\nSigned-off-by: Test User <test@gitbolt.local>");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "--cleanup=verbatim", "-m",
+                                   original.toStdString()})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile(QStringLiteral("a.txt"), "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main change"})));
+        QVERIFY(!succeeded(git.run({"cherry-pick", "side"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        auto* commit = child<QPushButton>(dialog, "commit.commitBtn");
+        auto* note = child<QLabel>(dialog, "commit.error");
+        QVERIFY(message && commit && note);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QTRY_VERIFY(message->toPlainText().startsWith(QStringLiteral("Add generated fixture")));
+        const QString shown = message->toPlainText();
+        QVERIFY2(shown.contains(QChar(0x2026)), qPrintable(shown.right(200)));
+        QVERIFY(shown.size() < original.size());
+        QVERIFY(note->isVisible());
+        QVERIFY2(note->text().contains(QStringLiteral("Left as it is, the commit takes the whole of it")),
+                 qPrintable(note->text()));
+        if (edited)
+            message->setPlainText(shown + QStringLiteral("\nReviewed."));
+        const QString typed = message->toPlainText();
+
+        repo.writeFile(QStringLiteral("a.txt"), "resolved\n");
+        QVERIFY(succeeded(git.run({"add", "a.txt"})));
+        svc.refreshStatus();
+        QTRY_VERIFY(commit->isEnabled());
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog.isVisible(), 15000);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        const QString committed = output(git.run({"log", "-1", "--format=%B"}));
+        QCOMPARE(committed.size(), (edited ? typed : original).size());
+        QCOMPARE(committed, edited ? typed : original);
     }
 
     // The commit goes through git, which runs the repository's hooks;

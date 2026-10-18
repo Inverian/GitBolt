@@ -1,5 +1,6 @@
 #include "dialogs/ReflogDialog.h"
 #include "conf/SettingsService.h"
+#include "util/MessageText.h"
 
 #include <QComboBox>
 #include <QDateTime>
@@ -60,11 +61,13 @@ void ReflogDialog::setEntries(
         const QString when = QDateTime::fromSecsSinceEpoch(
             static_cast<qint64>(t)).toString("yyyy-MM-dd hh:mm");
 
-        auto* whoItem = new QTableWidgetItem(
-            QString::fromStdString(e.committer.name));
+        // git writes a commit's subject into the entry ("commit: …"),
+        // and a subject can be one line of megabytes, which the table
+        // laid out whole on every paint: util::kMaxLineChars of it. And
+        // of the name, which can be any length too.
+        auto* whoItem = new QTableWidgetItem(util::elided(e.committer.name));
         auto* whenItem = new QTableWidgetItem(when);
-        auto* msgItem = new QTableWidgetItem(
-            QString::fromStdString(e.message));
+        auto* msgItem = new QTableWidgetItem(util::elided(e.message));
 
         for (auto* it : {oldItem, newItem, whoItem, whenItem, msgItem})
             it->setFlags(it->flags() & ~Qt::ItemIsEditable);

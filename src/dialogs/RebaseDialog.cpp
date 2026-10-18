@@ -1,5 +1,6 @@
 #include "dialogs/RebaseDialog.h"
 #include "conf/SettingsService.h"
+#include "util/MessageText.h"
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/PlainTextDialogs.h"
 
@@ -111,10 +112,11 @@ void RebaseDialog::setCommitsToRebase(const std::vector<git::CommitData>& commit
     previewList_->clear();
     int replayed = 0;
     for (const auto& c : commits) {
+        // At most util::kMaxLineChars of the subject: one of megabytes
+        // stalled the list, which lays an item's text out whole.
         QString entry = QStringLiteral("%1  %2")
                             .arg(QString::fromStdString(c.id.toShortHex()))
-                            .arg(QString::fromStdString(
-                                c.summary.empty() ? c.message : c.summary));
+                            .arg(util::elided(c.summary.empty() ? c.message : c.summary));
         if (!c.isMerge()) {
             previewList_->addItem(entry);
             ++replayed;

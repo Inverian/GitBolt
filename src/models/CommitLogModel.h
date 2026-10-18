@@ -33,6 +33,11 @@ public:
     static constexpr int PAGE_SIZE = 256;
     static constexpr int GRAPH_DATA_ROLE = Qt::UserRole + 1;
     static constexpr int COMMIT_DATA_ROLE = Qt::UserRole + 2;
+    /// A cell's text whole, for Copy: DisplayRole has at most
+    /// util::kMaxLineChars of a Message or an Author, which is all the
+    /// view can lay out on every paint, and a message with its body is
+    /// often longer than that.
+    static constexpr int FULL_TEXT_ROLE = Qt::UserRole + 3;
 
     explicit CommitLogModel(QObject* parent = nullptr);
 

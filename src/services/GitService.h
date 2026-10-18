@@ -3,8 +3,10 @@
 #include "util/AsyncRunner.h"
 #include "watcher/FileWatcher.h"
 #include <QObject>
+#include <QPointer>
 #include <QStringList>
 #include <QThread>
+#include <QThreadPool>
 #include <atomic>
 #include <functional>
 #include <map>
@@ -147,9 +149,40 @@ public:
         return std::forward<Fn>(fn)(*repo_);
     }
 
+    /// withRepository() off the GUI thread, for a read that can take
+    /// long: a commit's diff or its file tree walks the whole tree, and
+    /// on the GUI thread a commit with a huge or deeply nested one froze
+    /// the window. `read(repo)` runs on the service's read thread, under
+    /// repoMutex_ (the rules of withRepository() apply to it), and what
+    /// it returns goes to `done` on the service's thread, if that
+    /// repository is still the open one (deliverFor) and `context` still
+    /// exists; otherwise it is dropped. Nothing runs when no repository
+    /// is open. Service thread only. A caller that asks again before the
+    /// answer comes tells its replies apart itself, and its `read` can
+    /// skip a request already superseded when its turn comes.
+    template <typename Read, typename Done>
+    void readAsync(QObject* context, Read read, Done done)
+    {
+        if (!repo_)
+            return;
+        std::shared_ptr<git::Repository> r = repo_;
+        readRunner_.run([this, r, context = QPointer<QObject>(context),
+                         read = std::move(read), done = std::move(done)]() mutable {
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            if (r != repo_)
+                return;   // superseded by a repo switch
+            deliverFor(r, [context, result = read(*r), done = std::move(done)]() mutable {
+                if (context)
+                    done(std::move(result));
+            });
+        });
+    }
+
     /// Thread-safe construction of a GitProcess for the open repository.
     /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
-    /// returns by value. Once you have the GitProcess object you can
+    /// returns by value; on the service's thread it doesn't wait for the
+    /// lock, which a long read may hold, and copies the one made as the
+    /// repository opened. Once you have the GitProcess object you can
     /// run shell commands on it without holding the lock — QProcess is
     /// independent of libgit2 state. Its commands stop on
     /// cancelGitOps(), so a command run on a pool thread can't hold up
@@ -157,9 +190,9 @@ public:
     git::GitProcess process() const;
 
     /// Whether a job the service runs (a refresh, a rebase step, a
-    /// checkout, Git Flow, maintenance) is still running. MainWindow
-    /// hides itself while quitting waits for them.
-    bool workRunning() const { return runner_.busy(); }
+    /// checkout, Git Flow, maintenance, a readAsync) is still running.
+    /// MainWindow hides itself while quitting waits for them.
+    bool workRunning() const { return runner_.busy() || readRunner_.busy(); }
 
     void refreshStatus();
     /// Commits per history page (CommitLogModel pages by the same).
@@ -656,6 +689,9 @@ private:
     // (service thread only): a rebase step's outcome is delivered only
     // while it matches the step's.
     std::string openKey_;
+    // The open repository's GitProcess, made as it opened, for process()
+    // on the service's thread (service thread only).
+    std::optional<git::GitProcess> openProcess_;
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_
@@ -707,6 +743,17 @@ private:
     std::shared_ptr<std::atomic<bool>> watchEnumCancel_;
 
     watcher::FileWatcher watcher_;
+
+    // The thread readAsync's reads run on. libgit2's git_tree_walk
+    // (Repository::walkTreeAtCommit) recurses once per directory level:
+    // on a pool thread's default stack (512 KB on macOS) a tree some
+    // 4,500 levels deep overflowed it, where the GUI thread's 8 MB, which
+    // the walk ran on before, took over 60,000. So it gets as much. One
+    // thread is enough, as the reads take repoMutex_ in turn anyway.
+    QThreadPool readPool_;
+    // Drains the reads before readPool_ and the repository go (see
+    // runner_ below).
+    util::AsyncRunner readRunner_;
 
     // Declared last on purpose: ~AsyncRunner drains every in-flight
     // worker, and it must do so while repoMutex_ / repo_ above are

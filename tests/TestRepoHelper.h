@@ -112,6 +112,44 @@ public:
         return commit(message);
     }
 
+    /// HEAD made again with other idents ("Name <email>"), its tree,
+    /// parents and message the same, and the branch moved to it. The
+    /// object is written as it is: git puts no limit on an ident's
+    /// length (an author name of megabytes passes fsck), and a clone
+    /// brings whatever one a commit has.
+    gitbolt::git::ObjectId rewriteHeadIdents(const std::string& author,
+                                              const std::string& committer) {
+        git_repository* raw = repo_->raw();
+        git_reference* head = nullptr;
+        git_commit* old = nullptr;
+        if (git_repository_head(&head, raw) != 0
+            || git_commit_lookup(&old, raw, git_reference_target(head)) != 0)
+            qFatal("TestRepo: no HEAD commit to rewrite");
+        const auto hex = [](const git_oid* oid) {
+            char buf[GIT_OID_MAX_HEXSIZE + 1];
+            return std::string(git_oid_tostr(buf, sizeof buf, oid));
+        };
+        std::string text = "tree " + hex(git_commit_tree_id(old)) + "\n";
+        for (unsigned i = 0; i < git_commit_parentcount(old); ++i)
+            text += "parent " + hex(git_commit_parent_id(old, i)) + "\n";
+        text += "author " + author + " 1700000000 +0000\n";
+        text += "committer " + committer + " 1700000000 +0000\n\n";
+        text += git_commit_message(old);
+        git_commit_free(old);
+
+        git_odb* odb = nullptr;
+        git_oid id;
+        git_reference* moved = nullptr;
+        if (git_repository_odb(&odb, raw) != 0
+            || git_odb_write(&id, odb, text.data(), text.size(), GIT_OBJECT_COMMIT) != 0
+            || git_reference_set_target(&moved, head, &id, "rewrite idents") != 0)
+            qFatal("TestRepo: cannot write the rewritten commit");
+        git_reference_free(moved);
+        git_odb_free(odb);
+        git_reference_free(head);
+        return gitbolt::git::ObjectId(&id);
+    }
+
 private:
     /// Point libgit2's global/system/xdg config search paths at an
     /// empty directory ONCE per test process, so the developer's

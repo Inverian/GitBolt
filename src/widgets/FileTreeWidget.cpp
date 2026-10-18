@@ -28,6 +28,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <optional>
 #include <unordered_map>
 
 namespace gitbolt::widgets {
@@ -57,6 +58,66 @@ void applySingleLineHeight(QPlainTextEdit* editor)
     QTextBlockFormat fmt;
     fmt.setLineHeight(100, QTextBlockFormat::ProportionalHeight);
     c.mergeBlockFormat(fmt);
+}
+
+// A walk's entries in the tree's order: directories before files at
+// every level, then alphabetical within each group (GitHub / Finder
+// style). We build a component-wise sort key so ordering is
+// consistent both within a single parent and across the whole flat
+// walk:
+//
+//   src/conf/SettingsService.cpp →
+//     [ (DIR, "src"), (DIR, "conf"), (FILE, "SettingsService.cpp") ]
+//
+// Lexicographic comparison of these keys gives the GitHub
+// ordering: at each level a (DIR, name) tuple sorts before any
+// (FILE, name) tuple regardless of name. The previous comparator
+// mixed two different orderings (path-based for cross-parent
+// entries, dir-first for same-parent) and produced a non-
+// transitive comparator — std::sort is undefined under that.
+// Runs on the read thread, right after the walk (rebuildTree).
+std::vector<git::TreeEntry> sortedForTree(std::vector<git::TreeEntry> entries)
+{
+    static constexpr int DIR_KEY  = 0;
+    static constexpr int FILE_KEY = 1;
+    using SortKey = std::vector<std::pair<int, std::string>>;
+    auto buildSortKey = [](const git::TreeEntry& e) -> SortKey {
+        SortKey key;
+        const std::string& p = e.path;
+        size_t pos = 0;
+        while (true) {
+            const size_t slash = p.find('/', pos);
+            if (slash == std::string::npos) {
+                // Last (own) component — flag matches the entry's
+                // own kind: tree → DIR_KEY, blob → FILE_KEY.
+                key.emplace_back(e.isTree ? DIR_KEY : FILE_KEY,
+                                 p.substr(pos));
+                return key;
+            }
+            // Intermediate component is by definition a parent
+            // directory along the path, so always DIR_KEY.
+            key.emplace_back(DIR_KEY, p.substr(pos, slash - pos));
+            pos = slash + 1;
+        }
+    };
+
+    // Decorate–sort–undecorate: the comparator used to rebuild BOTH
+    // keys on every comparison — millions of transient vectors and
+    // substrings for a big tree. Build each key once, sort pointers
+    // by precomputed key.
+    std::vector<std::pair<SortKey, git::TreeEntry*>> keyed;
+    keyed.reserve(entries.size());
+    for (auto& e : entries)
+        keyed.emplace_back(buildSortKey(e), &e);
+    std::sort(keyed.begin(), keyed.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first < b.first;
+              });
+    std::vector<git::TreeEntry> sorted;
+    sorted.reserve(entries.size());
+    for (auto& [key, entry] : keyed)
+        sorted.push_back(std::move(*entry));
+    return sorted;
 }
 } // namespace
 
@@ -219,6 +280,7 @@ void FileTreeWidget::setCommit(const git::ObjectId& commitId)
 
 void FileTreeWidget::clear()
 {
+    ++*walkToken_;      // a walk still on its way is for nothing now
     model_->clear();
     preview_->clear();
     previewHeader_->setText(tr("Select a file to preview its contents"));
@@ -235,73 +297,53 @@ void FileTreeWidget::rebuildTree()
     preview_->clear();
     previewHeader_->setText(tr("Loading file tree…"));
 
+    // A walk still on its way for the commit before is for nothing now.
+    const quint64 token = ++*walkToken_;
     if (!svc_ || currentCommit_.isZero())
         return;
-
-    // Walk under the service's repo lock — background refresh
-    // workers use the same libgit2 handle concurrently.
-    auto walk = svc_->withRepository([&](git::Repository& r) {
-        return r.walkTreeAtCommit(currentCommit_);
-    });
-    if (!walk) {
+    if (!svc_->isOpen()) {
         previewHeader_->setText(tr("Failed to load tree at commit %1")
                                     .arg(QString::fromStdString(
                                         currentCommit_.toShortHex())));
         return;
     }
 
-    const auto& entries = *walk;
-
-    // Sort entries: directories before files at every level, then
-    // alphabetical within each group (GitHub / Finder style). We
-    // build a component-wise sort key so ordering is consistent
-    // both within a single parent and across the whole flat walk:
-    //
-    //   src/conf/SettingsService.cpp →
-    //     [ (DIR, "src"), (DIR, "conf"), (FILE, "SettingsService.cpp") ]
-    //
-    // Lexicographic comparison of these keys gives the GitHub
-    // ordering: at each level a (DIR, name) tuple sorts before any
-    // (FILE, name) tuple regardless of name. The previous comparator
-    // mixed two different orderings (path-based for cross-parent
-    // entries, dir-first for same-parent) and produced a non-
-    // transitive comparator — std::sort is undefined under that.
-    constexpr int DIR_KEY  = 0;
-    constexpr int FILE_KEY = 1;
-    using SortKey = std::vector<std::pair<int, std::string>>;
-    auto buildSortKey = [&](const git::TreeEntry& e) -> SortKey {
-        SortKey key;
-        const std::string& p = e.path;
-        size_t pos = 0;
-        while (true) {
-            const size_t slash = p.find('/', pos);
-            if (slash == std::string::npos) {
-                // Last (own) component — flag matches the entry's
-                // own kind: tree → DIR_KEY, blob → FILE_KEY.
-                key.emplace_back(e.isTree ? DIR_KEY : FILE_KEY,
-                                 p.substr(pos));
-                return key;
+    // On the service's read thread (GitService::readAsync), under its
+    // repo lock, as background refresh workers use the same libgit2
+    // handle. The walk ran here on the GUI thread, where a commit with
+    // a huge tree froze the window. The read thread's stack is the GUI
+    // thread's 8 MB on purpose, so the walk, which recurses once per
+    // level, takes a tree as deep as it took here; what bounds the
+    // depth is a limit in libgit2, not the thread. The sort goes along:
+    // its keys hold a component per path segment, quadratic in the
+    // depth.
+    using Walk = std::optional<git::Result<std::vector<git::TreeEntry>>>;
+    const git::ObjectId commit = currentCommit_;
+    svc_->readAsync(
+        this,
+        [commit, token, latest = walkToken_](git::Repository& r) -> Walk {
+            if (latest->load() != token)
+                return std::nullopt;   // superseded before its turn came
+            auto walk = r.walkTreeAtCommit(commit);
+            if (!walk)
+                return Walk(std::move(walk));
+            return Walk(sortedForTree(std::move(*walk)));
+        },
+        [this, token](Walk walk) {
+            if (token != walkToken_->load() || !walk)
+                return;                // for a commit no longer shown
+            if (!*walk) {
+                previewHeader_->setText(tr("Failed to load tree at commit %1")
+                                            .arg(QString::fromStdString(
+                                                currentCommit_.toShortHex())));
+                return;
             }
-            // Intermediate component is by definition a parent
-            // directory along the path, so always DIR_KEY.
-            key.emplace_back(DIR_KEY, p.substr(pos, slash - pos));
-            pos = slash + 1;
-        }
-    };
+            showTree(**walk);
+        });
+}
 
-    // Decorate–sort–undecorate: the comparator used to rebuild BOTH
-    // keys on every comparison — millions of transient vectors and
-    // substrings on the GUI thread for a big tree. Build each key
-    // once, sort pointers by precomputed key.
-    std::vector<std::pair<SortKey, const git::TreeEntry*>> keyed;
-    keyed.reserve(entries.size());
-    for (const auto& e : entries)
-        keyed.emplace_back(buildSortKey(e), &e);
-    std::sort(keyed.begin(), keyed.end(),
-              [](const auto& a, const auto& b) {
-                  return a.first < b.first;
-              });
-
+void FileTreeWidget::showTree(const std::vector<git::TreeEntry>& entries)
+{
     QFileIconProvider iconProvider;
     const QIcon folderIcon = iconProvider.icon(QFileIconProvider::Folder);
     const QIcon fileIcon   = iconProvider.icon(QFileIconProvider::File);
@@ -310,15 +352,14 @@ void FileTreeWidget::rebuildTree()
     // during the second pass. The empty key represents the model
     // root (invisibleRootItem()).
     std::unordered_map<std::string, QStandardItem*> itemByPath;
-    itemByPath.reserve(keyed.size() + 1);
+    itemByPath.reserve(entries.size() + 1);
     itemByPath[std::string{}] = model_->invisibleRootItem();
 
     int dirCount  = 0;
     int fileCount = 0;
     quint64 totalBytes = 0;
 
-    for (const auto& [sortKey, entryPtr] : keyed) {
-        const auto& entry = *entryPtr;
+    for (const auto& entry : entries) {
         QString name = QString::fromStdString(entry.name);
         QString display = name;
         if (!entry.isTree && entry.size > 0)

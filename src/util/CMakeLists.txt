@@ -8,6 +8,7 @@ set(SOURCES
     DesktopOpen.cpp
     LockFiles.cpp
     LoginPath.cpp
+    MessageText.cpp
     TestSession.cpp
     ToolTip.cpp
     Translations.cpp
@@ -17,6 +18,7 @@ set(SOURCES
     LockFiles.h
     LoginPath.h
     LruCache.h
+    MessageText.h
     PerformanceTimer.h
     TestSession.h
     ToolTip.h
