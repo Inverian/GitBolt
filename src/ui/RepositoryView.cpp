@@ -8,6 +8,7 @@
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
+#include "util/DesktopOpen.h"
 #include "widgets/BlameWidget.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
@@ -384,7 +385,84 @@ void RepositoryView::openFileExternally(const QString& path)
                "exist at an older commit).").arg(path));
         return;
     }
-    QDesktopServices::openUrl(QUrl::fromLocalFile(full));
+
+    // The desktop opens what a symbolic link leads to, and a tracked
+    // link (or a folder on the way that is one) can lead anywhere: to
+    // an app, or a script elsewhere on the disk. Only a file in the
+    // working tree is opened, and it is opened by its real path, so
+    // what opens is what was looked at below. What a link leads to out
+    // of it is not the repository's to hand over, a document included:
+    // the folder it is in can be shown, to open it from there.
+    const QFileInfo target(QFileInfo(full).canonicalFilePath());
+    if (!util::isWithinFolder(target.filePath(), workdir)) {
+        QMessageBox box(QMessageBox::Information, tr("Open Externally"),
+                        tr("%1 leads to %2, outside the working tree, so it was not opened.")
+                            .arg(QDir::toNativeSeparators(path),
+                                 QDir::toNativeSeparators(target.filePath())),
+                        QMessageBox::Ok, this);
+        box.setObjectName(QStringLiteral("dlg.openExternallyOutside"));
+        box.setTextFormat(Qt::PlainText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+        box.setInformativeText(
+            tr("Open Containing Folder shows the folder it is in, to open it from there "
+               "if you trust it."));
+        QAbstractButton* folder = box.addButton(tr("Open Containing Folder"),
+                                                QMessageBox::ActionRole);
+        box.setDefaultButton(QMessageBox::Ok);
+        box.setEscapeButton(QMessageBox::Ok);
+        box.exec();
+        if (box.clickedButton() == folder)
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(util::folderToShow(target.absolutePath())));
+        return;
+    }
+    // A link to a folder: the folder is shown, and a bundle (a link to
+    // Tool.app) never launched, the folder it is in shown instead.
+    if (target.isDir()) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(target.filePath())));
+        return;
+    }
+
+    // The default app of some files runs them: on macOS Terminal opens
+    // an executable file with no extension, CHANGELOG at mode 755 say,
+    // and runs it, and a .command file too. Nothing in the tree tells
+    // such a file from a text file, so ask first, with Cancel the
+    // default, and offer its folder instead.
+    if (util::mayRunWhenOpened(target)) {
+        QMessageBox box(QMessageBox::Warning, tr("Open Externally"),
+                        tr("%1 may run as a program if it is opened.")
+                            .arg(QDir::toNativeSeparators(path)),
+                        QMessageBox::NoButton, this);
+        box.setObjectName(QStringLiteral("dlg.openExternallyRuns"));
+        box.setTextFormat(Qt::PlainText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        // Qt's own box, not the platform's (an NSAlert on macOS): it
+        // keeps Cancel the default, and the name as it is written.
+        box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+        box.setInformativeText(
+            tr("The system may run it instead of showing it: it is marked executable, "
+               "or it is a type of file that runs, or opens what it points to. Open it "
+               "only if you trust what it contains. Open Containing Folder shows the "
+               "folder it is in instead."));
+        QAbstractButton* open = box.addButton(tr("Open Anyway"), QMessageBox::DestructiveRole);
+        QAbstractButton* folder = box.addButton(tr("Open Containing Folder"),
+                                                QMessageBox::ActionRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.setEscapeButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() == folder) {
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(util::folderToShow(target.absolutePath())));
+            return;
+        }
+        if (box.clickedButton() != open)
+            return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(target.filePath()));
 }
 
 // Compact file-history popup: every commit that touched the path

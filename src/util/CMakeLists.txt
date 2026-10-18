@@ -5,12 +5,14 @@
 set(SOURCES
     AsyncRunner.cpp
     CrashHandler.cpp
+    DesktopOpen.cpp
     LockFiles.cpp
     LoginPath.cpp
     TestSession.cpp
     Translations.cpp
     AsyncRunner.h
     CrashHandler.h
+    DesktopOpen.h
     LockFiles.h
     LoginPath.h
     LruCache.h
