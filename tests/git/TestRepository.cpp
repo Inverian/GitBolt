@@ -1902,6 +1902,30 @@ private slots:
         QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
     }
 
+    // A `url` line with no "= value" (a slip in a hand edit): libgit2
+    // lists the remote with no URL, and gives the entry a null value.
+    // Edit URL crashed on it; it now repairs the remote.
+    void setRemoteUrlRepairsAValuelessUrl() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        QFile config(QDir(repo.path()).filePath(QStringLiteral(".git/config")));
+        QVERIFY(config.open(QIODevice::Append));
+        config.write("[remote \"origin\"]\n\turl\n");
+        config.close();
+        auto reopened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(reopened.ok());
+        const auto res = reopened->setRemoteUrl("origin", "https://example.com/fixed.git");
+        QVERIFY2(res.ok(), res.ok() ? "" : res.error().message().c_str());
+        auto again = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(again.ok());
+        auto remotes = again->remotes();
+        QVERIFY(remotes.ok());
+        const auto origin = std::find_if(remotes->begin(), remotes->end(),
+                                         [](const auto& r) { return r.name == "origin"; });
+        QVERIFY(origin != remotes->end());
+        QCOMPARE(QString::fromStdString(origin->url), QStringLiteral("https://example.com/fixed.git"));
+    }
+
     // Several URLs (`git remote set-url --add`): refused as git does,
     // saying so instead of libgit2's "not unique due to being a
     // multivar", and nothing changes.

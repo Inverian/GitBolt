@@ -68,7 +68,8 @@ security policy for reporting vulnerabilities privately.
   that repository: Push pushed its commits while GitBolt showed the one
   that was open. An exported GIT_CONFIG hid the repository's own fetch
   settings from Fetch's prune check, so a fetch could delete local tags
-  that the server doesn't have.
+  that the server doesn't have, and it left Settings › Git › Git Config
+  empty, with Apply saving nothing.
 - **Linked worktrees and submodules** opened in GitBolt now refresh
   when a commit, staging or a branch switch happens outside GitBolt.
   Their `.git` is a file pointing elsewhere, and GitBolt never watched

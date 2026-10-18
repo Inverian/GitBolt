@@ -78,8 +78,10 @@ public:
     void start(const QString& workingDirectory = {});
 
     /// For a bare repository: GIT_DIR in the shell's environment, which
-    /// git needs where safe.bareRepository is "explicit". Empty: none
-    /// set (whatever the environment has). Takes effect at start().
+    /// git needs where safe.bareRepository is "explicit". Empty: no
+    /// GIT_DIR at all (an inherited one is left out too, as are git's
+    /// other repository variables: git::GitProcess::repositoryEnvVars).
+    /// Takes effect at start().
     void setGitDir(const QString& gitDir) { gitDir_ = gitDir; }
 
     /// Send `cd <path>\n` to the running shell. No-op if the

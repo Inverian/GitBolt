@@ -1521,8 +1521,10 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
     git_config_get_multivar_foreach(
         config, (key + "url").c_str(), nullptr,
         [](const git_config_entry* e, void* payload) {
+            // A `url` line with no "= value" (a slip in a hand edit) has
+            // none at all: libgit2 gives it a null value.
             static_cast<std::vector<Url>*>(payload)->push_back(
-                {e->value, definedOutsideRepoConfig(e->level, e->include_depth > 0)});
+                {e->value ? e->value : "", definedOutsideRepoConfig(e->level, e->include_depth > 0)});
             return 0;
         },
         &urls);

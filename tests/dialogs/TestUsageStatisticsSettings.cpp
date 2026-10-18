@@ -31,6 +31,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -244,6 +245,26 @@ private slots:
 
         QVERIFY(QMetaObject::invokeMethod(&dialog, "apply"));
         QVERIFY(settings.usageStatisticsEnabled());
+    }
+
+    // The Git Config page's identity comes from `git config --global`,
+    // which refused to run with GIT_CONFIG in GitBolt's environment ("only
+    // one config file at a time"): the fields came up empty, and Apply
+    // saved nothing. git's repository variables are left out of it, as
+    // for every git GitBolt runs.
+    void gitIdentityIgnoresAnExportedGitConfig() {
+        QFile global(homeDir_.filePath(QStringLiteral("gitconfig")));
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[user]\n\tname = Global Name\n");
+        global.close();
+        qputenv("GIT_CONFIG", QFile::encodeName(homeDir_.filePath(QStringLiteral("elsewhere"))));
+        const auto restore = qScopeGuard([] { qunsetenv("GIT_CONFIG"); });
+
+        SettingsService settings;
+        SettingsDialog dialog(&settings, nullptr);
+        auto* name = dialog.findChild<QLineEdit*>(QStringLiteral("settings.git-user-name"));
+        QVERIFY(name);
+        QTRY_COMPARE_WITH_TIMEOUT(name->text(), QStringLiteral("Global Name"), 10000);
     }
 
     void copyPutsTheIdOnTheClipboard() {
