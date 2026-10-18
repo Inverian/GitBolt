@@ -6,6 +6,7 @@
 #include "../TestRepoHelper.h"
 #include "git/GitProcess.h"
 #include "git/Repository.h"
+#include <git2.h>
 
 #include <algorithm>
 
@@ -2299,6 +2300,13 @@ private slots:
         const auto id = opened->resolveRef(picked.toStdString());
         QVERIFY(id.ok());
         QVERIFY(says(opened->cherryPick(*id)));
+        // Repository refuses these itself first; libgit2's own checkout
+        // (anything else that calls it) fails too, rather than crash.
+        git_checkout_options opts;
+        git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE;
+        QVERIFY(git_checkout_head(opened->raw(), &opts) < 0);
+        QVERIFY(QString::fromUtf8(git_error_last()->message).contains(QLatin1String("merge.conflictstyle")));
 #endif
     }
 
@@ -2328,7 +2336,54 @@ private slots:
         QVERIFY2(QString::fromStdString(pick.error().message()).contains(QLatin1String("merge.default")),
                  pick.error().message().c_str());
         QVERIFY(!QFileInfo::exists(QDir(repo.path()).filePath(QStringLiteral(".git/index.lock"))));
+        // And libgit2's own cherry-pick, behind Repository's refusal.
+        git_commit* commit = nullptr;
+        git_oid oid;
+        QCOMPARE(git_oid_fromstr(&oid, picked.toLatin1().constData()), 0);
+        QCOMPARE(git_commit_lookup(&commit, opened->raw(), &oid), 0);
+        const int err = git_cherrypick(opened->raw(), commit, nullptr);
+        git_commit_free(commit);
+        QVERIFY(err < 0);
+        QVERIFY(QString::fromUtf8(git_error_last()->message).contains(QLatin1String("merge.default")));
+        QVERIFY(!QFileInfo::exists(QDir(repo.path()).filePath(QStringLiteral(".git/index.lock"))));
 #endif
+    }
+
+    // With merge.conflictstyle given no value, stash save wrote the stash
+    // and then failed to reset the work tree (it crashed, before
+    // libgit2 was patched), and worktree add made the worktree's folder
+    // and metadata, then failed to check it out. Both are refused now
+    // before anything is written, with any libgit2.
+    void valuelessConflictStyleWritesNothing() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        repo.writeFile("a.txt", "changed\n");
+        appendConfig(repo.path(), "[merge]\n\tconflictstyle\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+
+        const auto saved = opened->stashSave("wip");
+        QVERIFY(!saved.ok());
+        QVERIFY2(QString::fromStdString(saved.error().message()).contains(QLatin1String("merge.conflictstyle")),
+                 saved.error().message().c_str());
+        const auto stashes = opened->stashes();
+        QVERIFY(stashes.ok());
+        QVERIFY(stashes->empty());
+        QFile file(QDir(repo.path()).filePath(QStringLiteral("a.txt")));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), QByteArray("changed\n"));
+
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString linked = scratch.filePath(QStringLiteral("linked"));
+        const auto added = opened->addWorktree("linked", linked.toStdString(), "side", true);
+        QVERIFY(!added.ok());
+        QVERIFY(!QFileInfo::exists(linked));
+        QVERIFY(!QFileInfo::exists(QDir(repo.path()).filePath(QStringLiteral(".git/worktrees/linked"))));
+        QVERIFY(!succeeded(gitbolt::git::GitProcess(repo.path().toStdString())
+                               .run({"rev-parse", "--verify", "-q", "refs/heads/side"})));
     }
 
     // A `url` line with no "= value" (a slip in a hand edit): libgit2
