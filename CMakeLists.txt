@@ -42,6 +42,11 @@ endif()
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
 project(GitBolt VERSION 0.9.6 LANGUAGES CXX)
+# Objective-C++ for the few AppKit calls Qt has no API for
+# (src/app/platform/macos/MacServices.mm). It takes CXX_STANDARD.
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 # An empty build type builds with NO optimization and no debug info —
 # the worst of both worlds, and exactly what `cmake -B build` with no

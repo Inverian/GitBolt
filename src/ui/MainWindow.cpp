@@ -24,6 +24,7 @@
 #include "dialogs/TagDialog.h"
 #include "dialogs/TextEditorDialog.h"
 #include "dialogs/WorktreeDialog.h"
+#include "git/Error.h"
 #include "git/GitProcessLog.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
@@ -5299,8 +5300,21 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
     }
 
     statusBar()->showMessage(tr("Failed to open %1").arg(path), 4000);
-    QMessageBox::warning(this, tr("Error"),
-        tr("Failed to open repository at %1\n\n%2").arg(path, error));
+    QMessageBox box(QMessageBox::Warning, tr("Error"),
+                    tr("Failed to open repository at %1\n\n%2").arg(path, error),
+                    QMessageBox::Ok, this);
+    box.setObjectName(QStringLiteral("dlg.openFailed"));
+    box.setTextFormat(Qt::PlainText);
+    // A folder in no repository at all: any folder can be sent from
+    // Finder's Open in GitBolt, or dropped on the Dock icon. Say so,
+    // rather than what libgit2 says (a subfolder of a repository would
+    // have opened it).
+    if (errorCode == static_cast<int>(git::GitErrorCode::NotFound) && QFileInfo(path).isDir()) {
+        box.setWindowTitle(tr("Not a Git Repository"));
+        box.setText(tr("%1 is not in a Git repository.").arg(QDir::toNativeSeparators(path)));
+        box.setInformativeText(tr("Open the folder of a repository, or any folder inside one."));
+    }
+    box.exec();
 }
 
 void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)

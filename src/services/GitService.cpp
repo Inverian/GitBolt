@@ -28,6 +28,14 @@ std::string rebaseStepKey(const git::Repository& repo) {
     return repo.path();
 #endif
 }
+
+// Where the search for the repository a folder is in stops: before
+// $HOME. A dotfiles repository there would otherwise claim every folder
+// in the home directory that is in no repository of its own. $HOME
+// itself still opens if it is a repository, as any repository does.
+std::string searchCeiling() {
+    return QDir::homePath().toStdString();
+}
 } // namespace
 
 GitService::GitService(QObject* parent)
@@ -59,13 +67,16 @@ bool GitService::openRepository(const QString& path) {
 
     openPending_ = false;
 
-    auto result = git::Repository::open(path.toStdString());
+    // A folder inside a repository opens that repository.
+    std::string found;
+    auto result = git::Repository::openContaining(path.toStdString(), searchCeiling(), found);
     if (!result) {
         // What was open stays so; an outcome that waited for the
         // superseded async open is its, if it is for it.
         settleReports();
         return false;
     }
+    const QString root = QString::fromStdString(found);
     {
         // Swap under the libgit2 mutex so an in-flight refresh
         // worker can't have the old repo destroyed mid-call.
@@ -73,8 +84,8 @@ bool GitService::openRepository(const QString& path) {
         repo_ = std::make_shared<git::Repository>(std::move(*result));
         openKey_ = rebaseStepKey(*repo_);
     }
-    watcher_.watchRepository(path);
-    emit repositoryOpened(path);
+    watcher_.watchRepository(root);
+    emit repositoryOpened(root);
     refreshStatus();
     refreshLog();
     refreshBranches();
@@ -94,19 +105,22 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
         std::shared_ptr<git::Repository> repo;
         QString error;
         int errorCode = 0;   // git::GitErrorCode
+        QString root;        // what opened: `path`, or the repository it is in
     };
 
     runner_.runWithResult<OpenOutcome>(
-        [path]() -> OpenOutcome {
+        [path, ceiling = searchCeiling()]() -> OpenOutcome {
             // Fresh git_repository* — no repoMutex_ needed; nothing
             // else can touch this object until we publish it below.
-            auto result = git::Repository::open(path.toStdString());
+            // A folder inside a repository opens that repository.
+            std::string found;
+            auto result = git::Repository::openContaining(path.toStdString(), ceiling, found);
             if (!result)
                 return { nullptr,
                          QString::fromStdString(result.error().message()),
-                         static_cast<int>(result.error().code()) };
+                         static_cast<int>(result.error().code()), QString() };
             return { std::make_shared<git::Repository>(std::move(*result)),
-                     QString(), 0 };
+                     QString(), 0, QString::fromStdString(found) };
         },
         [this, path, gen](OpenOutcome outcome) {
             // Main thread. A newer open/close superseded us — drop
@@ -131,15 +145,18 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
 
             // Cheap, immediate watches (.git internals + repo root)
             // now; the expensive working-tree walk goes to a worker.
-            watcher_.watchGitInternals(path);
-            startWatchEnumeration(path, gen);
+            // From here on the path is the repository's: a subfolder
+            // asked for is not what opened.
+            const QString root = outcome.root;
+            watcher_.watchGitInternals(root);
+            startWatchEnumeration(root, gen);
 
             // Emit BEFORE kicking refreshes: onRepositoryOpened
             // handlers read repository() (headBranchName etc.) on
             // the main thread, and direct-connection slots running
             // synchronously inside this emit are guaranteed to
             // finish before any refresh worker grabs repoMutex_.
-            emit repositoryOpened(path);
+            emit repositoryOpened(root);
             refreshStatus();
             loadLog(0, kLogPageSize, gen);   // tagged: initialLogLoaded
             refreshBranches();

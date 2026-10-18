@@ -126,8 +126,10 @@ Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
   - Repository statistics summary
 
 ### Platform Integration
+- macOS Finder "Open in GitBolt" on a folder's right-click menu (in its Services submenu when there are several), a macOS service that comes with GitBolt.app and works once GitBolt has been opened once. If it doesn't show, turn it on in System Settings › Keyboard › Keyboard Shortcuts… › Services › Files and Folders. Folders dropped on GitBolt's Dock icon, and `open -a GitBolt <folder>`, open too
 - Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
 - Linux Nautilus extension and `.desktop` file
+- A folder inside a repository opens that repository; a folder in none says so
 - Cross-platform installers (DMG, NSIS, DEB, AppImage)
 
 ---

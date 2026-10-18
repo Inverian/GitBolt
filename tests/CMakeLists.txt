@@ -273,5 +273,40 @@ add_dependencies(test_single_instance gitbolt_instance_helper)
 target_compile_definitions(test_single_instance PRIVATE
     GITBOLT_INSTANCE_HELPER="$<TARGET_FILE:gitbolt_instance_helper>")
 
+# The folders macOS asks a running GitBolt to open (Dock drops, `open -a`,
+# Finder's service): held, coalesced and emitted queued, on every
+# platform; the events are sent as Qt sends them.
+gitbolt_add_test(test_open_requests app/TestOpenRequests.cpp)
+target_link_libraries(test_open_requests PRIVATE gitbolt_instance)
+
+if(APPLE)
+    # Finder's "Open in GitBolt" provider, called with the pasteboards
+    # Finder sends (nothing is registered with macOS), and the
+    # Info.plist keys it and the folder open events need.
+    gitbolt_add_test(test_mac_services app/TestMacServices.cpp)
+    target_sources(test_mac_services PRIVATE
+        app/MacServicesTestSupport.mm app/MacServicesTestSupport.h)
+    set_source_files_properties(app/MacServicesTestSupport.mm PROPERTIES
+        COMPILE_OPTIONS -fobjc-arc)
+    target_link_libraries(test_mac_services PRIVATE gitbolt_macservices)
+    add_test(NAME macos_info_plist
+        COMMAND ${CMAKE_COMMAND}
+                -DPLIST=$<TARGET_BUNDLE_CONTENT_DIR:gitbolt>/Info.plist
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/app/CheckMacInfoPlist.cmake)
+endif()
+
+# The Nautilus extension offers Open in GitBolt where GitBolt finds a
+# repository (Repository::openContaining). Plain Python with
+# gi.repository stubbed, so Nautilus need not be installed.
+if(NOT WIN32)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        add_test(NAME nautilus_extension
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/app/test_nautilus_extension.py
+                    ${PROJECT_SOURCE_DIR}/src/app/platform/linux/nautilus-gitbolt.py)
+    endif()
+endif()
+
 # e2e/ tests — the real app binary driven through the test bridge.
 add_subdirectory(e2e)

@@ -256,6 +256,21 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
 
+      # Folders opened through LaunchServices, as Finder and the Dock send
+      # them, to the real cocoa app (tests/e2e/test_launchservices_open.py):
+      # a cold launch, a running GitBolt, a second launch's hand-off and
+      # Finder's service provider. It registers the build's GitBolt.app
+      # with LaunchServices, which only this throwaway runner may have
+      # done; ctest skips it everywhere else. Not gating until it has
+      # proven stable on the hosted runners.
+      - name: LaunchServices open (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          GITBOLT_E2E_LAUNCHSERVICES: '1'
+        run: ctest --test-dir build -R '^e2e_test_launchservices_open$' --output-on-failure
+
       # Only when tests failed: rerun each failed test binary directly,
       # verbosely, and print its exact exit code. A test that dies without
       # flushing its output leaves ctest nothing to show, and the code tells
@@ -512,7 +527,13 @@ jobs:
           [ -n "$(ls -A "$app/Contents/PlugIns/tls" 2>/dev/null)" ] \
             || err "the bundle has no Qt TLS plugin (Contents/PlugIns/tls)"
 
-          # 5) Exec from the mounted image. --version exits 0 only after dyld
+          # 5) Finder's "Open in GitBolt" service and folder open events:
+          #    the Info.plist keys macOS reads when it registers the app,
+          #    where a mistake fails silently (the item never shows).
+          cmake -DPLIST="$app/Contents/Info.plist" -P tests/app/CheckMacInfoPlist.cmake \
+            || err "Info.plist: the Finder integration keys are wrong"
+
+          # 6) Exec from the mounted image. --version exits 0 only after dyld
           #    loaded every linked image, git_libgit2_init() ran and
           #    QApplication loaded the bundled cocoa plugin.
           if out=$(GITBOLT_INSTANCE_NAME="ci-smoke-$$" "$app/Contents/MacOS/GitBolt" --version 2>&1); then

@@ -13,11 +13,11 @@ Only you and the security reviewers can see the report.
 
 Helpful details:
 
-- the GitBolt version (Help › About GitBolt) and your operating system;
-- what an attacker can do, and what they need first (for example a
+- The GitBolt version (Help › About GitBolt) and your operating system;
+- What an attacker can do, and what they need first (for example a
   crafted repository, a malicious remote, or local access);
-- steps to reproduce, or a proof of concept;
-- any fix or workaround you know of.
+- Steps to reproduce, or a proof of concept;
+- Any fix or workaround you know of.
 
 ## Who reviews reports
 

@@ -4,6 +4,31 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [Unreleased]
+
+### Added
+
+- **Open in GitBolt from Finder (macOS)**: right-click a folder in
+  Finder and choose Open in GitBolt (in the Services submenu when there
+  are several) to open its repository, whether GitBolt is running or
+  not. It is a macOS service that comes with GitBolt.app, so there is
+  nothing to install; it shows once GitBolt has been opened once (if
+  it doesn't, turn it on in System Settings › Keyboard › Keyboard
+  Shortcuts… › Services › Files and Folders). Folders dropped on
+  GitBolt's Dock icon, and `open -a GitBolt <folder>`, now open too;
+  before, GitBolt ignored them.
+
+### Changed
+
+- **A folder inside a repository opens that repository**, from Finder,
+  File › Open, Explorer, Nautilus or `gitbolt <path>`. Before, only the
+  repository's own folder opened, and Nautilus offered Open in GitBolt
+  only there. The search stops at your home folder: a repository there
+  (dotfiles, say) never claims a folder below it that is in no
+  repository of its own.
+- **A folder that is in no repository** now says so ("… is not in a
+  Git repository."), instead of showing libgit2's error.
+
 ## [0.9.6] — 2026-10-16
 
 Commits made in GitBolt now go through git, so your hooks and commit

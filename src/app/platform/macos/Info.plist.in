@@ -12,11 +12,35 @@
     <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>
     <key>LSMinimumSystemVersion</key><string>@CMAKE_OSX_DEPLOYMENT_TARGET@</string>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- Folders, and only folders (public.directory would match .app
+         bundles too): a Dock drop or `open -a GitBolt <folder>`. They
+         arrive as open-documents events (src/app/OpenRequests.h).
+         Alternate: GitBolt never becomes what opens a folder by
+         default. -->
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
+            <key>CFBundleTypeName</key><string>Folder</string>
             <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
             <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+        </dict>
+    </array>
+    <!-- Finder's "Open in GitBolt" on a folder: a macOS service that
+         GitBolt itself provides (platform/macos/MacServices.mm).
+         NSMessage names the provider's method, NSPortName must be the
+         executable's name, and an empty NSRequiredContext is what makes
+         the item show without being turned on first. Checked by
+         tests/app/CheckMacInfoPlist.cmake. -->
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key><dict><key>default</key><string>Open in GitBolt</string></dict>
+            <key>NSMessage</key><string>openInGitBolt</string>
+            <key>NSPortName</key><string>GitBolt</string>
+            <key>NSRequiredContext</key><dict/>
+            <key>NSSendFileTypes</key><array><string>public.folder</string></array>
+            <key>NSServiceDescription</key><string>Opens the selected folder's Git repository in GitBolt.</string>
         </dict>
     </array>
 </dict>
