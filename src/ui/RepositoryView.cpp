@@ -72,6 +72,30 @@ constexpr const char* kDiffSplitterKey  = "diffSplitter/v2";
 constexpr int kPathRole      = Qt::UserRole + 1;
 constexpr int kIsDirRole     = Qt::UserRole + 2;
 constexpr int kFileIndexRole = Qt::UserRole + 3;
+
+// The Commit tab's link to an author's or committer's email. The
+// address is whatever the commit says: libgit2 takes everything
+// between the last '<' and '>', so quotes, '=', ';' and spaces all
+// get through. It used to go into href='mailto:%1' escaped with
+// toHtmlEscaped(), which leaves ' alone, so an address such as
+// x@y' style='…' href='file:…' closed the href and added attributes
+// of its own: its styling, its tooltip, a second href that won.
+// Now QUrl builds the href from the raw address (a path set in
+// DecodedMode, so a '?' or '#' in it is encoded too, rather than
+// starting mail headers or a fragment), and it goes into a
+// double-quoted attribute, which toHtmlEscaped() does escape for. An
+// address QUrl can't make a URL of is shown as plain text.
+QString emailLink(const std::string& email)
+{
+    const QString address = QString::fromStdString(email);
+    QUrl url;
+    url.setScheme(QStringLiteral("mailto"));
+    url.setPath(address, QUrl::DecodedMode);
+    if (address.isEmpty() || !url.isValid())
+        return address.toHtmlEscaped();
+    return QStringLiteral("<a href=\"%1\">%2</a>")
+        .arg(url.toString(QUrl::FullyEncoded).toHtmlEscaped(), address.toHtmlEscaped());
+}
 } // namespace
 
 RepositoryView::RepositoryView(QWidget* parent)
@@ -195,7 +219,14 @@ QWidget* RepositoryView::buildCommitInfoTab()
     h->addWidget(avatarLabel_, 0, Qt::AlignTop);
 
     detailBrowser_ = new QTextBrowser(commitInfoTopRow_);
+    // Links are ours to follow (openCommitLink). Left to QTextBrowser,
+    // a click called setSource() with the link: the gitbolt:// and
+    // mailto: links had no document to load and blanked the pane, and
+    // a file: link would have loaded that file into it.
     detailBrowser_->setOpenExternalLinks(false);
+    detailBrowser_->setOpenLinks(false);
+    connect(detailBrowser_, &QTextBrowser::anchorClicked,
+            this, &RepositoryView::openCommitLink);
     detailBrowser_->setFrameShape(QFrame::NoFrame);
     detailBrowser_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     detailBrowser_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -227,7 +258,11 @@ QWidget* RepositoryView::buildCommitInfoTab()
 
     // ----- Bottom: full-width message body -----------------------
     messageBrowser_ = new QTextBrowser(page);
+    // The same as the metadata browser's links.
     messageBrowser_->setOpenExternalLinks(false);
+    messageBrowser_->setOpenLinks(false);
+    connect(messageBrowser_, &QTextBrowser::anchorClicked,
+            this, &RepositoryView::openCommitLink);
     messageBrowser_->setPlaceholderText(tr("Select a commit to view details"));
     messageBrowser_->setFrameShape(QFrame::NoFrame);
     // Same transparency trick as the metadata browser — blend
@@ -237,6 +272,35 @@ QWidget* RepositoryView::buildCommitInfoTab()
     v->addWidget(messageBrowser_, 1);
 
     return page;
+}
+
+// The Commit tab's links. gitbolt://commit/<hex> is a Parent or Child
+// row: select that commit in the graph, as Navigate › Go to parent
+// commit does (the selection change shows it here and goes on the
+// back / forward history). mailto: is an author's or committer's
+// email, handed to the mail app. Anything else is ignored: the
+// browsers show nothing else as a link, so it could only have come
+// from a commit's own text.
+void RepositoryView::openCommitLink(const QUrl& url)
+{
+    if (url.scheme() == QLatin1String("gitbolt") && url.host() == QLatin1String("commit")) {
+        static const QRegularExpression kHex(
+            QStringLiteral("^(?:[0-9a-f]{40}|[0-9a-f]{64})$"));
+        const QString hex = url.path().mid(1);
+        if (!graphWidget_ || !kHex.match(hex).hasMatch())
+            return;
+        // The paged log may not have loaded it yet.
+        if (!graphWidget_->selectCommit(hex)) {
+            if (auto* window = qobject_cast<QMainWindow*>(this->window()))
+                window->statusBar()->showMessage(
+                    tr("Commit %1 isn't in the currently-loaded commit window.")
+                        .arg(hex.left(8)),
+                    4000);
+        }
+        return;
+    }
+    if (url.scheme() == QLatin1String("mailto"))
+        QDesktopServices::openUrl(url);
 }
 
 // File tree tab — interactive browser of the repo at the selected
@@ -940,7 +1004,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 
     const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
     const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
-    const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
+    const QString email   = emailLink(commit.author.email);  // the mailto: link
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
 
     // Committer is shown as a separate row only if it differs from
@@ -951,7 +1015,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         (commit.author.name  != commit.committer.name) ||
         (commit.author.email != commit.committer.email);
     const QString committerName  = QString::fromStdString(commit.committer.name).toHtmlEscaped();
-    const QString committerEmail = QString::fromStdString(commit.committer.email).toHtmlEscaped();
+    const QString committerEmail = emailLink(commit.committer.email);
 
     // Author initials for the avatar (first letter of first and
     // last whitespace-separated tokens; "?" if the name is empty).
@@ -1006,6 +1070,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // No `text-decoration` here — leave it unset so QTextDocument's
     // default link underline applies, matching the mailto links in
     // the left column. The two link kinds should look identical.
+    // Their attributes are double-quoted, like the email links'
+    // (emailLink): a hash is only hex, but toHtmlEscaped() escapes "
+    // and not ', so a single-quoted value is one quote from breaking
+    // out. Clicks on either go to openCommitLink.
     const QString kHashLinkStyle = QStringLiteral(
         "font-family:Menlo,Consolas,monospace;font-size:11px;"
         "color:%1;").arg(linkColor);
@@ -1020,7 +1088,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             const QString hex = QString::fromStdString(pid.toHex()).toHtmlEscaped();
             parentRows += QStringLiteral(
                 "<tr><td class='lbl'>Parent:</td>"
-                "<td class='val'><a href='gitbolt://commit/%1' style='%3'>%2</a></td></tr>")
+                "<td class='val'><a href=\"gitbolt://commit/%1\" style=\"%3\">%2</a></td></tr>")
                 .arg(hex, hex, kHashLinkStyle);
         }
     }
@@ -1043,7 +1111,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
                     const QString hex = QString::fromStdString(other->id.toHex()).toHtmlEscaped();
                     childRows += QStringLiteral(
                         "<tr><td class='lbl'>Child:</td>"
-                        "<td class='val'><a href='gitbolt://commit/%1' style='%3'>%2</a></td></tr>")
+                        "<td class='val'><a href=\"gitbolt://commit/%1\" style=\"%3\">%2</a></td></tr>")
                         .arg(hex, hex, kHashLinkStyle);
                     break;
                 }
@@ -1065,7 +1133,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             static_cast<qint64>(committerTimeT)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         committerRow = QStringLiteral(
             "<tr><td class='lbl'>Committer:</td>"
-            "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
+            "<td class='val'>%1 &lt;%2&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
             .arg(committerName, committerEmail, committerDate, mutedColor);
     }
 
@@ -1153,7 +1221,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // padding-right. Per-row height ends up around 16 px.
     const QString leftRows = QStringLiteral(
         "<tr><td class='lbl'>Author:</td>"
-        "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt;</td></tr>"
+        "<td class='val'>%1 &lt;%2&gt;</td></tr>"
         "<tr><td class='lbl'>Date:</td>"
         "<td class='val'>%3</td></tr>"
         "%4"   // committerRow (optional)

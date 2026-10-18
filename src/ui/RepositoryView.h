@@ -21,6 +21,7 @@ class QTabWidget;
 class QTextBrowser;
 class QTreeView;
 class QShowEvent;
+class QUrl;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
@@ -115,6 +116,11 @@ private slots:
     void openFileExternally(const QString& path);
     void showFileHistory(const QString& path);
     void showBlameForFile(const QString& path);
+
+    /// A link clicked in the Commit tab: a Parent / Child hash selects
+    /// that commit, an email opens the mail app; nothing else is
+    /// followed.
+    void openCommitLink(const QUrl& url);
 
 protected:
     void showEvent(QShowEvent* e) override;
