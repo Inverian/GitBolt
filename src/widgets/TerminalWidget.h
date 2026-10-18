@@ -117,6 +117,11 @@ protected:
     /// made of it.
     virtual void outputRead(const QByteArray& bytes) { Q_UNUSED(bytes); }
 
+    /// How much of the output so far waits for the next read: the start
+    /// of an escape sequence a read cut short (see pendingOutput_).
+    /// Protected so tests can tell it stays small.
+    qsizetype pendingOutputSize() const { return pendingOutput_.size(); }
+
     /// How much of `run` (text that starts where a character does) goes
     /// on a screen row with `room` columns left, in UTF-16 units, which
     /// is how the Windows screen model counts columns: as much as fits
@@ -192,8 +197,12 @@ private:
     /// Tail of an escape sequence split across a read() boundary,
     /// re-prepended to the next chunk. Colored output splits like
     /// this constantly; without the carry the tail ("[0m", "[K", …)
-    /// printed as literal text.
+    /// printed as literal text. Only a sequence's worth: one too long to
+    /// be real is not kept (see appendOutput).
     QString          pendingOutput_;
+    /// Partway through a CSI too long to be a real one: the rest of it,
+    /// up to and with its final byte, is dropped as it arrives.
+    bool             droppingCsi_  = false;
 
     // The directory the shell should cd into the next time it
     // starts. Cached so RepositoryView can call setInitialPath

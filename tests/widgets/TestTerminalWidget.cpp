@@ -10,6 +10,12 @@
 //     character, and the rest is picked up from the next read. A
 //     character cut in two used to come out as two U+FFFDs, and on
 //     macOS and Linux an OSC cut in two as its text;
+//   - but only a real sequence's worth waits for the next read. A CSI
+//     that went on and on (an ESC [ and megabytes of digits) used to
+//     wait whole, walked again from its ESC on every read; one longer
+//     than any real one is now dropped as it arrives;
+//   - a count goes no further than the screen: ESC[50000000@ put fifty
+//     million blanks in the row;
 //   - the shell's cursor stays where a read leaves it, and the moves
 //     and erases within its row are honored: git's progress meter and
 //     the line editors' edits (recorded from zsh and bash) write over
@@ -94,6 +100,7 @@ class FedTerminal : public TerminalWidget {
 public:
     using TerminalWidget::appendOutput;
     using TerminalWidget::gridSize;
+    using TerminalWidget::pendingOutputSize;
     using TerminalWidget::rowChunk;
 
     // Everything the shell's terminal sent, as it came.
@@ -590,6 +597,96 @@ private slots:
         terminal.appendOutput("\x1b]8;;https://example.com\x1b");
         terminal.appendOutput("\\c\x1b]8;;\x1b\\d");
         QCOMPARE(terminal.toPlainText(), QStringLiteral("abcd"));
+    }
+
+    // A CSI that never ends: an ESC [ and then nothing but parameter
+    // bytes, megabytes of them, as `cat` of a file like that in the
+    // Console prints it (or a server's message during a fetch). It
+    // waited whole for its final byte, growing with every read, and was
+    // walked again from its ESC each time, so each read took longer
+    // than the one before: seconds a megabyte, and the memory to match.
+    // One longer than any real CSI is dropped as it arrives, as far as
+    // its final byte, and the output after it shows. Fed a kilobyte a
+    // read, as macOS's PTY hands it over. What waits for the next read
+    // is all a read walks besides its own text, so with that small the
+    // time goes with the output, however long the sequence.
+    void overlongCsiIsDroppedAsItArrives()
+    {
+        FedTerminal terminal;
+        terminal.appendOutput("before\r\n\x1b[");
+        const QByteArray body(1024, '0');
+        constexpr int kReads = 2048;  // 2 MB
+        constexpr qsizetype kSmall = 256;
+        QElapsedTimer clock;
+        clock.start();
+        qsizetype mostWaiting = terminal.pendingOutputSize();
+        int shown = 0;
+        // (Stops at the first read that leaves more waiting, or shows
+        // any of it: either way the rest would take minutes.)
+        int reads = 0;
+        while (reads < kReads && mostWaiting <= kSmall && shown == 0) {
+            terminal.appendOutput(body);
+            ++reads;
+            mostWaiting = qMax(mostWaiting, terminal.pendingOutputSize());
+            shown = terminal.document()->lastBlock().length() - 1;
+        }
+        qInfo("%d reads of %lld bytes in %lld ms", reads, qint64(body.size()),
+              clock.elapsed());
+        QVERIFY2(mostWaiting <= kSmall,
+                 qPrintable(QStringLiteral("%1 characters waited").arg(mostWaiting)));
+        QCOMPARE(shown, 0);
+        // Its final byte ends it; what follows shows, and none of it.
+        terminal.appendOutput("mafter");
+        QCOMPARE(terminal.toPlainText(), QStringLiteral("before\nafter"));
+
+        // All in one read, final byte and all: the same.
+        FedTerminal oneRead;
+        oneRead.appendOutput("a\x1b[" + QByteArray(1000, '0') + "mb");
+        QCOMPARE(oneRead.toPlainText(), QStringLiteral("ab"));
+        QCOMPARE(oneRead.pendingOutputSize(), qsizetype(0));
+
+        // An OSC that never ends waits a few KB at most (beyond that its
+        // text shows): an OSC 8 link's URL can be that long.
+        FedTerminal osc;
+        osc.appendOutput("x\x1b]0;");
+        for (int k = 0; k < 64; ++k) {
+            osc.appendOutput(QByteArray(1024, 'a'));
+            QVERIFY2(osc.pendingOutputSize() <= 4096,
+                     qPrintable(QString::number(osc.pendingOutputSize())));
+        }
+    }
+
+    // A count goes no further than the screen does. ICH's went as far
+    // as it said: ESC[50000000@, a dozen bytes, put fifty million blanks
+    // in the row, seconds and gigabytes for one sequence. And a number
+    // too big for an int was read as 0, the default, so the move it
+    // asked for went one column. The widget was never shown, so it has
+    // the default 80 columns.
+    void countsStopAtTheScreensEdge()
+    {
+        // As many blanks as it says, when they fit.
+        FedTerminal three;
+        three.appendOutput("abcdef\x1b[2G\x1b[3@");
+        QCOMPARE(three.toPlainText(), QStringLiteral("a   bcdef"));
+
+        // A row's worth at most, with what was there after them.
+        FedTerminal huge;
+        huge.appendOutput("AB\r\x1b[50000000@");
+        QCOMPARE(huge.document()->lastBlock().length() - 1, 80 + 2);
+        QCOMPARE(huge.toPlainText(), QString(80, QLatin1Char(' ')) + QStringLiteral("AB"));
+
+        // To the last column, and the rest of the row out, however big
+        // the number.
+        for (const QByteArray& count : {QByteArray("99999"), QByteArray("2147483647"),
+                                        QByteArray("99999999999")}) {
+            FedTerminal moved;
+            moved.appendOutput("ab\x1b[" + count + "CX");
+            QCOMPARE(moved.toPlainText(),
+                     QStringLiteral("ab") + QString(77, QLatin1Char(' ')) + QStringLiteral("X"));
+            FedTerminal deleted;
+            deleted.appendOutput("abcdef\x1b[2G\x1b[" + count + "P");
+            QCOMPARE(deleted.toPlainText(), QStringLiteral("a"));
+        }
     }
 
     // Windows wraps a long run a row at a time, a UTF-16 unit to a

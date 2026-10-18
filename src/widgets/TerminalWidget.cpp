@@ -68,6 +68,22 @@ char** hostEnviron() { return environ; }
 
 constexpr int kMaxScrollback = 5000;
 
+// The longest a CSI gets before its final byte, ESC and '[' included: a
+// real one is a handful of characters, an SGR with every attribute and
+// both colors a few dozen. Anything longer is dropped (see appendOutput).
+constexpr int kMaxCsiLength = 256;
+
+// An OSC a read cuts short waits for the next read only if it is
+// shorter than this. An OSC 8 link carries a URL, which can run to a
+// couple of KB.
+constexpr int kMaxPendingOsc = 4096;
+
+// The most digits a number in a CSI is read with, and what one with more
+// is taken for: more than any screen has rows or columns (see
+// TerminalWidget::csi).
+constexpr qsizetype kMaxCountDigits = 5;
+constexpr int kMaxCount = 99999;
+
 #ifndef Q_OS_WIN
 // The most onPtyReadable() reads, and draws in one appendOutput(), before
 // it goes back to the event loop. Drawing costs by the line, not the
@@ -94,6 +110,12 @@ QByteArray toTerminalBytes(const QString& text)
 bool isText(QChar c)
 {
     return c.unicode() >= 0x20 || c == QLatin1Char('\t');
+}
+
+// A CSI's final byte, which ends it (and says what it does).
+bool isCsiFinal(QChar c)
+{
+    return c.unicode() >= 0x40 && c.unicode() <= 0x7e;
 }
 
 // Write `run` at the cursor the way a terminal does: it replaces a
@@ -393,6 +415,7 @@ void TerminalWidget::stopShell()
     }
     writeQueue_.clear();
     pendingOutput_.clear();
+    droppingCsi_ = false;
     decoder_.resetState();
 #ifdef Q_OS_WIN
     if (conpty_) {
@@ -707,6 +730,16 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
 
     const int n = static_cast<int>(text.length());
     int i = 0;
+    if (droppingCsi_) {
+        // The rest of a CSI too long to be one (see below), as far as
+        // its final byte, which goes with it.
+        while (i < n && !isCsiFinal(text[i]))
+            ++i;
+        if (i < n) {
+            ++i;
+            droppingCsi_ = false;
+        }
+    }
     while (i < n) {
         const ushort u = text[i].unicode();
 
@@ -753,7 +786,7 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
             if (i + 1 >= n) {
                 // Chunk ended ON the ESC — hold it for the next
                 // read instead of dropping it (the rest of the
-                // sequence is in flight).
+                // sequence is in flight). Just the one character.
                 pendingOutput_ = text.mid(i);
                 break;
             }
@@ -763,18 +796,26 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 // where params are 0x30-0x3f, intermediates are
                 // 0x20-0x2f, and the final byte is 0x40-0x7e.
                 int j = i + 2;
-                bool handled = false;
-                while (j < n) {
-                    const ushort fu = text[j].unicode();
-                    if (fu >= 0x40 && fu <= 0x7e) {
-                        csi(cur, fu, QStringView(text).mid(i + 2, j - i - 2));
-                        i = j + 1;
-                        handled = true;
-                        break;
-                    }
+                while (j < n && !isCsiFinal(text[j]))
                     ++j;
+                if (j - i > kMaxCsiLength) {
+                    // Too long to be a CSI: an ESC [ and then nothing
+                    // but parameter bytes, megabytes of them, from a
+                    // file `cat`ed here or a server's message during a
+                    // fetch. Parked, it grew with every read until a
+                    // final byte came, and was walked again from its
+                    // ESC each time, so every read took longer than the
+                    // one before. Dropped instead, as far as its final
+                    // byte, in this read or a later one (droppingCsi_):
+                    // what follows it shows as usual.
+                    droppingCsi_ = j == n;
+                    i = droppingCsi_ ? n : j + 1;
+                    continue;
                 }
-                if (!handled) {
+                if (j < n) {
+                    csi(cur, text[j].unicode(), QStringView(text).mid(i + 2, j - i - 2));
+                    i = j + 1;
+                } else {
                     // Unterminated CSI — its final byte is in the
                     // next chunk. Park everything from the ESC and
                     // resume when it arrives.
@@ -783,13 +824,15 @@ void TerminalWidget::appendOutput(const QByteArray& bytes)
                 }
                 continue;
             }
-            if (next == ']' && n - i < 4096) {
+            if (next == ']' && n - i < kMaxPendingOsc) {
                 // An OSC the regex above couldn't remove because its
                 // terminator is in the next chunk, or its last byte is
                 // (the read ends on the ESC of an ESC \): conhost
                 // retitles the window on every command, and shells'
                 // prompts often do, so this does happen. Park it like
-                // an unterminated CSI.
+                // an unterminated CSI. n - i is all of the text from
+                // the ESC on, what would be parked; a longer one isn't,
+                // and its text shows.
                 const qsizetype esc = text.indexOf(QChar(0x1b), i + 2);
                 if (esc < 0 || esc == n - 1) {
                     pendingOutput_ = text.mid(i);
@@ -977,12 +1020,26 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
     }
     const QList<QStringView> args = params.split(u';');
     const auto arg = [&args](qsizetype index) {
-        return index < args.size() ? args.at(index).toInt() : 0;
+        if (index >= args.size())
+            return 0;
+        // A number of more than kMaxCountDigits digits is past every
+        // edge of the screen, which is as far as anything goes (see
+        // below), so it isn't read: toInt made one too big for an int
+        // 0, the default, and one just under INT_MAX overflowed the
+        // sums below.
+        const QStringView digits = args.at(index);
+        return digits.size() > kMaxCountDigits ? kMaxCount : digits.toInt();
     };
     const int count  = qMax(1, arg(0));  // moves treat 0 as 1
+    // A count goes no further than the screen does, as on a terminal:
+    // past its edge there is nothing more to move over, erase, insert
+    // or scroll. ESC[50000000@ inserted fifty million blanks. (A
+    // position, CHA's or CUP's, stops at the edge further down.)
+    const int cells  = qMin(count, qMax(1, screenColumns_));
     const int column = cur.positionInBlock() + 1;
     const int length = cur.block().length() - 1;
 #ifdef Q_OS_WIN
+    const int lines  = qMin(count, qMax(1, screenRows_));
     const int row    = cur.blockNumber() - screenTop_.blockNumber() + 1;
     const auto toColumn = [&](int to) { screenMoveTo(cur, row, to); };
 #else
@@ -996,8 +1053,8 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
 #endif
 
     switch (finalByte) {
-    case 'C': toColumn(column + count); break;  // CUF
-    case 'D': toColumn(column - count); break;  // CUB
+    case 'C': toColumn(column + cells); break;  // CUF
+    case 'D': toColumn(column - cells); break;  // CUB
     case 'G':                                   // CHA
     case '`': toColumn(count); break;           // HPA
     case 'K': {  // EL: 0 cursor to end, 1 start to cursor, 2 whole row
@@ -1012,18 +1069,18 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
         break;
     }
     case 'X':  // ECH: blank cells from the cursor on, without moving
-        blankCells(cur, column - 1, qMin(column - 1 + count, length));
+        blankCells(cur, column - 1, qMin(column - 1 + cells, length));
         break;
     case '@':  // ICH: blanks in at the cursor, the rest of the row right
         if (column <= length) {
             const int at = cur.position();
-            cur.insertText(QString(count, QLatin1Char(' ')));
+            cur.insertText(QString(cells, QLatin1Char(' ')));
             cur.setPosition(at);
         }
         break;
     case 'P': {  // DCH: the cursor's characters out, the rest of the row left
         QTextCursor erase = cur;
-        for (int k = 0; k < count && !erase.atBlockEnd(); ++k)
+        for (int k = 0; k < cells && !erase.atBlockEnd(); ++k)
             erase.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
         erase.removeSelectedText();
         break;
@@ -1033,8 +1090,8 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
     case 'f':  // HVP
         screenMoveTo(cur, qMax(1, arg(0)), qMax(1, arg(1)));
         break;
-    case 'A': screenMoveTo(cur, row - count, column); break;  // CUU
-    case 'B': screenMoveTo(cur, row + count, column); break;  // CUD
+    case 'A': screenMoveTo(cur, row - lines, column); break;  // CUU
+    case 'B': screenMoveTo(cur, row + lines, column); break;  // CUD
     case 'd': screenMoveTo(cur, count, column); break;        // VPA
     case 'J':  // ED
         if (arg(0) == 0) {  // cursor to the end of the screen
@@ -1052,7 +1109,7 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
         }
         break;
     case 'S':  // SU: the screen scrolls up; the cursor keeps its cell
-        for (int k = 0; k < count; ++k) {
+        for (int k = 0; k < lines; ++k) {
             if (!screenTop_.block().next().isValid()) {
                 QTextCursor end(document());
                 end.movePosition(QTextCursor::End);
