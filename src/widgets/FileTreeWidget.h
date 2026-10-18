@@ -41,9 +41,11 @@ namespace gitbolt::widgets {
 ///
 /// The tree walk (and the sort of what it finds) runs on the service's
 /// read thread (GitService::readAsync): on the GUI thread, a commit
-/// with a huge tree froze the window for the walk, and one nested
-/// deeply enough overflowed its stack. A blob preview reads one blob,
-/// at most kMaxPreviewBytes of it, synchronously.
+/// with a huge tree froze the window for the walk. That thread has the
+/// GUI thread's 8 MB stack, so the walk (libgit2's git_tree_walk
+/// recurses once per level) takes a tree as deep as it did; what bounds
+/// the depth is a limit in libgit2, not the thread. A blob preview
+/// reads one blob, at most kMaxPreviewBytes of it, synchronously.
 class FileTreeWidget : public QWidget {
     Q_OBJECT
 public:

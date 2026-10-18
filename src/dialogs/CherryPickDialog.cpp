@@ -82,12 +82,13 @@ QString CherryPickDialog::commitHash() const {
 void CherryPickDialog::setCommitDetails(const git::CommitData& commit) {
     hashLabel_->setText(QString::fromStdString(commit.id.toHex()));
     // At most util::kMaxLineChars: the label wraps its text, and laying
-    // out a subject of one line of megabytes froze the dialog.
+    // out a subject of one line of megabytes froze the dialog. The same
+    // for the author, whose ident git takes at any length.
     summaryLabel_->setText(util::elided(
         commit.summary.empty() ? commit.message : commit.summary));
     authorLabel_->setText(QStringLiteral("%1 <%2>")
-                              .arg(QString::fromStdString(commit.author.name))
-                              .arg(QString::fromStdString(commit.author.email)));
+                              .arg(util::elided(commit.author.name),
+                                   util::elided(commit.author.email)));
 
     auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
                      commit.author.when.time_since_epoch())

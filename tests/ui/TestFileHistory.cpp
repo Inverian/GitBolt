@@ -5,8 +5,8 @@
 // repository. Meanwhile nothing said it was coming, and a second
 // Show History… on the file loaded it again and opened a second
 // dialog. Now one load per file runs at a time, with a busy cursor
-// and a status-bar note until its dialog comes up. A subject of one
-// line of megabytes shows cut in its list.
+// and a status-bar note until its dialog comes up. A subject, or an
+// author's name, of one line of megabytes shows cut in its list.
 //
 
 #include <QApplication>
@@ -105,6 +105,39 @@ private slots:
         QCOMPARE(tree->topLevelItem(0)->text(3),
                  QString(gitbolt::util::kMaxLineChars, QLatin1Char('a')) + QChar(0x2026));
         QCOMPARE(tree->topLevelItem(1)->text(3), QStringLiteral("ordinary"));
+    }
+
+    // The same for an author's name (git takes an ident of any length).
+    void aHugeAuthorIsCut() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("b.txt"), "one\n", QStringLiteral("ordinary")).ok());
+        QVERIFY(repo.writeAndCommit(QStringLiteral("b.txt"), "two\n", QStringLiteral("hostile")).ok());
+        repo.rewriteHeadIdents(std::string(1024 * 1024, 'A') + " <a@example.com>",
+                               "Test User <test@gitbolt.local>");
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        QMainWindow window;
+        auto* view = new RepositoryView(&window);
+        window.setCentralWidget(view);
+        view->setGitService(&svc);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QCOMPARE(historyDialogs(), 0);
+        QVERIFY(QMetaObject::invokeMethod(view, "showFileHistory",
+                                          Q_ARG(QString, QStringLiteral("b.txt"))));
+        QTRY_COMPARE_WITH_TIMEOUT(historyDialogs(), 1, 15000);
+        QTreeWidget* tree = nullptr;
+        for (QWidget* top : QApplication::topLevelWidgets()) {
+            if (top->objectName() == QStringLiteral("dlg.fileHistory") && top->isVisible())
+                tree = top->findChild<QTreeWidget*>();
+        }
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QCOMPARE(tree->topLevelItem(0)->text(2),
+                 QString(gitbolt::util::kMaxLineChars, QLatin1Char('A')) + QChar(0x2026));
+        QCOMPARE(tree->topLevelItem(0)->text(3), QStringLiteral("hostile"));
+        QCOMPARE(tree->topLevelItem(1)->text(2), QStringLiteral("Test User"));
     }
 };
 

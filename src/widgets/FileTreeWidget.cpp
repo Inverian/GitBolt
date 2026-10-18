@@ -308,9 +308,12 @@ void FileTreeWidget::rebuildTree()
     // On the service's read thread (GitService::readAsync), under its
     // repo lock, as background refresh workers use the same libgit2
     // handle. The walk ran here on the GUI thread, where a commit with
-    // a huge tree froze the window, and one nested deeply enough
-    // overflowed the stack. The sort goes along: its keys hold a
-    // component per path segment, quadratic in the depth.
+    // a huge tree froze the window. The read thread's stack is the GUI
+    // thread's 8 MB on purpose, so the walk, which recurses once per
+    // level, takes a tree as deep as it took here; what bounds the
+    // depth is a limit in libgit2, not the thread. The sort goes along:
+    // its keys hold a component per path segment, quadratic in the
+    // depth.
     using Walk = std::optional<git::Result<std::vector<git::TreeEntry>>>;
     const git::ObjectId commit = currentCommit_;
     svc_->readAsync(

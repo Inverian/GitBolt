@@ -208,10 +208,11 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
             QString tip = QString::fromStdString(t.fullRefName);
             tip += QStringLiteral("\nTarget: ") + QString::fromStdString(t.targetId.toShortHex());
             if (t.type == git::TagType::Annotated) {
+                // The tagger's ident at most util::kMaxLineChars long:
+                // git takes one of any length.
                 if (!t.tagger.name.empty())
                     tip += QStringLiteral("\n") + tr("Tagger: %1 <%2>").arg(
-                        QString::fromStdString(t.tagger.name),
-                        QString::fromStdString(t.tagger.email));
+                        util::elided(t.tagger.name), util::elided(t.tagger.email));
                 // git ends a tag message with a newline. Cut where a
                 // line, or the whole of it, is too long for the tooltip
                 // to lay out without freezing the window

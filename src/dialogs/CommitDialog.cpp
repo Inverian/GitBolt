@@ -913,12 +913,19 @@ void CommitDialog::onCommitClicked()
     // and the first one's outcome was taken for the second's.
     if (pendingCommit_ || localOpBusy_ || stepRunning())
         return;
-    const QString msg = messageEdit_->toPlainText().trimmed();
+    QString msg = messageEdit_->toPlainText().trimmed();
     if (msg.isEmpty()) {
         errorLabel_->setText(tr("Commit message cannot be empty."));
         errorLabel_->show();
         return;
     }
+    // The editor still holds git's message as startFromPreparedMessage()
+    // cut it, untouched: the commit takes git's message whole. The cut
+    // text went in, "…" and all, and a message with one long line (a
+    // data URL, a generated trailer) lost the rest of it.
+    if (!prefilled_.isEmpty() && messageEdit_->toPlainText() == prefilled_
+        && util::elidedText(preparedRead_) != preparedRead_)
+        msg = preparedRead_.trimmed();
     errorLabel_->hide();
     pendingCommit_ = true;
     pendingKey_ = svc_->openKey();
@@ -1016,13 +1023,14 @@ void CommitDialog::startFromPreparedMessage(bool onlyIfChanged)
     // A pick's message is the picked commit's, which can be one line of
     // megabytes: laid out in the editor, it froze the window. The editor
     // gets at most util::elidedText of it, and the note under it says
-    // so; the commit takes what the editor holds, as ever. A note for
-    // the message read before goes with it.
+    // so. Left as it is, the commit takes git's message whole
+    // (onCommitClicked); edited, what the editor holds. A note for the
+    // message read before goes with it.
     const auto cutNote = [](const QString& message) {
         return util::elidedText(message) == message
             ? QString()
             : tr("git's message for this commit is %L1 characters long: only part of it "
-                 "is in the editor, and the commit takes what the editor holds.")
+                 "is in the editor. Left as it is, the commit takes the whole of it.")
                   .arg(message.size());
     };
     if (const QString stale = cutNote(preparedRead_);

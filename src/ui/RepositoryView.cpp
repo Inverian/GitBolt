@@ -382,10 +382,11 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
         const QStringList cols = line.split(QLatin1Char('\t'));
         if (cols.size() < 5)
             continue;
-        // The subject at most util::kMaxLineChars long: the view lays a
-        // cell's text out whole, on every paint, before eliding it.
+        // The author and subject at most util::kMaxLineChars long: the
+        // view lays a cell's text out whole, on every paint, before
+        // eliding it.
         auto* item = new QTreeWidgetItem(
-            {cols[1], cols[2], cols[3], util::elided(cols[4])});
+            {cols[1], cols[2], util::elided(cols[3]), util::elided(cols[4])});
         item->setData(0, Qt::UserRole, cols[0]); // full sha
         tree->addTopLevelItem(item);
     }
@@ -951,8 +952,13 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const QString fullSummary = QString::fromStdString(commit.summary);
     const QString shownSummary = util::elided(fullSummary, util::kMaxParagraphChars);
     const QString summary = shownSummary.toHtmlEscaped();
-    const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
-    const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
+    // The names and addresses at most util::kMaxLineChars long, for the
+    // same reason: git takes an ident of any length, and an author name
+    // of one line of megabytes froze the window just as long.
+    const QString authorName = util::elided(commit.author.name);
+    const QString authorEmail = util::elided(commit.author.email);
+    const QString name    = authorName.toHtmlEscaped();
+    const QString email   = authorEmail.toHtmlEscaped();
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
 
     // Committer is shown as a separate row only if it differs from
@@ -962,8 +968,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const bool committerDiffers =
         (commit.author.name  != commit.committer.name) ||
         (commit.author.email != commit.committer.email);
-    const QString committerName  = QString::fromStdString(commit.committer.name).toHtmlEscaped();
-    const QString committerEmail = QString::fromStdString(commit.committer.email).toHtmlEscaped();
+    const QString committerName  = util::elided(commit.committer.name).toHtmlEscaped();
+    const QString committerEmail = util::elided(commit.committer.email).toHtmlEscaped();
 
     // Author initials for the avatar (first letter of first and
     // last whitespace-separated tokens; "?" if the name is empty).
@@ -977,7 +983,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             return first;
         return first + parts.last().left(1).toUpper();
     };
-    const QString initials = initialsFor(QString::fromStdString(commit.author.name));
+    const QString initials = initialsFor(authorName);
 
     // Deterministic color from a hash of the email so the same
     // author always gets the same avatar color across commits.
@@ -990,7 +996,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         const int hue = static_cast<int>(h % 360u);
         return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
     };
-    const QString avatarBg = colorFor(QString::fromStdString(commit.author.email));
+    const QString avatarBg = colorFor(authorEmail);
 
     // Avatar text is set up-front; the size + stylesheet are
     // applied AFTER the metadata HTML is laid out so we can
@@ -1262,9 +1268,11 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     messageBrowser_->setHtml(messageHtml);
 
     // Kick the contained-in query on a worker and patch the browser
-    // when it lands. The GitProcess is snapshotted HERE (on the GUI
-    // thread, under the service's lock) and used freely on the pool
-    // thread — QProcess execution is independent of libgit2 state.
+    // when it lands. The GitProcess is a copy of the one the service
+    // made as the repository opened (process() on the GUI thread
+    // doesn't wait for the service's lock, which a long read may hold),
+    // and is used freely on the pool thread — QProcess execution is
+    // independent of libgit2 state.
     if (gitService_ && gitService_->isOpen()) {
         const quint64 token = ++containsQueryToken_;
         const std::string sha = commit.id.toHex();

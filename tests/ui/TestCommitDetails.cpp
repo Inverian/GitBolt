@@ -20,16 +20,23 @@
 //     and the window froze for minutes. The log's Message column, the
 //     reflog, the stash list and tooltips, the Cherry Pick and Rebase
 //     dialogs and the rebase plan cut it too;
-//   - an ordinary subject and body show exactly as they are.
+//   - an ordinary subject and body show exactly as they are;
+//   - an author name or address of megabytes (git takes an ident of
+//     any length) shows cut too, there and in the log, the blame, the
+//     Cherry Pick dialog, a tag's tooltip and the reflog;
+//   - Copy in the log copies a message whole, as it did before the
+//     cell had only its start.
 //
 
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
+#include <QClipboard>
 #include <QElapsedTimer>
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
 #include <QSettings>
+#include <QTableView>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -41,12 +48,15 @@
 #include "dialogs/RebaseDialog.h"
 #include "dialogs/ReflogDialog.h"
 #include "dialogs/StashManageDialog.h"
+#include "git/Blame.h"
+#include "models/BlameModel.h"
 #include "models/BranchModel.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
 #include "ui/RepositoryView.h"
 #include "util/MessageText.h"
 #include "widgets/InteractiveRebaseWidget.h"
+#include "widgets/RevisionGraphWidget.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -505,6 +515,228 @@ private slots:
             QCOMPARE(list->count(), 1);
             QVERIFY(list->item(0)->text().size() < gitbolt::util::kMaxLineChars + 20);
         }
+    }
+
+    // A commit whose author's name is one line of 1 MB, and whose
+    // committer's address is another: the browser laid them out whole,
+    // superlinearly (40 s for the name alone), and the log's Author
+    // column laid the name out on every paint.
+    void aHugeIdentIsShownCut() {
+        TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("Subject")).ok());
+        const std::string name(1024 * 1024, 'A');
+        const std::string address = std::string(1024 * 1024, 'c') + "@example.com";
+        const auto id = repo.rewriteHeadIdents(name + " <author@example.com>",
+                                               "Committer <" + address + ">");
+        const auto commit = commitData(repo, id);
+        QCOMPARE(commit.author.name, name);
+        QCOMPARE(commit.committer.email, address);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        model.setCommits({commit});
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+
+        QElapsedTimer timer;
+        timer.start();
+        view.onCommitSelected(hex(id));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        details->document()->documentLayout()->documentSize();
+        details->viewport()->grab();
+        QVERIFY2(timer.elapsed() < 5000,
+                 qPrintable(QStringLiteral("showing it took %1 ms").arg(timer.elapsed())));
+
+        const QString text = details->toPlainText();
+        QVERIFY2(text.size() < 4 * gitbolt::util::kMaxLineChars, qPrintable(text.left(200)));
+        QVERIFY2(text.contains(QString(gitbolt::util::kMaxLineChars, QLatin1Char('A')) + kEllipsis
+                               + QStringLiteral(" <author@example.com>")),
+                 qPrintable(text.left(200)));
+        QVERIFY2(text.contains(QStringLiteral("Committer <")
+                               + QString(gitbolt::util::kMaxLineChars, QLatin1Char('c')) + kEllipsis
+                               + QLatin1Char('>')),
+                 qPrintable(text.right(400)));
+
+        // The log's Author column, which the view lays out on every
+        // paint; Copy takes the name whole.
+        const QModelIndex author =
+            model.index(0, static_cast<int>(gitbolt::models::CommitLogColumn::Author));
+        QCOMPARE(model.data(author).toString(),
+                 QString(gitbolt::util::kMaxLineChars, QLatin1Char('A')) + kEllipsis);
+        QCOMPARE(model.data(author, CommitLogModel::FULL_TEXT_ROLE).toString().size(),
+                 qsizetype(name.size()));
+    }
+
+    // The other places an author's or tagger's name shows (1 MB here).
+    // The blame gave every line of a hunk a copy of its own (64K here,
+    // a copy per line being what it costs), and every one of them was
+    // laid out on every paint. An ordinary one shows as it is.
+    void otherViewsCutAHugeIdent() {
+        const std::string huge(1024 * 1024, 'A');
+        const QString cut = QString(gitbolt::util::kMaxLineChars, QLatin1Char('A')) + kEllipsis;
+
+        // The blame: two hunks, the first of 300 lines.
+        {
+            gitbolt::git::BlameResult result;
+            result.path = "a.txt";
+            for (int i = 0; i < 301; ++i)
+                result.lines.push_back("line " + std::to_string(i));
+            gitbolt::git::BlameHunk hostile;
+            hostile.commitId = gitbolt::git::ObjectId::fromHex(std::string(40, '1'));
+            hostile.signature.name = std::string(64 * 1024, 'A');
+            hostile.signature.when = std::chrono::system_clock::now();
+            hostile.startLine = 1;
+            hostile.lineCount = 300;
+            gitbolt::git::BlameHunk plain = hostile;
+            plain.commitId = gitbolt::git::ObjectId::fromHex(std::string(40, '2'));
+            plain.signature.name = "Ada Lovelace";
+            plain.startLine = 301;
+            plain.lineCount = 1;
+            result.hunks = {hostile, plain};
+            gitbolt::models::BlameModel model;
+            model.setBlameResult(result);
+            QCOMPARE(model.rowCount(), 301);
+            using gitbolt::models::BlameModel;
+            for (int row : {0, 299})
+                QCOMPARE(model.index(row, BlameModel::ColAuthor).data().toString(), cut);
+            QCOMPARE(model.index(300, BlameModel::ColAuthor).data().toString(),
+                     QStringLiteral("Ada Lovelace"));
+        }
+        // Cherry Pick's Author row.
+        {
+            gitbolt::git::CommitData commit;
+            commit.id = gitbolt::git::ObjectId::fromHex(std::string(40, '1'));
+            commit.summary = commit.message = "Fix the frobnicator";
+            commit.author.name = huge;
+            commit.author.email = huge + "@example.com";
+            gitbolt::dialogs::CherryPickDialog dialog;
+            dialog.setCommitDetails(commit);
+            bool found = false;
+            for (QLabel* label : dialog.findChildren<QLabel*>()) {
+                if (label->text().startsWith(QStringLiteral("AAAA"))) {
+                    QCOMPARE(label->text(), cut + QStringLiteral(" <") + cut + QLatin1Char('>'));
+                    found = true;
+                }
+            }
+            QVERIFY(found);
+            commit.author.name = "Ada Lovelace";
+            commit.author.email = "ada@example.com";
+            dialog.setCommitDetails(commit);
+            bool foundPlain = false;
+            for (QLabel* label : dialog.findChildren<QLabel*>())
+                foundPlain = foundPlain
+                             || label->text() == QStringLiteral("Ada Lovelace <ada@example.com>");
+            QVERIFY(foundPlain);
+        }
+        // An annotated tag's tagger, in its tooltip.
+        {
+            gitbolt::models::BranchModel model;
+            gitbolt::git::TagInfo tag;
+            tag.name = "v1";
+            tag.fullRefName = "refs/tags/v1";
+            tag.type = gitbolt::git::TagType::Annotated;
+            tag.message = "Release 1\n";
+            tag.tagger.name = huge;
+            tag.tagger.email = huge + "@example.com";
+            gitbolt::git::TagInfo plain = tag;
+            plain.name = "v2";
+            plain.fullRefName = "refs/tags/v2";
+            plain.tagger.name = "Ada Lovelace";
+            plain.tagger.email = "ada@example.com";
+            model.setTags({tag, plain});
+            const QModelIndex tags =
+                model.index(static_cast<int>(gitbolt::models::BranchModel::RootCategory::Tags), 0);
+            const QString tip = model.data(model.index(0, 0, tags), Qt::ToolTipRole).toString();
+            QVERIFY2(tip.contains(QStringLiteral("Tagger: ") + cut + QStringLiteral(" <") + cut
+                                  + QLatin1Char('>')),
+                     qPrintable(tip.left(200)));
+            QVERIFY(tip.size() < 3 * gitbolt::util::kMaxLineChars);
+            QVERIFY(model.data(model.index(1, 0, tags), Qt::ToolTipRole)
+                        .toString()
+                        .contains(QStringLiteral("Tagger: Ada Lovelace <ada@example.com>")));
+        }
+        // The reflog's Committer column.
+        {
+            gitbolt::dialogs::ReflogDialog dialog;
+            gitbolt::git::ReflogEntry entry;
+            entry.committer.name = huge;
+            entry.message = "commit: Fix the frobnicator";
+            gitbolt::git::ReflogEntry other = entry;
+            other.committer.name = "Ada Lovelace";
+            dialog.setEntries({entry, other});
+            auto* table = dialog.findChild<QTableWidget*>();
+            QVERIFY(table);
+            QCOMPARE(table->item(0, 2)->text(), cut);
+            QCOMPARE(table->item(1, 2)->text(), QStringLiteral("Ada Lovelace"));
+        }
+    }
+
+    // Copy (Cmd+C) in the log copies the current cell. The Message cell
+    // has at most util::kMaxLineChars of a message, and an ordinary one
+    // with its body shown is often longer: what Copy gave was cut, with
+    // a "…". It copies the message whole, with its body or without.
+    void copyingFromTheLogTakesTheWholeMessage() {
+        // The offscreen platform keeps its clipboard in the process;
+        // anywhere else this would overwrite the user's.
+        const QString platform = QGuiApplication::platformName();
+        if (platform != QLatin1String("offscreen") && platform != QLatin1String("minimal"))
+            QSKIP("needs the offscreen platform (ctest sets it): the clipboard is the user's");
+
+        gitbolt::git::CommitData commit;
+        commit.id = gitbolt::git::ObjectId::fromHex(std::string(40, '1'));
+        commit.summary = "Rework the parser";
+        std::string body;
+        for (int i = 0; i < 30; ++i)
+            body += "Line " + std::to_string(i) + " of the body, which explains the change.\n";
+        commit.message = commit.summary + "\n\n" + body;
+        commit.author.name = "Ada Lovelace";
+        QVERIFY(commit.message.size() > 1000);
+
+        CommitLogModel model;
+        model.setCommits({commit});
+        model.setShowMessageBody(true);
+        gitbolt::widgets::RevisionGraphWidget log;
+        log.setModel(&model);
+        log.resize(800, 400);
+        log.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&log));
+        auto* table = log.findChild<QTableView*>();
+        QVERIFY(table);
+        const int message = static_cast<int>(gitbolt::models::CommitLogColumn::Message);
+        table->setCurrentIndex(table->model()->index(0, message));
+        QVERIFY(table->model()->index(0, message).data().toString().endsWith(kEllipsis));
+
+        QApplication::clipboard()->clear();
+        QTest::keyClick(table, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(),
+                 QString::fromStdString(commit.message).trimmed());
+
+        model.setShowMessageBody(false);
+        QApplication::clipboard()->clear();
+        QTest::keyClick(table, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("Rework the parser"));
+
+        // Any other cell, as it shows.
+        table->setCurrentIndex(table->model()->index(
+            0, static_cast<int>(gitbolt::models::CommitLogColumn::Author)));
+        QApplication::clipboard()->clear();
+        QTest::keyClick(table, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("Ada Lovelace"));
+        table->setCurrentIndex(table->model()->index(
+            0, static_cast<int>(gitbolt::models::CommitLogColumn::Hash)));
+        QTest::keyClick(table, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("1111111"));
+        // The graph has no text: the clipboard stays as it is.
+        table->setCurrentIndex(table->model()->index(
+            0, static_cast<int>(gitbolt::models::CommitLogColumn::Graph)));
+        QTest::keyClick(table, Qt::Key_C, Qt::ControlModifier);
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("1111111"));
     }
 
 private:

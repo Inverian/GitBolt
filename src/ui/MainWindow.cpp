@@ -3444,8 +3444,10 @@ void MainWindow::buildPluginsMenu()
                     walk.pushHead();
                     walk.walk([&](const git::CommitData& c) {
                         ++s.commitCount;
-                        s.commitsByAuthor[QString::fromStdString(
-                            c.author.name)]++;
+                        // At most util::kMaxLineChars of a name: git
+                        // takes one of any length, and the box below
+                        // lays the top ones out.
+                        s.commitsByAuthor[util::elided(c.author.name)]++;
                         return true;
                     });
                     if (auto br = repo.branches(git::BranchType::Local);
