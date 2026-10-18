@@ -22,11 +22,16 @@
 //     and the box of an Init that git turns down;
 //   - the Clone dialog's status, the Commit dialog's error (a hook's
 //     output) and branch, the askpass prompt
-//     (PlainInputDialog::setLabelText), the labels naming a file (Blame,
-//     the diff, the .gitignore editor) or a commit (Cherry-Pick);
+//     (PlainInputDialog::setLabelText, an "&" in it included), the
+//     labels naming a file (Blame, the diff, the .gitignore editor) or a
+//     commit (Cherry-Pick);
 //   - the tooltips of the file lists, of Manage Submodules and Manage
 //     Worktrees, of a reworded commit in the Rebase dialog and of the
-//     home screen's recent list.
+//     home screen's recent list; and tooltips keep the size and lines
+//     they had (util::plainToolTip leaves what Qt shows as plain text
+//     alone);
+//   - the Commit tab's author and committer emails, links to that email
+//     that look like any other, in a panel no click navigates.
 //
 // gitbolt::test::shownText() is what a label or a tooltip puts on the
 // screen. The x-test: links are caught by a URL handler of the test's,
@@ -54,7 +59,11 @@
 #include <QTableView>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTextBlock>
+#include <QTextBrowser>
+#include <QTextCursor>
 #include <QTimer>
+#include <QToolTip>
 #include <QTreeWidget>
 #include <QUrl>
 
@@ -68,11 +77,14 @@
 #include "dialogs/CommitDialog.h"
 #include "dialogs/TextEditorDialog.h"
 #include "git/GitProcess.h"
+#include "models/CommitLogModel.h"
 #include "models/FileStatusModel.h"
 #include "services/GitService.h"
 #include "ui/DashboardView.h"
 #include "ui/InlineOpIndicator.h"
 #include "ui/MainWindow.h"
+#include "ui/RepositoryView.h"
+#include "util/ToolTip.h"
 #include "widgets/BlameWidget.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
@@ -149,6 +161,41 @@ QLabel* textLabelOf(QDialog* dialog) {
     if (qobject_cast<QMessageBox*>(dialog))
         return dialog->findChild<QLabel*>(QStringLiteral("qt_msgbox_label"));
     return dialog->findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly);
+}
+
+// The size of the window QToolTip shows `tip` in: its label, as it lays
+// the text out.
+QSize toolTipSize(const QString& tip) {
+    QToolTip::showText(QPoint(20, 20), tip);
+    QSize size;
+    for (QWidget* top : QApplication::topLevelWidgets()) {
+        if (top->inherits("QTipLabel") && top->isVisible())
+            size = top->size();
+    }
+    QToolTip::hideText();
+    return size;
+}
+
+// A link in a rich text document: its text, where it goes, how it looks
+// and where it starts.
+struct Link {
+    QString text;
+    QString href;
+    QTextCharFormat format;
+    int position = 0;
+};
+
+QList<Link> linksIn(const QTextDocument* document) {
+    QList<Link> links;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        for (auto it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            if (fragment.isValid() && fragment.charFormat().isAnchor())
+                links.append({fragment.text(), fragment.charFormat().anchorHref(),
+                              fragment.charFormat(), fragment.position()});
+        }
+    }
+    return links;
 }
 
 // What the next modal dialog said, and how: its text label's format and
@@ -267,20 +314,38 @@ private slots:
 
     // The askpass prompt names the URL git asks about, and the user name
     // in it can be the server's (a redirect to http://<it>@host/…); it
-    // was rendered, where the user decides whom to give a password.
+    // was rendered, where the user decides whom to give a password. An
+    // "&" in it, or in a branch's name, is shown too: the label is the
+    // field's buddy, which took one for a mnemonic's mark and hid it.
     void inputDialogPromptShowsItsTextAsWritten() {
         const QString prompt =
-            QStringLiteral("Password for 'http://%1@127.0.0.1:1': ").arg(kBold);
+            QStringLiteral("Password for 'http://%1&b@127.0.0.1:1': ").arg(kBold);
         QInputDialog dialog;
         PlainInputDialog::setLabelText(dialog, prompt);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         auto* label = textLabelOf(&dialog);
         QVERIFY(label);
+        QVERIFY(label->buddy());
         QCOMPARE(label->textFormat(), Qt::PlainText);
         QCOMPARE(shownText(label), prompt);
         // Set again, the dialog's one label keeps its format.
-        PlainInputDialog::setLabelText(dialog, kBold);
+        const QString again = kBold + QStringLiteral(" &&&");
+        PlainInputDialog::setLabelText(dialog, again);
         QCOMPARE(dialog.findChildren<QLabel*>().size(), 1);
-        QCOMPARE(shownText(label), kBold);
+        QCOMPARE(shownText(label), again);
+        dialog.close();
+
+        // getText(), as the sidebar asks for a branch's new name.
+        ModalProbe rename;
+        bool ok = true;
+        PlainInputDialog::getText(nullptr, QStringLiteral("Rename Branch"),
+                                  QStringLiteral("New name for 'a&b':"), QLineEdit::Normal,
+                                  QStringLiteral("a&b"), &ok);
+        QVERIFY(rename.up);
+        QVERIFY(!ok);
+        QCOMPARE(rename.format, Qt::PlainText);
+        QCOMPARE(rename.shown, QStringLiteral("New name for 'a&b':"));
     }
 
     // The toolbar's narration of an op: a failure's first line and its
@@ -605,6 +670,122 @@ private slots:
         // Its probe lands before the view goes.
         QTRY_VERIFY_WITH_TIMEOUT(view.findChildren<QFutureWatcherBase*>().isEmpty(), 15000);
         settings.clearRecentRepositories();
+    }
+
+    // A tooltip keeps the shape it had. Text Qt shows as plain text is
+    // left as it is, and laid out as before; escaped text keeps the
+    // lines plain text would give it. A tooltip that wraps rich text
+    // breaks it into a narrow block wherever it can: a branch's three
+    // lines into five or more, a path into two or four.
+    void toolTipsKeepTheirShape() {
+        using gitbolt::util::plainToolTip;
+        const QStringList ordinary = {
+            QStringLiteral("refs/heads/feature/some-long-branch-name\n"
+                           "Upstream: origin/feature/some-long-branch-name\n(HEAD)"),
+            QStringLiteral("src/widgets/InteractiveRebaseWidget.cpp"),
+            QStringLiteral("/Users/someone/Developer/My Projects/some repository"),
+            QStringLiteral("fatal: unable to access 'https://example.invalid/repo.git/': "
+                           "Could not resolve host: example.invalid"),
+        };
+        for (const QString& text : ordinary) {
+            const QSize plain = toolTipSize(text);
+            QVERIFY(plain.isValid());
+            QCOMPARE(toolTipSize(plainToolTip(text)), plain);
+            QCOMPARE(plainToolTip(text), text);
+        }
+
+        // With a tag in its first line, escaped: shown as written, in
+        // as many lines as the same text with other brackets, which Qt
+        // takes for plain text.
+        const QString marked =
+            QStringLiteral("remote: %1 a line as long as a server's can be, with words to "
+                           "break at\nremote:     indented")
+                .arg(kBold);
+        const QString unmarked =
+            QString(marked).replace(QLatin1Char('<'), QLatin1Char('[')).replace(
+                QLatin1Char('>'), QLatin1Char(']'));
+        QVERIFY(Qt::mightBeRichText(marked));
+        QVERIFY(!Qt::mightBeRichText(unmarked));
+        QCOMPARE(shownToolTip(plainToolTip(marked)), marked);
+        QCOMPARE(toolTipSize(plainToolTip(marked)).height(), toolTipSize(unmarked).height());
+        QCOMPARE(plainToolTip(QString()), QString());
+    }
+
+    // The Commit tab's author and committer: an email is shown as
+    // written, as a link to it that looks like any other. An email with
+    // a ' in it closed the link's single-quoted href and went on with
+    // attributes of its own, a style and an href to anywhere. And a
+    // link clicked there leaves the panel as it is: QTextBrowser went
+    // to the href itself, which blanked the panel.
+    void commitDetailsShowTheEmailsAsWritten() {
+        using gitbolt::git::ObjectId;
+        const QString authorEmail = QStringLiteral(
+            "m@example.com' style='font-size:40px;color:#00aa00' href='x-test:author");
+        const QString committerEmail =
+            QStringLiteral("c@example.com' style='font-size:40px' href='x-test:committer");
+        gitbolt::git::CommitData marked;
+        marked.id = ObjectId::fromHex(std::string(40, '1'));
+        marked.parentIds = {ObjectId::fromHex(std::string(40, '2'))};
+        marked.summary = "subject";
+        marked.message = "subject\n";
+        marked.author.name = "M";
+        marked.author.email = authorEmail.toStdString();
+        marked.committer.name = "C";
+        marked.committer.email = committerEmail.toStdString();
+        // The same commit by people with ordinary emails: how a link
+        // looks.
+        gitbolt::git::CommitData ordinary = marked;
+        ordinary.id = ObjectId::fromHex(std::string(40, '3'));
+        ordinary.author.email = "m@example.com";
+        ordinary.committer.email = "c@example.com";
+
+        gitbolt::models::CommitLogModel model;
+        model.setCommits({marked, ordinary});
+        gitbolt::ui::RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* details = view.findChild<QTextBrowser*>(QStringLiteral("commit.detailsBrowser"));
+        auto* message = view.findChild<QTextBrowser*>(QStringLiteral("commit.messageBrowser"));
+        QVERIFY(details && message);
+
+        view.onCommitSelected(QString::fromStdString(ordinary.id.toHex()));
+        const QList<Link> looks = linksIn(details->document());
+        view.onCommitSelected(QString::fromStdString(marked.id.toHex()));
+        const QList<Link> links = linksIn(details->document());
+        // The author's, the committer's and the parent's.
+        QCOMPARE(looks.size(), 3);
+        QCOMPARE(links.size(), 3);
+        for (int i = 0; i < 2; ++i) {
+            const QString email = i == 0 ? authorEmail : committerEmail;
+            QCOMPARE(links[i].text, email);
+            const QUrl target(links[i].href, QUrl::StrictMode);
+            QCOMPARE(target.scheme(), QStringLiteral("mailto"));
+            QCOMPARE(target.path(QUrl::FullyDecoded), email);
+            QTextCharFormat format = links[i].format;
+            QTextCharFormat look = looks[i].format;
+            format.clearProperty(QTextFormat::AnchorHref);
+            look.clearProperty(QTextFormat::AnchorHref);
+            QVERIFY2(format == look, qPrintable(QStringLiteral("%1px %2")
+                                                    .arg(format.font().pixelSize())
+                                                    .arg(format.foreground().color().name())));
+        }
+
+        UrlCatcher desktop;
+        QVERIFY(details->isVisible());
+        const QString shown = details->toPlainText();
+        for (const Link& link : links) {
+            QTextCursor cursor(details->document());
+            cursor.setPosition(link.position + 1);
+            const QPoint at = details->cursorRect(cursor).center();
+            QCOMPARE(details->anchorAt(at), link.href);
+            QTest::mouseClick(details->viewport(), Qt::LeftButton, {}, at);
+            QCOMPARE(details->source(), QUrl());
+            QCOMPARE(details->toPlainText(), shown);
+        }
+        QVERIFY2(desktop.urls.isEmpty(), qPrintable(desktop.seen()));
+        QVERIFY(!message->openLinks());
     }
 
 private:

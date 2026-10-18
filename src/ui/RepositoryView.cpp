@@ -196,7 +196,13 @@ QWidget* RepositoryView::buildCommitInfoTab()
     h->addWidget(avatarLabel_, 0, Qt::AlignTop);
 
     detailBrowser_ = new QTextBrowser(commitInfoTopRow_);
+    detailBrowser_->setObjectName(QStringLiteral("commit.detailsBrowser"));
     detailBrowser_->setOpenExternalLinks(false);
+    // Nor any other link: QTextBrowser follows a clicked one itself,
+    // putting what its href names in the panel's place (a file: URL's
+    // file; for a gitbolt://commit/ or mailto: one, nothing, and the
+    // panel went blank). Nothing here is a page to go to.
+    detailBrowser_->setOpenLinks(false);
     detailBrowser_->setFrameShape(QFrame::NoFrame);
     detailBrowser_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     detailBrowser_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -228,7 +234,9 @@ QWidget* RepositoryView::buildCommitInfoTab()
 
     // ----- Bottom: full-width message body -----------------------
     messageBrowser_ = new QTextBrowser(page);
+    messageBrowser_->setObjectName(QStringLiteral("commit.messageBrowser"));
     messageBrowser_->setOpenExternalLinks(false);
+    messageBrowser_->setOpenLinks(false);   // as the details' browser
     messageBrowser_->setPlaceholderText(tr("Select a commit to view details"));
     messageBrowser_->setFrameShape(QFrame::NoFrame);
     // Same transparency trick as the metadata browser — blend
@@ -939,9 +947,21 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const QString addedColor    = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
     const QString deletedColor  = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
 
+    // An email is also a mailto: link's target, in a single-quoted
+    // attribute. toHtmlEscaped() leaves ' alone, so an email with one
+    // in it closed the attribute and went on with attributes of its
+    // own: a style that dressed the link up as anything, an href of its
+    // choosing. Percent-encoded, the target is the email and nothing
+    // more (only ASCII letters and digits, "-._~@" and "%" are left).
+    auto mailtoFor = [](const std::string& address) -> QString {
+        return QStringLiteral("mailto:")
+               + QString::fromLatin1(QUrl::toPercentEncoding(
+                   QString::fromStdString(address), QByteArrayLiteral("@")));
+    };
     const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
     const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
     const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
+    const QString mailto  = mailtoFor(commit.author.email);
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
 
     // Committer is shown as a separate row only if it differs from
@@ -953,6 +973,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         (commit.author.email != commit.committer.email);
     const QString committerName  = QString::fromStdString(commit.committer.name).toHtmlEscaped();
     const QString committerEmail = QString::fromStdString(commit.committer.email).toHtmlEscaped();
+    const QString committerMailto = mailtoFor(commit.committer.email);
 
     // Author initials for the avatar (first letter of first and
     // last whitespace-separated tokens; "?" if the name is empty).
@@ -1066,8 +1087,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             static_cast<qint64>(committerTimeT)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         committerRow = QStringLiteral(
             "<tr><td class='lbl'>Committer:</td>"
-            "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
-            .arg(committerName, committerEmail, committerDate, mutedColor);
+            "<td class='val'>%1 &lt;<a href='%2'>%3</a>&gt; &nbsp; <span style='color:%5;'>%4</span></td></tr>")
+            .arg(committerName, committerMailto, committerEmail, committerDate, mutedColor);
     }
 
     // Diff stats — files-changed count + total +N/-M lines. Pulled
@@ -1154,12 +1175,12 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // padding-right. Per-row height ends up around 16 px.
     const QString leftRows = QStringLiteral(
         "<tr><td class='lbl'>Author:</td>"
-        "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt;</td></tr>"
+        "<td class='val'>%1 &lt;<a href='%2'>%3</a>&gt;</td></tr>"
         "<tr><td class='lbl'>Date:</td>"
-        "<td class='val'>%3</td></tr>"
-        "%4"   // committerRow (optional)
-        "%5"   // statsRow (optional)
-    ).arg(name, email, authorDate, committerRow, statsRow);
+        "<td class='val'>%4</td></tr>"
+        "%5"   // committerRow (optional)
+        "%6"   // statsRow (optional)
+    ).arg(name, mailto, email, authorDate, committerRow, statsRow);
 
     // Commit hash is the only hash row that ISN'T a link, so we
     // can put the inline mono style directly on the <td> instead

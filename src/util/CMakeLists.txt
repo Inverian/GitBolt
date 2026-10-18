@@ -24,6 +24,8 @@ add_library(gitbolt_util STATIC ${SOURCES})
 
 target_include_directories(gitbolt_util PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(gitbolt_util PUBLIC Qt6::Core Qt6::Concurrent)
+# Qt::mightBeRichText() (ToolTip.cpp) is QtGui's.
+target_link_libraries(gitbolt_util PRIVATE Qt6::Gui)
 # dladdr (CrashHandler's frame lines): in libc on macOS and glibc 2.34+,
 # in libdl before that.
 target_link_libraries(gitbolt_util PRIVATE ${CMAKE_DL_LIBS})

@@ -61,7 +61,8 @@ public:
                            QLineEdit::EchoMode mode = QLineEdit::Normal,
                            const QString& text = QString(), bool* ok = nullptr);
 
-    /// dialog.setLabelText(text), shown as plain text.
+    /// dialog.setLabelText(text), shown as plain text, an "&" in it
+    /// included (no mnemonic).
     static void setLabelText(QInputDialog& dialog, const QString& text);
 };
 

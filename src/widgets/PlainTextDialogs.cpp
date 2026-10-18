@@ -77,7 +77,12 @@ QString PlainInputDialog::getText(QWidget* parent, const QString& title, const Q
 
 void PlainInputDialog::setLabelText(QInputDialog& dialog, const QString& text)
 {
-    dialog.setLabelText(text);
+    // The label is the input field's buddy once the dialog is laid
+    // out, and a label with a buddy takes "&" for a mnemonic's mark,
+    // plain text or not: "a&b" showed as "ab", the b underlined. A
+    // branch name may have one, and so may the user name in the
+    // askpass prompt's URL. Doubled, each shows as itself.
+    dialog.setLabelText(QString(text).replace(QLatin1Char('&'), QStringLiteral("&&")));
     // The dialog's one label, which setLabelText() makes if need be.
     if (auto* label = dialog.findChild<QLabel*>(QString(), Qt::FindDirectChildrenOnly))
         label->setTextFormat(Qt::PlainText);
