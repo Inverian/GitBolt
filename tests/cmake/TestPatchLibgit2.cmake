@@ -18,14 +18,25 @@ set(_cflags_to
     "\tset(CMAKE_C_FLAGS_RELEASE \"/DNDEBUG /O2 /Oy /Gy \${CRT_FLAG_RELEASE}\")\n\tset(CMAKE_C_FLAGS_RELWITHDEBINFO \"/DNDEBUG /Zi /O2 /Oy- /Gy \${CRT_FLAG_RELEASE}\")\n\tset(CMAKE_C_FLAGS_MINSIZEREL \"/DNDEBUG /O1 /Oy /Gy \${CRT_FLAG_RELEASE}\")\n")
 set(_common_from "# define GIT_EXTERN(type) __declspec(dllexport) type __cdecl\n")
 set(_common_to "# define GIT_EXTERN(type) type __cdecl\n")
-set(_config_from
+# Each file's text is in two parts where the 0.9.7 script patched one
+# and a later version the other (_old and _new), so a tree the 0.9.7
+# script patched can be put together (_old_to with _new_from).
+set(_config_old_from
     "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}\n")
-set(_config_to
+set(_config_old_to
     "\t\tif (res != GIT_ENOTFOUND) {\n\t\t\tif (res == 0)\n\t\t\t\t*out = &be->entry;\n\t\t\tbreak;\n\t\t}\n")
-set(_config_file_from
+set(_config_new_from
+    "\t\tif (git_regexp_match(&iter->regex, (*entry)->entry.value) == 0)\n\t\t\treturn 0;\n")
+set(_config_new_to
+    "\t\tif (git_regexp_match(&iter->regex, (*entry)->entry.value ? (*entry)->entry.value : \"\") == 0)\n\t\t\treturn 0;\n")
+set(_config_file_old_from
     "out:\n\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
-set(_config_file_to
+set(_config_file_old_to
     "out:\n\tgit_config_list_free(config_list);\n\tif (error < 0) {\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\t\tmemset(b->file.checksum, 0, sizeof(b->file.checksum));\n\t}\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
+set(_config_file_new_from
+    "\tif (has_matched && write_data->preg != NULL)\n\t\thas_matched = (git_regexp_match(write_data->preg, var_value) == 0);\n")
+set(_config_file_new_to
+    "\tif (has_matched && write_data->preg != NULL)\n\t\thas_matched = (git_regexp_match(write_data->preg, var_value ? var_value : \"\") == 0);\n")
 # The config-lines-with-no-value fixes.
 set(_submodule_from
     "\twhile ((error = git_config_next(&entry, iter)) == 0) {\n\t\tconst char *fdot, *ldot;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {\n}\n\tif (!strcmp(entry->value, data->path)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"path\")) == 0) {\n\t\tin_config = 1;\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {\n\tif ((error = get_value(&value, cfg, &key, sm->name, \"url\")) == 0) {\n\t\t/* We would warn here if we had that API */\n\t\tif (!looks_like_command_line_option(value)) {\n\tif (bare)\n\t\tflags |= GIT_REPOSITORY_OPEN_BARE;\n\n\terror = git_repository_open_ext(subrepo, path.ptr, flags, wd);\n\n\t/* if we opened the submodule successfully, grab HEAD OID, etc. */\n")
@@ -35,13 +46,40 @@ set(_remote_from
     "\t\tif (git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
 set(_remote_to
     "\t\tif (!entry->value || git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (!entry->value || strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (!entry->value || strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
-set(_repository_from
+set(_repository_old_from
     "\n\tif ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
-set(_repository_to
+set(_repository_old_to
     "\n\tif (!entry->value) {\n\t\tgit_error_set(GIT_ERROR_REPOSITORY,\n\t\t\t\"missing value for 'extensions.objectformat'\");\n\t\terror = GIT_EINVALID;\n\t} else if ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
+set(_repository_new_from
+    "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\t*entry->value) {\n")
+set(_repository_new_to
+    "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\tentry->value && *entry->value) {\n")
+# Files only the later version patches.
+set(_checkout_new_from
+    "\t\telse if (error)\n\t\t\tgoto cleanup;\n\t\telse if (strcmp(conflict_style->value, \"merge\") == 0)\n")
+set(_checkout_new_to
+    "\t\telse if (error)\n\t\t\tgoto cleanup;\n\t\telse if (!conflict_style->value) {\n\t\t\tgit_error_set(GIT_ERROR_CHECKOUT,\n\t\t\t\t\"missing value for 'merge.conflictstyle'\");\n\t\t\terror = -1;\n\t\t\tgit_config_entry_free(conflict_style);\n\t\t\tgoto cleanup;\n\t\t}\n\t\telse if (strcmp(conflict_style->value, \"merge\") == 0)\n")
+set(_merge_new_from
+    "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
+set(_merge_new_to
+    "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0 && !entry->value) {\n\t\t\tgit_error_set(GIT_ERROR_MERGE,\n\t\t\t\t\"missing value for 'merge.default'\");\n\t\t\terror = GIT_EINVALID;\n\t\t\tif (!given || !given->metric) {\n\t\t\t\tgit__free(opts->metric);\n\t\t\t\topts->metric = NULL;\n\t\t\t}\n\t\t\tgoto done;\n\t\t} else if (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
+foreach(_file config config_file repository)
+    set(_${_file}_from "${_${_file}_old_from}${_${_file}_new_from}")
+    set(_${_file}_to "${_${_file}_old_to}${_${_file}_new_to}")
+    # As the 0.9.7 script left it.
+    set(_${_file}_097 "${_${_file}_old_to}${_${_file}_new_from}")
+endforeach()
+foreach(_file checkout merge)
+    set(_${_file}_from "${_${_file}_new_from}")
+    set(_${_file}_to "${_${_file}_new_to}")
+    set(_${_file}_097 "${_${_file}_new_from}")
+endforeach()
+foreach(_file cflags common submodule remote)
+    set(_${_file}_097 "${_${_file}_to}")
+endforeach()
 
-# A tree with the seven files: <suffix> picks each one's text (_from or
-# _to), <config_file> config_file.c's.
+# A tree with the nine files: <suffix> picks each one's text (_from,
+# _to or _097), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
     file(WRITE ${dir}/cmake/DefaultCFlags.cmake "${_cflags${suffix}}")
@@ -51,6 +89,8 @@ function(write_tree dir suffix config_file)
     file(WRITE ${dir}/src/libgit2/submodule.c "${_submodule${suffix}}")
     file(WRITE ${dir}/src/libgit2/remote.c "${_remote${suffix}}")
     file(WRITE ${dir}/src/libgit2/repository.c "${_repository${suffix}}")
+    file(WRITE ${dir}/src/libgit2/checkout.c "${_checkout${suffix}}")
+    file(WRITE ${dir}/src/libgit2/merge.c "${_merge${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -65,7 +105,8 @@ function(expect_patched what dir)
     foreach(_pair "cmake/DefaultCFlags.cmake;_cflags_to" "include/git2/common.h;_common_to"
                   "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to"
                   "src/libgit2/submodule.c;_submodule_to" "src/libgit2/remote.c;_remote_to"
-                  "src/libgit2/repository.c;_repository_to")
+                  "src/libgit2/repository.c;_repository_to" "src/libgit2/checkout.c;_checkout_to"
+                  "src/libgit2/merge.c;_merge_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)
@@ -91,6 +132,15 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "patched tree: the script failed:\n${_rc_OUTPUT}")
 endif()
 expect_patched("patched tree" ${_tree})
+
+# A tree the 0.9.7 script patched, as FetchContent runs a newer one over
+# it: it gets the newer patches.
+write_tree(${_tree} _097 "${_config_file_097}")
+run_patch(${_tree} _rc)
+if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "a tree 0.9.7 patched: the script failed:\n${_rc_OUTPUT}")
+endif()
+expect_patched("a tree 0.9.7 patched" ${_tree})
 
 # A tree patched in a way the script doesn't know (an earlier version of
 # it, say): fails, rather than leaving it as it is.

@@ -690,9 +690,35 @@ void MainWindow::buildRepositoryMenu()
                                            RepoCommandController::RefreshSubmodules,
                                            tr("Deinitializing submodule %1…").arg(n));
                     });
+            // A submodule's path is relative to the work tree; it used
+            // to go to the desktop as it was, which resolved it against
+            // GitBolt's own working folder, and nothing opened. Of the
+            // repository the dialog came up for: another one may be
+            // open by now (Recent, a second launch).
+            const std::string openedKey = gitService_->openKey();
+            const QString workdir = QString::fromStdString(
+                gitService_->withRepository([](git::Repository& r) { return r.workdir(); }));
             connect(widget, &widgets::SubmoduleWidget::openRequested,
-                    this, [](const QString& p) {
-                        QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+                    this, [this, dlg, openedKey, workdir](const QString& p) {
+                        if (repositoryChangedSince(openedKey, tr("the submodule was not opened.")))
+                            return;
+                        const QString folder = QDir(workdir).absoluteFilePath(p);
+                        // Not checked out: the folder (if any) is in no
+                        // repository of its own, and opening it opened
+                        // the superproject.
+                        if (!QFileInfo::exists(QDir(folder).filePath(QStringLiteral(".git")))) {
+                            QMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule %1 is not checked out. Initialize and "
+                                   "update it first.").arg(p));
+                            return;
+                        }
+                        dlg->close();
+                        openRepositoryAtPath(folder);
+                    });
+            connect(widget, &widgets::SubmoduleWidget::revealRequested,
+                    this, [workdir](const QString& p) {
+                        QDesktopServices::openUrl(
+                            QUrl::fromLocalFile(QDir(workdir).absoluteFilePath(p)));
                     });
 
             // Its row actions are local ops: off while one runs (or a
@@ -824,6 +850,11 @@ void MainWindow::buildRepositoryMenu()
                     gitService_->unlockWorktree(name);
             });
             connect(widget, &widgets::WorktreeWidget::openRequested,
+                    this, [this, dlg](const QString& p) {
+                dlg->close();
+                openRepositoryAtPath(p);
+            });
+            connect(widget, &widgets::WorktreeWidget::revealRequested,
                     this, [](const QString& p) {
                 QDesktopServices::openUrl(QUrl::fromLocalFile(p));
             });
@@ -5162,7 +5193,12 @@ void MainWindow::onRepositoryOpened(const QString& path)
         inspectingStop_ = false;
         repoView_->operationBar()->setBusy(gitService_->rebaseStepRunning() || localOpRunning_);
         repoView_->resetInspectorTabs();
-        repoView_->setRepositoryPath(path);
+        // A bare repository named outright, as for Git bash: git in the
+        // Console otherwise fails where safe.bareRepository is
+        // "explicit".
+        repoView_->setRepositoryPath(path, gitService_->withRepository([](git::Repository& r) {
+            return r.isBare() ? QString::fromStdString(r.path()) : QString();
+        }));
 
         // Re-apply persisted View → column visibility toggles.
         // The actions were restored from QSettings at construction

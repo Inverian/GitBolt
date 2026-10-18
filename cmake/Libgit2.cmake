@@ -145,11 +145,16 @@ function(gitbolt_add_bundled_libgit2)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/submodule.c _submodule_c)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/remote.c _remote_c)
     file(READ ${libgit2_SOURCE_DIR}/src/libgit2/repository.c _repository_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/checkout.c _checkout_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/merge.c _merge_c)
     if(_submodule_c MATCHES "if \\(entry->value && !strcmp\\(entry->value, data->path\\)\\)"
        AND _submodule_c MATCHES "if \\(\\*value && !looks_like_command_line_option\\(value\\)\\)"
        AND _submodule_c MATCHES "is not inside its superproject"
        AND _remote_c MATCHES "if \\(!entry->value \\|\\| git__prefixcmp\\(url, entry->value\\)\\)"
-       AND _repository_c MATCHES "missing value for 'extensions\\.objectformat'")
+       AND _repository_c MATCHES "missing value for 'extensions\\.objectformat'"
+       AND _config_file_c MATCHES "preg, var_value \\? var_value : \"\""
+       AND _checkout_c MATCHES "missing value for 'merge\\.conflictstyle'"
+       AND _merge_c MATCHES "missing value for 'merge\\.default'")
         target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
     else()
         message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "

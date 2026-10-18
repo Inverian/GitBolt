@@ -69,6 +69,7 @@ signals:
     void lockRequested(const QString& name);
     void unlockRequested(const QString& name);
     void openRequested(const QString& path);
+    void revealRequested(const QString& path);
 
 private slots:
     void onContextMenu(const QPoint& pos);

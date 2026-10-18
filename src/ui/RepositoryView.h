@@ -75,9 +75,10 @@ public:
     widgets::RepoOperationBar*    operationBar()  const;
 
     /// Tell the embedded terminal which directory to start in
-    /// (or `cd` to if it's already running). Called by MainWindow
+    /// (or `cd` to if it's already running), and a bare repository's
+    /// GIT_DIR (TerminalWidget::changeRepository). Called by MainWindow
     /// whenever a repository is opened.
-    void setRepositoryPath(const QString& path);
+    void setRepositoryPath(const QString& path, const QString& bareGitDir = {});
 
     /// Clear all inspector-tab content and reset to the Commit tab.
     /// Called by MainWindow when switching repositories so stale

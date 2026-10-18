@@ -679,11 +679,11 @@ widgets::RepoOperationBar* RepositoryView::operationBar() const
 // (stash cwd if not yet running, send `cd <path>` if already
 // running) so we can route both "first open" and "switched repo"
 // events through the same entry point.
-void RepositoryView::setRepositoryPath(const QString& path)
+void RepositoryView::setRepositoryPath(const QString& path, const QString& bareGitDir)
 {
     if (!terminalWidget_ || path.isEmpty())
         return;
-    terminalWidget_->changeDirectory(path);
+    terminalWidget_->changeRepository(path, bareGitDir);
 }
 
 void RepositoryView::resetInspectorTabs()

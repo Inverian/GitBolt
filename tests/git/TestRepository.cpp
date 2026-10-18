@@ -2228,6 +2228,109 @@ private slots:
 #endif
     }
 
+    // A line with no value in a branch's or a remote's section (`rebase`,
+    // `prune`, `mirror`: git booleans, true): rewriting the config
+    // matched a pattern against the missing value, strlen(NULL). Delete
+    // Branch, Remove Remote and Add Remote crashed, and left
+    // .git/config.lock behind.
+    void valuelessLinesLetBranchesAndRemotesChange() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"branch", "feat"})));
+        appendConfig(repo.path(), "[branch \"feat\"]\n\trebase\n"
+                                  "[remote \"origin\"]\n\turl = https://example.com/a.git\n"
+                                  "\tprune\n\tmirror\n"
+                                  "[remote \"up\"]\n\tfetch\n");
+        if (QTest::currentTestFailed())
+            return;
+        const QString lock = QDir(repo.path()).filePath(QStringLiteral(".git/config.lock"));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto deleted = opened->deleteBranch("feat");
+        QVERIFY2(deleted.ok(), deleted.ok() ? "" : deleted.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(lock));
+        QVERIFY(!succeeded(git.run({"config", "--get", "branch.feat.rebase"})));
+
+        const auto removed = opened->removeRemote("origin");
+        QVERIFY2(removed.ok(), removed.ok() ? "" : removed.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(lock));
+
+        const auto added = opened->addRemote("up", "https://example.com/up.git");
+        QVERIFY2(added.ok(), added.ok() ? "" : added.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(lock));
+        QCOMPARE(output(git.run({"config", "--get", "remote.up.url"})),
+                 QStringLiteral("https://example.com/up.git"));
+#endif
+    }
+
+    // merge.conflictstyle with no value (in ~/.gitconfig: every
+    // repository): every checkout crashed, a branch switch, a discard, a
+    // cherry-pick. Each fails as git does now, and says why.
+    void valuelessConflictStyleFailsCheckouts() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo.writeAndCommit("b.txt", "b\n", "b").ok());
+        const QString picked = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("a.txt", "changed\n");
+        appendConfig(repo.path(), "[merge]\n\tconflictstyle\n");
+        if (QTest::currentTestFailed())
+            return;
+        const auto says = [](const auto& result) {
+            return !result.ok()
+                && QString::fromStdString(result.error().message())
+                       .contains(QLatin1String("merge.conflictstyle"));
+        };
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QVERIFY(says(opened->checkout("side")));
+        QVERIFY(says(opened->discardWorkdirChanges("a.txt")));
+        const auto id = opened->resolveRef(picked.toStdString());
+        QVERIFY(id.ok());
+        QVERIFY(says(opened->cherryPick(*id)));
+#endif
+    }
+
+    // merge.default with no value: a cherry-pick (any libgit2 merge)
+    // crashed. It fails as git does now.
+    void valuelessMergeDefaultFailsACherryPick() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo.writeAndCommit("b.txt", "b\n", "b").ok());
+        const QString picked = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        appendConfig(repo.path(), "[merge]\n\tdefault\n");
+        if (QTest::currentTestFailed())
+            return;
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto id = opened->resolveRef(picked.toStdString());
+        QVERIFY(id.ok());
+        const auto pick = opened->cherryPick(*id);
+        QVERIFY(!pick.ok());
+        QVERIFY2(QString::fromStdString(pick.error().message()).contains(QLatin1String("merge.default")),
+                 pick.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(QDir(repo.path()).filePath(QStringLiteral(".git/index.lock"))));
+#endif
+    }
+
     // A `url` line with no "= value" (a slip in a hand edit): libgit2
     // lists the remote with no URL, and gives the entry a null value.
     // Edit URL crashed on it; it now repairs the remote.

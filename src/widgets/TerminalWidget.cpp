@@ -453,6 +453,21 @@ void TerminalWidget::changeDirectory(const QString& path)
     writeToPty(toTerminalBytes(cmd));
 }
 
+void TerminalWidget::changeRepository(const QString& path, const QString& gitDir)
+{
+    if (path.isEmpty())
+        return;
+    if (gitDir == gitDir_) {
+        changeDirectory(path);
+        return;
+    }
+    gitDir_ = gitDir;
+    pendingCwd_ = path;
+    // A shell not started yet takes both at its start (showEvent).
+    if (isRunning())
+        start(path);
+}
+
 // ---------------------------------------------------------------------------
 // PTY I/O
 // ---------------------------------------------------------------------------

@@ -256,8 +256,13 @@ void SubmoduleWidget::onContextMenu(const QPoint& pos) {
 
     menu.addSeparator();
 
-    menu.addAction(tr("Open in New Window"), this, [this, path]() {
+    // GitBolt has one window: Open makes the submodule the repository
+    // it shows, as Recent does.
+    menu.addAction(tr("Open in GitBolt"), this, [this, path]() {
         emit openRequested(path);
+    });
+    menu.addAction(tr("Open in File Explorer"), this, [this, path]() {
+        emit revealRequested(path);
     });
 
     menu.addAction(tr("Copy URL"), this, [url]() {

@@ -1053,6 +1053,60 @@ private slots:
 #endif
     }
 
+    // The Console followed the repository opened with a `cd` only, so a
+    // bare one got no GIT_DIR, and git there failed where
+    // safe.bareRepository is "explicit" (Git bash had it). A change of
+    // GIT_DIR starts the shell again with it; the same one only cds.
+    void ptyShellFollowsTheRepositorysGitDir()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString work = dirs.filePath(QStringLiteral("work"));
+        const QString bare = dirs.filePath(QStringLiteral("bare.git"));
+        QVERIFY(QDir().mkpath(work) && QDir().mkpath(bare));
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        // A variable of the shell's own: a `cd` keeps it, a new shell
+        // hasn't got it.
+        const auto type = [&terminal](const QString& line) {
+            QTest::keyClicks(&terminal, line);
+            QTest::keyClick(&terminal, Qt::Key_Return);
+        };
+        const auto shows = [&terminal](const QString& row) {
+            return QTest::qWaitFor([&] { return rows(terminal).contains(row); }, kTimeoutMs);
+        };
+        const QString echo = QStringLiteral("echo %1[$GIT_DIR][$gbmark][${PWD##*/}]");
+        type(QStringLiteral("gbmark=kept"));
+
+        terminal.changeRepository(work, {});
+        type(echo.arg(QStringLiteral("gbstep1")));
+        QVERIFY2(shows(QStringLiteral("gbstep1[][kept][work]")), qPrintable(terminal.toPlainText()));
+
+        terminal.changeRepository(bare, bare);
+        type(echo.arg(QStringLiteral("gbstep2")));
+        QVERIFY2(shows(QStringLiteral("gbstep2[%1][][bare.git]").arg(bare)),
+                 qPrintable(terminal.toPlainText()));
+
+        type(QStringLiteral("gbmark=again"));
+        terminal.changeRepository(bare, bare);
+        type(echo.arg(QStringLiteral("gbstep3")));
+        QVERIFY2(shows(QStringLiteral("gbstep3[%1][again][bare.git]").arg(bare)),
+                 qPrintable(terminal.toPlainText()));
+
+        terminal.changeRepository(work, {});
+        type(echo.arg(QStringLiteral("gbstep4")));
+        QVERIFY2(shows(QStringLiteral("gbstep4[][][work]")), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
     void ctrlCStopsAPtyFlood()
     {
 #ifdef Q_OS_WIN

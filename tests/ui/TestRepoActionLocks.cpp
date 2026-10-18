@@ -40,7 +40,11 @@
 //     landed; the in-progress bar shows no merge while a merge's
 //     post-merge hook runs; the Commit tab's "contained in" reply of
 //     a repository no longer open is dropped; a revealed auto-fetch
-//     outlives its repository opened again by a path in another case.
+//     outlives its repository opened again by a path in another case;
+//   - Manage Submodules' and Manage Worktrees' Open opens the submodule
+//     or worktree in the window, and Open in File Explorer shows its
+//     folder (a submodule's path is relative to the work tree); the
+//     Console gets a bare repository's GIT_DIR.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -52,6 +56,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -75,6 +80,7 @@
 #include <QTextBrowser>
 #include <QTimer>
 #include <QTreeView>
+#include <QUrl>
 
 #include <memory>
 #include <vector>
@@ -92,6 +98,7 @@
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/RepoOperationBar.h"
 #include "widgets/SubmoduleWidget.h"
+#include "widgets/TerminalWidget.h"
 #include "widgets/WorktreeWidget.h"
 
 using gitbolt::services::GitService;
@@ -278,6 +285,27 @@ bool pickFromContextMenu(QAbstractItemView* view, const QModelIndex& index,
     return picked;
 }
 
+// Takes the file URLs QDesktopServices would hand the desktop.
+class UrlCatcher : public QObject {
+    Q_OBJECT
+public:
+    UrlCatcher() { QDesktopServices::setUrlHandler(QStringLiteral("file"), this, "open"); }
+    ~UrlCatcher() override { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); }
+    QList<QUrl> urls;
+
+public slots:
+    void open(const QUrl& url) { urls << url; }
+};
+
+// The folder of the repository `svc` has open, symlinks resolved.
+QString openFolder(GitService* svc) {
+    if (!svc->isOpen() || svc->openPending())
+        return {};
+    return QFileInfo(QString::fromStdString(svc->withRepository(
+                         [](gitbolt::git::Repository& r) { return r.workdir(); })))
+        .canonicalFilePath();
+}
+
 } // namespace
 
 class TestRepoActionLocks : public QObject {
@@ -457,6 +485,119 @@ private slots:
         QVERIFY(QFileInfo::exists(super + QStringLiteral("/sub/.git")));
         if (auto* dialog = qobject_cast<QDialog*>(widget->window()))
             dialog->close();
+    }
+
+    // Manage Submodules' "Open in New Window" handed the desktop the
+    // submodule's path as git has it, relative to the work tree, so it
+    // resolved against GitBolt's own folder and nothing opened; Manage
+    // Worktrees' showed the worktree in the file manager. "Open in
+    // GitBolt" opens it in the window, and "Open in File Explorer"
+    // shows it; a submodule not checked out is said so.
+    void submoduleOpensInGitBolt() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString subUp = scratch.filePath(QStringLiteral("sub-upstream"));
+        const QString super = scratch.filePath(QStringLiteral("super"));
+        const auto git = [](const QString& dir, std::vector<std::string> args) {
+            return succeeded(gitbolt::git::GitProcess(dir.toStdString()).run(args));
+        };
+        QVERIFY(QDir().mkpath(subUp) && QDir().mkpath(super));
+        QVERIFY(git(subUp, {"init", "-q"}));
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s1"}));
+        QVERIFY(git(super, {"init", "-q"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "gone"}));
+        QVERIFY(git(super, {"commit", "-q", "-m", "with subs"}));
+        QVERIFY(git(super, {"submodule", "deinit", "-q", "-f", "gone"}));
+        const QString superFolder = QFileInfo(super).canonicalFilePath();
+        const QString subFolder = QFileInfo(super + QStringLiteral("/sub")).canonicalFilePath();
+
+        MainWindow window;
+        auto* svc = openIn(window, super);
+        QVERIFY(svc);
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(QStringLiteral("sub"));
+            QCOMPARE(desktop.urls.size(), 1);
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     subFolder);
+        }
+
+        {
+            BoxAnswerer answer(QMessageBox::Ok);
+            emit widget->openRequested(QStringLiteral("gone"));
+            QVERIFY2(answer.text.contains(QStringLiteral("not checked out")),
+                     qPrintable(answer.text));
+            QVERIFY(dialog && dialog->isVisible());
+            QCOMPARE(openFolder(svc), superFolder);
+        }
+
+        emit widget->openRequested(QStringLiteral("sub"));
+        QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), subFolder, 15000);
+        QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    void worktreeOpensInGitBolt() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        const QString linked = repo.path() + QStringLiteral("-linked");
+        const auto cleanup = qScopeGuard([&] { QDir(linked).removeRecursively(); });
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "side", linked.toStdString()})));
+        const QString linkedFolder = QFileInfo(linked).canonicalFilePath();
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        action(window, "repository.manage-worktrees")->trigger();
+        gitbolt::widgets::WorktreeWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::WorktreeWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(linked);
+            QCOMPARE(desktop.urls.size(), 1);
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     linkedFolder);
+            QCOMPARE(openFolder(svc), QFileInfo(repo.path()).canonicalFilePath());
+        }
+
+        emit widget->openRequested(linked);
+        QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), linkedFolder, 15000);
+        QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    // The Console's shell gets a bare repository's GIT_DIR, as Git bash
+    // does, and loses it with the next repository: it was only told to
+    // `cd`, and git there failed where safe.bareRepository is
+    // "explicit".
+    void consoleGetsABareRepositorysGitDir() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString bare = scratch.filePath(QStringLiteral("bare.git"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", bare.toStdString()})));
+        const auto canonical = [](const QString& p) { return QFileInfo(p).canonicalFilePath(); };
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        auto* view = window.findChild<gitbolt::ui::RepositoryView*>();
+        QVERIFY(view && view->terminal());
+        QCOMPARE(view->terminal()->gitDir(), QString());
+
+        window.openRepositoryAtPath(bare);
+        QTRY_COMPARE_WITH_TIMEOUT(canonical(view->terminal()->gitDir()), canonical(bare), 15000);
+
+        QVERIFY(openIn(window, repo.path()));
+        QTRY_COMPARE(view->terminal()->gitDir(), QString());
     }
 
     // `git cherry-pick A B` stopped at A on a conflict, and A was then

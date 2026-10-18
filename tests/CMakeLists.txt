@@ -273,6 +273,11 @@ add_dependencies(test_single_instance gitbolt_instance_helper)
 target_compile_definitions(test_single_instance PRIVATE
     GITBOLT_INSTANCE_HELPER="$<TARGET_FILE:gitbolt_instance_helper>")
 
+# File › Recent and the home screen's list: one entry per repository,
+# whatever spelling of its folder it was opened by.
+gitbolt_add_test(test_recent_repositories conf/TestRecentRepositories.cpp)
+target_link_libraries(test_recent_repositories PRIVATE gitbolt_conf)
+
 # The folders macOS asks a running GitBolt to open (Dock drops, `open -a`,
 # Finder's service): held, coalesced and emitted queued, on every
 # platform; the events are sent as Qt sends them.

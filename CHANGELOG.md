@@ -4,6 +4,37 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [Unreleased]
+
+### Fixed
+
+- **Opening a submodule or a worktree**: Repository › Manage
+  Submodules' "Open in New Window" did nothing, and Manage Worktrees'
+  showed the worktree in Finder or Explorer. Both menus now have Open
+  in GitBolt, which opens the submodule or worktree in the window (a
+  submodule that isn't checked out says so), and Open in File
+  Explorer, which shows its folder.
+- **The Console tab in a bare repository** now sets GIT_DIR, as Git
+  bash has since 0.9.7, so git typed there works where git's
+  `safe.bareRepository` setting is `explicit`. Opening a bare
+  repository, or leaving one, starts the Console's shell again.
+- **Recent repositories listed a repository twice** when it was opened
+  by two spellings of its path: on macOS, `/tmp/…` from Finder and
+  `/private/tmp/…` from Terminal, or a path through a symlinked folder.
+  It is now listed once, under the spelling it was last opened by.
+- **More crashes on config lines with no value** (a name and no
+  `= value`; see 0.9.7). A line with none in a branch's section of
+  `.git/config` (`rebase`, say, which git reads as `true`) crashed
+  Delete Branch. One in a remote's section (`prune`, `mirror`) crashed
+  removing the remote, and a `fetch` with none crashed adding one.
+  Each also left `.git/config.lock` behind, which then stopped every
+  change to the config, git's own included; these now just work. A
+  `merge.conflictstyle` with no value, in any git config, crashed
+  switching branches, discarding changes, stashing and cherry-picking,
+  and a `merge.default` with none crashed cherry-picks; they now stop
+  with git's own message ("missing value for …"). As in 0.9.7, the
+  fixes are in the libgit2 built into every GitBolt download.
+
 ## [0.9.7] — 2026-10-18
 
 Open in GitBolt comes to Finder on macOS, and a folder inside a

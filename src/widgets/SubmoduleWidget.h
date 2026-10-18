@@ -70,7 +70,9 @@ signals:
     void updateRequested(const QString& name);
     void deinitRequested(const QString& name);
     void syncRequested(const QString& name);
+    /// `path` as git has it: relative to the work tree.
     void openRequested(const QString& path);
+    void revealRequested(const QString& path);
 
 private slots:
     void onContextMenu(const QPoint& pos);

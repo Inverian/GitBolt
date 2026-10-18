@@ -83,12 +83,21 @@ public:
     /// other repository variables: git::GitProcess::repositoryEnvVars).
     /// Takes effect at start().
     void setGitDir(const QString& gitDir) { gitDir_ = gitDir; }
+    QString gitDir() const { return gitDir_; }
 
     /// Send `cd <path>\n` to the running shell. No-op if the
     /// shell is not running. Path is shell-quoted and prefixed
     /// with a leading space so the entry is excluded from history
     /// when HISTCONTROL=ignorespace is set.
     void changeDirectory(const QString& path);
+
+    /// The repository the shell works in: `cd` there, as
+    /// changeDirectory, with `gitDir` as setGitDir has it. GIT_DIR is in
+    /// the shell's environment, which only its start sets (`export` is
+    /// sh's, fish and cmd have their own), so a running shell whose
+    /// GIT_DIR changes (a bare repository opened or left) is started
+    /// again there.
+    void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
     bool isRunning() const;

@@ -60,13 +60,34 @@ static QString canonicalizeRepoPath(const QString& path)
 void SettingsService::addRecentRepository(const QString& path)
 {
     const QString canonical = canonicalizeRepoPath(path);
+    // The folder itself, symbolic links resolved: the same repository
+    // reached through two spellings (macOS's /tmp and /private/tmp, a
+    // linked folder) was listed twice. Only this path is looked at on
+    // disk, the one just opened; the others' resolved paths were kept
+    // when they were added, so a folder on a share that has gone away
+    // can't hold the window up.
+    const QString resolvedNow = QFileInfo(canonical).canonicalFilePath();
+    const QString resolved =
+        resolvedNow.isEmpty() ? canonical : QDir::toNativeSeparators(resolvedNow);
+    QVariantMap resolvedMap = settings_
+        .value(QStringLiteral("recent/resolved")).toMap();
     QStringList list = recentRepositories();
-    list.removeAll(canonical);
+    list.removeIf([&](const QString& entry) {
+        return entry == canonical || resolvedMap.value(entry).toString() == resolved;
+    });
     list.prepend(canonical);
     const int cap = maxRecentRepositories();
     while (list.size() > cap)
         list.removeLast();
     settings_.setValue(QStringLiteral("recent/repositories"), list);
+    resolvedMap[canonical] = resolved;
+    for (auto it = resolvedMap.begin(); it != resolvedMap.end();) {
+        if (!list.contains(it.key()))
+            it = resolvedMap.erase(it);
+        else
+            ++it;
+    }
+    settings_.setValue(QStringLiteral("recent/resolved"), resolvedMap);
 
     // Record the access timestamp alongside the path list. We persist
     // the map as a QVariantMap of ISO-8601 strings — QSettings writes
@@ -101,6 +122,10 @@ void SettingsService::removeRecentRepository(const QString& path)
             .value(QStringLiteral("recent/accessedAt")).toMap();
         if (accessMap.remove(canonical) > 0)
             settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
+        QVariantMap resolvedMap = settings_
+            .value(QStringLiteral("recent/resolved")).toMap();
+        if (resolvedMap.remove(canonical) > 0)
+            settings_.setValue(QStringLiteral("recent/resolved"), resolvedMap);
         notifyChanged();
     }
 }
@@ -109,6 +134,7 @@ void SettingsService::clearRecentRepositories()
 {
     settings_.remove(QStringLiteral("recent/repositories"));
     settings_.remove(QStringLiteral("recent/accessedAt"));
+    settings_.remove(QStringLiteral("recent/resolved"));
     notifyChanged();
 }
 

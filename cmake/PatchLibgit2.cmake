@@ -154,3 +154,44 @@ gitbolt_patch(src/libgit2/repository.c
     "\tif ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {"
     "\tif (!entry->value) {\n\t\tgit_error_set(GIT_ERROR_REPOSITORY,\n\t\t\t\"missing value for 'extensions.objectformat'\");\n\t\terror = GIT_EINVALID;\n\t} else if ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {"
     "\n\tif \\(\\(repo->oid_type = git_oid_type_fromstr\\(entry->value\\)\\) == 0\\)")
+# Rewriting a config file to remove or replace the values that match a
+# pattern (a remote's refspecs when it is added, every entry of a
+# branch's or a remote's section when it is deleted) matched the pattern
+# against each line's value, and a line with no value has none:
+# strlen(NULL). Deleting a branch with a `rebase` line, or removing a
+# remote with a `prune` or `mirror` one (git booleans: no value is
+# true), crashed GitBolt and left .git/config.lock behind, which then
+# failed every config write, git's too. A line with no value matches as
+# the empty value, as git_config_get_string() reads it.
+gitbolt_patch(src/libgit2/config_file.c
+    "\t\thas_matched = (git_regexp_match(write_data->preg, var_value) == 0);"
+    "\t\thas_matched = (git_regexp_match(write_data->preg, var_value ? var_value : \"\") == 0);"
+    "git_regexp_match\\(write_data->preg, var_value\\)")
+# The same strlen(NULL) for a caller that passes a value pattern to
+# git_config_get_multivar_foreach() or git_config_multivar_iterator_new()
+# (GitBolt passes none).
+gitbolt_patch(src/libgit2/config.c
+    "\t\tif (git_regexp_match(&iter->regex, (*entry)->entry.value) == 0)"
+    "\t\tif (git_regexp_match(&iter->regex, (*entry)->entry.value ? (*entry)->entry.value : \"\") == 0)"
+    "git_regexp_match\\(&iter->regex, \\(\\*entry\\)->entry\\.value\\)")
+# merge.conflictstyle with no value (in ~/.gitconfig: for every
+# repository): every checkout crashed, switching branch, discarding a
+# file's changes, stash save, apply and pop, a cherry-pick, adding a
+# worktree. Now it fails as git does.
+gitbolt_patch(src/libgit2/checkout.c
+    "\t\telse if (error)\n\t\t\tgoto cleanup;\n\t\telse if (strcmp(conflict_style->value, \"merge\") == 0)"
+    "\t\telse if (error)\n\t\t\tgoto cleanup;\n\t\telse if (!conflict_style->value) {\n\t\t\tgit_error_set(GIT_ERROR_CHECKOUT,\n\t\t\t\t\"missing value for 'merge.conflictstyle'\");\n\t\t\terror = -1;\n\t\t\tgit_config_entry_free(conflict_style);\n\t\t\tgoto cleanup;\n\t\t}\n\t\telse if (strcmp(conflict_style->value, \"merge\") == 0)"
+    "goto cleanup;\n\t\telse if \\(strcmp\\(conflict_style->value, \"merge\"\\)")
+# merge.default with no value: a cherry-pick (any libgit2 merge)
+# crashed. Now it fails as git does. The similarity metric allocated
+# above is the caller's to free only once this returns success.
+gitbolt_patch(src/libgit2/merge.c
+    "\t\tif (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);"
+    "\t\tif (error == 0 && !entry->value) {\n\t\t\tgit_error_set(GIT_ERROR_MERGE,\n\t\t\t\t\"missing value for 'merge.default'\");\n\t\t\terror = GIT_EINVALID;\n\t\t\tif (!given || !given->metric) {\n\t\t\t\tgit__free(opts->metric);\n\t\t\t\topts->metric = NULL;\n\t\t\t}\n\t\t\tgoto done;\n\t\t} else if (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);"
+    "\n\t\tif \\(error == 0\\) {\n\t\t\topts->default_driver = git__strdup\\(entry->value\\)")
+# init.defaultBranch with no value: git_repository_is_empty() crashed
+# (GitBolt doesn't call it). Taken as unset, as repository init does.
+gitbolt_patch(src/libgit2/repository.c
+    "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\t*entry->value) {"
+    "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\tentry->value && *entry->value) {"
+    "\"init\\.defaultbranch\"\\)\\) == 0 &&\n\t\t\\*entry->value\\)")
