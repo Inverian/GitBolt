@@ -246,6 +246,15 @@ set_property(TEST test_repo_action_locks APPEND PROPERTY ENVIRONMENT "QT_QPA_PLA
 # to do what they mustn't: about a minute here, so more room than the
 # 180 s the others get, for a slow runner.
 set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
+# Text a repository, a remote or git wrote, shown as written: message
+# boxes, prompts, labels and tooltips render none of its markup, and a
+# link in a message box's text opens nothing (its URLs go to a handler
+# of the test's). Off screen.
+gitbolt_add_test(test_plain_text ui/TestPlainText.cpp)
+target_sources(test_plain_text PRIVATE ShownText.h
+    ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
+target_link_libraries(test_plain_text PRIVATE gitbolt_ui)
+set_property(TEST test_plain_text APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File History: one load per file at a time, with a busy cursor and a
 # status-bar note until its dialog comes up.
 gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)

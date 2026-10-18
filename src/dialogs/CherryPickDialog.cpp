@@ -51,6 +51,11 @@ void CherryPickDialog::setupUi() {
     hashLabel_->setFont(QFont(QStringLiteral("Menlo,Consolas,monospace")));
     detailsLayout->addRow(tr("Hash:"), hashLabel_);
 
+    // The commit's message and author are its author's to write (a
+    // fetched commit is anyone's): plain text, or a summary such as
+    // "<b>…</b>" was rendered.
+    summaryLabel_->setTextFormat(Qt::PlainText);
+    authorLabel_->setTextFormat(Qt::PlainText);
     summaryLabel_->setWordWrap(true);
     detailsLayout->addRow(tr("Message:"), summaryLabel_);
 
@@ -82,9 +87,10 @@ void CherryPickDialog::setCommitDetails(const git::CommitData& commit) {
     hashLabel_->setText(QString::fromStdString(commit.id.toHex()));
     summaryLabel_->setText(QString::fromStdString(
         commit.summary.empty() ? commit.message : commit.summary));
+    // In one arg(): chained, a "%2" in the name took the email.
     authorLabel_->setText(QStringLiteral("%1 <%2>")
-                              .arg(QString::fromStdString(commit.author.name))
-                              .arg(QString::fromStdString(commit.author.email)));
+                              .arg(QString::fromStdString(commit.author.name),
+                                   QString::fromStdString(commit.author.email)));
 
     auto epoch = std::chrono::duration_cast<std::chrono::seconds>(
                      commit.author.when.time_since_epoch())

@@ -1,6 +1,7 @@
 #include "ui/RepoCommandController.h"
 
 #include "services/GitService.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QFutureWatcher>
 #include <QMessageBox>
@@ -82,7 +83,7 @@ bool RepoCommandController::runAsync(const std::vector<std::string>& args,
             QWidget* parent = parentWidget ? parentWidget.data() : dialogParent_;
             bool ok = false;
             if (!result.ok()) {
-                QMessageBox::warning(parent, failTitle,
+                widgets::PlainMessageBox::warning(parent, failTitle,
                     QString::fromStdString(result.error().message()));
             } else if (!result.value().success()) {
                 QString detail =
@@ -93,7 +94,7 @@ bool RepoCommandController::runAsync(const std::vector<std::string>& args,
                 if (detail.isEmpty())
                     detail = tr("git exited with code %1")
                                  .arg(result.value().exitCode);
-                QMessageBox::warning(parent, failTitle, detail);
+                widgets::PlainMessageBox::warning(parent, failTitle, detail);
             } else {
                 ok = true;
             }

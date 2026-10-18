@@ -1,5 +1,7 @@
 #include "models/BranchModel.h"
 
+#include "util/ToolTip.h"
+
 #include <QDateTime>
 #include <QString>
 #include <algorithm>
@@ -147,13 +149,17 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::DecorationRole:
             return b.isHead ? QIcon::fromTheme(QStringLiteral("vcs-branch"))
                             : QIcon::fromTheme(QStringLiteral("vcs-branch"));
+        // Every tooltip here is the repository's text: ref names (a
+        // clone's come from the server, and "<b>…</b>" is a valid one),
+        // a tag's message and tagger, a submodule's URL, a stash's
+        // message. Plain, or Qt rendered their markup.
         case Qt::ToolTipRole: {
             QString tip = QString::fromStdString(b.fullRefName);
             if (!b.upstream.empty())
                 tip += QStringLiteral("\nUpstream: ") + QString::fromStdString(b.upstream);
             if (b.isHead)
                 tip += QStringLiteral("\n(HEAD)");
-            return tip;
+            return util::plainToolTip(tip);
         }
         case FullRefNameRole:
             return QString::fromStdString(b.fullRefName);
@@ -179,7 +185,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::DecorationRole:
             return QIcon::fromTheme(QStringLiteral("network-server"));
         case Qt::ToolTipRole:
-            return QString::fromStdString(b.fullRefName);
+            return util::plainToolTip(QString::fromStdString(b.fullRefName));
         case FullRefNameRole:
             return QString::fromStdString(b.fullRefName);
         case BranchTypeRole:
@@ -216,7 +222,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                 if (!message.isEmpty())
                     tip += QStringLiteral("\n") + message;
             }
-            return tip;
+            return util::plainToolTip(tip);
         }
         case FullRefNameRole:
             return QString::fromStdString(t.fullRefName);
@@ -243,7 +249,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                 tip += QStringLiteral("\nURL: ") + QString::fromStdString(sm.url);
             if (!sm.branch.empty())
                 tip += QStringLiteral("\nBranch: ") + QString::fromStdString(sm.branch);
-            return tip;
+            return util::plainToolTip(tip);
         }
         default:
             return {};
@@ -263,7 +269,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::ToolTipRole: {
             QString tip = QStringLiteral("stash@{%1}").arg(s.index);
             tip += QStringLiteral("\n") + QString::fromStdString(s.message);
-            return tip;
+            return util::plainToolTip(tip);
         }
         default:
             return {};

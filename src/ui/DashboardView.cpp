@@ -2,6 +2,7 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "services/RecentRepoProbe.h"
+#include "util/ToolTip.h"
 #include "widgets/BoltLogoWidget.h"
 
 #include <QApplication>
@@ -503,8 +504,10 @@ void DashboardView::refreshRecentList()
         // Stash the canonical path on column 0 so itemActivated can
         // retrieve it regardless of which column the user clicked in.
         item->setData(0, Qt::UserRole, path);
+        // A path's folder names can be anything, markup included.
+        const QString tip = util::plainToolTip(path);
         for (int c = 0; c < recentList_->columnCount(); ++c)
-            item->setToolTip(c, path);
+            item->setToolTip(c, tip);
 
         probeAndPopulate(path);
     }

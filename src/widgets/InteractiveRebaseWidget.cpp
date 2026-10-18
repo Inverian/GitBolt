@@ -1,5 +1,7 @@
 #include "widgets/InteractiveRebaseWidget.h"
 
+#include "util/ToolTip.h"
+
 #include <QApplication>
 #include <QDialogButtonBox>
 #include <QDrag>
@@ -52,8 +54,11 @@ QVariant RebaseListModel::data(const QModelIndex& index, int role) const {
         case git::RebaseOperationType::Pick:
             return tr("Keep this commit as it is.");
         case git::RebaseOperationType::Reword:
-            return tr("Keep the changes, with a new message:\n\n%1")
-                .arg(QString::fromStdString(op.newMessage).trimmed());
+            // The new message starts as the commit's own, anyone's to
+            // write: plain text, whichever line comes first. (The other
+            // tips are GitBolt's.)
+            return util::plainToolTip(tr("Keep the changes, with a new message:\n\n%1")
+                                          .arg(QString::fromStdString(op.newMessage).trimmed()));
         case git::RebaseOperationType::Edit:
             return tr("Stop the rebase after this commit, to amend it or add commits; "
                       "then Continue.");

@@ -1,5 +1,7 @@
 #include "widgets/WorktreeWidget.h"
 
+#include "util/ToolTip.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
@@ -51,11 +53,14 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
     }
 
     if (role == Qt::ToolTipRole) {
-        return QStringLiteral("%1\nPath: %2\nBranch: %3\n%4")
-            .arg(QString::fromStdString(wt.name))
-            .arg(QString::fromStdString(wt.path))
-            .arg(QString::fromStdString(wt.branch))
-            .arg(wt.isLocked ? tr("Locked") : tr("Unlocked"));
+        // The worktree's name, path and branch: plain text, as markup
+        // in them was rendered. In one arg(), so a "%2" in the name
+        // stays.
+        return util::plainToolTip(QStringLiteral("%1\nPath: %2\nBranch: %3\n%4")
+                                      .arg(QString::fromStdString(wt.name),
+                                           QString::fromStdString(wt.path),
+                                           QString::fromStdString(wt.branch),
+                                           wt.isLocked ? tr("Locked") : tr("Unlocked")));
     }
 
     if (role == Qt::DecorationRole && index.column() == ColLocked) {

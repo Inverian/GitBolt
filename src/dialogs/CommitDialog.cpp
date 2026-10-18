@@ -10,6 +10,7 @@
 #include "services/GitService.h"
 #include "widgets/CommitMessageEdit.h"
 #include "widgets/DiffViewerWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QAction>
 #include <QCheckBox>
@@ -321,6 +322,9 @@ void CommitDialog::setupUi()
     errorLabel_ = new QLabel(this);
     errorLabel_->setObjectName(QStringLiteral("commit.error"));
     errorLabel_->setWordWrap(true);
+    // git's words, a hook's output among them: plain text, as with
+    // every label here that shows what git or the repository says.
+    errorLabel_->setTextFormat(Qt::PlainText);
     errorLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:#5a1f1f; color:#ffdada; padding:6px 10px; }"));
     errorLabel_->hide();
@@ -345,6 +349,10 @@ void CommitDialog::setupUi()
     committerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     branchStatusLabel_ = new QLabel(statusStrip);
     stagedCountLabel_  = new QLabel(statusStrip);
+    // The branch's name (a clone's comes from the server) and the
+    // configured "name <email>".
+    committerLabel_->setTextFormat(Qt::PlainText);
+    branchStatusLabel_->setTextFormat(Qt::PlainText);
 
     statusLayout->addWidget(committerLabel_, 1);
     statusLayout->addWidget(branchStatusLabel_, 0, Qt::AlignCenter);
@@ -439,7 +447,7 @@ void CommitDialog::wireConnections()
             diffView_->currentFile(), static_cast<size_t>(hunkIdx),
             lines);
         if (patch.empty()) {
-            QMessageBox::information(this, tr("Stage Lines"),
+            widgets::PlainMessageBox::information(this, tr("Stage Lines"),
                 tr("The selection doesn't produce a stageable "
                    "change — select at least one added or removed "
                    "line (hunks that end without a newline only "
@@ -882,7 +890,7 @@ void CommitDialog::onDiscardSelected()
         : tr("Discard all uncommitted changes to %1 files?\n\nThis cannot be undone.")
             .arg(paths.size());
 
-    const auto answer = QMessageBox::question(this,
+    const auto answer = widgets::PlainMessageBox::question(this,
         tr("Discard changes?"), detail,
         QMessageBox::Discard | QMessageBox::Cancel,
         QMessageBox::Cancel);

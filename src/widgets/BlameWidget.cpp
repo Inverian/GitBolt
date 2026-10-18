@@ -29,6 +29,8 @@ void BlameWidget::setupUI() {
 
     filePathLabel_->setStyleSheet(
         QStringLiteral("QLabel { padding: 2px 8px; font-weight: bold; }"));
+    // The file's path in the repository, which can hold markup.
+    filePathLabel_->setTextFormat(Qt::PlainText);
     toolbar_->addWidget(filePathLabel_);
     toolbar_->addSeparator();
 

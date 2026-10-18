@@ -1,5 +1,6 @@
 #include "widgets/MaintenanceWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
+#include "widgets/PlainTextDialogs.h"
 #include "services/GitService.h"
 
 #include <QGroupBox>
@@ -45,6 +46,8 @@ void MaintenanceWidget::setupUi() {
     auto* statsLayout = new QVBoxLayout(statsGroup);
     statsLabel_ = new QLabel(tr("No repository open."));
     statsLabel_->setWordWrap(true);
+    // git count-objects' output, here and in the comparison below.
+    statsLabel_->setTextFormat(Qt::PlainText);
     statsLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     statsLayout->addWidget(statsLabel_);
     mainLayout->addWidget(statsGroup);
@@ -75,6 +78,7 @@ void MaintenanceWidget::setupUi() {
     // Before/after comparison
     comparisonLabel_ = new QLabel;
     comparisonLabel_->setWordWrap(true);
+    comparisonLabel_->setTextFormat(Qt::PlainText);
     mainLayout->addWidget(comparisonLabel_);
 
     // Console output
@@ -103,7 +107,7 @@ void MaintenanceWidget::captureBeforeDiskUsage() {
 
 void MaintenanceWidget::onGarbageCollect() {
     if (!gitService_) return;
-    auto answer = QMessageBox::question(this, tr("Garbage Collect"),
+    auto answer = PlainMessageBox::question(this, tr("Garbage Collect"),
         tr("Run git gc? This will optimize the repository."));
     if (answer != QMessageBox::Yes) return;
 
@@ -115,7 +119,7 @@ void MaintenanceWidget::onGarbageCollect() {
 
 void MaintenanceWidget::onPrune() {
     if (!gitService_) return;
-    auto answer = QMessageBox::question(this, tr("Prune"),
+    auto answer = PlainMessageBox::question(this, tr("Prune"),
         tr("Run git prune? This will remove unreachable objects."));
     if (answer != QMessageBox::Yes) return;
 
@@ -134,7 +138,7 @@ void MaintenanceWidget::onFsck() {
 
 void MaintenanceWidget::onRepack() {
     if (!gitService_) return;
-    auto answer = QMessageBox::question(this, tr("Repack"),
+    auto answer = PlainMessageBox::question(this, tr("Repack"),
         tr("Run git repack? This will repack objects for efficiency."));
     if (answer != QMessageBox::Yes) return;
 
@@ -146,7 +150,7 @@ void MaintenanceWidget::onRepack() {
 
 void MaintenanceWidget::onRunAll() {
     if (!gitService_) return;
-    auto answer = QMessageBox::question(this, tr("Run All Maintenance"),
+    auto answer = PlainMessageBox::question(this, tr("Run All Maintenance"),
         tr("Run gc, prune, and repack in sequence?"));
     if (answer != QMessageBox::Yes) return;
 

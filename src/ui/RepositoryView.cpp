@@ -13,6 +13,7 @@
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
 #include "widgets/LoadingOverlayWidget.h"
+#include "widgets/PlainTextDialogs.h"
 #include "widgets/RepoOperationBar.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
@@ -279,14 +280,14 @@ void RepositoryView::openFileExternally(const QString& path)
     // Bare: no working tree, and an empty one would be GitBolt's own
     // working folder, maybe another repository with that file in it.
     if (workdir.isEmpty()) {
-        QMessageBox::information(this, tr("Open Externally"),
+        widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("This repository is bare: it has no working tree to open "
                "%1 from.").arg(path));
         return;
     }
     const QString full = QDir(workdir).filePath(path);
     if (!QFileInfo::exists(full)) {
-        QMessageBox::information(this, tr("Open Externally"),
+        widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("%1 does not exist in the working tree (it may only "
                "exist at an older commit).").arg(path));
         return;
@@ -337,7 +338,7 @@ void RepositoryView::showFileHistory(const QString& path)
             return;
         const Log log = watcher->result();
         if (!log) {
-            QMessageBox::warning(this, tr("File History"),
+            widgets::PlainMessageBox::warning(this, tr("File History"),
                 tr("Could not load history for %1").arg(path));
             return;
         }
@@ -408,7 +409,7 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
             dlg->close();
         } else {
             // Paged log: the commit may simply not be loaded yet.
-            QMessageBox::information(dlg, tr("File History"),
+            widgets::PlainMessageBox::information(dlg, tr("File History"),
                 tr("Commit %1 isn't in the loaded portion of the "
                    "log — scroll the revision list further back "
                    "and try again.").arg(sha.left(7)));

@@ -1,4 +1,5 @@
 #include "widgets/MergeConflictWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QApplication>
 #include <QEvent>
@@ -357,7 +358,7 @@ void MergeConflictWidget::onMarkAllResolved() {
     }
 
     if (!allResolved) {
-        auto answer = QMessageBox::question(
+        auto answer = PlainMessageBox::question(
             this, tr("Unresolved Conflicts"),
             tr("Some conflicts have not been explicitly resolved.\n"
                "The current content in each result panel will be used.\n"
@@ -380,7 +381,7 @@ void MergeConflictWidget::onMarkAllResolved() {
 }
 
 void MergeConflictWidget::onAbortMerge() {
-    auto answer = QMessageBox::question(
+    auto answer = PlainMessageBox::question(
         this, tr("Abort Merge"),
         tr("Are you sure you want to abort the merge?\n"
            "All conflict resolutions will be lost."),

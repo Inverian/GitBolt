@@ -17,6 +17,7 @@ set(SOURCES
     LoadingOverlayWidget.cpp
     MaintenanceWidget.cpp
     MergeConflictWidget.cpp
+    PlainTextDialogs.cpp
     RecordTablePanel.cpp
     RepoOperationBar.cpp
     RevisionGraphWidget.cpp
@@ -37,6 +38,7 @@ set(SOURCES
     LoadingOverlayWidget.h
     MaintenanceWidget.h
     MergeConflictWidget.h
+    PlainTextDialogs.h
     RecordTablePanel.h
     RepoOperationBar.h
     RevisionGraphWidget.h
