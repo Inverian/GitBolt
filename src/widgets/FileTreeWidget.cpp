@@ -141,6 +141,9 @@ void FileTreeWidget::setupUi()
                                 rightPane);
     previewHeader_->setObjectName(QStringLiteral("fileTree.previewHeader"));
     previewHeader_->setWordWrap(true);   // styled by applyColors()
+    // It names the file or folder, a path in the repository, which
+    // can hold markup.
+    previewHeader_->setTextFormat(Qt::PlainText);
     rightLayout->addWidget(previewHeader_);
 
     preview_ = new QPlainTextEdit(rightPane);

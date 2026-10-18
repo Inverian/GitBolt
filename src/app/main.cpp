@@ -16,6 +16,7 @@
 #include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
+#include "widgets/PlainTextDialogs.h"
 
 #ifdef Q_OS_MACOS
 #include "platform/macos/MacServices.h"
@@ -72,9 +73,13 @@ int runAskpass(const QString& prompt)
 
     QInputDialog dialog;
     dialog.setWindowTitle(QStringLiteral("GitBolt"));
-    dialog.setLabelText(prompt.trimmed().isEmpty()
-                            ? QStringLiteral("Credential:")
-                            : prompt.trimmed());
+    // Plain text, as the Yes / No box's: the prompt names the URL, and
+    // its user name can be the server's (it redirects the request to a
+    // URL with one in it), so "<b>…</b>" there was rendered, the very
+    // place where the user decides whom to give a password.
+    gitbolt::widgets::PlainInputDialog::setLabelText(
+        dialog, prompt.trimmed().isEmpty() ? QStringLiteral("Credential:")
+                                           : prompt.trimmed());
     dialog.setInputMode(QInputDialog::TextInput);
     if (secret)
         dialog.setTextEchoMode(QLineEdit::Password);
@@ -151,6 +156,9 @@ private:
                               "free.").arg(QDir::toNativeSeparators(path_)),
             QMessageBox::Cancel);
         box_->setObjectName(QStringLiteral("app.busyInstance"));
+        // The path's folder names are anyone's, a cloned repository's
+        // included.
+        box_->setTextFormat(Qt::PlainText);
         // Cancel, Escape or the close button: this launch stops
         // waiting.
         QObject::connect(box_.get(), &QDialog::finished, box_.get(),
@@ -178,7 +186,7 @@ void reportUnresponsiveInstance()
     const QString platform = QGuiApplication::platformName();
     if (platform != QStringLiteral("offscreen")
         && platform != QStringLiteral("minimal"))
-        QMessageBox::warning(nullptr, QStringLiteral("GitBolt"), text);
+        gitbolt::widgets::PlainMessageBox::warning(nullptr, QStringLiteral("GitBolt"), text);
 }
 
 namespace endpoints = gitbolt::app::telemetry_endpoints;

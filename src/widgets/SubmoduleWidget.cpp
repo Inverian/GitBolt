@@ -1,5 +1,7 @@
 #include "widgets/SubmoduleWidget.h"
 
+#include "util/ToolTip.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
@@ -51,11 +53,13 @@ QVariant SubmoduleTableModel::data(const QModelIndex& index, int role) const {
     }
 
     if (role == Qt::ToolTipRole) {
-        return QStringLiteral("%1\nPath: %2\nURL: %3\nStatus: %4")
-            .arg(QString::fromStdString(sub.name))
-            .arg(QString::fromStdString(sub.path))
-            .arg(QString::fromStdString(sub.url))
-            .arg(statusString(sub.status));
+        // .gitmodules' name, path and URL, as a clone brought them:
+        // plain text. In one arg(), so a "%2" in the name stays.
+        return util::plainToolTip(QStringLiteral("%1\nPath: %2\nURL: %3\nStatus: %4")
+                                      .arg(QString::fromStdString(sub.name),
+                                           QString::fromStdString(sub.path),
+                                           QString::fromStdString(sub.url),
+                                           statusString(sub.status)));
     }
 
     // Colored status indicator

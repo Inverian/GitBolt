@@ -66,6 +66,10 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
     statusLabel_ = new QLabel(this);
     statusLabel_->setObjectName(QStringLiteral("clone.status"));
     statusLabel_->setWordWrap(true);
+    // A failure is shown in git's words, and they start with the
+    // server's: a git:// server's "fatal: remote error: <font …>" was
+    // rendered as rich text, an inline image and colours of its own.
+    statusLabel_->setTextFormat(Qt::PlainText);
     statusLabel_->hide();   // until setBusy() has something to say
     layout->addWidget(statusLabel_);
 

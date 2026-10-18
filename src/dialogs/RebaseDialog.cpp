@@ -1,6 +1,7 @@
 #include "dialogs/RebaseDialog.h"
 #include "conf/SettingsService.h"
 #include "widgets/InteractiveRebaseWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -168,7 +169,7 @@ void RebaseDialog::onAccepted() {
     // git would stop at once on this one; say why here, with the
     // plan still open to fix.
     if (const QString problem = rebaseWidget_->planProblem(); !problem.isEmpty()) {
-        QMessageBox::warning(this, tr("Interactive Rebase"), problem);
+        widgets::PlainMessageBox::warning(this, tr("Interactive Rebase"), problem);
         return;
     }
     // Turned down (a rebase step still running, HEAD moved since the
@@ -177,7 +178,7 @@ void RebaseDialog::onAccepted() {
     refusal_.clear();
     emit rebaseRequested(plan);
     if (!refusal_.isEmpty()) {
-        QMessageBox::warning(this, tr("Interactive Rebase"), refusal_);
+        widgets::PlainMessageBox::warning(this, tr("Interactive Rebase"), refusal_);
         return;
     }
     accept();

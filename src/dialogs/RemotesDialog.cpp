@@ -1,5 +1,6 @@
 #include "dialogs/RemotesDialog.h"
 #include "conf/SettingsService.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -107,7 +108,9 @@ void RemotesDialog::setupUi() {
         if (name.isEmpty()) return;
         const QString currentUrl = selectedUrl();
         bool ok = false;
-        const QString newUrl = QInputDialog::getText(
+        // The prompt names the remote (a name in the repository's
+        // config): plain text.
+        const QString newUrl = widgets::PlainInputDialog::getText(
             this, tr("Edit Remote URL"),
             tr("New URL for \"%1\":").arg(name),
             QLineEdit::Normal, currentUrl, &ok);
