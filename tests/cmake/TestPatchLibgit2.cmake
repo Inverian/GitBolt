@@ -26,14 +26,31 @@ set(_config_file_from
     "out:\n\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
 set(_config_file_to
     "out:\n\tgit_config_list_free(config_list);\n\tif (error < 0) {\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\t\tmemset(b->file.checksum, 0, sizeof(b->file.checksum));\n\t}\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;\n}\n")
-# A tree with the four files: <suffix> picks each one's text (_from or _to),
-# <config_file> config_file.c's.
+# The config-lines-with-no-value fixes.
+set(_submodule_from
+    "\twhile ((error = git_config_next(&entry, iter)) == 0) {\n\t\tconst char *fdot, *ldot;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {\n}\n\tif (!strcmp(entry->value, data->path)) {\n")
+set(_submodule_to
+    "\twhile ((error = git_config_next(&entry, iter)) == 0) {\n\t\tconst char *fdot, *ldot;\n\n\t\tif (!entry->value)\n\t\t\tcontinue;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {\n}\n\tif (entry->value && !strcmp(entry->value, data->path)) {\n")
+set(_remote_from
+    "\t\tif (git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
+set(_remote_to
+    "\t\tif (!entry->value || git__prefixcmp(url, entry->value))\n\t\t\tcontinue;\n\tif (!entry->value || strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;\n\t\tif (!entry->value || strcmp(remote_name, entry->value))\n\t\t\tcontinue;\n")
+set(_repository_from
+    "\n\tif ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
+set(_repository_to
+    "\n\tif (!entry->value) {\n\t\tgit_error_set(GIT_ERROR_REPOSITORY,\n\t\t\t\"missing value for 'extensions.objectformat'\");\n\t\terror = GIT_EINVALID;\n\t} else if ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {\n")
+
+# A tree with the seven files: <suffix> picks each one's text (_from or
+# _to), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
     file(WRITE ${dir}/cmake/DefaultCFlags.cmake "${_cflags${suffix}}")
     file(WRITE ${dir}/include/git2/common.h "${_common${suffix}}")
     file(WRITE ${dir}/src/libgit2/config.c "${_config${suffix}}")
     file(WRITE ${dir}/src/libgit2/config_file.c "${config_file}")
+    file(WRITE ${dir}/src/libgit2/submodule.c "${_submodule${suffix}}")
+    file(WRITE ${dir}/src/libgit2/remote.c "${_remote${suffix}}")
+    file(WRITE ${dir}/src/libgit2/repository.c "${_repository${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -46,7 +63,9 @@ endfunction()
 
 function(expect_patched what dir)
     foreach(_pair "cmake/DefaultCFlags.cmake;_cflags_to" "include/git2/common.h;_common_to"
-                  "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to")
+                  "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to"
+                  "src/libgit2/submodule.c;_submodule_to" "src/libgit2/remote.c;_remote_to"
+                  "src/libgit2/repository.c;_repository_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)

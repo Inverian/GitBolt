@@ -6,6 +6,7 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "git/Askpass.h"
+#include "git/GitProcess.h"
 #include "telemetry/EventQueue.h"
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
@@ -226,6 +227,15 @@ int main(int argc, char* argv[]) {
     // which fails git or ssh with its own reason.
     if (qgetenv(gitbolt::git::kAskpassModeEnv) == gitbolt::git::kAskpassRefuse)
         return 1;
+
+    // Which repository git works in is the open one's business, never
+    // GitBolt's environment's: a shell that exports GIT_DIR or
+    // GIT_WORK_TREE (a bare dotfiles setup) sent git's commands to that
+    // repository. Gone for the whole process, so nothing it starts
+    // inherits them, an editor that Open Externally starts included.
+    // (GitProcess, the terminals and GitK leave them out as well.)
+    for (const auto& name : gitbolt::git::GitProcess::repositoryEnvVars())
+        qunsetenv(name.c_str());
 
     // Install crash handler before anything else. Its report header
     // says whether a later launch may upload the report: official

@@ -1516,7 +1516,7 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
     // push goes to every one. Like git, libgit2 won't replace one of
     // several, and said only "entry is not unique due to being a
     // multivar". Each may come from a config of its own.
-    struct Url { std::string value, where; };
+    struct Url { std::string value, where; bool valueless; };
     std::vector<Url> urls;
     git_config_get_multivar_foreach(
         config, (key + "url").c_str(), nullptr,
@@ -1524,10 +1524,25 @@ Result<void> Repository::setRemoteUrl(const std::string& name, const std::string
             // A `url` line with no "= value" (a slip in a hand edit) has
             // none at all: libgit2 gives it a null value.
             static_cast<std::vector<Url>*>(payload)->push_back(
-                {e->value ? e->value : "", definedOutsideRepoConfig(e->level, e->include_depth > 0)});
+                {e->value ? e->value : "", definedOutsideRepoConfig(e->level, e->include_depth > 0),
+                 e->value == nullptr});
             return 0;
         },
         &urls);
+    // One alone is replaced below, which repairs the remote. Beside
+    // others, git can't read the config at all ("missing value"), so
+    // no git command would help: the line has to go.
+    if (urls.size() > 1) {
+        for (const auto& u : urls) {
+            if (u.valueless)
+                return GitError(GitErrorCode::GenericError,
+                                "Remote '" + name + "' has a `url` line with no value in "
+                                    + (u.where.empty() ? std::string("the repository's config")
+                                                       : u.where)
+                                    + ", which git can't read; delete that line, then change "
+                                      "the URL again.");
+        }
+    }
     if (urls.size() > 1) {
         std::string list;
         std::vector<std::string> places;   // each outside config, once

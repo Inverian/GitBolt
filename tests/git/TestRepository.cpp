@@ -88,6 +88,14 @@ QString addFeatureBranch(gitbolt::test::TestRepo& repo) {
     return tip;
 }
 
+// Appends `text` to the repository's .git/config (a test checks
+// QTest::currentTestFailed() after it).
+void appendConfig(const QString& repoPath, const QByteArray& text) {
+    QFile config(QDir(repoPath).filePath(QStringLiteral(".git/config")));
+    QVERIFY(config.open(QIODevice::Append));
+    config.write(text);
+}
+
 } // namespace
 
 class TestRepository : public QObject {
@@ -1902,6 +1910,89 @@ private slots:
         QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
     }
 
+    // -----------------------------------------------------------------
+    // Config lines with a name and no "= value": libgit2 gives them a
+    // NULL value, and crashed where it wanted a string (patched in the
+    // bundled libgit2, cmake/PatchLibgit2.cmake). git refuses such a
+    // config; GitBolt must not go down on it. A .gitmodules is committed,
+    // so a cloned repository can bring one.
+    // -----------------------------------------------------------------
+    void valuelessSubmodulePathIsSkipped() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(".gitmodules",
+                                    "[submodule \"x\"]\n\tpath\n\turl = https://example.com/x.git\n",
+                                    "a .gitmodules with a path line and no value").ok());
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto subs = opened->submodules();   // every open runs this
+        QVERIFY2(subs.ok(), subs.ok() ? "" : subs.error().message().c_str());
+#endif
+    }
+
+    void valuelessInsteadOfIsIgnored() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n"
+                                  "[url \"https://z/\"]\n\tinsteadOf\n\tpushInsteadOf\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto remotes = opened->remotes();   // Remote repositories' list
+        QVERIFY(remotes.ok());
+        QCOMPARE(remotes->size(), std::size_t(1));
+        QCOMPARE(QString::fromStdString(remotes->front().url), QStringLiteral("https://example.com/a.git"));
+        QVERIFY(opened->setRemoteUrl("origin", "https://example.com/b.git").ok());
+#endif
+    }
+
+    void valuelessBranchRemoteLetsARemoteGo() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n"
+                                  "\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
+                                  "[branch \"main\"]\n\tremote\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto removed = opened->removeRemote("origin");
+        QVERIFY2(removed.ok(), removed.ok() ? "" : removed.error().message().c_str());
+#endif
+    }
+
+    void valuelessObjectFormatFailsToOpen() {
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        QVERIFY(QDir(repo.path()).mkpath(QStringLiteral("sub")));
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.repositoryformatversion", "1"})));
+        appendConfig(repo.path(), "[extensions]\n\tobjectformat\n");
+        if (QTest::currentTestFailed())
+            return;
+        const auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(!opened.ok());
+        QVERIFY2(QString::fromStdString(opened.error().message()).contains(QLatin1String("objectformat")),
+                 opened.error().message().c_str());
+        std::string root;
+        const auto fromSub = gitbolt::git::Repository::openContaining(
+            QDir(repo.path()).filePath(QStringLiteral("sub")).toStdString(), "", root);
+        QVERIFY(!fromSub.ok());
+#endif
+    }
+
     // A `url` line with no "= value" (a slip in a hand edit): libgit2
     // lists the remote with no URL, and gives the entry a null value.
     // Edit URL crashed on it; it now repairs the remote.
@@ -1924,6 +2015,25 @@ private slots:
                                          [](const auto& r) { return r.name == "origin"; });
         QVERIFY(origin != remotes->end());
         QCOMPARE(QString::fromStdString(origin->url), QStringLiteral("https://example.com/fixed.git"));
+    }
+
+    // A valueless `url` beside a real one: git can't read the config,
+    // so the note says to delete the line (no git command would work).
+    void setRemoteUrlNamesAValuelessUrlAmongOthers() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "a").ok());
+        appendConfig(repo.path(), "[remote \"origin\"]\n\turl = https://example.com/a.git\n\turl\n");
+        if (QTest::currentTestFailed())
+            return;
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const QByteArray before = readFile(repo.path(), QStringLiteral(".git/config"));
+        const auto res = opened->setRemoteUrl("origin", "https://example.com/b.git");
+        QVERIFY(!res.ok());
+        QVERIFY2(QString::fromStdString(res.error().message())
+                     .contains(QLatin1String("a `url` line with no value in the repository's config")),
+                 res.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), QStringLiteral(".git/config")), before);
     }
 
     // Several URLs (`git remote set-url --add`): refused as git does,

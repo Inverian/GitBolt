@@ -63,13 +63,22 @@ security policy for reporting vulnerabilities privately.
   files) say it has no working tree.
 - **GIT_DIR, GIT_WORK_TREE and git's other repository variables in
   GitBolt's own environment** (a shell that exports them for a bare
-  dotfiles repository, say) no longer reach the git commands GitBolt
-  runs, its Console and Git bash terminals, or GitK. They sent those to
-  that repository: Push pushed its commits while GitBolt showed the one
+  dotfiles repository, say) no longer reach anything GitBolt starts:
+  its git commands, its Console and Git bash terminals, GitK, or an
+  editor that Open Externally opens. They sent git's commands to that
+  repository: Push pushed its commits while GitBolt showed the one
   that was open. An exported GIT_CONFIG hid the repository's own fetch
   settings from Fetch's prune check, so a fetch could delete local tags
   that the server doesn't have, and it left Settings › Git › Git Config
   empty, with Apply saving nothing.
+- **Crashes on config lines with no value** (a name and no `= value`,
+  which git refuses): a committed `.gitmodules` whose `path` had none
+  crashed GitBolt as it opened the repository, a freshly cloned one
+  included, and so did an `extensions.objectformat` with none. A
+  `url.<base>.insteadOf` or `pushInsteadOf` with none crashed
+  Repository › Remote repositories, and a `branch.<name>.remote` with
+  none crashed removing a remote. The repository now opens, or, for
+  `objectformat`, says what is wrong with it.
 - **Linked worktrees and submodules** opened in GitBolt now refresh
   when a commit, staging or a branch switch happens outside GitBolt.
   Their `.git` is a file pointing elsewhere, and GitBolt never watched

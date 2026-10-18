@@ -140,6 +140,20 @@ function(gitbolt_add_bundled_libgit2)
             "of cmake/PatchLibgit2.cmake's config fixes (a crash, a stale config); "
             "run cmake -P ${_patch} in that directory")
     endif()
+    # And its fixes for config lines with no value (crashes): the tests
+    # of those skip without them.
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/submodule.c _submodule_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/remote.c _remote_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/repository.c _repository_c)
+    if(_submodule_c MATCHES "if \\(entry->value && !strcmp\\(entry->value, data->path\\)\\)"
+       AND _remote_c MATCHES "if \\(!entry->value \\|\\| git__prefixcmp\\(url, entry->value\\)\\)"
+       AND _repository_c MATCHES "missing value for 'extensions\\.objectformat'")
+        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_NULL_VALUES_PATCHED)
+    else()
+        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "
+            "cmake/PatchLibgit2.cmake's fixes for config lines with no value; "
+            "run cmake -P ${_patch} in that directory")
+    endif()
 
     # Say so at configure time, not as an #error deep in the build: a
     # Unix libgit2 with nanosecond times needs one of these fields.

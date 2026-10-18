@@ -7,8 +7,9 @@
 # first two changes only matter to MSVC, and are about libgit2 being a
 # static library here; the third fixes a crash when a config file that
 # changed can't be read again, on every platform, and the fourth the
-# stale config that followed it. A version bump that moves the patched
-# text fails here, loudly.
+# stale config that followed it. The rest stop crashes on config lines
+# with no value. A version bump that moves the patched text fails here,
+# loudly.
 
 # Replaces <from> with <to> in <file>, then fails if <leftover> (a regex)
 # still matches: the upstream text changed and this patch needs updating.
@@ -85,3 +86,42 @@ gitbolt_patch(src/libgit2/config_file.c
     "\tgit_config_list_free(config_list);\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
     "\tgit_config_list_free(config_list);\n\tif (error < 0) {\n\t\tgit_futils_filestamp_set(&b->file.stamp, NULL);\n\t\tmemset(b->file.checksum, 0, sizeof(b->file.checksum));\n\t}\n\n\treturn (error == GIT_ENOTFOUND) ? 0 : error;"
     "git_config_list_free\\(config_list\\);[ \t\n]*return \\(error == GIT_ENOTFOUND\\)")
+
+# A config line with a name and no "= value" (`path`, not `path = x`) is
+# an entry whose value is NULL: git's "true" for a boolean. Where libgit2
+# wants a string it used the NULL as one, and crashed (strchr, strcmp,
+# strlen) where git refuses the config with "missing value for ...".
+#
+# .gitmodules is committed, so a repository can bring one: a `path` with
+# no value crashed GitBolt on opening it (Repository::submodules, which
+# every open runs). Skip such an entry, as one with no usable path.
+gitbolt_patch(src/libgit2/submodule.c
+    "\t\tconst char *fdot, *ldot;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {"
+    "\t\tconst char *fdot, *ldot;\n\n\t\tif (!entry->value)\n\t\t\tcontinue;\n\n\t\tfdot = strchr(entry->name, '.');\n\t\tldot = strrchr(entry->name, '.');\n\n\t\tif (git_submodule_namemap_contains(names, entry->value)) {"
+    "ldot;\n\n\t\tfdot = strchr\\(entry->name, '\\.'\\);\n\t\tldot = strrchr\\(entry->name, '\\.'\\);\n\n\t\tif \\(git_submodule_namemap_contains")
+gitbolt_patch(src/libgit2/submodule.c
+    "\tif (!strcmp(entry->value, data->path)) {"
+    "\tif (entry->value && !strcmp(entry->value, data->path)) {"
+    "if \\(!strcmp\\(entry->value, data->path\\)\\)")
+# url.<base>.insteadOf / pushInsteadOf with no value: every remote lookup
+# (the Remote repositories list, Edit URL, Statistics) crashed.
+gitbolt_patch(src/libgit2/remote.c
+    "\t\tif (git__prefixcmp(url, entry->value))\n\t\t\tcontinue;"
+    "\t\tif (!entry->value || git__prefixcmp(url, entry->value))\n\t\t\tcontinue;"
+    "if \\(git__prefixcmp\\(url, entry->value\\)\\)")
+# branch.<name>.remote with no value: renaming or removing any remote
+# crashed.
+gitbolt_patch(src/libgit2/remote.c
+    "\tif (strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;"
+    "\tif (!entry->value || strcmp(entry->value, data->old_remote_name))\n\t\treturn 0;"
+    "if \\(strcmp\\(entry->value, data->old_remote_name\\)\\)")
+gitbolt_patch(src/libgit2/remote.c
+    "\t\tif (strcmp(remote_name, entry->value))\n\t\t\tcontinue;"
+    "\t\tif (!entry->value || strcmp(remote_name, entry->value))\n\t\t\tcontinue;"
+    "if \\(strcmp\\(remote_name, entry->value\\)\\)")
+# extensions.objectformat with no value: opening the repository, or any
+# folder in it, crashed. Now it fails as git does.
+gitbolt_patch(src/libgit2/repository.c
+    "\tif ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {"
+    "\tif (!entry->value) {\n\t\tgit_error_set(GIT_ERROR_REPOSITORY,\n\t\t\t\"missing value for 'extensions.objectformat'\");\n\t\terror = GIT_EINVALID;\n\t} else if ((repo->oid_type = git_oid_type_fromstr(entry->value)) == 0) {"
+    "\n\tif \\(\\(repo->oid_type = git_oid_type_fromstr\\(entry->value\\)\\) == 0\\)")
