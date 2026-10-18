@@ -7,9 +7,10 @@
 # first two changes only matter to MSVC, and are about libgit2 being a
 # static library here; the third fixes a crash when a config file that
 # changed can't be read again, on every platform, and the fourth the
-# stale config that followed it. The rest stop crashes on config lines
-# with no value. A version bump that moves the patched text fails here,
-# loudly.
+# stale config that followed it. Then come crashes on config lines with
+# no value, and last, limits on what a repository's content can make
+# libgit2 do: a pattern that never finishes matching, a tree nested too
+# deep. A version bump that moves the patched text fails here, loudly.
 
 # Replaces <from> with <to> in <file>, then fails if <leftover> (a regex)
 # still matches: the upstream text changed and this patch needs updating.
@@ -195,3 +196,87 @@ gitbolt_patch(src/libgit2/repository.c
     "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\t*entry->value) {"
     "\tif ((error = git_config_get_entry(&entry, config, \"init.defaultbranch\")) == 0 &&\n\t\tentry->value && *entry->value) {"
     "\"init\\.defaultbranch\"\\)\\) == 0 &&\n\t\t\\*entry->value\\)")
+
+# A .gitattributes or .gitignore pattern with many stars and a literal
+# that never comes (`*a*a*a*a*a*a*a*a*a*a*a*a*Q`) made wildmatch, which
+# matches it against each path, backtrack exponentially: against a name
+# of forty a's it never returned. The pattern is committed, so a clone
+# brings it, and selecting a commit whose diff has such a path (the diff
+# driver is an attribute) froze GitBolt for good at full CPU; with the
+# path checked out, so did status, on opening. git's own wildmatch hangs
+# on it too. A match now has a budget of steps: a pattern character
+# tried, a character of the path skipped, a character of a [class] read.
+# Spent, the pattern doesn't match (WM_ABORT_ALL, which every caller
+# takes as no match). It counts characters, not calls: a budget of a
+# million calls still let one match against a 65,000-character name take
+# 17 s. The budget is 1000 steps, then 64 per character of pattern and
+# path; ordinary patterns take one to three per character of the path,
+# and a hostile one now costs microseconds, milliseconds for that name.
+gitbolt_patch(src/util/wildmatch.c
+    "static int dowild(const uchar *p, const uchar *text, unsigned int flags)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n"
+    "static int dowild(const uchar *p, const uchar *text, unsigned int flags, long *budget)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\t/* GitBolt: a hostile pattern backtracks exponentially, so a\n\t\t * match has a budget of steps (see wildmatch()), spent here and\n\t\t * in every loop that skips over the path or the pattern. Spent,\n\t\t * the pattern doesn't match. */\n\t\tif (--*budget <= 0)\n\t\t\treturn WM_ABORT_ALL;\n"
+    "static int dowild\\(const uchar \\*p, const uchar \\*text, unsigned int flags\\)")
+gitbolt_patch(src/util/wildmatch.c
+    "dowild(p + 1, text, flags) == WM_MATCH)"
+    "dowild(p + 1, text, flags, budget) == WM_MATCH)"
+    "dowild\\(p \\+ 1, text, flags\\)")
+gitbolt_patch(src/util/wildmatch.c
+    "\t\t\t\tif (!match_slash) {\n\t\t\t\t\tif (strchr((char*)text, '/') != NULL)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n"
+    "\t\t\t\tif (!match_slash) {\n\t\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\t\tif (slash != NULL) {\n\t\t\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t\t}\n\t\t\t\t}\n"
+    "if \\(strchr\\(\\(char\\*\\)text, '/'\\) != NULL\\)")
+gitbolt_patch(src/util/wildmatch.c
+    "\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash)\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\ttext = (const uchar*)slash;\n"
+    "\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash) {\n\t\t\t\t\t*budget -= (long)strlen((char*)text);\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\ttext = (const uchar*)slash;\n"
+    "if \\(!slash\\)\n\t+return WM_NOMATCH;")
+gitbolt_patch(src/util/wildmatch.c
+    "\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags)) != WM_NOMATCH) {"
+    "\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tif (--*budget <= 0)\n\t\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags, budget)) != WM_NOMATCH) {"
+    "matched = dowild\\(p, text, flags\\)\\)")
+gitbolt_patch(src/util/wildmatch.c
+    "\t\t\tdo {\n\t\t\t\tif (!p_ch)\n\t\t\t\t\treturn WM_ABORT_ALL;\n"
+    "\t\t\tdo {\n\t\t\t\tif (!p_ch || --*budget <= 0)\n\t\t\t\t\treturn WM_ABORT_ALL;\n"
+    "do {\n\t+if \\(!p_ch\\)\n")
+gitbolt_patch(src/util/wildmatch.c
+    "p++) {} /*SHARED ITERATOR*/\n\t\t\t\t\tif (!p_ch)\n\t\t\t\t\t\treturn WM_ABORT_ALL;\n"
+    "p++) {} /*SHARED ITERATOR*/\n\t\t\t\t\tif (!p_ch || (*budget -= (long)(p - s)) <= 0)\n\t\t\t\t\t\treturn WM_ABORT_ALL;\n"
+    "/\\*SHARED ITERATOR\\*/\n\t+if \\(!p_ch\\)\n")
+gitbolt_patch(src/util/wildmatch.c
+    "int wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags);\n}"
+    "int wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\t/* GitBolt: an ordinary pattern takes one to three steps per\n\t * character of the path. A match gets 1000, and if they run out,\n\t * starts over with 64 per character of the pattern and the path. */\n\tlong budget = 1000;\n\tsize_t len;\n\tint error = dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n\n\tif (error != WM_ABORT_ALL || budget > 0)\n\t\treturn error;\n\tlen = strlen(pattern) + strlen(text);\n\tbudget = 1000 + 64 * (long)(len < 1000000 ? len : 1000000);\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n}"
+    "return dowild\\(\\(const uchar\\*\\)pattern, \\(const uchar\\*\\)text, flags\\);")
+
+# A tree nested thousands of levels deep, one directory in each (a few
+# kilobytes of objects, which git fsck accepts and a clone delivers).
+# libgit2's tree iterator keeps the path of every directory it is in, so
+# what it held grew as the square of the depth: status, which every open
+# runs, took 0.5 GB at a depth of 20,000, 10 GB at 100,000, and was
+# killed for want of memory at 500,000; a commit's diff the same, on the
+# GUI thread. git_tree_walk (the File Tree) recursed once per level
+# until the stack ran out. Both now stop with "tree too deep" past 2048
+# levels, git's own default (core.maxTreeDepth), or at a directory whose
+# path is longer than GIT_PATH_MAX (4096 bytes, the longest path libgit2
+# itself handles on disk), as long names would otherwise make even that
+# depth dear. A tree_walk level takes 128 bytes of stack (112 at -O0),
+# so 2048 of them, git_index_read_tree's included, take about 260 KB of
+# a macOS worker thread's 512 KB. The work tree's iterator already stops
+# at 100 levels.
+gitbolt_patch(src/libgit2/tree.h
+    "GIT_INLINE(bool) git_tree_entry__is_tree(const struct git_tree_entry *e)\n{\n\treturn (S_ISDIR(e->attr) && !S_ISGITLINK(e->attr));\n}\n\nvoid git_tree__free(void *tree);"
+    "GIT_INLINE(bool) git_tree_entry__is_tree(const struct git_tree_entry *e)\n{\n\treturn (S_ISDIR(e->attr) && !S_ISGITLINK(e->attr));\n}\n\n/*\n * GitBolt: how deep the tree iterator and git_tree_walk() go. A tree\n * nested thousands of levels deep costs a few kilobytes of objects; the\n * iterator, which keeps the path of every directory it is in, then held\n * the square of the depth (gigabytes), and git_tree_walk() recursed\n * until the stack ran out. git stops at 2048 levels too (its\n * core.maxTreeDepth). A directory's path is held to GIT_PATH_MAX, or\n * long names would make even that depth dear.\n */\n#define GIT_TREE_MAX_DEPTH 2048\n\n/*\n * Whether a walk among the entries of a tree `depth` levels down (1 for\n * the root tree's) may go into one of them, a tree whose path (with its\n * trailing slash) is `path_len` bytes long.\n */\nGIT_INLINE(int) git_tree__descend_ok(size_t depth, size_t path_len)\n{\n\tif (depth >= GIT_TREE_MAX_DEPTH) {\n\t\tgit_error_set(GIT_ERROR_TREE,\n\t\t\t\"tree too deep: more than %d levels\", GIT_TREE_MAX_DEPTH);\n\t\treturn GIT_EINVALID;\n\t}\n\tif (path_len > GIT_PATH_MAX) {\n\t\tgit_error_set(GIT_ERROR_TREE,\n\t\t\t\"tree too deep: a path of more than %d bytes\", GIT_PATH_MAX);\n\t\treturn GIT_EINVALID;\n\t}\n\treturn 0;\n}\n\nvoid git_tree__free(void *tree);"
+    "S_ISGITLINK\\(e->attr\\)\\);\n}\n\nvoid git_tree__free")
+gitbolt_patch(src/libgit2/iterator.c
+    "\tgit_tree *tree = NULL;\n\tint error;\n\n\tif ((error = git_tree_lookup(&tree,\n\t\t\titer->base.repo, &entry->tree_entry->oid)) < 0 ||\n\t\t(error = tree_iterator_frame_init(iter, tree, entry)) < 0)"
+    "\tgit_tree *tree = NULL;\n\tint error;\n\n\t/* GitBolt: no deeper than GIT_TREE_MAX_DEPTH (see tree.h). */\n\tif ((error = git_tree__descend_ok(iter->frames.size,\n\t\t\t(entry->parent_path ? strlen(entry->parent_path) : 0) +\n\t\t\tentry->tree_entry->filename_len + 1)) < 0)\n\t\treturn error;\n\n\tif ((error = git_tree_lookup(&tree,\n\t\t\titer->base.repo, &entry->tree_entry->oid)) < 0 ||\n\t\t(error = tree_iterator_frame_init(iter, tree, entry)) < 0)"
+    "int error;\n\n\tif \\(\\(error = git_tree_lookup\\(&tree,[ \t\n]*iter->base\\.repo, &entry->tree_entry->oid\\)\\) < 0 \\|\\|")
+gitbolt_patch(src/libgit2/tree.c
+    "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n"
+    "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder,\n\tsize_t depth)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n"
+    "void \\*payload,\n\tbool preorder\\)\n{\n\tint error = 0;")
+gitbolt_patch(src/libgit2/tree.c
+    "\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder);\n"
+    "\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\t/* GitBolt: no deeper than GIT_TREE_MAX_DEPTH (see tree.h). */\n\t\t\terror = git_tree__descend_ok(depth,\n\t\t\t\tpath_len + entry->filename_len + 1);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder, depth + 1);\n"
+    "error = tree_walk\\(subtree, callback, path, payload, preorder\\);")
+gitbolt_patch(src/libgit2/tree.c
+    "\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE));"
+    "\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE), 1);"
+    "&root_path, payload, \\(mode == GIT_TREEWALK_PRE\\)\\);")

@@ -1,3 +1,4 @@
+#include <QElapsedTimer>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QScopeGuard>
@@ -95,6 +96,65 @@ void appendConfig(const QString& repoPath, const QByteArray& text) {
     QVERIFY(config.open(QIODevice::Append));
     config.write(text);
 }
+
+#if defined(GITBOLT_LIBGIT2_LIMITS_PATCHED)
+// Commits a tree that is `depth` nested single-entry directories named
+// "d", with a blob "leaf.txt" at the bottom, and points HEAD at it. The
+// objects are a few kilobytes whatever the depth. Returns the commit's
+// id, or a zero id (and a test failure) if libgit2 refused a step.
+gitbolt::git::ObjectId commitDeepTree(gitbolt::git::Repository& repo, int depth) {
+    git_repository* raw = repo.raw();
+    git_oid blob;
+    if (git_blob_create_from_buffer(&blob, raw, "leaf\n", 5) < 0) {
+        QTest::qVerify(false, "git_blob_create_from_buffer", "", __FILE__, __LINE__);
+        return {};
+    }
+    git_oid cur;
+    {
+        git_treebuilder* tb = nullptr;
+        if (git_treebuilder_new(&tb, raw, nullptr) < 0
+            || git_treebuilder_insert(nullptr, tb, "leaf.txt", &blob, GIT_FILEMODE_BLOB) < 0
+            || git_treebuilder_write(&cur, tb) < 0) {
+            QTest::qVerify(false, "innermost tree", "", __FILE__, __LINE__);
+            git_treebuilder_free(tb);
+            return {};
+        }
+        git_treebuilder_free(tb);
+    }
+    for (int i = 0; i < depth; ++i) {
+        git_treebuilder* tb = nullptr;
+        if (git_treebuilder_new(&tb, raw, nullptr) < 0
+            || git_treebuilder_insert(nullptr, tb, "d", &cur, GIT_FILEMODE_TREE) < 0
+            || git_treebuilder_write(&cur, tb) < 0) {
+            QTest::qVerify(false, "wrapping tree", "", __FILE__, __LINE__);
+            git_treebuilder_free(tb);
+            return {};
+        }
+        git_treebuilder_free(tb);
+    }
+    git_tree* tree = nullptr;
+    if (git_tree_lookup(&tree, raw, &cur) < 0) {
+        QTest::qVerify(false, "git_tree_lookup", "", __FILE__, __LINE__);
+        return {};
+    }
+    git_signature* sig = nullptr;
+    if (git_signature_new(&sig, "T", "t@gitbolt.local", 1700000000, 0) < 0) {
+        QTest::qVerify(false, "git_signature_new", "", __FILE__, __LINE__);
+        git_tree_free(tree);
+        return {};
+    }
+    git_oid commitOid;
+    int err = git_commit_create(&commitOid, raw, "HEAD", sig, sig, nullptr,
+                                "deep", tree, 0, nullptr);
+    git_signature_free(sig);
+    git_tree_free(tree);
+    if (err < 0) {
+        QTest::qVerify(false, "git_commit_create", "", __FILE__, __LINE__);
+        return {};
+    }
+    return gitbolt::git::ObjectId(&commitOid);
+}
+#endif
 
 } // namespace
 
@@ -2455,6 +2515,141 @@ private slots:
         QVERIFY2(spreadMessage.contains(QLatin1String(
                      "in your global git config and a file that the repository's config includes")),
                  qPrintable(spreadMessage));
+    }
+
+    // -----------------------------------------------------------------
+    // Hostile repository content the bundled libgit2 is patched against
+    // (cmake/PatchLibgit2.cmake): a .gitattributes pattern that never
+    // finishes matching, and a tree nested so deep it exhausts memory or
+    // the stack. A system libgit2 lacks the patches, so these skip
+    // there.
+    // -----------------------------------------------------------------
+
+    // A committed .gitattributes pattern of a dozen stars and a literal
+    // that never comes (`*a...*a*Q`) made libgit2's wildmatch backtrack
+    // exponentially against a long path. Selecting such a commit froze
+    // GitBolt for good at full CPU, computing its diff on the GUI
+    // thread. The parent has a file of forty a's; HEAD installs the
+    // pattern and deletes the file, so diffCommit looks the "diff"
+    // attribute up for that path. It must return promptly now.
+    void hostileGitattributesDiffsPromptly() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        const QString longName = QString(40, QLatin1Char('a')) + QStringLiteral(".txt");
+        repo.writeFile(".gitattributes", "# benign\n");
+        repo.writeFile(longName, "hello\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "A"})));
+
+        QByteArray pattern;
+        for (int i = 0; i < 12; ++i)
+            pattern += "*a";
+        pattern += "*Q diff=x text\n";
+        repo.writeFile(".gitattributes", pattern);
+        repo.deleteFile(longName);
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "B"})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto head = opened->head();
+        QVERIFY(head.ok());
+
+        QElapsedTimer timer;
+        timer.start();
+        const auto diff = opened->diffCommit(*head);
+        const qint64 elapsed = timer.elapsed();
+        QVERIFY2(diff.ok(), diff.ok() ? "" : diff.error().message().c_str());
+        // The budget caps a hostile match at milliseconds per path;
+        // without it this never returns. Generous, for a loaded CI box.
+        QVERIFY2(elapsed < 5000, qPrintable(QStringLiteral("diffCommit took %1 ms").arg(elapsed)));
+#endif
+    }
+
+    // The budget leaves ordinary patterns matching as before, through
+    // the same attribute lookup the diff driver uses: a committed
+    // `*.lisp diff=lisp` still gives a .lisp file that driver, a file it
+    // doesn't name has none, and a `binary` glob still sets -diff. A
+    // hostile pattern earlier in the file does not disturb the others.
+    void ordinaryGitattributesStillApply() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QByteArray attrs;
+        for (int i = 0; i < 12; ++i)
+            attrs += "*a";
+        attrs += "*Q diff=x\n";          // the hostile pattern, up top
+        attrs += "*.lisp diff=lisp\n";
+        attrs += "*.bin binary\n";
+        QVERIFY(repo.writeAndCommit(".gitattributes", attrs, "attrs").ok());
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+
+        const char* value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "src/main.lisp", "diff"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_STRING);
+        QCOMPARE(QString::fromUtf8(value), QStringLiteral("lisp"));
+
+        value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "src/main.c", "diff"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_UNSPECIFIED);
+
+        // `binary` expands to -diff: the diff attribute reads as false.
+        value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "blob.bin", "diff"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_FALSE);
+#endif
+    }
+
+    // A tree nested a few hundred levels past the depth limit: status,
+    // diffCommit and the File Tree's walk grew without bound (memory as
+    // the square of the depth; the walk's recursion ran the stack out).
+    // They stop with a "tree too deep" error now, while a tree a little
+    // under the limit still works.
+    void deepTreeIsBounded() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        // Just under the limit (2048): everything works.
+        {
+            gitbolt::test::TestRepo repo;
+            const auto id = commitDeepTree(repo.repo(), 2000);
+            if (QTest::currentTestFailed())
+                return;
+            auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+            QVERIFY(opened.ok());
+            QVERIFY(opened->status().ok());
+            QVERIFY(opened->diffCommit(id).ok());
+            const auto walk = opened->walkTreeAtCommit(id);
+            QVERIFY(walk.ok());
+            QVERIFY(walk->size() >= 2000u);
+        }
+        // A few hundred levels past it: each call returns the error.
+        {
+            gitbolt::test::TestRepo repo;
+            const auto id = commitDeepTree(repo.repo(), 2350);
+            if (QTest::currentTestFailed())
+                return;
+            auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+            QVERIFY(opened.ok());
+            auto tooDeep = [](const auto& result) {
+                return !result.ok()
+                    && QString::fromStdString(result.error().message())
+                           .contains(QLatin1String("tree too deep"));
+            };
+            QVERIFY2(tooDeep(opened->status()), "status() did not stop at the depth limit");
+            QVERIFY2(tooDeep(opened->diffCommit(id)), "diffCommit did not stop at the depth limit");
+            QVERIFY2(tooDeep(opened->walkTreeAtCommit(id)),
+                     "walkTreeAtCommit did not stop at the depth limit");
+        }
+#endif
     }
 };
 

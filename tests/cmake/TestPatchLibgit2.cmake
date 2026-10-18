@@ -63,13 +63,30 @@ set(_merge_new_from
     "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
 set(_merge_new_to
     "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0 && !entry->value) {\n\t\t\tgit_error_set(GIT_ERROR_MERGE,\n\t\t\t\t\"missing value for 'merge.default'\");\n\t\t\terror = GIT_EINVALID;\n\t\t\tif (!given || !given->metric) {\n\t\t\t\tgit__free(opts->metric);\n\t\t\t\topts->metric = NULL;\n\t\t\t}\n\t\t\tgoto done;\n\t\t} else if (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
+# The limits on hostile content: wildmatch's budget, the tree depth.
+set(_wildmatch_new_from
+    "static int dowild(const uchar *p, const uchar *text, unsigned int flags)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\tif ((t_ch = *text) == '\\0' && p_ch != '*')\n\t\t\t\t\t    dowild(p + 1, text, flags) == WM_MATCH)\n\t\t\t\tif (!match_slash) {\n\t\t\t\t\tif (strchr((char*)text, '/') != NULL)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\treturn WM_MATCH;\n\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash)\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\ttext = (const uchar*)slash;\n\t\t\t\t/* the slash is consumed by the top-level for loop */\n\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags)) != WM_NOMATCH) {\n\t\t\tdo {\n\t\t\t\tif (!p_ch)\n\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\tif (p_ch == '\\\\') {\n\t\t\t\t\tfor (s = p += 2; (p_ch = *p) && p_ch != ']'; p++) {} /*SHARED ITERATOR*/\n\t\t\t\t\tif (!p_ch)\n\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\ti = (int)(p - s - 1);\nint wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags);\n}\n")
+set(_wildmatch_new_to
+    "static int dowild(const uchar *p, const uchar *text, unsigned int flags, long *budget)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\t/* GitBolt: a hostile pattern backtracks exponentially, so a\n\t\t * match has a budget of steps (see wildmatch()), spent here and\n\t\t * in every loop that skips over the path or the pattern. Spent,\n\t\t * the pattern doesn't match. */\n\t\tif (--*budget <= 0)\n\t\t\treturn WM_ABORT_ALL;\n\t\tif ((t_ch = *text) == '\\0' && p_ch != '*')\n\t\t\t\t\t    dowild(p + 1, text, flags, budget) == WM_MATCH)\n\t\t\t\tif (!match_slash) {\n\t\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\t\tif (slash != NULL) {\n\t\t\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\treturn WM_MATCH;\n\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash) {\n\t\t\t\t\t*budget -= (long)strlen((char*)text);\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\t*budget -= (long)(slash - (const char*)text);\n\t\t\t\ttext = (const uchar*)slash;\n\t\t\t\t/* the slash is consumed by the top-level for loop */\n\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\tif (--*budget <= 0)\n\t\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags, budget)) != WM_NOMATCH) {\n\t\t\tdo {\n\t\t\t\tif (!p_ch || --*budget <= 0)\n\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\tif (p_ch == '\\\\') {\n\t\t\t\t\tfor (s = p += 2; (p_ch = *p) && p_ch != ']'; p++) {} /*SHARED ITERATOR*/\n\t\t\t\t\tif (!p_ch || (*budget -= (long)(p - s)) <= 0)\n\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\ti = (int)(p - s - 1);\nint wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\t/* GitBolt: an ordinary pattern takes one to three steps per\n\t * character of the path. A match gets 1000, and if they run out,\n\t * starts over with 64 per character of the pattern and the path. */\n\tlong budget = 1000;\n\tsize_t len;\n\tint error = dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n\n\tif (error != WM_ABORT_ALL || budget > 0)\n\t\treturn error;\n\tlen = strlen(pattern) + strlen(text);\n\tbudget = 1000 + 64 * (long)(len < 1000000 ? len : 1000000);\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags, &budget);\n}\n")
+set(_tree_h_new_from
+    "GIT_INLINE(bool) git_tree_entry__is_tree(const struct git_tree_entry *e)\n{\n\treturn (S_ISDIR(e->attr) && !S_ISGITLINK(e->attr));\n}\n\nvoid git_tree__free(void *tree);\n")
+set(_tree_h_new_to
+    "GIT_INLINE(bool) git_tree_entry__is_tree(const struct git_tree_entry *e)\n{\n\treturn (S_ISDIR(e->attr) && !S_ISGITLINK(e->attr));\n}\n\n/*\n * GitBolt: how deep the tree iterator and git_tree_walk() go. A tree\n * nested thousands of levels deep costs a few kilobytes of objects; the\n * iterator, which keeps the path of every directory it is in, then held\n * the square of the depth (gigabytes), and git_tree_walk() recursed\n * until the stack ran out. git stops at 2048 levels too (its\n * core.maxTreeDepth). A directory's path is held to GIT_PATH_MAX, or\n * long names would make even that depth dear.\n */\n#define GIT_TREE_MAX_DEPTH 2048\n\n/*\n * Whether a walk among the entries of a tree `depth` levels down (1 for\n * the root tree's) may go into one of them, a tree whose path (with its\n * trailing slash) is `path_len` bytes long.\n */\nGIT_INLINE(int) git_tree__descend_ok(size_t depth, size_t path_len)\n{\n\tif (depth >= GIT_TREE_MAX_DEPTH) {\n\t\tgit_error_set(GIT_ERROR_TREE,\n\t\t\t\"tree too deep: more than %d levels\", GIT_TREE_MAX_DEPTH);\n\t\treturn GIT_EINVALID;\n\t}\n\tif (path_len > GIT_PATH_MAX) {\n\t\tgit_error_set(GIT_ERROR_TREE,\n\t\t\t\"tree too deep: a path of more than %d bytes\", GIT_PATH_MAX);\n\t\treturn GIT_EINVALID;\n\t}\n\treturn 0;\n}\n\nvoid git_tree__free(void *tree);\n")
+set(_iterator_new_from
+    "\tgit_tree *tree = NULL;\n\tint error;\n\n\tif ((error = git_tree_lookup(&tree,\n\t\t\titer->base.repo, &entry->tree_entry->oid)) < 0 ||\n\t\t(error = tree_iterator_frame_init(iter, tree, entry)) < 0)\n")
+set(_iterator_new_to
+    "\tgit_tree *tree = NULL;\n\tint error;\n\n\t/* GitBolt: no deeper than GIT_TREE_MAX_DEPTH (see tree.h). */\n\tif ((error = git_tree__descend_ok(iter->frames.size,\n\t\t\t(entry->parent_path ? strlen(entry->parent_path) : 0) +\n\t\t\tentry->tree_entry->filename_len + 1)) < 0)\n\t\treturn error;\n\n\tif ((error = git_tree_lookup(&tree,\n\t\t\titer->base.repo, &entry->tree_entry->oid)) < 0 ||\n\t\t(error = tree_iterator_frame_init(iter, tree, entry)) < 0)\n")
+set(_tree_c_new_from
+    "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n\n\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder);\n\n\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE));\n")
+set(_tree_c_new_to
+    "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder,\n\tsize_t depth)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n\n\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\t/* GitBolt: no deeper than GIT_TREE_MAX_DEPTH (see tree.h). */\n\t\t\terror = git_tree__descend_ok(depth,\n\t\t\t\tpath_len + entry->filename_len + 1);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder, depth + 1);\n\n\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE), 1);\n")
 foreach(_file config config_file repository)
     set(_${_file}_from "${_${_file}_old_from}${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_old_to}${_${_file}_new_to}")
     # As the 0.9.7 script left it.
     set(_${_file}_097 "${_${_file}_old_to}${_${_file}_new_from}")
 endforeach()
-foreach(_file checkout merge)
+foreach(_file checkout merge wildmatch tree_h iterator tree_c)
     set(_${_file}_from "${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_new_to}")
     set(_${_file}_097 "${_${_file}_new_from}")
@@ -78,7 +95,7 @@ foreach(_file cflags common submodule remote)
     set(_${_file}_097 "${_${_file}_to}")
 endforeach()
 
-# A tree with the nine files: <suffix> picks each one's text (_from,
+# A tree with the thirteen files: <suffix> picks each one's text (_from,
 # _to or _097), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
@@ -91,6 +108,10 @@ function(write_tree dir suffix config_file)
     file(WRITE ${dir}/src/libgit2/repository.c "${_repository${suffix}}")
     file(WRITE ${dir}/src/libgit2/checkout.c "${_checkout${suffix}}")
     file(WRITE ${dir}/src/libgit2/merge.c "${_merge${suffix}}")
+    file(WRITE ${dir}/src/util/wildmatch.c "${_wildmatch${suffix}}")
+    file(WRITE ${dir}/src/libgit2/tree.h "${_tree_h${suffix}}")
+    file(WRITE ${dir}/src/libgit2/iterator.c "${_iterator${suffix}}")
+    file(WRITE ${dir}/src/libgit2/tree.c "${_tree_c${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -106,7 +127,9 @@ function(expect_patched what dir)
                   "src/libgit2/config.c;_config_to" "src/libgit2/config_file.c;_config_file_to"
                   "src/libgit2/submodule.c;_submodule_to" "src/libgit2/remote.c;_remote_to"
                   "src/libgit2/repository.c;_repository_to" "src/libgit2/checkout.c;_checkout_to"
-                  "src/libgit2/merge.c;_merge_to")
+                  "src/libgit2/merge.c;_merge_to" "src/util/wildmatch.c;_wildmatch_to"
+                  "src/libgit2/tree.h;_tree_h_to" "src/libgit2/iterator.c;_iterator_to"
+                  "src/libgit2/tree.c;_tree_c_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)
