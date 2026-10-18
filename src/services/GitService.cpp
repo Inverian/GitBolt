@@ -1778,13 +1778,13 @@ void GitService::addWorktree(const QString& name, const QString& path,
     else     refreshWorktrees();
 }
 
-void GitService::removeWorktree(const QString& name) {
+void GitService::removeWorktree(const QString& name, const QString& folder) {
     if (!repo_) return;
     bool ok = false;
     QString err;
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        auto result = repo_->removeWorktree(name.toStdString());
+        auto result = repo_->removeWorktree(name.toStdString(), folder.toStdString());
         ok = result.ok();
         if (!ok) err = QString::fromStdString(result.error().message());
     }

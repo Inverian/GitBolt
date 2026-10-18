@@ -43,8 +43,9 @@
 //     outlives its repository opened again by a path in another case;
 //   - Manage Submodules' and Manage Worktrees' Open opens the submodule
 //     or worktree in the window, and Open in File Explorer shows its
-//     folder (a submodule's path is relative to the work tree); the
-//     Console gets a bare repository's GIT_DIR.
+//     folder (a submodule's path is relative to the work tree); Manage
+//     Worktrees' Remove names the folder it deletes; the Console gets
+//     a bare repository's GIT_DIR.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -75,6 +76,7 @@
 #include <QSignalSpy>
 #include <QStatusBar>
 #include <QStandardPaths>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
@@ -573,6 +575,51 @@ private slots:
         QVERIFY(!dialog || !dialog->isVisible());
     }
 
+    // Manage Worktrees' Remove asks with the folder it deletes, the
+    // worktree's path as the table shows it, from a row's menu and from
+    // the toolbar. It named the worktree alone, and the folder deleted
+    // was whatever folder its files in .git named.
+    void worktreeRemoveNamesItsFolder() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        const QString linked = repo.path() + QStringLiteral("-linked");
+        const auto cleanup = qScopeGuard([&] { QDir(linked).removeRecursively(); });
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "side", linked.toStdString()})));
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        action(window, "repository.manage-worktrees")->trigger();
+        gitbolt::widgets::WorktreeWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::WorktreeWidget*>()) != nullptr);
+        auto* rows = widget->findChild<QTableView*>();
+        QVERIFY(rows);
+        QTRY_VERIFY_WITH_TIMEOUT(rows->model()->rowCount() == 1, 10000);
+        const QModelIndex row = rows->model()->index(0, 0);
+        const QString shown =
+            row.data(gitbolt::widgets::WorktreeTableModel::WorktreePathRole).toString();
+        QCOMPARE(QFileInfo(shown).canonicalFilePath(), QFileInfo(linked).canonicalFilePath());
+        const QString named = QDir::toNativeSeparators(shown);
+
+        {
+            BoxAnswerer answer(QMessageBox::No);
+            QVERIFY(pickFromContextMenu(rows, row, QStringLiteral("Remove")));
+            QVERIFY2(answer.text.contains(named), qPrintable(answer.text));
+        }
+        QVERIFY(QFileInfo::exists(linked + QStringLiteral("/a.txt")));
+
+        rows->selectionModel()->select(row, QItemSelectionModel::ClearAndSelect
+                                                | QItemSelectionModel::Rows);
+        auto* remove = widget->findChild<QAction*>(QStringLiteral("worktree.remove"));
+        QVERIFY(remove);
+        {
+            BoxAnswerer answer(QMessageBox::Yes);
+            remove->trigger();
+            QVERIFY2(answer.text.contains(named), qPrintable(answer.text));
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(linked), 10000);
+    }
+
     // The Console's shell gets a bare repository's GIT_DIR, as Git bash
     // does, and loses it with the next repository: it was only told to
     // `cd`, and git there failed where safe.bareRepository is
@@ -960,7 +1007,8 @@ private slots:
             action(window, "repository.manage-worktrees")->trigger();
             auto* worktrees = window.findChild<gitbolt::widgets::WorktreeWidget*>();
             QVERIFY(worktrees);
-            emit worktrees->removeRequested(QStringLiteral("review"));
+            emit worktrees->removeRequested(QStringLiteral("review"),
+                                            a + QStringLiteral("-wt/review"));
         } else if (flow == QLatin1String("bar.skip")) {
             QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && !bar->isBusy(), 10000);
             emit bar->skipRequested();

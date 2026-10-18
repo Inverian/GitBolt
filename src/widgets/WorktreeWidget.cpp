@@ -189,7 +189,7 @@ bool WorktreeWidget::selectedWorktreeLocked() const {
 void WorktreeWidget::onRemoveClicked() {
     const QString name = selectedWorktreeName();
     if (!name.isEmpty())
-        emit removeRequested(name);
+        emit removeRequested(name, selectedWorktreePath());
 }
 
 void WorktreeWidget::onLockUnlockClicked() {
@@ -229,8 +229,8 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
 
     menu.addSeparator();
 
-    menu.addAction(tr("Remove"), this, [this, name]() {
-        emit removeRequested(name);
+    menu.addAction(tr("Remove"), this, [this, name, path]() {
+        emit removeRequested(name, path);
     });
 
     if (locked) {
