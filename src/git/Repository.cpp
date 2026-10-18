@@ -1365,9 +1365,10 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
     // has only one side) and yields empty content so the three-way
     // panes can render "nothing on this side".
     auto readSide = [this](const git_index_entry* e,
-                           std::string& content, ObjectId& id) {
+                           std::string& content, ObjectId& id, uint32_t& mode) {
         if (!e) return;
         id = ObjectId(&e->id);
+        mode = e->mode;
         git_blob* blob = nullptr;
         if (git_blob_lookup(&blob, repo_, &e->id) == 0) {
             const auto* data =
@@ -1394,9 +1395,9 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
         if (ours && ours->path)            entry.path = ours->path;
         else if (theirs && theirs->path)   entry.path = theirs->path;
         else if (ancestor && ancestor->path) entry.path = ancestor->path;
-        readSide(ancestor, entry.ancestorContent, entry.ancestorId);
-        readSide(ours, entry.oursContent, entry.oursId);
-        readSide(theirs, entry.theirsContent, entry.theirsId);
+        readSide(ancestor, entry.ancestorContent, entry.ancestorId, entry.ancestorMode);
+        readSide(ours, entry.oursContent, entry.oursId, entry.oursMode);
+        readSide(theirs, entry.theirsContent, entry.theirsId, entry.theirsMode);
         result.push_back(std::move(entry));
     }
     git_index_conflict_iterator_free(it);
@@ -1426,6 +1427,172 @@ Result<int> Repository::conflictCount() const {
     git_index_conflict_iterator_free(it);
     git_index_free(index);
     return count;
+}
+
+namespace {
+// A symbolic link, or on Windows a junction (a folder's link), and not
+// what it points to.
+bool isLink(const QFileInfo& info) {
+    return info.isSymbolicLink() || info.isJunction();
+}
+
+// Why the work tree's `path` (repository-relative, '/'-separated) is
+// no place to write a file, or "" when it is one. A checkout goes into
+// the directories on the way as it finds them, and through a link
+// among them it wrote wherever that pointed: outside the work tree as
+// likely as not. git never leaves a tracked path below a link, but the
+// work tree is anybody's to change. A "." or ".." step is no path git
+// tracks either, nor on Windows a drive or a backslash.
+std::string workTreePathProblem(const QString& workdir, const std::string& path) {
+    const QStringList steps = QString::fromStdString(path).split(QLatin1Char('/'));
+    for (const QString& step : steps) {
+        bool valid = !step.isEmpty() && step != QLatin1String(".") && step != QLatin1String("..");
+#ifdef Q_OS_WIN
+        valid = valid && !step.contains(QLatin1Char('\\')) && !step.contains(QLatin1Char(':'));
+#endif
+        if (!valid)
+            return "'" + path + "' is not a path in the work tree.";
+    }
+    QString dir = workdir;
+    for (qsizetype i = 0; i + 1 < steps.size(); ++i) {
+        dir = QDir(dir).filePath(steps[i]);
+        const QFileInfo info(dir);
+        if (isLink(info))
+            return path + " is below " + QDir(workdir).relativeFilePath(dir).toStdString()
+                   + ", a symbolic link: the resolution would be written wherever it points.";
+        if (!info.exists())
+            break;   // the checkout makes it, and what's below it
+    }
+    return {};
+}
+} // namespace
+
+Result<void> Repository::resolveConflict(const std::string& path, const std::string& content) {
+    const QString workdir = QString::fromStdString(this->workdir());
+    if (workdir.isEmpty())
+        return GitError(GitErrorCode::BareRepo, "A bare repository has no work tree to resolve in.");
+
+    git_index* index = nullptr;
+    int err = freshIndex(&index, repo_);
+    if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeIndex = qScopeGuard([index] { git_index_free(index); });
+
+    const git_index_entry* ancestor = nullptr;
+    const git_index_entry* ours = nullptr;
+    const git_index_entry* theirs = nullptr;
+    err = git_index_conflict_get(&ancestor, &ours, &theirs, index, path.c_str());
+    if (err == GIT_ENOTFOUND) {
+        // Staged since the resolver listed it (from the file list, say):
+        // the resolver's content replaces what was staged, as `git add`
+        // of the file edited once more would.
+        ancestor = theirs = nullptr;
+        ours = git_index_get_bypath(index, path.c_str(), 0);
+        if (!ours)
+            return GitError(GitErrorCode::NotFound, path + " is no longer in the index.");
+    } else if (err < 0) {
+        return GitError::fromLibgit2(err);
+    }
+
+    for (const git_index_entry* side : {ancestor, ours, theirs}) {
+        if (side && side->mode == GIT_FILEMODE_COMMIT)
+            return GitError(GitErrorCode::GenericError,
+                            path + " is a submodule: check out the commit it should be at "
+                                   "in it, then stage it.");
+    }
+
+    // The content goes in with ours' mode: an executable stays one. Ours
+    // is gone in a delete/modify conflict, and theirs' is the one left.
+    std::string staged = content;
+    const git_index_entry* modeSide = ours ? ours : theirs ? theirs : ancestor;
+    uint32_t mode = modeSide ? modeSide->mode : GIT_FILEMODE_BLOB;
+    const auto isLinkEntry = [](const git_index_entry* e) {
+        return e && e->mode == GIT_FILEMODE_LINK;
+    };
+    if (isLinkEntry(ours) || isLinkEntry(theirs)) {
+        // A link's content is the path it points to. The resolver shows
+        // it as text, but the only resolutions are the sides themselves,
+        // staged as they are: a link, or the file the other side has
+        // instead. Written to the work tree as text, a resolution went
+        // into whatever the link pointed to, in the work tree or not,
+        // and staging the path then kept the link. The resolver's
+        // content is compared as the resolver got the sides, as UTF-8.
+        bool picked = false;
+        for (const git_index_entry* side : {ours, theirs}) {
+            if (!side)
+                continue;
+            auto bytes = readBlob(ObjectId(&side->id));
+            if (!bytes)
+                return bytes.error();
+            const QByteArray raw(bytes->data(), static_cast<qsizetype>(bytes->size()));
+            if (QString::fromUtf8(raw).toUtf8() == QByteArray::fromStdString(content)) {
+                staged.assign(bytes->begin(), bytes->end());
+                mode = side->mode;
+                picked = true;
+                break;
+            }
+        }
+        if (!picked)
+            return GitError(GitErrorCode::GenericError,
+                            path + " is a symbolic link: accept Ours or Theirs for it, "
+                                   "as they are.");
+    }
+
+    const std::string problem = workTreePathProblem(workdir, path);
+    if (!problem.empty())
+        return GitError(GitErrorCode::GenericError, problem);
+    const QString file = QDir(workdir).filePath(QString::fromStdString(path));
+    const QFileInfo existing(file);
+    const bool link = isLink(existing);
+    if (!link && existing.isDir())
+        return GitError(GitErrorCode::Directory, path + " is a directory in the work tree.");
+
+    // The work tree's file is written from the index, by a checkout of
+    // that one path, and never opened for writing here: opening a link
+    // follows it. libgit2 writes a link as a link (or as a file holding
+    // its target with core.symlinks off), with the smudge filters and
+    // the mode. A link there now goes first, the link and not what it
+    // points to: libgit2 replaces one only where the path becomes a
+    // link again, or on a case-insensitive file system, and elsewhere
+    // wrote a file's content through it.
+    if (link && !QFile::remove(file) && !QDir(workdir).rmdir(QString::fromStdString(path)))
+        return GitError(GitErrorCode::GenericError,
+                        "Could not remove the symbolic link " + path + " to replace it.");
+
+    git_index_entry entry{};
+    entry.path = path.c_str();
+    // A file's mode as git canonicalizes it: 100644 or 100755, the only
+    // ones libgit2 stages from a buffer.
+    entry.mode = mode == GIT_FILEMODE_LINK ? mode
+               : (mode & 0111) != 0     ? GIT_FILEMODE_BLOB_EXECUTABLE
+                                        : GIT_FILEMODE_BLOB;
+    // Stages it and moves the conflict's entries to resolve-undo, as
+    // `git add` does.
+    err = git_index_add_from_buffer(index, &entry, staged.data(), staged.size());
+    if (err >= 0) {
+        git_checkout_options opts;
+        git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH
+                                 | GIT_CHECKOUT_DONT_WRITE_INDEX;
+        // Against the index itself, as `git checkout-index -f` does: the
+        // file is written wherever it differs from the index, or is
+        // missing. Against HEAD, a path that had been a link there and
+        // is a file now was left out once the link was gone.
+        opts.baseline_index = index;
+        const char* paths[] = {path.c_str()};
+        opts.paths.strings = const_cast<char**>(paths);
+        opts.paths.count = 1;
+        err = git_checkout_index(repo_, index, &opts);
+    }
+    if (err >= 0)
+        err = git_index_write(index);
+    if (err < 0) {
+        // The conflict stays: libgit2's copy of the index goes back to
+        // the file's (see Index.cpp).
+        const GitError error = GitError::fromLibgit2(err);
+        git_index_read(index, /*force=*/1);
+        return error;
+    }
+    return Result<void>::success();
 }
 
 Result<std::vector<RemoteInfo>> Repository::remotes() const {

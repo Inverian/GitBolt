@@ -273,6 +273,25 @@ void MergeConflictWidget::showConflict(int index) {
     baseEditor_->setPlainText(QString::fromStdString(conflict.ancestorContent));
     theirsEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
 
+    // A side that is a symbolic link shows the path it points to, and
+    // says so: nothing else tells it from a one-line file. Such a
+    // conflict is resolved by accepting a side as it is, never by
+    // editing it (Repository::resolveConflict refuses any other text),
+    // so its result is read-only and there's no Accept Both.
+    constexpr uint32_t link = git::MergeConflictEntry::kSymlinkMode;
+    oursLabel_->setText(conflict.oursMode == link ? tr("Ours (Local), a symbolic link")
+                                                  : tr("Ours (Local)"));
+    baseLabel_->setText(conflict.ancestorMode == link
+                            ? tr("Base (Common Ancestor), a symbolic link")
+                            : tr("Base (Common Ancestor)"));
+    theirsLabel_->setText(conflict.theirsMode == link ? tr("Theirs (Remote), a symbolic link")
+                                                      : tr("Theirs (Remote)"));
+    resultLabel_->setText(conflict.isSymlink()
+                              ? tr("Merged Result (a symbolic link: accept Ours or Theirs)")
+                              : tr("Merged Result (editable)"));
+    resultEditor_->setReadOnly(conflict.isSymlink());
+    acceptBothBtn_->setEnabled(!conflict.isSymlink());
+
     // If we already have a resolved version, show it; otherwise default to ours
     if (!resolvedContents_[idx].isEmpty()) {
         resultEditor_->setPlainText(resolvedContents_[idx]);

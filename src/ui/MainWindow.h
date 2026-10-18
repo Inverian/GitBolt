@@ -274,7 +274,7 @@ private:
 
     /// Open the three-way conflict resolver dialog (hosting
     /// MergeConflictWidget). Reads the index's conflicted entries
-    /// via GitService::refreshConflicts; resolving writes + stages
+    /// via GitService::refreshConflicts; resolving stages + writes
     /// each file, aborting runs the state-appropriate --abort.
     /// Reached from Commands → Resolve conflicts and from the
     /// offer shown after a merge / cherry-pick hits conflicts.

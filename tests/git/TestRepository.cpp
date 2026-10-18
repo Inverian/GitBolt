@@ -96,6 +96,16 @@ void appendConfig(const QString& repoPath, const QByteArray& text) {
     config.write(text);
 }
 
+#ifndef Q_OS_WIN
+// Writes `bytes` to the file `path`, outside any repository (a test
+// checks QTest::currentTestFailed() after it).
+void writeBytes(const QString& path, const QByteArray& bytes) {
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(bytes);
+}
+#endif
+
 } // namespace
 
 class TestRepository : public QObject {
@@ -963,6 +973,108 @@ private slots:
         count = repo.repo().conflictCount();
         QVERIFY(count.ok());
         QCOMPARE(*count, 2);
+    }
+
+    // A conflict whose ours is a symbolic link to a file outside the
+    // repository, in the work tree too, and whose theirs is a file.
+    // Accepting theirs replaces the link with theirs' file: what it
+    // pointed to stays as it was, and the index has theirs' file. With
+    // core.ignoreCase off, as on Linux: libgit2 clears the way for a
+    // file it writes on a case-insensitive file system alone, and
+    // elsewhere wrote it through the link. (And a checkout against
+    // HEAD, where the path is a link, left the file out once the link
+    // was gone.)
+    void resolvingALinkConflictToAFileReplacesTheLink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath("MARKER");
+        writeBytes(marker, "original marker\n");
+        if (QTest::currentTestFailed())
+            return;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(QFile::link(marker, QDir(repo.path()).filePath("p")));
+        QVERIFY(repo.stageFile("p").ok());
+        QVERIFY(repo.commit("p links out").ok());
+        // The conflict as git records one: the ancestor's file, ours (the
+        // link HEAD has) and theirs' file, in stages 1 to 3.
+        const auto blob = [&](const std::string& content) {
+            return output(git.runWithInput({"hash-object", "-w", "--stdin"}, content))
+                .toStdString();
+        };
+        const std::string base = blob("base\n");
+        const std::string file = blob("theirs\n");
+        const std::string link = output(git.run({"rev-parse", "HEAD:p"})).toStdString();
+        QVERIFY(succeeded(git.runWithInput({"update-index", "--index-info"},
+                                           "0 " + std::string(40, '0') + "\tp\n"
+                                           "100644 " + base + " 1\tp\n"
+                                           "120000 " + link + " 2\tp\n"
+                                           "100644 " + file + " 3\tp\n")));
+        const auto conflicts = repo.repo().conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
+        QVERIFY(succeeded(git.run({"config", "core.ignorecase", "false"})));
+
+        // Opened anew: libgit2 keeps the core.* settings it has read.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        auto resolved = opened->resolveConflict("p", "theirs\n");
+        QVERIFY2(resolved.ok(), resolved.error().message().c_str());
+        QCOMPARE(readFile(outside.path(), "MARKER"), QByteArray("original marker\n"));
+        const QFileInfo p(QDir(repo.path()).filePath("p"));
+        QVERIFY(!p.isSymLink());
+        QCOMPARE(readFile(repo.path(), "p"), QByteArray("theirs\n"));
+        QCOMPARE(output(git.run({"ls-files", "-s", "--", "p"})),
+                 QString::fromStdString("100644 " + file + " 0\tp"));
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("T  p"));
+#endif
+    }
+
+    // A conflicted path below a directory that someone made a symbolic
+    // link to a folder outside the repository since: git never leaves a
+    // tracked path below a link, and the resolution would land in the
+    // folder. Refused, and nothing changes: not the folder's file, not
+    // the link, not the conflict. With core.ignoreCase off, as on Linux,
+    // where libgit2 goes through a link on the way to a file it writes.
+    void resolveConflictRefusesAPathBelowALink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        writeBytes(outside.filePath("f"), "original marker\n");
+        if (QTest::currentTestFailed())
+            return;
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("d/f", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo.writeAndCommit("d/f", "side\n", "side").ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(repo.writeAndCommit("d/f", "main\n", "main").ok());
+        QVERIFY(!succeeded(git.run({"merge", "side"})));
+        QVERIFY(QDir(QDir(repo.path()).filePath("d")).removeRecursively());
+        QVERIFY(QFile::link(outside.path(), QDir(repo.path()).filePath("d")));
+        QVERIFY(succeeded(git.run({"config", "core.ignorecase", "false"})));
+
+        // Opened anew: libgit2 keeps the core.* settings it has read.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        auto resolved = opened->resolveConflict("d/f", "resolved\n");
+        QCOMPARE(readFile(outside.path(), "f"), QByteArray("original marker\n"));
+        QVERIFY(QFileInfo(QDir(repo.path()).filePath("d")).isSymLink());
+        QVERIFY(!resolved.ok());
+        QCOMPARE(QString::fromStdString(resolved.error().message()),
+                 QStringLiteral("d/f is below d, a symbolic link: the resolution would be "
+                                "written wherever it points."));
+        const auto conflicts = repo.repo().conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
+#endif
     }
 
     void commitWhileARebaseIsStoppedKeepsTheRebase() {

@@ -189,6 +189,11 @@ set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 gitbolt_add_test(test_diff_colors widgets/TestDiffColors.cpp)
 target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf gitbolt_ui)
 set_property(TEST test_diff_colors APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The conflict resolver's panes: a conflict on a symbolic link says so,
+# and is resolved by accepting a side. Off screen.
+gitbolt_add_test(test_merge_conflict_widget widgets/TestMergeConflictWidget.cpp)
+target_link_libraries(test_merge_conflict_widget PRIVATE gitbolt_widgets)
+set_property(TEST test_merge_conflict_widget APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # dialogs/ — Settings › General › Usage statistics and the
 # SettingsService keys behind it. Off screen like test_rebase_widgets:

@@ -200,6 +200,20 @@ public:
     /// alone: no blob is read.
     Result<int> conflictCount() const;
 
+    /// Resolves the conflict on `path` with `content`, the resolver's
+    /// result, as `git add` would after the file was edited: the
+    /// content is staged with the conflict's mode (ours', or theirs'
+    /// where ours is gone), the conflict entries go to resolve-undo,
+    /// and the work tree's file is written from the index, never
+    /// through a symbolic link. A path staged since the resolver
+    /// listed it gets the content all the same. Where ours or theirs
+    /// is a symbolic link, `content` must be one side's, and that side
+    /// is staged as it is: a link stays a link. Refuses, changing
+    /// nothing, a submodule's conflict, an edited link, a path no
+    /// longer in the index, a path that is a directory in the work
+    /// tree, and one below a symbolic link there.
+    Result<void> resolveConflict(const std::string& path, const std::string& content);
+
     // Remotes
     Result<std::vector<RemoteInfo>> remotes() const;
     Result<void> addRemote(const std::string& name, const std::string& url);
