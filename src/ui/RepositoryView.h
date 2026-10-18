@@ -21,6 +21,7 @@ class QTabWidget;
 class QTextBrowser;
 class QTreeView;
 class QShowEvent;
+class QUrl;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
@@ -116,6 +117,11 @@ private slots:
     void showFileHistory(const QString& path);
     void showBlameForFile(const QString& path);
 
+    /// A link clicked in the Commit tab: a Parent / Child hash selects
+    /// that commit, an email opens the mail app; nothing else is
+    /// followed.
+    void openCommitLink(const QUrl& url);
+
 protected:
     void showEvent(QShowEvent* e) override;
     void changeEvent(QEvent* e) override;
@@ -144,6 +150,9 @@ private:
     QWidget* buildGpgTab();
     QWidget* buildConsoleTab();
     void showCommitDetails(const git::CommitData& commit);
+    /// Sizes the Commit tab's top row and avatar to the metadata as
+    /// laid out; again whenever its laid-out size changes.
+    void fitCommitInfoTopRow();
     void showCommitDiff(const git::ObjectId& commitId);
 
     // Services

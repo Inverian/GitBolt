@@ -251,6 +251,13 @@ set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
 gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)
 target_link_libraries(test_file_history PRIVATE gitbolt_ui)
 set_property(TEST test_file_history APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The Commit tab's links: an email is one mailto: link and adds nothing
+# to it, a Parent / Child hash selects that commit, nothing else is
+# followed. Off screen, as it clicks them; it catches the URLs that
+# would go to the desktop.
+gitbolt_add_test(test_commit_links ui/TestCommitLinks.cpp)
+target_link_libraries(test_commit_links PRIVATE gitbolt_ui)
+set_property(TEST test_commit_links APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.
