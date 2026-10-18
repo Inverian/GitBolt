@@ -718,12 +718,31 @@ void MainWindow::buildRepositoryMenu()
                         dlg->close();
                         openRepositoryAtPath(folder);
                     });
-            // A submodule's path is the repository's choice: one named
-            // Tool.app would be launched as an app, not shown.
+            // A submodule's path is the repository's choice, and the list
+            // has the ones .gitmodules alone names too, so it needn't be
+            // a submodule's folder at all: a file in the work tree (an
+            // executable CHANGELOG, which the desktop runs when it opens
+            // it), a link, a folder named Tool.app (launched as an app),
+            // or a path out of the work tree. Only a folder is handed to
+            // the desktop, a file's own for a file, and only one in the
+            // work tree.
             connect(widget, &widgets::SubmoduleWidget::revealRequested,
-                    this, [workdir](const QString& p) {
-                        QDesktopServices::openUrl(QUrl::fromLocalFile(
-                            util::folderToShow(QDir(workdir).absoluteFilePath(p))));
+                    this, [dlg, workdir](const QString& p) {
+                        const QString folder =
+                            util::folderToShow(QDir(workdir).absoluteFilePath(p));
+                        if (!util::isWithinFolder(folder, workdir)) {
+                            QMessageBox box(QMessageBox::Information, tr("Open in File Explorer"),
+                                            tr("The submodule path %1 leads to %2, outside the "
+                                               "working tree, so it was not shown.")
+                                                .arg(QDir::toNativeSeparators(p),
+                                                     QDir::toNativeSeparators(folder)),
+                                            QMessageBox::Ok, dlg);
+                            box.setObjectName(QStringLiteral("dlg.submoduleRevealOutside"));
+                            box.setTextFormat(Qt::PlainText);
+                            box.exec();
+                            return;
+                        }
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
                     });
 
             // Its row actions are local ops: off while one runs (or a

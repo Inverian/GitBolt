@@ -46,7 +46,10 @@
 //     folder (a submodule's path is relative to the work tree), as
 //     Repository › File Explorer shows the work tree's, and the folder
 //     a bundle is in rather than launch it (a folder named Tool.app,
-//     on macOS); the Console gets a bare repository's GIT_DIR.
+//     on macOS); a submodule's path that names a file shows the folder
+//     it is in, not the file (an executable CHANGELOG runs), a link
+//     the folder it leads to, and one out of the work tree nothing;
+//     the Console gets a bare repository's GIT_DIR.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -562,6 +565,101 @@ private slots:
         emit widget->openRequested(QStringLiteral("sub"));
         QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), subFolder, 15000);
         QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    // Manage Submodules lists what .gitmodules names, a path with no
+    // submodule at it included, so a row's path is the repository's to
+    // choose. Open in File Explorer handed the desktop whatever was
+    // there: an executable CHANGELOG (which Terminal runs), a .command
+    // file, a link to one, a link to Tool.app (launched as an app), or
+    // a path out of the work tree. Only a folder in the work tree is
+    // shown now: a file's is the folder it is in, a link's is where it
+    // leads, and a path out of the work tree is said so.
+    void submoduleRevealShowsAFolderInTheWorkTree_data() {
+        QTest::addColumn<QString>("path");   // the submodule's, in .gitmodules
+        QTest::addColumn<QString>("shown");  // in the superproject; empty: nothing
+        QTest::newRow("CHANGELOG at 755") << QStringLiteral("CHANGELOG") << QStringLiteral(".");
+        QTest::newRow("run.command") << QStringLiteral("run.command") << QStringLiteral(".");
+        QTest::newRow("a link to a script")
+            << QStringLiteral("linked") << QStringLiteral("tools");
+#ifdef Q_OS_MACOS
+        QTest::newRow("a link to Tool.app") << QStringLiteral("applink") << QStringLiteral("x");
+#else
+        QTest::newRow("a link to Tool.app")
+            << QStringLiteral("applink") << QStringLiteral("x/Tool.app");
+#endif
+        QTest::newRow("up and out") << QStringLiteral("../victim/CHANGELOG") << QString();
+        // The absolute path, filled in below: the scratch folder's.
+        QTest::newRow("absolute") << QStringLiteral("<victim>/CHANGELOG") << QString();
+    }
+
+    void submoduleRevealShowsAFolderInTheWorkTree() {
+        QFETCH(QString, path);
+        QFETCH(QString, shown);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString super = QFileInfo(scratch.path()).canonicalFilePath()
+                              + QStringLiteral("/super");
+        const QString victim = QFileInfo(scratch.path()).canonicalFilePath()
+                               + QStringLiteral("/victim");
+        path.replace(QStringLiteral("<victim>"), victim);
+        const QByteArray script = "#!/bin/sh\necho marker >/dev/null\n";
+        const auto executable = [](const QString& file) {
+            return QFile::setPermissions(file, QFile::ReadOwner | QFile::WriteOwner
+                                                   | QFile::ExeOwner | QFile::ReadGroup
+                                                   | QFile::ExeGroup);
+        };
+        for (const QString& file : {super + QStringLiteral("/CHANGELOG"),
+                                    super + QStringLiteral("/tools/CHANGELOG"),
+                                    super + QStringLiteral("/x/Tool.app/Contents/MacOS/Tool"),
+                                    victim + QStringLiteral("/CHANGELOG")})
+            QVERIFY(writeFile(file, script) && executable(file));
+        QVERIFY(writeFile(super + QStringLiteral("/run.command"), script));
+        QVERIFY(QFile::link(super + QStringLiteral("/tools/CHANGELOG"),
+                            super + QStringLiteral("/linked")));
+        QVERIFY(QFile::link(super + QStringLiteral("/x/Tool.app"),
+                            super + QStringLiteral("/applink")));
+        const QStringList paths{QStringLiteral("CHANGELOG"), QStringLiteral("run.command"),
+                                QStringLiteral("linked"), QStringLiteral("applink"),
+                                QStringLiteral("../victim/CHANGELOG"),
+                                victim + QStringLiteral("/CHANGELOG")};
+        QByteArray modules;
+        for (int i = 0; i < paths.size(); ++i)
+            modules += "[submodule \"s" + QByteArray::number(i) + "\"]\n\tpath = "
+                       + paths[i].toUtf8() + "\n\turl = ../elsewhere.git\n";
+        QVERIFY(writeFile(super + QStringLiteral("/.gitmodules"), modules));
+        gitbolt::git::GitProcess git(super.toStdString());
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "files named as submodules"})));
+
+        MainWindow window;
+        QVERIFY(openIn(window, super));
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        // The list has the file as a submodule's path, to pick.
+        auto* model = widget->findChild<gitbolt::widgets::SubmoduleTableModel*>();
+        QVERIFY(model);
+        QStringList listed;
+        for (int row = 0; row < model->rowCount(); ++row)
+            listed << model->pathAtRow(row);
+        QVERIFY2(listed.contains(QStringLiteral("CHANGELOG")), qPrintable(listed.join(", ")));
+
+        UrlCatcher desktop;
+        BoxAnswerer answer(QMessageBox::Ok);
+        emit widget->revealRequested(path);
+        if (shown.isEmpty()) {
+            QVERIFY2(answer.text.contains(QStringLiteral("outside the working tree")),
+                     qPrintable(answer.text));
+            QCOMPARE(desktop.urls.size(), 0);
+            return;
+        }
+        QCOMPARE(answer.text, QString());
+        QCOMPARE(desktop.urls.size(), 1);
+        const QFileInfo handed(desktop.urls.first().toLocalFile());
+        QVERIFY2(handed.isDir() && !handed.isSymLink(), qPrintable(handed.filePath()));
+        QCOMPARE(handed.filePath(), QDir::cleanPath(super + QLatin1Char('/') + shown));
     }
 
     void worktreeOpensInGitBolt() {

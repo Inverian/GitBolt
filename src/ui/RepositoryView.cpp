@@ -297,19 +297,11 @@ void RepositoryView::openFileExternally(const QString& path)
     // link (or a folder on the way that is one) can lead anywhere: to
     // an app, or a script elsewhere on the disk. Only a file in the
     // working tree is opened, and it is opened by its real path, so
-    // what opens is what was looked at below.
-    const QString root = QFileInfo(workdir).canonicalFilePath();
+    // what opens is what was looked at below. What a link leads to out
+    // of it is not the repository's to hand over, a document included:
+    // the folder it is in can be shown, to open it from there.
     const QFileInfo target(QFileInfo(full).canonicalFilePath());
-    const QString rootSlash = root.endsWith(QLatin1Char('/')) ? root : root + QLatin1Char('/');
-#ifdef Q_OS_WIN
-    constexpr Qt::CaseSensitivity pathCase = Qt::CaseInsensitive;
-#else
-    constexpr Qt::CaseSensitivity pathCase = Qt::CaseSensitive;
-#endif
-    const bool inside = !root.isEmpty()
-        && (target.filePath().compare(root, pathCase) == 0
-            || target.filePath().startsWith(rootSlash, pathCase));
-    if (!inside) {
+    if (!util::isWithinFolder(target.filePath(), workdir)) {
         QMessageBox box(QMessageBox::Information, tr("Open Externally"),
                         tr("%1 leads to %2, outside the working tree, so it was not opened.")
                             .arg(QDir::toNativeSeparators(path),
@@ -317,9 +309,24 @@ void RepositoryView::openFileExternally(const QString& path)
                         QMessageBox::Ok, this);
         box.setObjectName(QStringLiteral("dlg.openExternallyOutside"));
         box.setTextFormat(Qt::PlainText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+        box.setInformativeText(
+            tr("Open Containing Folder shows the folder it is in, to open it from there "
+               "if you trust it."));
+        QAbstractButton* folder = box.addButton(tr("Open Containing Folder"),
+                                                QMessageBox::ActionRole);
+        box.setDefaultButton(QMessageBox::Ok);
+        box.setEscapeButton(QMessageBox::Ok);
         box.exec();
+        if (box.clickedButton() == folder)
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(util::folderToShow(target.absolutePath())));
         return;
     }
+    // A link to a folder: the folder is shown, and a bundle (a link to
+    // Tool.app) never launched, the folder it is in shown instead.
     if (target.isDir()) {
         QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(target.filePath())));
         return;

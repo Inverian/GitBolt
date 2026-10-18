@@ -13,8 +13,13 @@
 //     so, in a plain-text question that names it and defaults to
 //     Cancel; Open Containing Folder shows its folder instead, and
 //     never a bundle (macOS launches a folder named Tool.app);
+//   - so is a file of a type whose default app runs it or follows it
+//     though git checked it out at mode 644 (a Terminal session file,
+//     a jar, a location file, on macOS);
 //   - a link is judged by the file it leads to, and one that leads out
-//     of the work tree is not opened at all;
+//     of the work tree is not opened at all, only the folder it leads
+//     into shown if the user asks; a link to a folder shows the folder,
+//     and never launches a bundle;
 //   - a text file opens as before, with no question.
 //
 // The desktop never sees a URL: QDesktopServices::setUrlHandler takes
@@ -231,6 +236,37 @@ private slots:
                                                            : QFileInfo(full).absolutePath()));
     }
 
+    // Types whose default app runs them, or opens what they point to,
+    // ask too: git checks them out at mode 644, so their name alone
+    // tells them.
+    void typesThatRunAskFirst_data() {
+        QTest::addColumn<QString>("path");
+#if defined(Q_OS_MACOS)
+        for (const char* name : {"session.term", "tool.jar", "Main.class", "app.jnlp",
+                                 "share.afploc", "site.ftploc", "link.url", "a.vncloc"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+#elif defined(Q_OS_WIN)
+        for (const char* name : {"x.cpl", "x.chm", "x.application", "x.jar"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+#else
+        for (const char* name : {"setup.exe", "tool.jar"})
+            QTest::newRow(name) << QString::fromLatin1(name);
+#endif
+    }
+
+    void typesThatRunAskFirst() {
+        QFETCH(QString, path);
+        writeFile(repo_->path() + QLatin1Char('/') + path, kScript, false);
+
+        UrlCatcher desktop;
+        BoxAnswerer box(QStringLiteral("Cancel"));
+        emit fileTree()->openExternallyRequested(path);
+        QCOMPARE(box.asked, 1);
+        QVERIFY(!box.missing);
+        QCOMPARE(box.name, QStringLiteral("dlg.openExternallyRuns"));
+        QCOMPARE(desktop.urls.size(), 0);
+    }
+
     // A text file opens as it did: no question, the file itself.
     void textFileOpensAsBefore() {
         UrlCatcher desktop;
@@ -245,27 +281,33 @@ private slots:
 
 #ifndef Q_OS_WIN
     // A tracked symbolic link (or a folder on the way that is one) that
-    // leads out of the work tree is not opened, whatever is there; one
-    // that stays in it is judged by the file it leads to.
+    // leads out of the work tree is not opened, whatever is there; the
+    // folder it leads into is shown if the user asks, to open it from
+    // there. One that stays in it is judged by the file it leads to.
     void linkOutOfTheWorkTreeIsNotOpened_data() {
         QTest::addColumn<QString>("link");   // the link, in the work tree
         QTest::addColumn<QString>("leadsTo"); // in a folder outside it
         QTest::addColumn<QString>("path");   // what is opened
-        QTest::newRow("CHANGELOG to a script")
-            << QStringLiteral("CHANGELOG") << QStringLiteral("evil.command")
-            << QStringLiteral("CHANGELOG");
-        QTest::newRow("notes to a text file")
-            << QStringLiteral("README") << QStringLiteral("notes.txt")
-            << QStringLiteral("README");
-        QTest::newRow("a folder on the way")
-            << QStringLiteral("docs") << QStringLiteral(".")
-            << QStringLiteral("docs/evil.command");
+        QTest::addColumn<QString>("answer");
+        for (const QString& answer : {QStringLiteral("OK"),
+                                      QStringLiteral("Open Containing Folder")}) {
+            QTest::addRow("CHANGELOG to a script, %s", qPrintable(answer))
+                << QStringLiteral("CHANGELOG") << QStringLiteral("evil.command")
+                << QStringLiteral("CHANGELOG") << answer;
+            QTest::addRow("notes to a text file, %s", qPrintable(answer))
+                << QStringLiteral("README") << QStringLiteral("notes.txt")
+                << QStringLiteral("README") << answer;
+            QTest::addRow("a folder on the way, %s", qPrintable(answer))
+                << QStringLiteral("docs") << QStringLiteral(".")
+                << QStringLiteral("docs/evil.command") << answer;
+        }
     }
 
     void linkOutOfTheWorkTreeIsNotOpened() {
         QFETCH(QString, link);
         QFETCH(QString, leadsTo);
         QFETCH(QString, path);
+        QFETCH(QString, answer);
         QTemporaryDir outside;
         QVERIFY(outside.isValid());
         writeFile(outside.filePath(QStringLiteral("evil.command")), kScript, true);
@@ -274,7 +316,7 @@ private slots:
                             repo_->path() + QLatin1Char('/') + link));
 
         UrlCatcher desktop;
-        BoxAnswerer box(QStringLiteral("OK"));
+        BoxAnswerer box(answer);
         emit fileTree()->openExternallyRequested(path);
         QCOMPARE(box.asked, 1);
         QVERIFY(!box.missing);
@@ -283,7 +325,49 @@ private slots:
         QVERIFY2(box.text.contains(QStringLiteral("outside the working tree")),
                  qPrintable(box.text));
         QVERIFY(box.plainText);
-        QCOMPARE(desktop.urls.size(), 0);
+        QVERIFY(box.qtBox);
+        if (answer == QStringLiteral("OK")) {
+            QCOMPARE(desktop.urls.size(), 0);
+            return;
+        }
+        // The folder, never the file.
+        QCOMPARE(desktop.urls.size(), 1);
+        QCOMPARE(canonical(desktop.urls.first()), canonical(outside.path()));
+    }
+
+    // A link to a folder shows the folder, with no question: a bundle
+    // (a link to Tool.app) isn't launched, the folder it is in is shown.
+    void linkToAFolderShowsIt_data() {
+        QTest::addColumn<QString>("link");
+        QTest::addColumn<QString>("leadsTo");
+        QTest::addColumn<QString>("shown");
+        QTest::newRow("docs") << QStringLiteral("linkdir") << QStringLiteral("docs")
+                              << QStringLiteral("docs");
+#ifdef Q_OS_MACOS
+        QTest::newRow("Tool.app") << QStringLiteral("applink") << QStringLiteral("x/Tool.app")
+                                  << QStringLiteral("x");
+#else
+        QTest::newRow("Tool.app") << QStringLiteral("applink") << QStringLiteral("x/Tool.app")
+                                  << QStringLiteral("x/Tool.app");
+#endif
+    }
+
+    void linkToAFolderShowsIt() {
+        QFETCH(QString, link);
+        QFETCH(QString, leadsTo);
+        QFETCH(QString, shown);
+        const QString root = repo_->path() + QLatin1Char('/');
+        writeFile(root + QStringLiteral("docs/guide.md"), "guide\n", false);
+        writeFile(root + QStringLiteral("x/Tool.app/Contents/MacOS/Tool"), kScript, true);
+        QVERIFY(QFile::link(root + leadsTo, root + link));
+
+        UrlCatcher desktop;
+        BoxAnswerer box(QStringLiteral("Open Anyway"));
+        emit fileTree()->openExternallyRequested(link);
+        QTest::qWait(100);  // a question would be up and answered by now
+        QCOMPARE(box.asked, 0);
+        QCOMPARE(desktop.urls.size(), 1);
+        QCOMPARE(desktop.urls.first().toLocalFile(), canonical(root + shown));
     }
 
     void linkInTheWorkTreeIsJudgedByItsFile() {
