@@ -2794,7 +2794,8 @@ void MainWindow::buildCommandsMenu()
         cmdMenu->addAction(a);
     }
     {
-        // Archive revision → `git archive --format=zip <ref> -o <file>`.
+        // Archive revision → `git archive --format=zip -o <file>
+        // --end-of-options <ref>`.
         // Prompt for the revision (default HEAD) and the output file;
         // format is picked from the output extension (.zip or .tar).
         auto* a = new QAction(menuIcon(QStringLiteral("archive")),
@@ -2964,7 +2965,8 @@ void MainWindow::buildCommandsMenu()
 
     cmdMenu->addSeparator();
     {
-        // Format patch → `git format-patch <range> -o <dir>`. We
+        // Format patch → `git format-patch -o <dir> --end-of-options
+        // <range>`, or `git format-patch -o <dir> -<n>` for a count. We
         // prompt for the revision range (default `origin/main..HEAD`
         // — what most users want when they're prepping a series for
         // mailing-list review) and the output directory. Files end
@@ -2982,8 +2984,15 @@ void MainWindow::buildCommandsMenu()
                    "HEAD~5..HEAD):"),
                 QLineEdit::Normal,
                 QStringLiteral("origin/main..HEAD"), &ok);
+            // "-3", the last three commits, is format-patch's own count,
+            // which git takes as it always did: it is no revision, and
+            // after --end-of-options git turns it down. Anything else
+            // that begins with '-' is refused.
+            static const QRegularExpression countOnly(QStringLiteral("^-[0-9]+$"));
+            const bool count = countOnly.match(range.trimmed()).hasMatch();
             if (!ok || range.trimmed().isEmpty()
-                || refuseOptionLikeNames(tr("Format Patch Failed"), {range.trimmed()}))
+                || (!count
+                    && refuseOptionLikeNames(tr("Format Patch Failed"), {range.trimmed()})))
                 return;
             const QString outDir = QFileDialog::getExistingDirectory(
                 this, tr("Choose output directory for patches"),
@@ -2993,9 +3002,12 @@ void MainWindow::buildCommandsMenu()
                 return;
             // The range last, after --end-of-options: the revisions typed
             // are revisions, never options of format-patch's.
+            std::vector<std::string> args = {"format-patch", "-o", outDir.toStdString()};
+            if (!count)
+                args.emplace_back("--end-of-options");
+            args.push_back(range.trimmed().toStdString());
             repoCmd_->runAsync(
-                {"format-patch", "-o", outDir.toStdString(),
-                 "--end-of-options", range.trimmed().toStdString()},
+                args,
                 tr("Format Patch Failed"),
                 RepoCommandController::RefreshNone,
                 tr("Writing patches…"),
@@ -3008,7 +3020,7 @@ void MainWindow::buildCommandsMenu()
         cmdMenu->addAction(a);
     }
     {
-        // Apply patch → `git am <files>` or `git apply <files>`.
+        // Apply patch → `git am -- <files>` or `git apply -- <files>`.
         // We use `git am` so the commit metadata in the patch is
         // preserved (author / date / subject / message). For raw
         // diffs without commit metadata the user wants `git apply`,
@@ -5007,8 +5019,7 @@ void MainWindow::setupConnections()
                 this, [this](const QString& oldName, const std::string& key) {
             const QString notDone = tr("branch %1 was not renamed.").arg(oldName);
             if (!gitService_ || !gitService_->isOpen()
-                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns()
-                || refuseOptionLikeNames(tr("Rename Branch Failed"), {oldName}))
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
                 return;
             bool ok = false;
             const QString newName = QInputDialog::getText(
@@ -5019,7 +5030,9 @@ void MainWindow::setupConnections()
                 || refuseOptionLikeNames(tr("Rename Branch Failed"), {newName}))
                 return;
             // "--": a branch the repository named "-x" (git allows it)
-            // went to git as an option. The names are checked above too.
+            // went to git as an option. Only the new name is checked
+            // above (git would turn it down too): the old one may begin
+            // with '-', as renaming such a branch away clears it up.
             repoCmd_->runAsync({"branch", "-m", "--", oldName.toStdString(),
                                 newName.toStdString()},
                                tr("Rename Branch Failed"),
@@ -5856,15 +5869,16 @@ void MainWindow::checkoutAsLocalBranch(const QString& remoteBranch)
     if (slash <= 0 || slash == remoteBranch.size() - 1)
         return;
     const QString local = remoteBranch.mid(slash + 1);
-    if (refuseOptionLikeNames(tr("Checkout Failed"), {remoteBranch, local}))
-        return;
     if (gitService_->localBranchExists(local)) {
         gitService_->checkoutBranch(local);
         return;
     }
-    // The start point as a full ref, which can't begin with '-' as a
-    // remote's name can: checkout has no "--" for it (one means that
-    // paths follow).
+    // Only a branch git is to make is checked: the one there already
+    // goes through libgit2, which takes no options. The start point as
+    // a full ref, which can't begin with '-' as a remote's name can:
+    // checkout has no "--" for it (one means that paths follow).
+    if (refuseOptionLikeNames(tr("Checkout Failed"), {remoteBranch, local}))
+        return;
     repoCmd_->runAsync({"checkout", "-b", local.toStdString(), "--track",
                         "refs/remotes/" + remoteBranch.toStdString()},
                        tr("Checkout Failed"),
@@ -5873,7 +5887,7 @@ void MainWindow::checkoutAsLocalBranch(const QString& remoteBranch)
                        tr("Checking out %1…").arg(remoteBranch));
 }
 
-// Confirm, then `git push <remote> --delete <branch>` via runRemoteOp.
+// Confirm, then `git push --delete -- <remote> <branch>` via runRemoteOp.
 // `remoteBranch` is the remote-tracking name ("origin/feature/x"); the
 // remote is everything before the first '/', the same assumption the
 // sidebar's "Checkout as local branch" makes.
@@ -5887,8 +5901,11 @@ void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
     const QString remote = remoteBranch.left(slash);
     const QString branch = remoteBranch.mid(slash + 1);
     // Before the question: GitService refuses it too, but only once the
-    // user has said yes to deleting it.
-    if (refuseOptionLikeNames(tr("Delete Remote Branch"), {remote, branch}))
+    // user has said yes to deleting it. Not the branch: after "--" it is
+    // push's refspec, and a branch named "-x" on the server (a remote's
+    // "origin/-x") is deleted here as any other, rather than left for
+    // the shell to clear away.
+    if (refuseOptionLikeNames(tr("Delete Remote Branch"), {remote}))
         return;
 
     const auto confirm = QMessageBox::question(

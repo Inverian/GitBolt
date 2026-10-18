@@ -291,8 +291,9 @@ public:
     /// git runs (git::GitProcess::checkOperand), as operationFailed.
     bool push(const QString& remote, const QString& branch);
     /// `git push --delete -- <remote> <branch>`: removes the branch on
-    /// the server and, on success, the local remote-tracking ref.
-    /// Failures, and a name git would read as an option, surface as
+    /// the server and, on success, the local remote-tracking ref, a
+    /// branch whose name begins with '-' too. Failures, and a remote
+    /// name git would read as an option, surface as
     /// operationFailed("delete remote branch", …). Safe off the GUI
     /// thread.
     bool deleteRemoteBranch(const QString& remote, const QString& branch);

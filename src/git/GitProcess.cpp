@@ -295,8 +295,13 @@ Result<ProcessOutput> GitProcess::deleteRemoteBranch(const std::string& remote,
     // short name stays: git deletes a full ref the server doesn't have
     // without a word, and a branch someone else deleted already is to
     // be reported as such.
-    for (const std::string* name : {&remote, &branch})
-        if (auto refused = checkOperand(*name); !refused) return refused.error();
+    //
+    // Only the remote is checked. After "--" the branch is a refspec
+    // and nothing else, which --delete makes ":<branch>", so a branch
+    // named like an option is deleted as any other; refusing it left
+    // such a branch, on a server everyone fetches from, for the shell
+    // to clear away.
+    if (auto refused = checkOperand(remote); !refused) return refused.error();
     return run({"push", "--delete", "--", remote, branch}, 120000);
 }
 

@@ -1051,12 +1051,20 @@ bool GitService::push(const QString& remote, const QString& branch) {
     // the first push of every new branch failed. Publish it instead,
     // which is what a first push means in every Git GUI. A detached
     // HEAD has no branch to publish; git's own error explains that.
+    //
+    // The branch's name comes from HEAD's full name, not from --short:
+    // where a tag shares the branch's name, --short says "heads/<name>",
+    // which @{upstream} knows no branch by and push sent as
+    // refs/heads/heads/<name>, a ref that isn't there. The toolbar's
+    // Push of such a branch failed, published or not.
     std::string target = branch.toStdString();
     if (target.empty()) {
-        auto head = proc.run({"symbolic-ref", "--quiet", "--short", "HEAD"});
-        if (head && head.value().success())
-            target = QString::fromStdString(head.value().stdoutData)
-                         .trimmed().toStdString();
+        auto head = proc.run({"symbolic-ref", "--quiet", "HEAD"});
+        if (head && head.value().success()) {
+            const QString full = QString::fromStdString(head.value().stdoutData).trimmed();
+            const QLatin1String heads("refs/heads/");
+            target = (full.startsWith(heads) ? full.mid(heads.size()) : full).toStdString();
+        }
     }
     // Before the upstream is asked about: rev-parse took a branch named
     // "-x" for an option of its own (GitProcess::checkOperand). The

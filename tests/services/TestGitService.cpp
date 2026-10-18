@@ -70,9 +70,11 @@
 //     open on its way (and reaches its own repository, opened again),
 //   - a commit waiting on its hook leaves the thread pool room for an
 //     open (a job waiting on git lends its thread back),
-//   - the remote ops and checkoutBranch return their own outcome, and
-//     push and remote branch delete refuse a branch name git would read
-//     as an option before any git runs,
+//   - the remote ops and checkoutBranch return their own outcome, push
+//     refuses a branch name git would read as an option before any git
+//     runs (and remote branch delete a remote's), remote branch delete
+//     deletes a branch of such a name, and the toolbar's Push publishes
+//     a branch a tag shares its name with,
 //   - a conflicted merge is aborted off the GUI thread,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
@@ -1551,6 +1553,45 @@ private slots:
         QVERIFY(!work.resolveRef("refs/remotes/origin/feature").ok());
     }
 
+    // The toolbar's Push (no branch named) on a branch that shares its
+    // name with a tag. git's short name for HEAD is "heads/v1" then,
+    // which @{upstream} knows no branch by, and push made it
+    // refs/heads/heads/v1, which isn't there: neither the first push
+    // (a publish) nor a later one went through. Both do now.
+    void toolbarPushOfABranchATagSharesItsNamePublishesIt() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        auto& work = repo->repo();
+        auto head = work.head();
+        QVERIFY(head.ok());
+        QVERIFY(work.createBranch("v1", head.value()).ok());
+        QVERIFY(work.createLightweightTag("v1", head.value()).ok());
+        QVERIFY(work.checkout("v1").ok());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto lastFailure = [&failedSpy] {
+            return failedSpy.isEmpty() ? QStringLiteral("(none)")
+                                       : failedSpy.last().at(1).toString();
+        };
+
+        QVERIFY2(svc.push(QStringLiteral("origin"), QString()), qPrintable(lastFailure()));
+        QCOMPARE(tip(*origin, "refs/heads/v1"), tip(work, "HEAD"));
+        QCOMPARE(upstreamOf(work, "v1"), std::string("refs/remotes/origin/v1"));
+
+        QVERIFY(repo->writeAndCommit(QStringLiteral("more.txt"),
+                                     QByteArrayLiteral("more\n"),
+                                     QStringLiteral("more")).ok());
+        QVERIFY2(svc.push(QStringLiteral("origin"), QString()), qPrintable(lastFailure()));
+        QCOMPARE(tip(*origin, "refs/heads/v1"), tip(work, "HEAD"));
+        QCOMPARE(failedSpy.count(), 0);
+    }
+
     // A failed remote delete must surface as operationFailed under the
     // op name MainWindow keys its remote-op feedback on.
     void deleteRemoteBranchFailureIsReported() {
@@ -1617,9 +1658,11 @@ private slots:
     // A branch named "-x" (git allows it, and a fetch keeps one a remote
     // advertises as "origin/-x"): push's publish check gave it to
     // rev-parse, and the push to git, which read it as an option. Push
-    // and remote branch delete refuse it now before any git runs, as
-    // operationFailed under their own op names; so does the toolbar's
-    // Push (no branch named) with it checked out. The server keeps it.
+    // refuses it now before any git runs, as operationFailed under its
+    // own op name; so does the toolbar's Push (no branch named) with it
+    // checked out, and remote branch delete a remote of such a name.
+    // The server keeps it, until it is deleted there: after "--" the
+    // branch is push's refspec, and nothing else.
     void remoteOpsRefuseANameGitWouldReadAsAnOption() {
         auto repo = repoWithCommits(1);
         QVERIFY(repo);
@@ -1664,12 +1707,17 @@ private slots:
         watching = true;
         QVERIFY(!svc.push(QStringLiteral("origin"), QString()));
         QVERIFY2(refusedAs(QStringLiteral("push")), qPrintable(lastFailure()));
-        QVERIFY(!svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("-x")));
+        QVERIFY(!svc.deleteRemoteBranch(QStringLiteral("-x"), QStringLiteral("main")));
         QVERIFY2(refusedAs(QStringLiteral("delete remote branch")), qPrintable(lastFailure()));
         watching = false;
         QCOMPARE(failedSpy.count(), 3);
         QVERIFY2(ran.isEmpty(), qPrintable(ran.join(QStringLiteral(" | "))));
         QCOMPARE(tip(*origin, "refs/heads/-x"), onServer);
+
+        QVERIFY2(svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("-x")),
+                 qPrintable(lastFailure()));
+        QVERIFY(!origin->resolveRef("refs/heads/-x").ok());
+        QCOMPARE(failedSpy.count(), 3);
     }
 
     // Fetch prunes: a branch deleted on the server (merged and deleted

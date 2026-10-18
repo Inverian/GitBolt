@@ -99,12 +99,14 @@ public:
     /// git reads as an option wherever no "--" comes before it. git
     /// allows such names all the same: a fetch keeps the refs a remote
     /// advertises as they are ("origin/-x"), and update-ref makes a
-    /// branch of any of them. push, deleteRemoteBranch, pull, fetch,
-    /// the git-flow commands and the ones that read a commit id from
-    /// git's rebase or sequencer state ask this first, and so do the
-    /// commands GitService and the window build, whatever separator
-    /// they put in front of the name as well. Empty is fine: the
-    /// commands leave an empty one out.
+    /// branch of any of them. push, deleteRemoteBranch (of the remote),
+    /// pull, fetch, the git-flow commands and the ones that read a
+    /// commit id from git's rebase or sequencer state ask this first,
+    /// and so do the commands GitService and the window build, whatever
+    /// separator they put in front of the name as well; only the ones
+    /// that clear such a name away (a remote branch delete, a rename's
+    /// old name) leave it to their "--". Empty is fine: the commands
+    /// leave an empty one out.
     static Result<void> checkOperand(const std::string& name);
 
     /// `git push -- <remote> <refspec>`: `branch` as a full ref, so
@@ -117,7 +119,9 @@ public:
     Result<ProcessOutput> push(const std::string& remote, const std::string& branch,
                                bool force = false, bool setUpstream = false) const;
     /// `git push --delete -- <remote> <branch>`, refused before git
-    /// runs for a name checkOperand() turns down.
+    /// runs for a remote checkOperand() turns down. Not for the branch:
+    /// after "--" it is a refspec and nothing else, and a branch named
+    /// "-x" on the server is to be deleted as any other.
     Result<ProcessOutput> deleteRemoteBranch(const std::string& remote,
                                              const std::string& branch) const;
     Result<ProcessOutput> pull(const std::string& remote, const std::string& branch) const;

@@ -16,9 +16,11 @@
 //
 // A branch or remote name that begins with '-' (git allows them, and a
 // fetch keeps the ones a remote advertises) never reaches git, where it
-// would be read as an option: push, and remote branch delete, refuse
-// it before git runs. Push names the branch as a full ref, which also
-// pushes a branch that shares its name with a tag.
+// would be read as an option: push refuses it before git runs, and so
+// does remote branch delete for a remote's name. Push names the branch
+// as a full ref, which also pushes a branch that shares its name with a
+// tag. Remote branch delete gives git the branch after "--", where it
+// is a refspec, so such a branch on the server is deleted as any other.
 //
 
 #include <QDir>
@@ -294,8 +296,8 @@ private slots:
     // --all` pushed every branch, "private" too, where the user had
     // asked for one (and a name with a command in it ran the command,
     // against a remote on a local path). Refused now before git runs,
-    // published or not, and so is a remote of such a name and a remote
-    // branch delete of one; the server is as it was.
+    // published or not, and so is a remote of such a name, to push to
+    // or to delete a branch from; the server is as it was.
     void pushTakesNoOptionFromABranchName() {
         Remote remote;
         QVERIFY2(remote.ok, qPrintable(remote.failure));
@@ -313,9 +315,35 @@ private slots:
         QVERIFY(refused(git.push("origin", "--all", /*force=*/false, /*setUpstream=*/true)));
         QVERIFY(refused(git.push("origin", "--all", /*force=*/true)));
         QVERIFY(refused(git.push("--all", "main")));
-        QVERIFY(refused(git.deleteRemoteBranch("origin", "-x")));
         QVERIFY(refused(git.deleteRemoteBranch("--all", "main")));
         QCOMPARE(remote.serverRefs(), before);
+    }
+
+    // A remote branch delete of a branch named like an option (a
+    // remote's "origin/-x"), a command in it too. After "--" git reads
+    // the name as a refspec, ":<name>" with --delete, and nothing else,
+    // so it is deleted as any other branch would be and the command
+    // isn't run. The check refused it as well, which left such a
+    // branch on the server for the shell to clear away.
+    void deleteRemoteBranchDeletesANameLikeAnOption() {
+        Remote remote;
+        QVERIFY2(remote.ok, qPrintable(remote.failure));
+        const gitbolt::git::GitProcess& git = remote.work;
+        // Run, it would leave "ran" at the top of the work tree.
+        const std::vector<std::string> names = {"-x", "--receive-pack=touch${IFS}ran;true"};
+        for (const std::string& name : names)
+            QVERIFY(succeeded(remote.server.run({"update-ref", "--", "refs/heads/" + name, "main"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+
+        for (const std::string& name : names) {
+            const auto deleted = git.deleteRemoteBranch("origin", name);
+            QVERIFY2(succeeded(deleted), qPrintable(failureOf(deleted)));
+        }
+        QCOMPARE(remote.serverRefs(), QStringLiteral("refs/heads/main ")
+                                          + output(git.run({"rev-parse", "main"})));
+        QCOMPARE(output(git.run({"for-each-ref", "--format=%(refname)", "refs/remotes/origin"})),
+                 QStringLiteral("refs/remotes/origin/main"));
+        QVERIFY(!QFileInfo::exists(remote.dir.filePath(QStringLiteral("work/ran"))));
     }
 
     // push() names the branch as a full ref. A tag of the same name

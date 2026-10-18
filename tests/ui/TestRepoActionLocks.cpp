@@ -46,9 +46,12 @@
 //     folder (a submodule's path is relative to the work tree); the
 //     Console gets a bare repository's GIT_DIR;
 //   - a branch whose name begins with '-' never reaches git from the
-//     sidebar (Merge, Rename, Set Upstream, Checkout as local branch,
-//     Delete from remote, Push), where git read it as an option: each
-//     says so instead, and nothing changes.
+//     sidebar's Merge, Set Upstream, Checkout as local branch (of one to
+//     be made) and Push, where git read it as an option: each says so
+//     instead, and nothing changes; Rename renames such a branch away
+//     and Delete from remote deletes it on the server, after "--", and
+//     an existing local one is checked out;
+//   - Format Patch takes a count ("-2") as git does.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -64,6 +67,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QLabel>
@@ -1113,10 +1117,10 @@ private slots:
 
     // Branches whose names begin with '-': git allows them, and a fetch
     // keeps one a remote advertises ("origin/-y"). The sidebar's Merge,
-    // Rename, Set Upstream, Checkout as local branch, Delete from remote
-    // and Push gave them to git, which read them as options. Each says
-    // so now, as its failure would, before it asks anything, and runs
-    // nothing: the repository and the server are as they were.
+    // Set Upstream, Checkout as local branch and Push gave them to git,
+    // which read them as options. Each says so now, as its failure
+    // would, before it asks anything, and runs nothing: the repository
+    // and the server are as they were.
     void sidebarRefusesBranchNamesGitWouldReadAsOptions() {
         QTemporaryDir scratch;
         QVERIFY(scratch.isValid());
@@ -1170,13 +1174,9 @@ private slots:
 
         emit tree->mergeRequested(QStringLiteral("-x"), tree->repositoryKey());
         QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
-        emit tree->renameBranchRequested(QStringLiteral("-x"), tree->repositoryKey());
-        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
         emit tree->setUpstreamRequested(QStringLiteral("-x"), tree->repositoryKey());
         QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
         emit tree->checkoutRemoteRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
-        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-y")));
-        emit tree->deleteRemoteBranchRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
         QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-y")));
         // Push is a remote op: refused by the service, on the status bar.
         emit tree->pushRequested(QStringLiteral("origin"), QStringLiteral("-x"),
@@ -1192,6 +1192,196 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
         QCOMPARE(fingerprint(work), before);
         QCOMPARE(output(serverGit.run({"for-each-ref"})), serverBefore);
+    }
+
+    // What the sidebar can do with such branches, as git can. Rename
+    // gives git the old name after "--", and Delete from remote the
+    // branch (push's refspec, nothing else), so neither is read as an
+    // option, a name with a command in it included; both used to be
+    // refused, which left the branch in the repository or on the
+    // server for the shell to clear away. A new name that begins with
+    // '-' is still refused, and Checkout as local branch checks out a
+    // local "-y" that is there already (through libgit2, no git).
+    void sidebarClearsAwayBranchesNamedLikeOptions() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString server = scratch.filePath(QStringLiteral("server.git"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        gitbolt::git::GitProcess git(work.toStdString());
+        gitbolt::git::GitProcess serverGit(server.toStdString());
+        serverGit.setGitDir(server.toStdString());
+        QVERIFY(QDir().mkpath(work));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "main"})));
+        // Run, it would leave "ran" at the top of the work tree.
+        const QString command = QStringLiteral("--receive-pack=touch${IFS}ran;true");
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-y", "HEAD"})));
+        for (const QString& name : {QStringLiteral("-y"), command})
+            QVERIFY(succeeded(serverGit.run({"update-ref", "--",
+                                             "refs/heads/" + name.toStdString(), "main"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+        const QString base = output(git.run({"rev-parse", "HEAD"}));
+
+        MainWindow window;
+        auto* svc = openIn(window, work);
+        QVERIFY(svc);
+        auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
+        QVERIFY(tree);
+        // What the window asks or says: a message box is noted and said
+        // yes to, a text question noted and answered with `typed`.
+        QStringList asked;
+        QString typed;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked, &typed] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                if (QAbstractButton* yes = box->button(QMessageBox::Yes))
+                    yes->click();
+                else
+                    box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->setTextValue(typed);
+                input->accept();
+            }
+        });
+        answer.start();
+        const auto localBranches = [&git] {
+            return output(git.run({"for-each-ref", "--format=%(refname)", "refs/heads"}))
+                .split(QLatin1Char('\n'));
+        };
+        const auto idle = [&window] {
+            return QTest::qWaitFor([&window] { return action(window, "act.commit")->isEnabled(); },
+                                   15000);
+        };
+
+        typed = QStringLiteral("fixed");
+        emit tree->renameBranchRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), QStringList{QStringLiteral("asked: Rename Branch")});
+        QTRY_COMPARE_WITH_TIMEOUT(localBranches(),
+                                  (QStringList{QStringLiteral("refs/heads/-y"),
+                                               QStringLiteral("refs/heads/fixed"),
+                                               QStringLiteral("refs/heads/main")}),
+                                  10000);
+        QCOMPARE(output(git.run({"rev-parse", "fixed"})), base);
+        QVERIFY(idle());
+
+        typed = QStringLiteral("-z");
+        emit tree->renameBranchRequested(QStringLiteral("fixed"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}),
+                 (QStringList{QStringLiteral("asked: Rename Branch"),
+                              QStringLiteral("\"-z\" begins with '-', which git would read as "
+                                             "an option, not a name, so GitBolt doesn't pass "
+                                             "it to git.")}));
+
+        emit tree->checkoutRemoteRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
+        QVERIFY2(asked.isEmpty(), qPrintable(asked.join(QStringLiteral(" | "))));
+        QTRY_COMPARE_WITH_TIMEOUT(output(git.run({"symbolic-ref", "HEAD"})),
+                                  QStringLiteral("refs/heads/-y"), 10000);
+        QVERIFY(idle());
+
+        for (const QString& name : {QStringLiteral("-y"), command}) {
+            emit tree->deleteRemoteBranchRequested(QStringLiteral("origin/") + name,
+                                                   tree->repositoryKey());
+            QCOMPARE(asked.size(), 1);
+            QVERIFY2(std::exchange(asked, {}).constFirst().startsWith(
+                         QStringLiteral("Delete branch \"%1\" from remote \"origin\"?").arg(name)),
+                     qPrintable(name));
+            // Shown once the op is done, its failure otherwise.
+            QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(),
+                                      QStringLiteral("Deleted %1 from origin.").arg(name), 15000);
+        }
+        QCOMPARE(output(serverGit.run({"for-each-ref", "--format=%(refname)"})),
+                 QStringLiteral("refs/heads/main"));
+        QVERIFY(!QFileInfo::exists(work + QStringLiteral("/ran")));
+        QCOMPARE(localBranches(), (QStringList{QStringLiteral("refs/heads/-y"),
+                                               QStringLiteral("refs/heads/fixed"),
+                                               QStringLiteral("refs/heads/main")}));
+    }
+
+    // Commands > Format patch… with a count, "-2" (the last two commits),
+    // which `git format-patch -2` takes. It was refused as an option,
+    // and after --end-of-options git turns it down too. A range is
+    // written as before, and an option ("--stdout") is refused.
+    void formatPatchTakesACount() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        // The folder the directory question starts in.
+        const gitbolt::test::ScopedEnv home("HOME", QFile::encodeName(scratch.path()));
+        gitbolt::test::TestRepo repo;
+        for (const char* subject : {"one", "two", "three"})
+            QVERIFY(repo.writeAndCommit(QString::fromLatin1(subject) + QStringLiteral(".txt"),
+                                        "x\n", QString::fromLatin1(subject)).ok());
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        // The range question answered with `typed`, the directory one
+        // with `outDir`, a message box noted and closed.
+        QStringList asked;
+        QString typed;
+        QString outDir;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked, &typed, &outDir] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->setTextValue(typed);
+                input->accept();
+            } else if (auto* folder = qobject_cast<QFileDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + folder->windowTitle();
+                folder->setDirectory(outDir);
+                static_cast<QDialog*>(folder)->accept();    // QFileDialog's own is protected
+            }
+        });
+        answer.start();
+        const auto patchesIn = [](const QString& dir) {
+            return QDir(dir).entryList({QStringLiteral("*.patch")}, QDir::Files, QDir::Name);
+        };
+        const QStringList bothQuestions = {QStringLiteral("asked: Format Patch"),
+                                           QStringLiteral("asked: Choose output directory for patches")};
+
+        typed = QStringLiteral("-2");
+        outDir = scratch.filePath(QStringLiteral("count"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}), bothQuestions);
+        QTRY_COMPARE_WITH_TIMEOUT(patchesIn(outDir),
+                                  (QStringList{QStringLiteral("0001-two.patch"),
+                                               QStringLiteral("0002-three.patch")}),
+                                  10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+
+        typed = QStringLiteral("HEAD~1..HEAD");
+        outDir = scratch.filePath(QStringLiteral("range"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}), bothQuestions);
+        QTRY_COMPARE_WITH_TIMEOUT(patchesIn(outDir),
+                                  QStringList{QStringLiteral("0001-three.patch")}, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+
+        typed = QStringLiteral("--stdout");
+        outDir = scratch.filePath(QStringLiteral("option"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}),
+                 (QStringList{QStringLiteral("asked: Format Patch"),
+                              QStringLiteral("\"--stdout\" begins with '-', which git would "
+                                             "read as an option, not a name, so GitBolt "
+                                             "doesn't pass it to git.")}));
+        QVERIFY(patchesIn(outDir).isEmpty());
     }
 
     // A branch's context menu in the sidebar, up when a second launch
