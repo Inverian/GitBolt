@@ -924,6 +924,23 @@ void MainWindow::buildRepositoryMenu()
             QString fullPath = inGitDir ? gitDir : workdir;
             if (!fullPath.endsWith('/')) fullPath += '/';
             fullPath += relativePath;
+            // A work tree's .gitignore, .gitattributes and .mailmap are
+            // the repository's own content, and a repository can commit
+            // any of them as a symbolic link. Reading went through it,
+            // and saving wrote the text wherever it pointed, outside the
+            // work tree too. A link isn't edited here: not when the
+            // editor opens, nor when it is saved (a checkout meanwhile
+            // can put one there).
+            const auto refuseLink = [&] {
+                const QFileInfo info(fullPath);
+                if (inGitDir || !(info.isSymbolicLink() || info.isJunction()))
+                    return false;
+                QMessageBox::warning(this, title,
+                    tr("%1 is a symbolic link: edit the file it points to "
+                       "instead.").arg(relativePath));
+                return true;
+            };
+            if (refuseLink()) return;
 
             QFile f(fullPath);
             QString original;
@@ -945,6 +962,7 @@ void MainWindow::buildRepositoryMenu()
 
             const QString updated = dlg.contents();
             if (updated == original) return;  // nothing changed
+            if (refuseLink()) return;
 
             // Ensure the parent directory exists — .git/info/ usually
             // does, but a brand-new repo may not yet have it. Saving

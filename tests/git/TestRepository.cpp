@@ -138,6 +138,16 @@ bool symlinkBytes(const QByteArray& target, const QByteArray& link) {
 }
 #endif
 
+#ifndef Q_OS_WIN
+// Writes `bytes` to the file `path`, outside any repository (a test
+// checks QTest::currentTestFailed() after it).
+void writeBytes(const QString& path, const QByteArray& bytes) {
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(bytes);
+}
+#endif
+
 } // namespace
 
 class TestRepository : public QObject {
@@ -1005,6 +1015,425 @@ private slots:
         count = repo.repo().conflictCount();
         QVERIFY(count.ok());
         QCOMPARE(*count, 2);
+    }
+
+    // A conflict whose ours is a symbolic link to a file outside the
+    // repository, in the work tree too, and whose theirs is a file.
+    // Accepting theirs replaces the link with theirs' file: what it
+    // pointed to stays as it was, and the index has theirs' file. With
+    // core.ignoreCase off, as on Linux: libgit2 clears the way for a
+    // file it writes on a case-insensitive file system alone, and
+    // elsewhere wrote it through the link. (And a checkout against
+    // HEAD, where the path is a link, left the file out once the link
+    // was gone.)
+    void resolvingALinkConflictToAFileReplacesTheLink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath("MARKER");
+        writeBytes(marker, "original marker\n");
+        if (QTest::currentTestFailed())
+            return;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(QFile::link(marker, QDir(repo.path()).filePath("p")));
+        QVERIFY(repo.stageFile("p").ok());
+        QVERIFY(repo.commit("p links out").ok());
+        // The conflict as git records one: the ancestor's file, ours (the
+        // link HEAD has) and theirs' file, in stages 1 to 3.
+        const auto blob = [&](const std::string& content) {
+            return output(git.runWithInput({"hash-object", "-w", "--stdin"}, content))
+                .toStdString();
+        };
+        const std::string base = blob("base\n");
+        const std::string file = blob("theirs\n");
+        const std::string link = output(git.run({"rev-parse", "HEAD:p"})).toStdString();
+        QVERIFY(succeeded(git.runWithInput({"update-index", "--index-info"},
+                                           "0 " + std::string(40, '0') + "\tp\n"
+                                           "100644 " + base + " 1\tp\n"
+                                           "120000 " + link + " 2\tp\n"
+                                           "100644 " + file + " 3\tp\n")));
+        const auto conflicts = repo.repo().conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
+        QVERIFY(succeeded(git.run({"config", "core.ignorecase", "false"})));
+
+        // Opened anew: libgit2 keeps the core.* settings it has read.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        auto resolved = opened->resolveConflict("p", "theirs\n");
+        QVERIFY2(resolved.ok(), resolved.error().message().c_str());
+        QCOMPARE(readFile(outside.path(), "MARKER"), QByteArray("original marker\n"));
+        const QFileInfo p(QDir(repo.path()).filePath("p"));
+        QVERIFY(!p.isSymLink());
+        QCOMPARE(readFile(repo.path(), "p"), QByteArray("theirs\n"));
+        QCOMPARE(output(git.run({"ls-files", "-s", "--", "p"})),
+                 QString::fromStdString("100644 " + file + " 0\tp"));
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("T  p"));
+#endif
+    }
+
+    // A conflicted path below a directory that someone made a symbolic
+    // link to a folder outside the repository since: git never leaves a
+    // tracked path below a link, and the resolution would land in the
+    // folder. Refused, and nothing changes: not the folder's file, not
+    // the link, not the conflict. With core.ignoreCase off, as on Linux,
+    // where libgit2 goes through a link on the way to a file it writes.
+    void resolveConflictRefusesAPathBelowALink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        writeBytes(outside.filePath("f"), "original marker\n");
+        if (QTest::currentTestFailed())
+            return;
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("d/f", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo.writeAndCommit("d/f", "side\n", "side").ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(repo.writeAndCommit("d/f", "main\n", "main").ok());
+        QVERIFY(!succeeded(git.run({"merge", "side"})));
+        QVERIFY(QDir(QDir(repo.path()).filePath("d")).removeRecursively());
+        QVERIFY(QFile::link(outside.path(), QDir(repo.path()).filePath("d")));
+        QVERIFY(succeeded(git.run({"config", "core.ignorecase", "false"})));
+
+        // Opened anew: libgit2 keeps the core.* settings it has read.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        auto resolved = opened->resolveConflict("d/f", "resolved\n");
+        QCOMPARE(readFile(outside.path(), "f"), QByteArray("original marker\n"));
+        QVERIFY(QFileInfo(QDir(repo.path()).filePath("d")).isSymLink());
+        QVERIFY(!resolved.ok());
+        QCOMPARE(QString::fromStdString(resolved.error().message()),
+                 QStringLiteral("d/f is below d, a symbolic link: the resolution would be "
+                                "written wherever it points."));
+        const auto conflicts = repo.repo().conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
+#endif
+    }
+
+    // GitBolt's cherry-pick (libgit2's) notes a rename it found in a
+    // conflict in the index's NAME entries. The checkout that writes a
+    // resolution checked each of them against the conflicts it read,
+    // and failed on the first that named a path no longer conflicted
+    // ("a NAME entry referenced ancestor entry 'a.txt' which does not
+    // exist in the main index"): no file in such a pick could be
+    // resolved, the plain text conflict next to it neither. The
+    // checkout reads no conflicts now; the path it writes is resolved
+    // by then.
+    void resolveConflictAfterACherryPickThatFoundARename() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QByteArray rest;
+        for (int line = 2; line <= 30; ++line)
+            rest += "line " + QByteArray::number(line) + '\n';
+        repo.writeFile("a.txt", "line 1\n" + rest);
+        repo.writeFile("c.txt", "base\n");
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(repo.commit("base").ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("a.txt", "side 1\n" + rest);
+        repo.writeFile("c.txt", "side\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "-m", "side"})));
+        const QString picked = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(succeeded(git.run({"mv", "a.txt", "b.txt"})));
+        repo.writeFile("b.txt", "main 1\n" + rest);
+        repo.writeFile("c.txt", "main\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-a", "-m", "main"})));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto id = opened->resolveRef(picked.toStdString());
+        QVERIFY(id.ok());
+        const auto pick = opened->cherryPick(*id);
+        QVERIFY2(pick.ok(), pick.ok() ? "" : pick.error().message().c_str());
+        QVERIFY(pick->hasConflicts);
+        QCOMPARE(output(git.run({"diff", "--name-only", "--diff-filter=U"})),
+                 QStringLiteral("a.txt\nb.txt\nc.txt"));
+
+        for (const char* path : {"c.txt", "b.txt"}) {
+            const auto resolved = opened->resolveConflict(path, std::string("resolved ") + path + '\n');
+            QVERIFY2(resolved.ok(), resolved.ok() ? path : resolved.error().message().c_str());
+            QCOMPARE(readFile(repo.path(), path), QByteArray("resolved ") + path + '\n');
+        }
+        QCOMPARE(output(git.run({"diff", "--name-only", "--diff-filter=U"})), QStringLiteral("a.txt"));
+        QCOMPARE(output(git.run({"diff", "--name-only", "--", "b.txt", "c.txt"})), QString());
+        QCOMPARE(output(git.run({"show", ":b.txt"})), QStringLiteral("resolved b.txt"));
+        QCOMPARE(output(git.run({"show", ":c.txt"})), QStringLiteral("resolved c.txt"));
+        // And the renamed file's old name, which only theirs still has.
+        const auto resolved = opened->resolveConflict("a.txt", "resolved a.txt\n");
+        QVERIFY2(resolved.ok(), resolved.ok() ? "" : resolved.error().message().c_str());
+        QCOMPARE(readFile(repo.path(), "a.txt"), QByteArray("resolved a.txt\n"));
+        QCOMPARE(output(git.run({"diff", "--name-only", "--diff-filter=U"})), QString());
+        QCOMPARE(output(git.run({"diff", "--name-only"})), QString());
+    }
+
+    // A text conflict's result is staged with the mode git's merge gives
+    // it: a side's change of the executable bit wins over the side that
+    // left it alone, and ours' wins where both changed it. It went in
+    // with ours' mode, and the checkout then took the bit off the work
+    // tree's file: where only theirs had made the file executable (in a
+    // rebase, the user's own commit), that was lost.
+    void resolveConflictMergesTheExecutableBit() {
+#ifdef Q_OS_WIN
+        QSKIP("core.fileMode is off on Windows: the work tree has no executable bit");
+#else
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"config", "core.filemode", "true"})));
+        // Each file's content as the commit has it, and its mode: x, or
+        // - for none.
+        const auto commitFiles = [&](const QByteArray& text, const char* modes,
+                                     const char* message) {
+            for (int i = 0; i < 4; ++i) {
+                const QString name = QStringLiteral("f%1.sh").arg(i);
+                repo.writeFile(name, "#!/bin/sh\necho " + text + '\n');
+                const QString file = QDir(repo.path()).filePath(name);
+                const auto exec = QFile::ExeOwner | QFile::ExeUser | QFile::ExeGroup | QFile::ExeOther;
+                const auto plain = QFile::permissions(file) & ~exec;
+                if (!QFile::setPermissions(file, modes[i] == 'x' ? plain | exec : plain)
+                    || !succeeded(git.run({"add", name.toStdString()})))
+                    return false;
+            }
+            return succeeded(git.run({"commit", "-q", "-m", message}));
+        };
+        // f0: theirs makes it executable; f1: ours does; f2: ours makes
+        // it no longer executable; f3: theirs does.
+        QVERIFY(commitFiles("base", "--xx", "base"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(commitFiles("side", "x-x-", "side"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(commitFiles("main", "-x-x", "main"));
+        QVERIFY(!succeeded(git.run({"merge", "-q", "side"})));
+        QCOMPARE(output(git.run({"diff", "--name-only", "--diff-filter=U"})),
+                 QStringLiteral("f0.sh\nf1.sh\nf2.sh\nf3.sh"));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        for (int i = 0; i < 4; ++i) {
+            const std::string name = "f" + std::to_string(i) + ".sh";
+            const auto resolved = opened->resolveConflict(name, "#!/bin/sh\necho resolved\n");
+            QVERIFY2(resolved.ok(), resolved.ok() ? name.c_str() : resolved.error().message().c_str());
+        }
+        const auto modeOf = [&](const char* name) {
+            return output(git.run({"ls-files", "-s", "--", name})).left(6);
+        };
+        QCOMPARE(modeOf("f0.sh"), QStringLiteral("100755"));
+        QCOMPARE(modeOf("f1.sh"), QStringLiteral("100755"));
+        QCOMPARE(modeOf("f2.sh"), QStringLiteral("100644"));
+        QCOMPARE(modeOf("f3.sh"), QStringLiteral("100644"));
+        // The work tree's the same: nothing left to stage.
+        QCOMPARE(output(git.run({"diff", "--name-only"})), QString());
+        QVERIFY(QFileInfo(QDir(repo.path()).filePath("f0.sh")).isExecutable());
+        QVERIFY(!QFileInfo(QDir(repo.path()).filePath("f3.sh")).isExecutable());
+
+        // A rebase replays the user's commit as theirs: its chmod +x is
+        // staged, for the commit the rebase makes.
+        QVERIFY(succeeded(git.run({"reset", "-q", "--hard"})));
+        const QString upstream = output(git.run({"branch", "--show-current"}));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "topic", "HEAD~1"})));
+        QVERIFY(commitFiles("topic", "x-xx", "make f0 executable, edit"));
+        QVERIFY(!succeeded(git.run({"rebase", upstream.toStdString()})));
+        QCOMPARE(opened->state(), gitbolt::git::RepoState::Rebase);
+        QCOMPARE(output(git.run({"ls-files", "-u", "--", "f0.sh"})).count(QLatin1Char('\n')), 2);
+        const auto resolved = opened->resolveConflict("f0.sh", "#!/bin/sh\necho resolved\n");
+        QVERIFY2(resolved.ok(), resolved.ok() ? "" : resolved.error().message().c_str());
+        QCOMPARE(modeOf("f0.sh"), QStringLiteral("100755"));
+        QVERIFY(QFileInfo(QDir(repo.path()).filePath("f0.sh")).isExecutable());
+#endif
+    }
+
+    // Paths whose names libgit2 reads as pattern syntax when they are
+    // the paths of a checkout: a backslash (taken as escaping the next
+    // character), a trailing space or carriage return (taken off), a
+    // line feed (the end of the pattern), a leading # (a comment, which
+    // matches every path) and the wildcards. The resolution was staged
+    // and its file left with the conflict markers, or another file was
+    // written as well. Each is written now, and only it: the work
+    // tree's other files keep their changes. With core.ignoreCase on
+    // (as on macOS and Windows) and off (as on Linux): libgit2 matches
+    // patterns either way.
+    void resolveConflictWritesAPathOfAnyName_data() {
+        QTest::addColumn<bool>("ignoreCase");
+        QTest::newRow("ignoreCase") << true;
+        QTest::newRow("case-sensitive") << false;
+    }
+
+    void resolveConflictWritesAPathOfAnyName() {
+#ifdef Q_OS_WIN
+        QSKIP("Windows file names have none of these characters");
+#else
+        const QStringList names = {
+            QStringLiteral("x\\y.txt"),   QStringLiteral("sub/x\\*.txt"),
+            QStringLiteral("a*b.txt"),    QStringLiteral("[ab].txt"),
+            QStringLiteral("?.txt"),      QStringLiteral("!bang.txt"),
+            QStringLiteral("#hash.txt"),  QStringLiteral("trailing "),
+            QStringLiteral("new\nline"),  QStringLiteral("Icon\r"),
+            QStringLiteral("tab\tname"),  QStringLiteral(" lead.txt"),
+            QStringLiteral("end\\\r"),
+        };
+        // What a name taken as a pattern would also, or instead, match.
+        const QStringList others = {
+            QStringLiteral("xy.txt"),    QStringLiteral("sub/x*.txt"),  QStringLiteral("sub/xa.txt"),
+            QStringLiteral("aXb.txt"),   QStringLiteral("a.txt"),       QStringLiteral("b.txt"),
+            QStringLiteral("1.txt"),     QStringLiteral("bang.txt"),    QStringLiteral("#hash.txt.orig"),
+            QStringLiteral("trailing"),  QStringLiteral("new"),         QStringLiteral("Icon"),
+            QStringLiteral("lead.txt"),  QStringLiteral("end\\"),
+        };
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        const auto commitAll = [&](const QByteArray& text, bool withOthers, const char* message) {
+            for (const QString& name : names)
+                repo.writeFile(name, text);
+            if (withOthers) {
+                for (const QString& name : others)
+                    repo.writeFile(name, "other\n");
+            }
+            return succeeded(git.run({"add", "-A"}))
+                && succeeded(git.run({"commit", "-q", "-m", message}));
+        };
+        QVERIFY(commitAll("base\n", true, "base"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(commitAll("side\n", false, "side"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(commitAll("main\n", false, "main"));
+        QVERIFY(!succeeded(git.run({"merge", "-q", "side"})));
+        for (const QString& name : others)
+            repo.writeFile(name, "changed\n");
+        const auto list = [&](std::vector<std::string> args) {
+            const auto out = git.run(args);
+            QStringList paths = succeeded(out)
+                ? QString::fromStdString(out.value().stdoutData).split(QChar(0), Qt::SkipEmptyParts)
+                : QStringList{QStringLiteral("<failed>")};
+            paths.sort();
+            return paths;
+        };
+        QStringList sortedNames = names;
+        sortedNames.sort();
+        QCOMPARE(list({"diff", "-z", "--name-only", "--diff-filter=U"}), sortedNames);
+        QFETCH(bool, ignoreCase);
+        QVERIFY(succeeded(git.run({"config", "core.ignorecase", ignoreCase ? "true" : "false"})));
+
+        // Opened anew: libgit2 keeps the core.* settings it has read.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        for (const QString& name : names) {
+            const auto resolved = opened->resolveConflict(name.toStdString(), "resolved\n");
+            QVERIFY2(resolved.ok(), qPrintable(name + QStringLiteral(": ")
+                                               + QString::fromStdString(resolved.ok() ? std::string()
+                                                                                      : resolved.error().message())));
+        }
+        for (const QString& name : names)
+            QVERIFY2(readFile(repo.path(), name) == "resolved\n", qPrintable(name));
+        for (const QString& name : others)
+            QVERIFY2(readFile(repo.path(), name) == "changed\n", qPrintable(name));
+        QCOMPARE(list({"diff", "-z", "--name-only", "--diff-filter=U"}), QStringList());
+        QStringList sortedOthers = others;
+        sortedOthers.sort();
+        // In the work tree, only the other files' changes; the resolved
+        // files are staged and as staged.
+        QCOMPARE(list({"diff", "-z", "--name-only"}), sortedOthers);
+        QCOMPARE(list({"diff", "-z", "--name-only", "--cached"}), sortedNames);
+#endif
+    }
+
+    // libgit2 takes a path that is a pattern's literal spelling of
+    // another path (a\\, two backslashes, for a\ with one) as that path
+    // too. Resolving a\ would have written a\\ from the index as well,
+    // throwing away its changes in the work tree, or, where a\\ has a
+    // conflict of its own, deleted it, conflict markers and all, from
+    // the work tree and the index. It is refused instead, and nothing
+    // changes: neither file, nor either conflict.
+    void resolveConflictWritesNoOtherPath_data() {
+        QTest::addColumn<bool>("bothConflicted");
+        QTest::newRow("changed") << false;
+        QTest::newRow("conflicted") << true;
+    }
+
+    void resolveConflictWritesNoOtherPath() {
+#ifdef Q_OS_WIN
+        QSKIP("Windows file names have no backslash");
+#else
+        QFETCH(bool, bothConflicted);
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        const QString one = QStringLiteral("a\\");
+        const QString two = QStringLiteral("a\\\\");
+        const auto commitBoth = [&](const QByteArray& text, const QByteArray& other,
+                                    const char* message) {
+            repo.writeFile(one, text);
+            repo.writeFile(two, other);
+            return succeeded(git.run({"add", "-A"}))
+                && succeeded(git.run({"commit", "-q", "-m", message}));
+        };
+        QVERIFY(commitBoth("base\n", "other\n", "base"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(commitBoth("side\n", bothConflicted ? "other side\n" : "other\n", "side"));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(commitBoth("main\n", bothConflicted ? "other main\n" : "other\n", "main"));
+        QVERIFY(!succeeded(git.run({"merge", "-q", "side"})));
+        if (!bothConflicted)
+            repo.writeFile(two, "changed\n");
+        const QByteArray markers = readFile(repo.path(), one);
+        const QByteArray otherBefore = readFile(repo.path(), two);
+        const QString indexBefore = output(git.run({"ls-files", "-s"}));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto resolved = opened->resolveConflict(one.toStdString(), "resolved\n");
+        QCOMPARE(readFile(repo.path(), two), otherBefore);
+        QCOMPARE(output(git.run({"ls-files", "-s"})), indexBefore);
+        QVERIFY(!resolved.ok());
+        QCOMPARE(QString::fromStdString(resolved.error().message()),
+                 QStringLiteral("a\\ was not resolved: writing it would also have written a\\\\."));
+        QCOMPARE(readFile(repo.path(), one), markers);
+        const auto conflicts = opened->conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, bothConflicted ? 2 : 1);
+#endif
+    }
+
+    // merge.conflictstyle with no value, added while a conflict is open:
+    // the checkout that writes a resolution read it, and a system
+    // libgit2 crashed (the bundled one fails). Refused first, as the
+    // other checkouts are, and the conflict stays as it was.
+    void resolveConflictRefusesAValuelessConflictStyle() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(repo.writeAndCommit("a.txt", "side\n", "side").ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        QVERIFY(repo.writeAndCommit("a.txt", "main\n", "main").ok());
+        QVERIFY(!succeeded(git.run({"merge", "-q", "side"})));
+        const QByteArray markers = readFile(repo.path(), "a.txt");
+        appendConfig(repo.path(), "[merge]\n\tconflictstyle\n");
+        if (QTest::currentTestFailed())
+            return;
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto resolved = opened->resolveConflict("a.txt", "resolved\n");
+        QVERIFY(!resolved.ok());
+        QCOMPARE(QString::fromStdString(resolved.error().message()),
+                 QStringLiteral("missing value for 'merge.conflictstyle'"));
+        QCOMPARE(readFile(repo.path(), "a.txt"), markers);
+        const auto conflicts = opened->conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
     }
 
     void commitWhileARebaseIsStoppedKeepsTheRebase() {

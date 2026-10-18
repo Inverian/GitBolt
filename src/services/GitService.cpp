@@ -468,24 +468,15 @@ bool GitService::resolveConflicts(
     }
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        const QString workdir =
-            QString::fromStdString(repo_->workdir());
         for (const auto& [path, content] : resolutions) {
-            QFile f(QDir(workdir).filePath(path));
-            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                emit operationFailed(
-                    QStringLiteral("resolve conflicts"),
-                    tr("Could not write %1: %2")
-                        .arg(path, f.errorString()));
-                continue;
-            }
-            f.write(content.toUtf8());
-            f.close();
-
-            // Staging a conflicted path collapses its conflict
-            // entries to a normal stage-0 entry — same as
-            // `git add` during manual resolution.
-            auto res = repo_->stageFile(path.toStdString());
+            // Staged first and then written from the index, rather than
+            // written and then staged: the work tree's path can be a
+            // symbolic link (a conflict on a link leaves one side's
+            // there), and writing the resolution to it wrote to wherever
+            // it pointed, outside the work tree too, while staging it
+            // kept the link. See Repository::resolveConflict.
+            auto res = repo_->resolveConflict(path.toStdString(),
+                                              content.toUtf8().toStdString());
             if (!res)
                 emit operationFailed(
                     QStringLiteral("resolve conflicts"),

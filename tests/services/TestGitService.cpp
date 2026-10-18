@@ -76,6 +76,9 @@
 //     deletes a branch of such a name, and the toolbar's Push publishes
 //     a branch a tag shares its name with,
 //   - a conflicted merge is aborted off the GUI thread,
+//   - the resolver's results are staged and then written from the
+//     index: a symbolic link's conflict to a side's link alone, never
+//     through the link, and a text conflict as it always was,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
 //     leaves out (.git, node_modules, build, …),
@@ -273,6 +276,30 @@ bool writeHook(const QString& dir, const char* name, const QByteArray& body) {
     hook.close();
     return hook.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
 }
+
+// A file's bytes, or "<missing>".
+QByteArray fileBytes(const QString& path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArrayLiteral("<missing>");
+}
+
+#ifndef Q_OS_WIN
+// Makes the work tree's `path` a symbolic link to `target` and stages
+// it, as a link.
+bool stageLink(gitbolt::test::TestRepo& repo, const QString& path, const QString& target) {
+    const QString link = QDir(repo.path()).filePath(path);
+    QFile::remove(link);
+    return QFile::link(target, link) && repo.stageFile(path).ok();
+}
+
+// Where the symbolic link `path` points, as the link has it (QFileInfo
+// makes it absolute), or "" when `path` is no link.
+QString linkTarget(const QString& path) {
+    char target[4096];
+    const ssize_t size = ::readlink(QFile::encodeName(path).constData(), target, sizeof target);
+    return size < 0 ? QString() : QFile::decodeName(QByteArray(target, size));
+}
+#endif
 
 } // namespace
 
@@ -4259,6 +4286,195 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+    }
+
+    // A conflict on a symbolic link, which git leaves in the work tree as
+    // one side's link: here HEAD's, pointing at a file outside the
+    // repository. The resolver wrote its result to the work tree's path,
+    // and so through the link into that file, and staging the path then
+    // kept the link: the file was overwritten and the resolution lost.
+    // The resolver is told the conflict is a link's (its sides' modes).
+    // Text that is neither side is refused now, changing nothing, and
+    // the side picked is staged and written as the link it is.
+    void resolvingALinkConflictNeverWritesThroughTheLink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath(QStringLiteral("MARKER"));
+        {
+            QFile file(marker);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("original marker\n");
+        }
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("b")));
+        QVERIFY(repo.commit(QStringLiteral("link to b")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), marker));
+        QVERIFY(repo.commit(QStringLiteral("link out")).ok());
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        const QString link = QDir(repo.path()).filePath(QStringLiteral("link"));
+        QCOMPARE(linkTarget(link), marker);
+
+        GitService svc;
+        SignalLog log(svc);
+        QObject receiver;
+        std::vector<gitbolt::git::MergeConflictEntry> conflicts;
+        QObject::connect(&svc, &GitService::conflictsReady, &receiver,
+                         [&](std::vector<gitbolt::git::MergeConflictEntry> entries) {
+            conflicts = std::move(entries);
+        });
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.refreshConflicts();
+        QVERIFY(QTest::qWaitFor([&] { return !conflicts.empty(); }, 10000));
+        QCOMPARE(conflicts.size(), size_t(1));
+        QVERIFY(conflicts[0].isSymlink());
+        QCOMPARE(conflicts[0].oursMode, 0120000u);
+        QCOMPARE(conflicts[0].theirsMode, 0120000u);
+        QCOMPARE(QString::fromStdString(conflicts[0].oursContent), marker);
+        QCOMPARE(QString::fromStdString(conflicts[0].theirsContent), QStringLiteral("b"));
+
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), QStringLiteral("edited\n")}}));
+        QVERIFY2(log.contains(QStringLiteral(
+                     "operationFailed(resolve conflicts: link is a symbolic link: "
+                     "accept Ours or Theirs for it, as they are.)")),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(linkTarget(link), marker);
+        QCOMPARE(output(work.run({"ls-files", "-u", "--", "link"})).count(QLatin1Char('\n')), 2);
+
+        // Accept Theirs.
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), QStringLiteral("b")}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink")
+                     .arg(output(work.run({"rev-parse", "side:link"}))));
+        QCOMPARE(linkTarget(link), QStringLiteral("b"));
+        QCOMPARE(output(work.run({"status", "--porcelain", "--", "link"})),
+                 QStringLiteral("M  link"));
+#endif
+    }
+
+    // The same in a rebase, which leaves the upstream's link (ours: the
+    // commit the rebase builds on) in the work tree. Mark All Resolved
+    // takes ours for a conflict nobody looked at: it is staged as the
+    // link it is, and the file it points to stays as it was.
+    void resolvingALinkConflictInARebaseKeepsOursAsALink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath(QStringLiteral("MARKER"));
+        {
+            QFile file(marker);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("original marker\n");
+        }
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        const QString upstream = output(work.run({"branch", "--show-current"}));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "topic"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("b")));
+        QVERIFY(repo.commit(QStringLiteral("link to b")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", upstream.toStdString()})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), marker));
+        QVERIFY(repo.commit(QStringLiteral("link out")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "topic"})));
+        QVERIFY(!succeeded(work.run({"rebase", upstream.toStdString()})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
+        const QString link = QDir(repo.path()).filePath(QStringLiteral("link"));
+        QCOMPARE(linkTarget(link), marker);
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), marker}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink")
+                     .arg(output(work.run({"rev-parse", "HEAD:link"}))));
+        QCOMPARE(linkTarget(link), marker);
+        QCOMPARE(output(work.run({"status", "--porcelain", "--", "link"})), QString());
+#endif
+    }
+
+    // A text conflict resolves as it always has: the result is the work
+    // tree's file and the index's, the conflict is gone (kept for
+    // resolve-undo, as `git add` keeps it), and an executable is still
+    // one. Each is now staged first and then written from the index.
+    void resolvingATextConflictWritesAndStagesTheResult() {
+        const IsolatedGitConfig config;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        // Git for Windows' system config has core.autocrlf on, and the
+        // checks compare bytes.
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        const auto commitBoth = [&](const QByteArray& text, const QString& message) {
+            repo.writeFile(QStringLiteral("a.txt"), text + '\n');
+            repo.writeFile(QStringLiteral("run.sh"), "#!/bin/sh\necho " + text + '\n');
+            // Executable in the work tree, and in the index where git
+            // ignores the work tree's modes (core.fileMode off, Windows).
+            return QFile::setPermissions(repo.path() + QStringLiteral("/run.sh"),
+                                         QFile::permissions(repo.path() + QStringLiteral("/run.sh"))
+                                             | QFile::ExeOwner)
+                && succeeded(work.run({"add", "a.txt", "run.sh"}))
+                && succeeded(work.run({"update-index", "--chmod=+x", "run.sh"}))
+                && repo.commit(message).ok();
+        };
+        QVERIFY(commitBoth("base", QStringLiteral("base")));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(commitBoth("side", QStringLiteral("side")));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(commitBoth("main", QStringLiteral("main")));
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        QCOMPARE(output(work.run({"diff", "--name-only", "--diff-filter=U"})),
+                 QStringLiteral("a.txt\nrun.sh"));
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        QVERIFY(svc.resolveConflicts(
+            {{QStringLiteral("a.txt"), QStringLiteral("resolved\n")},
+             {QStringLiteral("run.sh"), QStringLiteral("#!/bin/sh\necho resolved\n")}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+
+        QCOMPARE(fileBytes(repo.path() + QStringLiteral("/a.txt")), QByteArrayLiteral("resolved\n"));
+        QCOMPARE(fileBytes(repo.path() + QStringLiteral("/run.sh")),
+                 QByteArrayLiteral("#!/bin/sh\necho resolved\n"));
+        QCOMPARE(output(work.run({"show", ":a.txt"})), QStringLiteral("resolved"));
+        QCOMPARE(output(work.run({"show", ":run.sh"})), QStringLiteral("#!/bin/sh\necho resolved"));
+        QCOMPARE(output(work.run({"ls-files", "-u"})), QString());
+        const QStringList staged = output(work.run({"ls-files", "-s", "--", "a.txt", "run.sh"}))
+                                       .split(QLatin1Char('\n'));
+        QCOMPARE(staged.size(), 2);
+        QVERIFY2(staged[0].startsWith(QLatin1String("100644 ")), qPrintable(staged[0]));
+        QVERIFY2(staged[1].startsWith(QLatin1String("100755 ")), qPrintable(staged[1]));
+        // Staged, and the work tree the same.
+        QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("M  a.txt\nM  run.sh"));
+        QVERIFY(!output(work.run({"ls-files", "--resolve-undo"})).isEmpty());
+#ifndef Q_OS_WIN
+        QVERIFY(QFileInfo(repo.path() + QStringLiteral("/run.sh")).isExecutable());
+#endif
     }
 
     // The cherry-pick worker asks for its refreshes while it still

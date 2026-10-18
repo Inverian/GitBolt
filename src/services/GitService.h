@@ -181,9 +181,11 @@ public:
     /// source: merge, cherry-pick, rebase, revert.
     void refreshConflicts();
 
-    /// Write each (repo-relative path, resolved content) pair to
-    /// the working tree and stage it, collapsing the conflict
-    /// entries. Synchronous (file writes + index adds are fast);
+    /// Stage each (repo-relative path, resolved content) pair,
+    /// collapsing the conflict entries, and write the file from the
+    /// index (Repository::resolveConflict): never through a symbolic
+    /// link, and a link's conflict only to one side's link as it is.
+    /// Synchronous (index adds + one-file checkouts are fast);
     /// failures surface per-file via operationFailed. Ends with a
     /// status refresh. The caller then concludes the merge with a
     /// normal commit — git commit (commitChanges) picks up MERGE_HEAD

@@ -193,6 +193,11 @@ set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 gitbolt_add_test(test_diff_colors widgets/TestDiffColors.cpp)
 target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf gitbolt_ui)
 set_property(TEST test_diff_colors APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The conflict resolver's panes: a conflict on a symbolic link says so,
+# and is resolved by accepting a side. Off screen.
+gitbolt_add_test(test_merge_conflict_widget widgets/TestMergeConflictWidget.cpp)
+target_link_libraries(test_merge_conflict_widget PRIVATE gitbolt_widgets)
+set_property(TEST test_merge_conflict_widget APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # dialogs/ — Settings › General › Usage statistics and the
 # SettingsService keys behind it. Off screen like test_rebase_widgets:
@@ -236,6 +241,12 @@ set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Repository > Edit .gitignore, .gitattributes and .mailmap: a symbolic
+# link there (one a repository committed) is neither read nor written
+# through. Off screen; it answers the editor and the message boxes.
+gitbolt_add_test(test_edit_config_file ui/TestEditConfigFile.cpp)
+target_link_libraries(test_edit_config_file PRIVATE gitbolt_ui)
+set_property(TEST test_edit_config_file APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # A real MainWindow while git works on its repository: the actions,
 # the toolbar's branch switch and the sidebar off during a commit's
 # hooks; Checkout as local branch and a submodule's Update as local ops;

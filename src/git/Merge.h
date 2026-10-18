@@ -2,6 +2,7 @@
 
 #include "git/ObjectId.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -40,6 +41,21 @@ struct MergeConflictEntry {
     ObjectId ancestorId;
     ObjectId oursId;
     ObjectId theirsId;
+    // Each side's file mode as git records it (0100644, 0100755,
+    // 0120000 for a symbolic link, 0160000 for a submodule), 0 for a
+    // side that doesn't exist.
+    uint32_t ancestorMode = 0;
+    uint32_t oursMode = 0;
+    uint32_t theirsMode = 0;
+
+    static constexpr uint32_t kSymlinkMode = 0120000;
+
+    /// Ours or theirs is a symbolic link, whose content is the path it
+    /// points to. Such a conflict is resolved by picking a side, never
+    /// by editing: see Repository::resolveConflict.
+    bool isSymlink() const {
+        return oursMode == kSymlinkMode || theirsMode == kSymlinkMode;
+    }
 };
 
 struct MergeResult {
