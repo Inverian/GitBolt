@@ -17,6 +17,7 @@ class QSortFilterProxyModel;
 class QSplitter;
 class QStandardItem;
 class QStandardItemModel;
+class QTimer;
 class QTreeView;
 class QModelIndex;
 
@@ -94,6 +95,8 @@ private:
     void setupUi();
     void applyColors();
     void rebuildTree();
+    /// Empties the tree and says it's loading.
+    void showLoading();
     /// The walk of currentCommit_ is in, sorted: fills the tree.
     void showTree(const std::vector<git::TreeEntry>& entries);
     void showBlobPreview(const git::ObjectId& blobId, const QString& path,
@@ -108,6 +111,15 @@ private:
     // superseded before its turn doesn't run.
     std::shared_ptr<std::atomic<quint64>> walkToken_ =
         std::make_shared<std::atomic<quint64>>(0);
+    // Until a walk is in, the tree on show (the previous commit's) stays,
+    // so a walk in within milliseconds, as most are, shows in one change.
+    // Emptied at once, the tree painted empty, under "Loading file tree…",
+    // on every selection, and flickered as the user arrowed through the
+    // log. That lasts kLoadingDelayMs at most, counted from the first
+    // walk asked for that is still out, so arrowing on through slow ones
+    // can't keep a commit's tree up for another: then it is emptied and
+    // says it's loading.
+    QTimer* loadingTimer_ = nullptr;
 
     QSplitter*             splitter_     = nullptr;
     QLineEdit*             filterInput_  = nullptr;

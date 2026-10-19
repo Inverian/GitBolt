@@ -48,8 +48,12 @@
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QTabWidget>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextCursor>
 #include <QTextDocument>
+#include <QTextTable>
+#include <QTimer>
 #include <QTreeView>
 #include <QTreeWidget>
 #include <QUrl>
@@ -106,10 +110,10 @@ QString emailLink(const QString& address)
 
 // The Commit tab avatar's colour: deterministic from a hash of the
 // author's email, so the same author always gets the same colour
-// across commits.
-QString avatarColor(const std::string& email)
+// across commits. `key` is the address as shown, cut to
+// util::kMaxLineChars already.
+QString avatarColor(const QString& key)
 {
-    const QString key = QString::fromStdString(email);
     if (key.isEmpty())
         return QStringLiteral("#888");
     // Deliberately the low 32 bits of the size_t hash; widening h
@@ -118,12 +122,42 @@ QString avatarColor(const std::string& email)
     const int hue = static_cast<int>(h % 360u);
     return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
 }
+
+// How long the Diff tab and the Stats row wait on the selected commit's
+// diff before they say it's on its way (diffLoadingTimer_), and so the
+// longest the previous commit's files stay up: long enough for an
+// ordinary diff, which takes milliseconds, and short enough that they
+// are hardly seen. The File Tree waits as long for its walk.
+constexpr int kDiffLoadingDelayMs = 150;
+
+// The Commit tab's Stats value: the cell beside the "Stats:" label.
+// Only the label column is looked in, as the value cells hold what the
+// commit says, and an author could be named "Stats:".
+QTextTableCell statsCell(QTextDocument* document)
+{
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        if (block.text() != QLatin1String("Stats:"))
+            continue;
+        const QTextCursor at(block);
+        QTextTable* table = at.currentTable();
+        if (!table || table->columns() < 2)
+            continue;
+        const QTextTableCell label = table->cellAt(at);
+        if (label.column() == 0)
+            return table->cellAt(label.row(), 1);
+    }
+    return {};
+}
 } // namespace
 
 RepositoryView::RepositoryView(QWidget* parent)
     : QWidget(parent)
 {
     setupUi();
+    diffLoadingTimer_ = new QTimer(this);
+    diffLoadingTimer_->setSingleShot(true);
+    diffLoadingTimer_->setInterval(kDiffLoadingDelayMs);
+    connect(diffLoadingTimer_, &QTimer::timeout, this, &RepositoryView::showDiffLoading);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,6 +265,7 @@ QWidget* RepositoryView::buildCommitInfoTab()
     h->setSpacing(12);
 
     avatarLabel_ = new QLabel(commitInfoTopRow_);
+    avatarLabel_->setObjectName(QStringLiteral("commit.avatar"));
     // Initial size — overridden on first commit selection by
     // fitCommitInfoTopRow to match the actual metadata height.
     avatarLabel_->setFixedSize(120, 120);
@@ -878,8 +913,9 @@ void RepositoryView::resetInspectorTabs()
     // Its diff, the same.
     ++containsQueryToken_;
     ++*diffQueryToken_;
+    diffLoadingTimer_->stop();
+    diffLoading_ = false;
     shownStats_.reset();
-    statsPendingHtml_.clear();
     shownCommit_.reset();
     if (avatarLabel_) {
         avatarLabel_->clear();
@@ -1044,7 +1080,8 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
     if (commitHash.isEmpty()) {
         ++containsQueryToken_;      // a query out for it is stale now
         ++*diffQueryToken_;         // and its diff
-        statsPendingHtml_.clear();
+        diffLoadingTimer_->stop();
+        diffLoading_ = false;
         shownCommit_.reset();
         if (avatarLabel_) {
             avatarLabel_->clear();
@@ -1130,8 +1167,9 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // same reason: git takes an ident of any length, and an author name
     // of one line of megabytes froze the window just as long.
     const QString authorName = util::elided(commit.author.name);
+    const QString authorEmail = util::elided(commit.author.email);
     const QString name    = authorName.toHtmlEscaped();
-    const QString email   = emailLink(util::elided(commit.author.email));  // the mailto: link
+    const QString email   = emailLink(authorEmail);  // the mailto: link
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
 
     // Committer is shown as a separate row only if it differs from
@@ -1157,6 +1195,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         return first + parts.last().left(1).toUpper();
     };
     const QString initials = initialsFor(authorName);
+    avatarColor_ = avatarColor(authorEmail);
 
     // Avatar text is set up-front; the size + stylesheet are
     // applied AFTER the metadata HTML is laid out so we can
@@ -1253,21 +1292,18 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
 
     // Diff stats — files-changed count + total +N/-M lines, from the
     // commit's diff. That comes from a worker (showCommitDiff asks for
-    // it, for the Diff tab too): until it's in, the row says so, and
-    // showDiffStats puts the numbers in its place. A commit shown again
-    // (a theme switch) whose diff is in already gets them at once.
+    // it, for the Diff tab too), so the row goes in with its value
+    // blank, a no-break space whose font the value takes (setStatsRow).
+    // The value is written in below for a commit shown again (a theme
+    // switch) whose diff is in already, else as the diff comes in, or
+    // as "(counting…)" if it is slow to (diffLoadingTimer_). In place:
+    // setting the whole HTML again for it put the pane back at its top
+    // and dropped any text selected in it, which the user had had the
+    // time to do by the time a slow diff came in.
+    const bool statsKnown = shownStats_ && shownStats_->commit == commit.id;
     QString statsRow;
-    statsPendingHtml_.clear();
-    statsPlaceholder_.clear();
-    if (shownStats_ && shownStats_->commit == commit.id) {
-        statsRow = statsRowHtml(*shownStats_);
-    } else if (gitService_ && gitService_->isOpen()) {
-        statsPlaceholder_ = QStringLiteral(
-            "<tr><td class='lbl'>Stats:</td>"
-            "<td class='val'><i style='color:%1;'>(counting…)</i></td></tr>")
-            .arg(mutedColor);
-        statsRow = statsPlaceholder_;
-    }
+    if (statsKnown || (gitService_ && gitService_->isOpen()))
+        statsRow = QStringLiteral("<tr><td class='lbl'>Stats:</td><td class='val'>&nbsp;</td></tr>");
 
     // Commit message body (everything after the summary line), cut
     // where a line or the whole of it is too long to lay out
@@ -1390,8 +1426,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         .arg(leftRows, rightRows, labelColor, linkColor);
 
     detailBrowser_->setHtml(metadataHtml);
-    if (!statsPlaceholder_.isEmpty())
-        statsPendingHtml_ = metadataHtml;
+    if (statsKnown)
+        setStatsRow(&*shownStats_);
+    else if (!statsRow.isEmpty() && diffLoading_)
+        setStatsRow(nullptr);
 
     // ----- Bottom browser: summary, message body, contained-in --
     const QString messageHtml = QStringLiteral(R"HTML(
@@ -1551,7 +1589,7 @@ void RepositoryView::fitCommitInfoTopRow()
         "  color: white;"
         "  font-size: %2px;"
         "  font-weight: bold;"
-        "}").arg(avatarColor(shownCommit_->author.email)).arg(fontPx);
+        "}").arg(avatarColor_).arg(fontPx);
     // Only when it changes: this runs on every re-wrap, and setting a
     // style sheet re-polishes the label.
     if (avatarLabel_->styleSheet() != avatarStyle)
@@ -1560,23 +1598,19 @@ void RepositoryView::fitCommitInfoTopRow()
 
 void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
 {
-    // Drop any previous click handler — each call to showCommitDiff
-    // captures a fresh DiffResult shared_ptr in its lambda, and we
-    // don't want stale captures firing after the model is cleared.
-    if (changedFilesTree_ && changedFilesTree_->selectionModel()) {
-        disconnect(changedFilesTree_->selectionModel(),
-                   &QItemSelectionModel::currentChanged,
-                   this, nullptr);
-    }
-
-    if (changedFilesModel_)
-        changedFilesModel_->clear();
-    diffWidget_->clear();
-
     // A reply still out for the commit selected before is stale now.
     const quint64 token = ++*diffQueryToken_;
-    if (!gitService_ || !gitService_->isOpen())
+    if (!gitService_ || !gitService_->isOpen()) {
+        diffLoadingTimer_->stop();
+        diffLoading_ = false;
+        clearDiffFiles();
         return;
+    }
+
+    // The previous commit's files stay until this one's are in, or the
+    // timer runs out: see diffLoadingTimer_.
+    if (!diffLoading_ && !diffLoadingTimer_->isActive())
+        diffLoadingTimer_->start();
 
     // On the service's read thread: see diffQueryToken_. The Stats row
     // waits for the same diff, so it's read once for both.
@@ -1592,10 +1626,37 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
         [this, commitId, token](std::shared_ptr<git::DiffResult> diff) {
             if (token != diffQueryToken_->load())
                 return;           // for a commit no longer selected
+            diffLoadingTimer_->stop();
+            diffLoading_ = false;
             showDiffStats(commitId, diff.get());
+            clearDiffFiles();
             if (diff)
                 showDiffFiles(std::move(diff));
         });
+}
+
+void RepositoryView::clearDiffFiles()
+{
+    // Drop any previous click handler — each call to showDiffFiles
+    // captures a fresh DiffResult shared_ptr in its lambda, and we
+    // don't want stale captures firing after the model is cleared.
+    if (changedFilesTree_ && changedFilesTree_->selectionModel()) {
+        disconnect(changedFilesTree_->selectionModel(),
+                   &QItemSelectionModel::currentChanged,
+                   this, nullptr);
+    }
+
+    if (changedFilesModel_)
+        changedFilesModel_->clear();
+    diffWidget_->clear();
+}
+
+void RepositoryView::showDiffLoading()
+{
+    diffLoading_ = true;
+    clearDiffFiles();
+    if (shownCommit_ && !(shownStats_ && shownStats_->commit == shownCommit_->id))
+        setStatsRow(nullptr);
 }
 
 void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff)
@@ -1609,35 +1670,52 @@ void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::Dif
         stats.deletions = diff->totalDeletions;
     }
     shownStats_ = stats;
-    if (!shownCommit_ || shownCommit_->id != commitId || statsPendingHtml_.isEmpty()
-        || !detailBrowser_)
+    if (!shownCommit_ || shownCommit_->id != commitId || !detailBrowser_)
         return;
-    QString html = statsPendingHtml_;
-    html.replace(statsPlaceholder_, statsRowHtml(stats));
-    statsPendingHtml_.clear();
-    detailBrowser_->setHtml(html);
+    setStatsRow(&stats);
 }
 
-QString RepositoryView::statsRowHtml(const DiffStats& stats)
+void RepositoryView::setStatsRow(const DiffStats* stats)
 {
-    if (!stats.ok)
-        return {};
+    const QTextTableCell cell = statsCell(detailBrowser_->document());
+    if (!cell.isValid())
+        return;
+    QTextCursor value = cell.firstCursorPosition();
+    value.setPosition(cell.lastCursorPosition().position(), QTextCursor::KeepAnchor);
+    if (stats && !stats->ok) {
+        value.currentTable()->removeRows(cell.row(), 1);
+        return;
+    }
+    // In the font the HTML gave the cell: that of the character in it,
+    // without the italics and colour of "(counting…)".
+    QTextCharFormat plain = cell.firstCursorPosition().charFormat();
+    plain.setFontItalic(false);
+    plain.clearForeground();
     // As showCommitDetails picks its colours (readable on either theme).
     const QPalette app = QApplication::palette();
     const bool dark = app.color(QPalette::WindowText).lightness()
                       > app.color(QPalette::Window).lightness();
-    const QString addedColor   = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
-    const QString deletedColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
-    return QStringLiteral(
-        "<tr><td class='lbl'>Stats:</td>"
-        "<td class='val'>%1 file%2 changed, "
-        "<span style='color:%5;'>+%3</span> "
-        "<span style='color:%6;'>−%4</span></td></tr>")
-        .arg(stats.files)
-        .arg(stats.files == 1 ? QString{} : QStringLiteral("s"))
-        .arg(stats.additions)
-        .arg(stats.deletions)
-        .arg(addedColor, deletedColor);
+    value.beginEditBlock();
+    value.removeSelectedText();
+    if (!stats) {
+        QTextCharFormat muted = plain;
+        muted.setFontItalic(true);
+        muted.setForeground(dark ? QColor(0x9e, 0x9e, 0x9e) : QColor(0x6a, 0x6a, 0x6a));
+        value.insertText(QStringLiteral("(counting…)"), muted);
+    } else {
+        QTextCharFormat added = plain;
+        added.setForeground(dark ? QColor(0x3f, 0xb9, 0x50) : QColor(0x1e, 0x7b, 0x34));
+        QTextCharFormat deleted = plain;
+        deleted.setForeground(dark ? QColor(0xff, 0x7b, 0x72) : QColor(0xcf, 0x22, 0x2e));
+        value.insertText(QStringLiteral("%1 file%2 changed, ")
+                             .arg(stats->files)
+                             .arg(stats->files == 1 ? QString{} : QStringLiteral("s")),
+                         plain);
+        value.insertText(QStringLiteral("+%1").arg(stats->additions), added);
+        value.insertText(QStringLiteral(" "), plain);
+        value.insertText(QStringLiteral("−%1").arg(stats->deletions), deleted);
+    }
+    value.endEditBlock();
 }
 
 void RepositoryView::showDiffFiles(std::shared_ptr<git::DiffResult> diff)

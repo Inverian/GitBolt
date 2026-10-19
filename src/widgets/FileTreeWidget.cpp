@@ -24,6 +24,7 @@
 #include <QStandardItemModel>
 #include <QTextBlock>
 #include <QTextCursor>
+#include <QTimer>
 #include <QTreeView>
 #include <QVBoxLayout>
 
@@ -43,6 +44,11 @@ constexpr int kSizeRole    = Qt::UserRole + 4;
 // certainly binary or generated and the user can't usefully scroll
 // through it in a small inspector pane anyway.
 constexpr quint64 kMaxPreviewBytes = 1 * 1024 * 1024;
+
+// How long the tree waits on a walk before it says it's loading
+// (loadingTimer_): as long as the Diff tab waits on its diff
+// (RepositoryView's kDiffLoadingDelayMs).
+constexpr int kLoadingDelayMs = 150;
 
 // Same single-line-height fix as DiffViewerWidget — without this,
 // the file preview pane shows lines with QPlainTextEdit's default
@@ -126,6 +132,10 @@ FileTreeWidget::FileTreeWidget(QWidget* parent)
 {
     setupUi();
     applyColors();
+    loadingTimer_ = new QTimer(this);
+    loadingTimer_->setSingleShot(true);
+    loadingTimer_->setInterval(kLoadingDelayMs);
+    connect(loadingTimer_, &QTimer::timeout, this, &FileTreeWidget::showLoading);
 }
 
 void FileTreeWidget::changeEvent(QEvent* event)
@@ -281,6 +291,7 @@ void FileTreeWidget::setCommit(const git::ObjectId& commitId)
 void FileTreeWidget::clear()
 {
     ++*walkToken_;      // a walk still on its way is for nothing now
+    loadingTimer_->stop();
     model_->clear();
     preview_->clear();
     previewHeader_->setText(tr("Select a file to preview its contents"));
@@ -293,20 +304,25 @@ void FileTreeWidget::clear()
 
 void FileTreeWidget::rebuildTree()
 {
-    model_->clear();
-    preview_->clear();
-    previewHeader_->setText(tr("Loading file tree…"));
-
     // A walk still on its way for the commit before is for nothing now.
     const quint64 token = ++*walkToken_;
-    if (!svc_ || currentCommit_.isZero())
+    if (!svc_ || currentCommit_.isZero()) {
+        loadingTimer_->stop();
+        showLoading();
         return;
+    }
     if (!svc_->isOpen()) {
+        loadingTimer_->stop();
+        showLoading();
         previewHeader_->setText(tr("Failed to load tree at commit %1")
                                     .arg(QString::fromStdString(
                                         currentCommit_.toShortHex())));
         return;
     }
+    // The tree on show stays until this one's is in, or the timer runs
+    // out: see loadingTimer_.
+    if (!loadingTimer_->isActive())
+        loadingTimer_->start();
 
     // On the service's read thread (GitService::readAsync), under its
     // repo lock, as background refresh workers use the same libgit2
@@ -332,6 +348,9 @@ void FileTreeWidget::rebuildTree()
         [this, token](Walk walk) {
             if (token != walkToken_->load() || !walk)
                 return;                // for a commit no longer shown
+            loadingTimer_->stop();
+            model_->clear();
+            preview_->clear();
             if (!*walk) {
                 previewHeader_->setText(tr("Failed to load tree at commit %1")
                                             .arg(QString::fromStdString(
@@ -340,6 +359,13 @@ void FileTreeWidget::rebuildTree()
             }
             showTree(**walk);
         });
+}
+
+void FileTreeWidget::showLoading()
+{
+    model_->clear();
+    preview_->clear();
+    previewHeader_->setText(tr("Loading file tree…"));
 }
 
 void FileTreeWidget::showTree(const std::vector<git::TreeEntry>& entries)

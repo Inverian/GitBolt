@@ -12,8 +12,20 @@
 //     the repository from every refresh meanwhile. Here another thread
 //     holds the repository for a few seconds, as a long read or refresh
 //     does: the selection returns at once, the Stats row says
-//     "(counting…)", and the numbers, the changed files and the tree
-//     come in once the repository is free;
+//     "(counting…)" after a moment, and the numbers, the changed files
+//     and the tree come in once the repository is free;
+//   - a diff and a tree read as quickly as most are show without
+//     "(counting…)", an empty Diff tab or "Loading file tree…" first:
+//     until they're in, the Stats value is blank and the previous
+//     commit's files and tree stay. Cleared at once, every selection
+//     painted those, and arrowing through the log flickered. A read that
+//     takes longer says so after a moment;
+//   - the Stats row coming in late leaves the details pane scrolled as
+//     it was and the text selected in it selected: setting the pane's
+//     HTML again for it put it back at its top, the selection gone;
+//   - the avatar's colour comes from the author's email as shown, cut
+//     to util::kMaxLineChars: the whole of it was hashed on every
+//     re-wrap of the pane, tens of MB for a hostile one;
 //   - a diff for a commit selected before comes to nothing;
 //   - a subject of one line of 4 MB shows cut, with a note that says
 //     so, in a moment: the browser laid it out whole, superlinearly,
@@ -35,12 +47,17 @@
 #include <QLabel>
 #include <QListView>
 #include <QListWidget>
+#include <QRegularExpression>
+#include <QScrollBar>
 #include <QSettings>
+#include <QTabWidget>
 #include <QTableView>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
+#include <QTextCursor>
+#include <QTextDocument>
 #include <QTreeView>
 
 #include "../TestRepoHelper.h"
@@ -60,6 +77,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -140,6 +158,45 @@ QString hex(const gitbolt::git::ObjectId& id) {
     return QString::fromStdString(id.toHex());
 }
 
+// The details pane's Stats value, as it reads ("" with no Stats row).
+QString statsValue(const QTextBrowser* details) {
+    const QString text = details->toPlainText();
+    const QString label = QStringLiteral("Stats:\n");
+    const qsizetype at = text.indexOf(label);
+    if (at < 0)
+        return {};
+    const qsizetype from = at + label.size();
+    return text.mid(from, text.indexOf(QLatin1Char('\n'), from) - from);
+}
+
+// " word word …": a value that wraps over a line or more.
+QString words(int count) {
+    QString text;
+    for (int i = 0; i < count; ++i)
+        text += QStringLiteral(" word");
+    return text;
+}
+
+// Calls `painted` each time one of `widgets` paints.
+class PaintLog : public QObject {
+public:
+    PaintLog(const QList<QWidget*>& widgets, std::function<void()> painted)
+        : painted_(std::move(painted)) {
+        for (QWidget* widget : widgets)
+            widget->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (event->type() == QEvent::Paint)
+            painted_();
+        return false;
+    }
+
+private:
+    std::function<void()> painted_;
+};
+
 } // namespace
 
 class TestCommitDetails : public QObject {
@@ -185,11 +242,11 @@ private slots:
                      qPrintable(QStringLiteral("the selection took %1 ms").arg(timer.elapsed())));
             details = browserWith(view, QStringLiteral("Author:"));
             QVERIFY(details);
-            QVERIFY2(details->toPlainText().contains(QStringLiteral("(counting…)")),
-                     qPrintable(details->toPlainText()));
             QVERIFY(browserWith(view, QStringLiteral("Contained in")));
             QCOMPARE(diffFiles->model()->rowCount(), 0);
             QCOMPARE(fileTree->model()->rowCount(), 0);
+            QTRY_VERIFY2(details->toPlainText().contains(QStringLiteral("(counting…)")),
+                         qPrintable(details->toPlainText()));
             held.release();
         }
         QTRY_VERIFY2(details->toPlainText().contains(QStringLiteral("2 files changed")),
@@ -264,6 +321,207 @@ private slots:
         QCOMPARE(rows(diffFiles->model()).size(), 2);
         QVERIFY(!rows(diffFiles->model()).join(QLatin1Char('|')).contains(QStringLiteral("first.txt")));
         QTRY_VERIFY(details->toPlainText().contains(QStringLiteral("2 files changed")));
+    }
+
+    // The next commit's diff and tree, read as quickly as most are: on
+    // whichever tab is open, no "(counting…)", empty Diff tab or
+    // "Loading file tree…" is painted on the way to them. The Diff tab
+    // and the File Tree go from the previous commit's straight to this
+    // one's; the Commit tab shows this one's details at once, the Stats
+    // value blank until its numbers are in.
+    void aQuickDiffShowsWithoutAPlaceholder_data() {
+        QTest::addColumn<int>("tab");
+        QTest::newRow("Commit") << 0;
+        QTest::newRow("Diff") << 1;
+        QTest::newRow("File Tree") << 2;
+    }
+    void aQuickDiffShowsWithoutAPlaceholder() {
+        QFETCH(int, tab);
+        TestRepo repo;
+        auto first = repo.writeAndCommit(QStringLiteral("first.txt"), "1\n", QStringLiteral("first"));
+        QVERIFY(first.ok());
+        repo.writeFile(QStringLiteral("dir/second.txt"), "2\n");
+        repo.writeFile(QStringLiteral("third.txt"), "3\n");
+        QVERIFY(repo.stageAll().ok());
+        auto second = repo.commit(QStringLiteral("second"));
+        QVERIFY(second.ok());
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        model.setCommits({commitData(repo, *second), commitData(repo, *first)});
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* tabs = view.findChild<QTabWidget*>();
+        auto* diffFiles = view.findChild<QTreeView*>(QStringLiteral("diff.files"));
+        auto* fileTree = view.findChild<QTreeView*>(QStringLiteral("fileTree.view"));
+        auto* treeHeader = view.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
+        QVERIFY(tabs && diffFiles && fileTree && treeHeader);
+        tabs->setCurrentIndex(tab);
+
+        view.onCommitSelected(hex(*first));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        QTRY_COMPARE(statsValue(details), QStringLiteral("1 file changed, +1 −0"));
+        QTRY_COMPARE(rows(diffFiles->model()).size(), 1);
+        QTRY_COMPARE(rows(fileTree->model()).size(), 1);
+
+        // What the inspector shows, logged at every paint of the tab open
+        // from the next selection on.
+        const auto shows = [&] {
+            return QStringLiteral("Stats: %1 | Diff: %2 files | File Tree: %3 files, %4")
+                .arg(statsValue(details))
+                .arg(rows(diffFiles->model()).size())
+                .arg(rows(fileTree->model()).size())
+                .arg(treeHeader->text());
+        };
+        const auto placeholder = [](const QString& shown) {
+            return shown.contains(QStringLiteral("(counting…)"))
+                   || shown.contains(QStringLiteral(" 0 files"))
+                   || shown.contains(QStringLiteral("Loading file tree…"));
+        };
+        QStringList painted;
+        PaintLog log({details->viewport(), diffFiles->viewport(), fileTree->viewport()},
+                     [&] { painted << shows(); });
+
+        QElapsedTimer timer;
+        timer.start();
+        view.onCommitSelected(hex(*second));
+        // Until its diff and tree are in: its details, the Stats value
+        // blank, the first commit's files and tree.
+        QVERIFY(details->toPlainText().contains(hex(*second)));
+        QVERIFY2(!placeholder(shows()), qPrintable(shows()));
+        QCOMPARE(statsValue(details).trimmed(), QString());
+
+        QVERIFY2(QTest::qWaitFor([&] {
+                     return statsValue(details) == QStringLiteral("2 files changed, +2 −0")
+                            && rows(diffFiles->model()).size() == 3   // dir, second.txt, third.txt
+                            && rows(fileTree->model()).size() == 4;
+                 }, 5000),
+                 qPrintable(shows()));
+        const qint64 tookMs = timer.elapsed();
+        QTest::qWait(300);   // past the moment the view would say they're on their way
+        QVERIFY2(!placeholder(shows()), qPrintable(shows()));
+        QVERIFY(!painted.isEmpty());
+        // A diff or tree that took as long as the view waits before it says
+        // so shows that it's loading, as it should.
+        if (tookMs >= 140)
+            QSKIP(qPrintable(QStringLiteral("the diff and the tree took %1 ms to come in").arg(tookMs)));
+        for (const QString& shown : painted)
+            QVERIFY2(!placeholder(shown), qPrintable(painted.join(QLatin1Char('\n'))));
+    }
+
+    // A diff slow to come in: after a moment the Stats row says so, and
+    // the Diff tab and the File Tree empty. The row is written over in
+    // place as it changes, so the details pane, which the user has
+    // scrolled meanwhile, stays where it is, and the text selected in it
+    // (the commit's hash, to copy it) stays selected.
+    void aSlowDiffLeavesThePaneAsTheUserHasIt() {
+        TestRepo repo;
+        auto first = repo.writeAndCommit(QStringLiteral("first.txt"), "1\n", QStringLiteral("first"));
+        QVERIFY(first.ok());
+        repo.writeFile(QStringLiteral("dir/second.txt"), "2\n");
+        repo.writeFile(QStringLiteral("third.txt"), "3\n");
+        QVERIFY(repo.stageAll().ok());
+        QVERIFY(repo.commit(QStringLiteral("second")).ok());
+        // An author name over more lines than the pane holds at its
+        // tallest: it scrolls.
+        const auto second = repo.rewriteHeadIdents(
+            (QStringLiteral("Ada") + words(400)).toStdString() + " <ada@example.com>",
+            "Mallory <mallory@example.com>");
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        model.setCommits({commitData(repo, second), commitData(repo, *first)});
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* diffFiles = view.findChild<QTreeView*>(QStringLiteral("diff.files"));
+        auto* fileTree = view.findChild<QTreeView*>(QStringLiteral("fileTree.view"));
+        auto* treeHeader = view.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
+        QVERIFY(diffFiles && fileTree && treeHeader);
+
+        view.onCommitSelected(hex(*first));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        QTRY_COMPARE(statsValue(details), QStringLiteral("1 file changed, +1 −0"));
+        QTRY_COMPARE(rows(diffFiles->model()).size(), 1);
+        QTRY_COMPARE(rows(fileTree->model()).size(), 1);
+        QScrollBar* bar = details->verticalScrollBar();
+
+        int scrolled = 0;
+        {
+            RepoHeld held(svc.repoMutex(), 10000);
+            view.onCommitSelected(hex(second));
+            QCOMPARE(statsValue(details).trimmed(), QString());
+            QCOMPARE(rows(diffFiles->model()).size(), 1);
+            QCOMPARE(rows(fileTree->model()).size(), 1);
+
+            // The user selects the hash and scrolls to the pane's end.
+            QTRY_VERIFY(bar->isVisible());
+            const QTextCursor hash = details->document()->find(hex(second));
+            QVERIFY(!hash.isNull());
+            details->setTextCursor(hash);
+            bar->setValue(bar->maximum());
+            scrolled = bar->value();
+            QVERIFY(scrolled > 0);
+
+            QTRY_COMPARE(statsValue(details), QStringLiteral("(counting…)"));
+            QCOMPARE(rows(diffFiles->model()).size(), 0);
+            QTRY_COMPARE(treeHeader->text(), QStringLiteral("Loading file tree…"));
+            QCOMPARE(rows(fileTree->model()).size(), 0);
+            QCOMPARE(bar->value(), scrolled);
+            QCOMPARE(details->textCursor().selectedText(), hex(second));
+            held.release();
+        }
+        QTRY_COMPARE(statsValue(details), QStringLiteral("2 files changed, +2 −0"));
+        QCOMPARE(bar->value(), scrolled);
+        QCOMPARE(details->textCursor().selectedText(), hex(second));
+        QTRY_COMPARE(rows(diffFiles->model()).size(), 3);
+        QTRY_COMPARE(rows(fileTree->model()).size(), 4);
+    }
+
+    // Authors whose emails differ only past util::kMaxLineChars, where
+    // the pane cuts them: their avatars are the same colour.
+    void theAvatarColourComesFromTheEmailAsShown() {
+        const std::string start(gitbolt::util::kMaxLineChars, 'c');
+        std::vector<gitbolt::git::CommitData> commits;
+        for (const char* end : {"@a.example", "@b.example", "@c.example", "@d.example"}) {
+            gitbolt::git::CommitData commit;
+            commit.id = gitbolt::git::ObjectId::fromHex(
+                std::string(40, static_cast<char>('1' + commits.size())));
+            commit.author.name = commit.committer.name = "Ada";
+            commit.author.email = commit.committer.email = start + end;
+            commit.summary = commit.message = "A commit";
+            commits.push_back(commit);
+        }
+        CommitLogModel model;
+        model.setCommits(commits);
+        RepositoryView view;
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* avatar = view.findChild<QLabel*>(QStringLiteral("commit.avatar"));
+        QVERIFY(avatar);
+
+        static const QRegularExpression kBackground(QStringLiteral("background: *([^;]+);"));
+        QStringList colours;
+        for (const auto& commit : commits) {
+            view.onCommitSelected(hex(commit.id));
+            colours << kBackground.match(avatar->styleSheet()).captured(1);
+        }
+        QVERIFY2(colours.first().startsWith(QStringLiteral("hsl(")), qPrintable(colours.first()));
+        QVERIFY2(colours.count(colours.first()) == colours.size(),
+                 qPrintable(colours.join(QStringLiteral(", "))));
     }
 
     void aHugeSubjectIsShownCut() {
