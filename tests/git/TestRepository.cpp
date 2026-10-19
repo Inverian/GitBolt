@@ -135,6 +135,19 @@ bool addRepoWithWorktree(const QString& main, const QString& worktree, bool byGi
     return repo.ok() && repo->addWorktree("wt", worktree.toStdString(), "side", true).ok();
 }
 
+#ifdef Q_OS_WIN
+// A junction at `link` to the folder `target` (mklink /J), which takes
+// no privilege, unlike a symbolic link. False if none was made.
+bool makeJunction(const QString& link, const QString& target) {
+    QProcess mklink;
+    mklink.start(QStringLiteral("cmd"),
+                 {QStringLiteral("/c"), QStringLiteral("mklink"), QStringLiteral("/J"),
+                  QDir::toNativeSeparators(link), QDir::toNativeSeparators(target)});
+    return mklink.waitForFinished(30000) && mklink.exitStatus() == QProcess::NormalExit
+           && mklink.exitCode() == 0;
+}
+#endif
+
 #ifndef Q_OS_WIN
 // A symbolic link at `link` to `target`, both given as bytes: a name
 // that isn't UTF-8 too, where the file system takes one (macOS's
@@ -406,6 +419,62 @@ private slots:
             home.toStdString(), root);
         QVERIFY(beside.ok());
     }
+
+#ifdef Q_OS_WIN
+    // On Windows libgit2 compares a folder with the ceiling as they are
+    // written, following no junction (nor subst drive), while the
+    // system resolves them. A folder at or above the ceiling either way
+    // is not searched from: the folder holding a home folder that is a
+    // junction elsewhere (libgit2 went on up from it, into the
+    // repository around it), and the home folder reached through a
+    // junction (libgit2 took it for another folder, and searched on up
+    // past the ceiling).
+    void openContainingNeverSearchesFromTheCeilingUpThroughAJunction_data() {
+        QTest::addColumn<bool>("ceilingIsTheJunction");
+        QTest::newRow("the ceiling a junction elsewhere") << true;
+        QTest::newRow("the ceiling reached through a junction") << false;
+    }
+
+    void openContainingNeverSearchesFromTheCeilingUpThroughAJunction() {
+        QFETCH(bool, ceilingIsTheJunction);
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString outer = base.filePath(QStringLiteral("outer"));
+        QVERIFY(QDir().mkpath(outer));
+        QVERIFY(gitbolt::git::Repository::init(outer.toStdString()).ok());
+        QString junction;
+        QString start;
+        QString ceiling;
+        if (ceilingIsTheJunction) {
+            // outer/users/me is the home folder elsewhere/me.
+            const QString elsewhere = base.filePath(QStringLiteral("elsewhere/me"));
+            QVERIFY(QDir().mkpath(elsewhere));
+            QVERIFY(QDir(outer).mkpath(QStringLiteral("users")));
+            junction = outer + QStringLiteral("/users/me");
+            start = outer + QStringLiteral("/users");
+            ceiling = junction;
+            if (!makeJunction(junction, elsewhere))
+                QSKIP("mklink /J made no junction here");
+        } else {
+            // j is outer: j/me is the home folder outer/me.
+            QVERIFY(QDir(outer).mkpath(QStringLiteral("me")));
+            junction = base.filePath(QStringLiteral("j"));
+            start = junction + QStringLiteral("/me");
+            ceiling = outer + QStringLiteral("/me");
+            if (!makeJunction(junction, outer))
+                QSKIP("mklink /J made no junction here");
+        }
+        // Before `base` goes: the junction alone, not what it leads to.
+        const auto undo = qScopeGuard([&] { QDir().rmdir(junction); });
+
+        std::string root = "untouched";
+        auto result = gitbolt::git::Repository::openContaining(
+            start.toStdString(), ceiling.toStdString(), root);
+        QVERIFY2(!result.ok(), root.c_str());
+        QCOMPARE(result.error().code(), gitbolt::git::GitErrorCode::NotFound);
+        QCOMPARE(root, std::string("untouched"));
+    }
+#endif
 
     // A repository found broken is not "no repository": a linked
     // worktree whose main repository was moved away. libgit2 reports
@@ -3220,6 +3289,13 @@ private slots:
         QTest::newRow("gitdir naming the main work tree's .git") << QStringLiteral("main");
         QTest::newRow("a folder holding the repository, pointing back")
             << QStringLiteral("holds repository");
+#ifdef Q_OS_WIN
+        // The repository opened through a junction in the folder:
+        // libgit2 keeps that spelling, and as written the folder holds
+        // the repository, though not once the junction is resolved.
+        QTest::newRow("a folder holding the repository through a junction")
+            << QStringLiteral("holds junction");
+#endif
 #ifndef Q_OS_WIN
         // Windows' home folder isn't $HOME, and a link there takes a
         // privilege.
@@ -3267,6 +3343,7 @@ private slots:
         QString home;
         QString workingDir;
         std::string locale;
+        QString opened = main;
         if (forgery == QLatin1String("folder .git")) {
             QVERIFY(QDir().mkpath(victim + QStringLiteral("/.git")));
             gitdir = (victim + QStringLiteral("/.git")).toUtf8();
@@ -3377,10 +3454,24 @@ private slots:
             gitdir = rootBytes + "/l\xFF/victim/.git";
         }
 #endif
+#ifdef Q_OS_WIN
+        if (forgery == QLatin1String("holds junction")) {
+            opened = victim + QStringLiteral("/j");
+            if (!makeJunction(opened, main))
+                QSKIP("mklink /J made no junction here");
+            QVERIFY(writeFile(victim + QStringLiteral("/.git"), pointingBack));
+            gitdir = (victim + QStringLiteral("/.git")).toUtf8();
+        }
+        // Before `base` goes: the junction alone, not what it leads to.
+        const auto undo = qScopeGuard([&] {
+            if (opened != main)
+                QDir().rmdir(opened);
+        });
+#endif
         if (!gitdir.isEmpty())
             QVERIFY(writeFile(admin + QStringLiteral("/gitdir"), gitdir + '\n'));
 
-        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        auto repo = gitbolt::git::Repository::open(opened.toStdString());
         QVERIFY(repo.ok());
         gitbolt::git::Result<void> removed;
         {
@@ -3458,9 +3549,7 @@ private slots:
         QString spelled;   // `real`, through the junction or the drive
         if (through == QLatin1String("junction")) {
             spelled = base.filePath(QStringLiteral("junction"));
-            if (!run(QStringLiteral("cmd"), {QStringLiteral("/c"), QStringLiteral("mklink"),
-                                             QStringLiteral("/J"), QDir::toNativeSeparators(spelled),
-                                             QDir::toNativeSeparators(real)}))
+            if (!makeJunction(spelled, real))
                 QSKIP("mklink /J made no junction here");
         } else {
             QStringList taken;

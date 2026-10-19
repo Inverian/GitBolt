@@ -151,15 +151,32 @@ QString realPath(const QString& path) {
 
 // `path` is `ceiling`, or a folder above it. libgit2 applies a ceiling
 // only to a search that starts below it: from $HOME itself it would
-// search on up, past the ceiling.
+// search on up, past the ceiling. On Windows it is enough that either
+// spelling says so: as written, as libgit2 compares them there (it
+// follows no junction or subst drive) and as Remove deletes a folder,
+// or as the system resolves them (realPath()). As written, C:\Users
+// holds a home folder that is a junction to D:\Users\me, and libgit2
+// searched on from C:\Users to C:\; resolved, S:\me is the home folder
+// itself where S: is a subst drive of C:\Users, and libgit2 searched
+// S:\, which is C:\Users.
 bool atOrAbove(const std::string& path, const std::string& ceiling) {
-    const QString p = realPath(QString::fromStdString(path));
-    const QString c = realPath(QString::fromStdString(ceiling));
-    if (p.isEmpty() || c.isEmpty())
-        return false;
-    if (c.compare(p, kPathCase) == 0)
+    const auto holds = [](const QString& p, const QString& c) {
+        if (p.isEmpty() || c.isEmpty())
+            return false;
+        if (c.compare(p, kPathCase) == 0)
+            return true;
+        return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+    };
+    const QString p = QString::fromStdString(path);
+    const QString c = QString::fromStdString(ceiling);
+#ifdef Q_OS_WIN
+    const auto asWritten = [](const QString& x) {
+        return QDir::cleanPath(QFileInfo(x).absoluteFilePath());
+    };
+    if (holds(asWritten(p), asWritten(c)))
         return true;
-    return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+#endif
+    return holds(realPath(p), realPath(c));
 }
 
 // The folder `found`, as `path` spells it: the nearest of `path`'s own

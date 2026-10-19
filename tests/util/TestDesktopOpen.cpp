@@ -138,14 +138,19 @@ private slots:
 
 #if defined(Q_OS_WIN)
     // What PATHEXT adds runs by name, and Windows' own list runs when
-    // opened whatever PATHEXT says.
+    // opened whatever PATHEXT says. The type is one only PATHEXT makes
+    // run (Tcl's installer adds .tcl to it): .py, which this was, is on
+    // GitBolt's own list now, and passed with PATHEXT ignored.
     void pathExtAddsToWindowsOwn() {
         const QByteArray was = qgetenv("PATHEXT");
         const auto restore = qScopeGuard([&] { qputenv("PATHEXT", was); });
-        qputenv("PATHEXT", ".EXE;.PY");
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        QVERIFY(util::mayRunWhenOpened(QFileInfo(writeFile(dir, QStringLiteral("x.py"), false))));
+        const QFileInfo tcl(writeFile(dir, QStringLiteral("x.tcl"), false));
+        qputenv("PATHEXT", ".EXE");
+        QVERIFY(!util::mayRunWhenOpened(tcl));
+        qputenv("PATHEXT", ".EXE;.TCL");
+        QVERIFY(util::mayRunWhenOpened(tcl));
         QVERIFY(util::mayRunWhenOpened(QFileInfo(writeFile(dir, QStringLiteral("x.bat"), false))));
         QVERIFY(!util::mayRunWhenOpened(QFileInfo(writeFile(dir, QStringLiteral("x.txt"), false))));
     }
