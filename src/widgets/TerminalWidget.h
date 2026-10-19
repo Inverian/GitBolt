@@ -13,6 +13,7 @@
 #endif
 
 class QSocketNotifier;
+class QTimer;
 
 namespace gitbolt::widgets {
 
@@ -96,7 +97,8 @@ public:
     /// the shell's environment, which only its start sets (`export` is
     /// sh's, fish and cmd have their own), so a running shell whose
     /// GIT_DIR changes (a bare repository opened or left) is started
-    /// again there.
+    /// again there: at once at its prompt, but once the command running
+    /// in it ends if there is one (see restartWhenIdle).
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
@@ -142,6 +144,12 @@ private slots:
 
 private:
     void stopShell();
+    /// changeRepository's start again: now, unless a command the shell
+    /// started is running, and then once it no longer is.
+    void restartWhenIdle();
+    /// Whether a command the shell started holds its terminal (never
+    /// known on Windows).
+    bool commandRunning() const;
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
     /// byte count written (stops at EAGAIN without dropping).
@@ -183,6 +191,9 @@ private:
     int              screenColumns_ = 80;
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
+    /// Active while a start again waits for a command to end
+    /// (restartWhenIdle), which it checks for every so often.
+    QTimer*          restartTimer_ = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY
     /// master buffer is only ~1-4 KB, so a paste overflows it
     /// easily. Drained via writeNotifier_ as the fd becomes

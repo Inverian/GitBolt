@@ -16,6 +16,7 @@
 #include <QTextBoundaryFinder>
 #include <QTextBlock>
 #include <QTextCursor>
+#include <QTimer>
 
 #include <errno.h>
 #include <stdlib.h>
@@ -83,6 +84,10 @@ constexpr int kMaxPendingOsc = 4096;
 // TerminalWidget::csi).
 constexpr qsizetype kMaxCountDigits = 5;
 constexpr int kMaxCount = 99999;
+
+// How often a start again that waits for a command to end looks again
+// (see TerminalWidget::restartWhenIdle).
+constexpr int kRestartCheckMs = 250;
 
 #ifndef Q_OS_WIN
 // The most onPtyReadable() reads, and draws in one appendOutput(), before
@@ -193,6 +198,10 @@ TerminalWidget::TerminalWidget(QWidget* parent)
 
     // A 2px bar caret is easy to spot against the dark background.
     setCursorWidth(2);
+
+    restartTimer_ = new QTimer(this);
+    restartTimer_->setInterval(kRestartCheckMs);
+    connect(restartTimer_, &QTimer::timeout, this, &TerminalWidget::restartWhenIdle);
 }
 
 TerminalWidget::~TerminalWidget()
@@ -417,6 +426,7 @@ void TerminalWidget::stopShell()
     pendingOutput_.clear();
     droppingCsi_ = false;
     decoder_.resetState();
+    restartTimer_->stop();
 #ifdef Q_OS_WIN
     if (conpty_) {
         // Returns at once: ConPtyProcess finishes the hang-up on its
@@ -480,7 +490,9 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 {
     if (path.isEmpty())
         return;
-    if (gitDir == gitDir_) {
+    // While a start again waits, the shell starts in the latest
+    // repository, and no `cd` is typed into the command running.
+    if (gitDir == gitDir_ && !restartTimer_->isActive()) {
         changeDirectory(path);
         return;
     }
@@ -488,7 +500,60 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
     pendingCwd_ = path;
     // A shell not started yet takes both at its start (showEvent).
     if (isRunning())
-        start(path);
+        restartWhenIdle();
+}
+
+// Starting the shell again hangs it up, and with it whatever it runs: the
+// editor of a `git commit` or a `git rebase -i`, a long fetch or gc. Such
+// a command is left to finish. The shell starts again once it is back at
+// its prompt, which is looked for as its output arrives (the prompt is
+// output) and every so often in case none does; meanwhile a note says
+// so, below the command's output.
+void TerminalWidget::restartWhenIdle()
+{
+    if (!commandRunning()) {
+        start(pendingCwd_);
+        return;
+    }
+    if (restartTimer_->isActive())
+        return;
+    restartTimer_->start();
+    // The note goes at the end, which can be just where the shell's
+    // cursor is. The cursor stays put, so the command's output goes on
+    // above the note, and the new shell starts on the row below it. Its
+    // anchor goes along all the same: left there, it selected the note,
+    // and the command's next output wrote over it.
+    screenCursor_.setKeepPositionOnInsert(true);
+    appendPlainText(tr("[gitbolt] the shell will restart for this repository "
+                       "when the running command ends\n"));
+    screenCursor_.setKeepPositionOnInsert(false);
+    screenCursor_.clearSelection();
+}
+
+// On Unix the terminal's foreground process group: an interactive shell
+// runs each command in a group of its own, hands the terminal to it, and
+// takes it back for the prompt. The shell's own group is its pid, as
+// forkpty made it a session leader. What the shell runs in itself (a
+// builtin such as `read`, a loop between its commands) is not told
+// apart from the prompt, nor is anything a shell without job control
+// runs.
+//
+// Windows: ConPTY doesn't say. A console has no process groups, and its
+// process list is only for a process attached to it (attaching GitBolt,
+// as interruptTree in git/GitProcess.cpp does to send git a Ctrl-C,
+// swaps out GitBolt's Ctrl-C handlers); cmd's child processes would
+// leave out its builtins (`type`, `for`) and count a program it
+// `start`ed. There the shell starts again at once, as it did before.
+bool TerminalWidget::commandRunning() const
+{
+#ifdef Q_OS_WIN
+    return false;
+#else
+    if (!isRunning())
+        return false;
+    const pid_t group = ::tcgetpgrp(masterFd_);
+    return group > 0 && group != childPid_;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +689,8 @@ void TerminalWidget::onPtyReadable()
     if (exited) {
         stopShell();
         appendPlainText(tr("\n[gitbolt] shell exited"));
+    } else if (restartTimer_->isActive()) {
+        restartWhenIdle();  // the command's last output, or the prompt after it
     }
 #endif
 }
@@ -1069,7 +1136,7 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
     case 'X':  // ECH: blank cells from the cursor on, without moving
         blankCells(cur, column - 1, qMin(column - 1 + count, length));
         break;
-    case '@':  // ICH: blanks in at the cursor, the rest of the row right
+    case '@': {  // ICH: blanks in at the cursor, the rest of the row right
         // A screen's width at most: on a terminal, blanks past that
         // only push the rest of the row off its edge, which fewer do
         // too. ESC[50000000@ put fifty million in. The other counts
@@ -1078,12 +1145,31 @@ void TerminalWidget::csi(QTextCursor& cur, ushort finalByte, QStringView params)
         // must not have one: here a line longer than the terminal is
         // one row (see appendOutput), and with a screen's width as the
         // most, ESC[1000D took the cursor only partway back to its start.
+        //
+        // And the rest of the cursor's screen row goes no further than
+        // that takes it: to the end of the screen row after it. What
+        // another ICH pushes past there is lost, as off a terminal's
+        // edge, and the rows beyond stay put. Pushed on without end,
+        // each ESC[99999@ at the same place added a screen's width of
+        // blanks to the row: a file of them `cat`ed in the Console made
+        // one row of ten or more characters for each of its bytes, which
+        // took longer to lay out with every read.
         if (column <= length) {
+            const int columns = qMax(1, screenColumns_);
+            const int blanks = qMin(count, columns);
+            const int edge = (column - 1) / columns * columns + 2 * columns;
+            const int base = cur.block().position();
             const int at = cur.position();
-            cur.insertText(QString(qMin(count, qMax(1, screenColumns_)), QLatin1Char(' ')));
+            cur.insertText(QString(blanks, QLatin1Char(' ')));
+            if (const int over = qMin(blanks, length + blanks - edge); over > 0) {
+                cur.setPosition(base + edge);
+                cur.setPosition(base + edge + over, QTextCursor::KeepAnchor);
+                cur.removeSelectedText();
+            }
             cur.setPosition(at);
         }
         break;
+    }
     case 'P': {  // DCH: the cursor's characters out, the rest of the row left
         QTextCursor erase = cur;
         for (int k = 0; k < count && !erase.atBlockEnd(); ++k)

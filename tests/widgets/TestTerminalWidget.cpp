@@ -18,6 +18,9 @@
 //     fifty million blanks in the row. The other counts go as far along
 //     the row as they say, a line longer than the terminal included,
 //     which is one row on macOS and Linux;
+//   - nor do many ICHs together: what they push past the screen row
+//     after the cursor's is lost, as off a terminal's edge. Each one
+//     used to add its blanks to the row, which grew without bound;
 //   - the shell's cursor stays where a read leaves it, and the moves
 //     and erases within its row are honored: git's progress meter and
 //     the line editors' edits (recorded from zsh and bash) write over
@@ -47,7 +50,11 @@
 //   - a progress meter's updates, reads of their own each ending in a
 //     CR, redraw one row instead of piling up on it;
 //   - a shell started again while the old one's CSI was being dropped
-//     (see above) shows its output whole.
+//     (see above) shows its output whole;
+//   - a repository switch that changes GIT_DIR while a command runs in
+//     the shell lets the command finish, and starts the shell again
+//     after it, with the new GIT_DIR. The shell used to be started again
+//     at once, which hung the command up with it.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -693,6 +700,60 @@ private slots:
         }
     }
 
+    // Nor does the rest of the row go further for more ICHs. Each pushed
+    // it on a screen's width and nothing off its end, so ESC[99999@ over
+    // and over at the same place grew the row by that much a sequence:
+    // a file of them `cat`ed in the Console made one row of ten or more
+    // characters for each of its bytes, which took longer to lay out
+    // with every read. What they push past the end of the screen row
+    // after the cursor's is lost now, as off a terminal's edge. The
+    // widget was never shown, so it has the default 80 columns.
+    void repeatedInsertsKeepTheRowBounded()
+    {
+        QByteArray inserts;
+        for (int k = 0; k < 1000; ++k)
+            inserts += "\x1b[99999@";
+
+        // At a row's start, in one read and in the next: a row's worth
+        // of blanks pushes "AB" into the next screen row, and the next
+        // pushes it off that.
+        FedTerminal start;
+        start.appendOutput("AB\r" + inserts);
+        QCOMPARE(start.toPlainText(), QString(2 * 80, QLatin1Char(' ')));
+        start.appendOutput(inserts);
+        QCOMPARE(start.toPlainText(), QString(2 * 80, QLatin1Char(' ')));
+
+        // Typing in the middle of a line, as bash's readline does (an
+        // ICH, then the key), makes it as long as what was typed.
+        FedTerminal typed;
+        typed.appendOutput("P> ad\b");
+        for (int k = 0; k < 50; ++k)
+            typed.appendOutput("\x1b[1@x");
+        QCOMPARE(typed.toPlainText(),
+                 QStringLiteral("P> a") + QString(50, QLatin1Char('x')) + QStringLiteral("d"));
+
+#ifndef Q_OS_WIN
+        // A line longer than the terminal, one row here: on its first
+        // screen row, the ICHs push that row's rest across the second
+        // and the second's off; the rows after stay put, and so does
+        // the row's length.
+        const QByteArray row = QByteArray(80, 'a') + QByteArray(80, 'b') + QByteArray(140, 'c');
+        FedTerminal longRow;
+        longRow.appendOutput(row + "\x1b[5G" + inserts);
+        QCOMPARE(longRow.toPlainText(), QStringLiteral("aaaa") + QString(156, QLatin1Char(' '))
+                                            + QString(140, QLatin1Char('c')));
+
+        // And a line typed into until it is longer than the terminal
+        // stays whole.
+        FedTerminal typedLong;
+        typedLong.appendOutput("P> ad\b");
+        for (int k = 0; k < 200; ++k)
+            typedLong.appendOutput("\x1b[1@x");
+        QCOMPARE(typedLong.toPlainText(),
+                 QStringLiteral("P> a") + QString(200, QLatin1Char('x')) + QStringLiteral("d"));
+#endif
+    }
+
     // On macOS and Linux a line longer than the terminal is one row (see
     // longCommandLineStaysWhole), and a move, erase or delete goes along
     // it as far as its count says. Only ICH's count stops at the
@@ -1238,6 +1299,86 @@ private slots:
         terminal.changeRepository(work, {});
         type(echo.arg(QStringLiteral("gbstep4")));
         QVERIFY2(shows(QStringLiteral("gbstep4[][][work]")), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // The same while a command runs in the shell. Starting the shell
+    // again hung the command up along with it (an editor git started, a
+    // fetch, a gc), unasked. The command now runs to its end, with a
+    // note in the meantime, and the shell starts again after it with the
+    // new GIT_DIR. A second switch meanwhile changes only where it
+    // starts: no `cd` is typed into the command, and no second note.
+    void ptyRestartWaitsForTheRunningCommand()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString bare = dirs.filePath(QStringLiteral("bare.git"));
+        QVERIFY(QDir().mkpath(bare));
+        // A command of its own (`sh`, not `.`, which the shell would run
+        // itself), so in a process group of its own: it says it has
+        // started, sleeps until the test lets it go on, and says it is
+        // done. In a script, so the line typed is short.
+        const QString go = QDir(shell.home()).filePath(QStringLiteral("go"));
+        QFile script(QDir(shell.home()).filePath(QStringLiteral("job.sh")));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("echo gbjob started\n"
+                     "while [ ! -e \"$HOME/go\" ]; do sleep 1; done\n"
+                     "echo gbjob done\n");
+        script.close();
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const auto type = [&terminal](const QString& line) {
+            QTest::keyClicks(&terminal, line);
+            QTest::keyClick(&terminal, Qt::Key_Return);
+        };
+        const auto notes = [&terminal] {
+            return terminal.toPlainText().count(QStringLiteral("[gitbolt] the shell will restart"));
+        };
+        type(QStringLiteral("gbmark=kept"));
+        type(QStringLiteral("sh \"$HOME/job.sh\""));
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob started")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+
+        terminal.changeRepository(bare, bare);
+        QVERIFY(terminal.isRunning());
+        QCOMPARE(notes(), 1);
+        terminal.changeRepository(bare, bare);
+        // A few of the checks for the end of the command go by, and it
+        // still runs: what it prints next isn't there, nor the prompt of
+        // a new shell, nor a `cd` echoed.
+        QTest::qWait(1000);
+        QCOMPARE(notes(), 1);
+        QVERIFY2(!rows(terminal).contains(QStringLiteral("gbjob done"))
+                     && !lastRow(terminal).startsWith(kShPrompt)
+                     && !terminal.toPlainText().contains(QStringLiteral("cd '")),
+                 qPrintable(terminal.toPlainText()));
+
+        QFile goFile(go);
+        QVERIFY(goFile.open(QIODevice::WriteOnly));
+        goFile.close();
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob done")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        // The new shell's prompt, below the note, which the command's
+        // output went on above.
+        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal), qPrintable(terminal.toPlainText()),
+                                  kTimeoutMs);
+        QCOMPARE(notes(), 1);
+        const QStringList shown = rows(terminal);
+        QVERIFY2(shown.indexOf(QStringLiteral("gbjob done"))
+                     < shown.indexOf(QRegularExpression(QStringLiteral("\\[gitbolt\\] the shell .*"))),
+                 qPrintable(terminal.toPlainText()));
+        type(QStringLiteral("echo gbafter[$GIT_DIR][$gbmark][${PWD##*/}]"));
+        QTRY_VERIFY2_WITH_TIMEOUT(
+            rows(terminal).contains(QStringLiteral("gbafter[%1][][bare.git]").arg(bare)),
+            qPrintable(terminal.toPlainText()), kTimeoutMs);
 #endif
     }
 
