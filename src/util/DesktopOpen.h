@@ -19,15 +19,16 @@ namespace gitbolt::util {
 /// asked to open it, rather than show it. True for a file marked
 /// executable, and for the types the platform's opener runs or
 /// follows: on macOS .command, .tool, .term and .terminal (Terminal
-/// runs them), .jar, .class and .jnlp (Java runs them), and the
-/// location files, .fileloc, .webloc, .url and the like (they open
-/// what they point to); on Windows whatever PATHEXT lists, and the
-/// shortcuts, installers, scripts, control panels and the like whose
-/// default verb runs them (.lnk, .url, .msi, .cpl, .chm, .hta,
-/// .application...); elsewhere .desktop, .jar, and the Windows
-/// programs Wine runs. A folder only when it is a bundle (see
-/// folderToShow()). The type is read from `file`'s own name, so
-/// resolve a symbolic link first.
+/// runs them), .jar, .class and .jnlp (Java runs them), .py and its
+/// kin (Python Launcher runs them), and the location files, .fileloc,
+/// .webloc, .url and the like (they open what they point to); on
+/// Windows whatever PATHEXT lists, the shortcuts, installers, scripts,
+/// control panels and the like whose default verb runs them (.lnk,
+/// .url, .msi, .cpl, .chm, .hta, .application...), and the scripts an
+/// installed interpreter runs (.sh, .py, .rb, .pl...); elsewhere
+/// .desktop, .jar, .jnlp, and the Windows programs Wine runs. A folder
+/// only when it is a bundle (see folderToShow()). The type is read
+/// from `file`'s own name, so resolve a symbolic link first.
 bool mayRunWhenOpened(const QFileInfo& file);
 
 /// The folder to hand the desktop to show `path`, and only ever a
@@ -45,5 +46,15 @@ QString folderToShow(const QString& path);
 /// their real paths: a symbolic link (or a folder on the way that is
 /// one) is judged by where it leads. False if either doesn't exist.
 bool isWithinFolder(const QString& path, const QString& folder);
+
+/// Whether `path`, relative to a folder a repository names it in (a
+/// submodule's path, in the work tree), stays in that folder as it is
+/// written, on every platform: not empty, no root, drive or UNC host
+/// ("/x", "C:/x", "//host/share", "\\host\share"), and no ".." step.
+/// Judged from the text alone, so ask it before anything looks on
+/// disk: on Windows a look at //host/share/x is a connection to that
+/// host, the user's credentials offered, and one that doesn't answer
+/// holds the window up until it times out.
+bool isRelativeInside(const QString& path);
 
 } // namespace gitbolt::util

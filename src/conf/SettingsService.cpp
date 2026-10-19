@@ -71,9 +71,20 @@ void SettingsService::addRecentRepository(const QString& path)
         resolvedNow.isEmpty() ? canonical : QDir::toNativeSeparators(resolvedNow);
     QVariantMap resolvedMap = settings_
         .value(QStringLiteral("recent/resolved")).toMap();
+    // Windows' file names are case-blind, and canonicalFilePath() there
+    // keeps the case it was given ("c:\src\repo", typed, and Explorer's
+    // "C:\src\Repo" are one folder). macOS's gives the case on disk, so
+    // a case-blind volume's spellings match already, and on a
+    // case-sensitive one they are two folders.
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseSensitive;
+#endif
     QStringList list = recentRepositories();
     list.removeIf([&](const QString& entry) {
-        return entry == canonical || resolvedMap.value(entry).toString() == resolved;
+        return entry.compare(canonical, pathCase) == 0
+               || resolvedMap.value(entry).toString().compare(resolved, pathCase) == 0;
     });
     list.prepend(canonical);
     const int cap = maxRecentRepositories();

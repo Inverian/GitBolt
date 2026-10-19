@@ -49,6 +49,9 @@
 //     on macOS); a submodule's path that names a file shows the folder
 //     it is in, not the file (an executable CHANGELOG runs), a link
 //     the folder it leads to, and one out of the work tree nothing;
+//     both judge a submodule's path as written before they look on
+//     disk (on Windows //host/share is another computer), and Open
+//     opens no repository out of the work tree either;
 //     Manage Worktrees' Remove names the folder it deletes; the Console
 //     gets a bare repository's GIT_DIR;
 //   - a branch whose name begins with '-' never reaches git from the
@@ -661,7 +664,7 @@ private slots:
         BoxAnswerer answer(QMessageBox::Ok);
         emit widget->revealRequested(path);
         if (shown.isEmpty()) {
-            QVERIFY2(answer.text.contains(QStringLiteral("outside the working tree")),
+            QVERIFY2(answer.text.contains(QStringLiteral("not a path in the working tree")),
                      qPrintable(answer.text));
             QCOMPARE(desktop.urls.size(), 0);
             return;
@@ -671,6 +674,78 @@ private slots:
         const QFileInfo handed(desktop.urls.first().toLocalFile());
         QVERIFY2(handed.isDir() && !handed.isSymLink(), qPrintable(handed.filePath()));
         QCOMPARE(handed.filePath(), QDir::cleanPath(super + QLatin1Char('/') + shown));
+    }
+
+    // A submodule's path is judged as written, before anything looks on
+    // disk. On Windows //host/share/x (or \\host\share\x) is another
+    // computer's folder: Open in File Explorer looked at it for a folder
+    // to show, which connected to that host with the user's credentials
+    // (or held the window up while one that doesn't answer timed out),
+    // and only then found it out of the work tree; Open in GitBolt
+    // looked for its .git and opened it, in the work tree or not. Both
+    // refuse a path with a root, a drive, a UNC host or a ".." step now,
+    // even one leading back into the work tree, and Open in GitBolt one
+    // that leads out through a link too.
+    void submodulePathIsJudgedAsWritten_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QString>("said");   // by both
+        const QString asWritten = QStringLiteral("is not a path in the working tree");
+        QTest::newRow("UNC") << QStringLiteral("//gitbolt.invalid/share/sub") << asWritten;
+        QTest::newRow("UNC, backslashes")
+            << QStringLiteral("\\\\gitbolt.invalid\\share\\sub") << asWritten;
+        QTest::newRow("a drive") << QStringLiteral("C:/sub") << asWritten;
+        // Filled in below: the superproject's folder.
+        QTest::newRow("absolute, into the work tree") << QStringLiteral("<super>/sub") << asWritten;
+        QTest::newRow("up and back in") << QStringLiteral("sub/../sub") << asWritten;
+#ifndef Q_OS_WIN
+        // QFile::link makes a shortcut on Windows, not a link.
+        QTest::newRow("a link to another repository")
+            << QStringLiteral("elsewhere") << QStringLiteral("outside the working tree");
+#endif
+    }
+
+    void submodulePathIsJudgedAsWritten() {
+        QFETCH(QString, path);
+        QFETCH(QString, said);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString root = QFileInfo(scratch.path()).canonicalFilePath();
+        const QString subUp = root + QStringLiteral("/sub-upstream");
+        const QString super = root + QStringLiteral("/super");
+        const auto git = [](const QString& dir, std::vector<std::string> args) {
+            return succeeded(gitbolt::git::GitProcess(dir.toStdString()).run(args));
+        };
+        QVERIFY(QDir().mkpath(subUp) && QDir().mkpath(super));
+        QVERIFY(git(subUp, {"init", "-q"}));
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s1"}));
+        QVERIFY(git(super, {"init", "-q"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
+        QVERIFY(git(super, {"commit", "-q", "-m", "with sub"}));
+#ifndef Q_OS_WIN
+        QVERIFY(QFile::link(subUp, super + QStringLiteral("/elsewhere")));
+#endif
+        path.replace(QStringLiteral("<super>"), super);
+
+        MainWindow window;
+        auto* svc = openIn(window, super);
+        QVERIFY(svc);
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            BoxAnswerer answer(QMessageBox::Ok);
+            emit widget->revealRequested(path);
+            QVERIFY2(answer.text.contains(said), qPrintable(answer.text));
+            QCOMPARE(desktop.urls.size(), 0);
+        }
+        BoxAnswerer answer(QMessageBox::Ok);
+        emit widget->openRequested(path);
+        QVERIFY2(answer.text.contains(said), qPrintable(answer.text));
+        QVERIFY(dialog && dialog->isVisible());
+        QCOMPARE(openFolder(svc), super);
     }
 
     void worktreeOpensInGitBolt() {

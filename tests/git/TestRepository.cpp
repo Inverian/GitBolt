@@ -16,6 +16,8 @@
 #include <string>
 #ifndef Q_OS_WIN
 #include <unistd.h>
+#else
+#include <QProcess>
 #endif
 #include <memory>
 #include <optional>
@@ -3426,6 +3428,77 @@ private slots:
         QCOMPARE(readFile(worktree, QStringLiteral("a.txt")), QByteArray("a\n"));
         QVERIFY(QFileInfo::exists(main + QStringLiteral("/.git/worktrees/wt/gitdir")));
     }
+
+#ifdef Q_OS_WIN
+    // git for Windows writes a worktree's .git file with the
+    // repository's final path, as the system resolves it: a subst
+    // drive's folder, a mapped drive's share, a junction's target.
+    // libgit2 keeps the spelling the repository was opened by, and
+    // canonicalFilePath() resolves none of them, so Remove refused
+    // every worktree git made of a repository opened through one: its
+    // .git file "does not point back".
+    void removeWorktreeOfARepositoryReachedThroughADriveOrJunction_data() {
+        QTest::addColumn<QString>("through");
+        QTest::newRow("a junction") << QStringLiteral("junction");
+        QTest::newRow("a subst drive") << QStringLiteral("subst");
+    }
+
+    void removeWorktreeOfARepositoryReachedThroughADriveOrJunction() {
+        QFETCH(QString, through);
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString real = base.filePath(QStringLiteral("real"));
+        QVERIFY(QDir().mkpath(real));
+        const auto run = [](const QString& program, const QStringList& args) {
+            QProcess process;
+            process.start(program, args);
+            return process.waitForFinished(30000) && process.exitStatus() == QProcess::NormalExit
+                   && process.exitCode() == 0;
+        };
+        QString spelled;   // `real`, through the junction or the drive
+        if (through == QLatin1String("junction")) {
+            spelled = base.filePath(QStringLiteral("junction"));
+            if (!run(QStringLiteral("cmd"), {QStringLiteral("/c"), QStringLiteral("mklink"),
+                                             QStringLiteral("/J"), QDir::toNativeSeparators(spelled),
+                                             QDir::toNativeSeparators(real)}))
+                QSKIP("mklink /J made no junction here");
+        } else {
+            QStringList taken;
+            for (const QFileInfo& drive : QDir::drives())
+                taken << drive.filePath().left(2).toUpper();
+            for (char letter = 'Z'; letter >= 'G' && spelled.isEmpty(); --letter) {
+                const QString drive = QString(QLatin1Char(letter)) + QLatin1Char(':');
+                if (!taken.contains(drive))
+                    spelled = drive;
+            }
+            if (spelled.isEmpty()
+                || !run(QStringLiteral("subst"), {spelled, QDir::toNativeSeparators(real)}))
+                QSKIP("subst made no drive here");
+        }
+        // Before `base` goes: the junction or the drive alone, not what
+        // they lead to.
+        const auto undo = qScopeGuard([&] {
+            if (through == QLatin1String("junction"))
+                QDir().rmdir(spelled);
+            else
+                run(QStringLiteral("subst"), {spelled, QStringLiteral("/D")});
+        });
+        const QString main = spelled + QStringLiteral("/main");
+        QVERIFY(addRepoWithWorktree(main, spelled + QStringLiteral("/wt")));
+
+        auto repo = gitbolt::git::Repository::open(main.toStdString());
+        QVERIFY(repo.ok());
+        const auto listed = repo->worktrees();
+        QVERIFY(listed.ok());
+        QCOMPARE(listed->size(), std::size_t(1));
+        const auto removed = repo->removeWorktree(listed->front().name, listed->front().path);
+        QVERIFY2(removed.ok(), removed.error().message().c_str());
+        QVERIFY(!QFileInfo::exists(real + QStringLiteral("/wt")));
+        QVERIFY(!QFileInfo::exists(real + QStringLiteral("/main/.git/worktrees/wt")));
+        QCOMPARE(readFile(real + QStringLiteral("/main"), QStringLiteral("a.txt")),
+                 QByteArray("a\n"));
+    }
+#endif
 
     // -----------------------------------------------------------------
     // Hostile repository content the bundled libgit2 is patched against

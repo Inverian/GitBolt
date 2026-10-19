@@ -57,6 +57,33 @@ private slots:
 #endif
     }
 
+    // The same folder by its name in another case, where the file
+    // system takes either (Windows, and macOS's own volumes): one
+    // entry, with the spelling it was opened by last. Explorer gives a
+    // folder's case on disk, a typed path or a second launch's argument
+    // the case it was typed in, and on Windows both stayed. Where case
+    // counts, they are two folders, and two entries.
+    void oneEntryPerFolderWhateverItsCase() {
+        QTemporaryDir base;
+        QVERIFY(base.isValid());
+        const QString onDisk = base.filePath(QStringLiteral("Repo"));
+        const QString typed = base.filePath(QStringLiteral("rEPO"));
+        QVERIFY(QDir().mkpath(onDisk));
+        const bool eitherCase = QFileInfo::exists(typed);
+        if (!eitherCase)
+            QVERIFY(QDir().mkpath(typed));
+
+        SettingsService settings;
+        settings.addRecentRepository(onDisk);
+        settings.addRecentRepository(typed);
+        if (eitherCase)
+            QCOMPARE(settings.recentRepositories(), QStringList{QDir::toNativeSeparators(typed)});
+        else
+            QCOMPARE(settings.recentRepositories(),
+                     (QStringList{QDir::toNativeSeparators(typed),
+                                  QDir::toNativeSeparators(onDisk)}));
+    }
+
     // Two different folders stay two entries, and an entry whose
     // folder is gone is not looked at (nor dropped) when another is
     // added.

@@ -704,10 +704,23 @@ void MainWindow::buildRepositoryMenu()
             const std::string openedKey = gitService_->openKey();
             const QString workdir = QString::fromStdString(
                 gitService_->withRepository([](git::Repository& r) { return r.workdir(); }));
+            // A submodule's path is the repository's choice, and the list
+            // has the ones .gitmodules alone names too, so both actions
+            // judge it as written first, before anything looks on disk:
+            // on Windows //host/share/x (or \\host\share\x) is another
+            // computer's folder, and a look at it connected to that host
+            // with the user's credentials, or held the window up while
+            // one that doesn't answer timed out.
             connect(widget, &widgets::SubmoduleWidget::openRequested,
                     this, [this, dlg, openedKey, workdir](const QString& p) {
                         if (repositoryChangedSince(openedKey, tr("the submodule was not opened.")))
                             return;
+                        if (!util::isRelativeInside(p)) {
+                            widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule path %1 is not a path in the working tree, "
+                                   "so it was not opened.").arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
                         const QString folder = QDir(workdir).absoluteFilePath(p);
                         // Not checked out: the folder (if any) is in no
                         // repository of its own, and opening it opened
@@ -718,31 +731,45 @@ void MainWindow::buildRepositoryMenu()
                                    "update it first.").arg(p));
                             return;
                         }
+                        // A link to another repository is no submodule
+                        // of this one.
+                        if (!util::isWithinFolder(folder, workdir)) {
+                            widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule path %1 leads outside the working tree, so "
+                                   "it was not opened.").arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
                         dlg->close();
                         openRepositoryAtPath(folder);
                     });
-            // A submodule's path is the repository's choice, and the list
-            // has the ones .gitmodules alone names too, so it needn't be
-            // a submodule's folder at all: a file in the work tree (an
-            // executable CHANGELOG, which the desktop runs when it opens
-            // it), a link, a folder named Tool.app (launched as an app),
-            // or a path out of the work tree. Only a folder is handed to
-            // the desktop, a file's own for a file, and only one in the
-            // work tree.
+            // Nor need it be a submodule's folder at all: a file in the
+            // work tree (an executable CHANGELOG, which the desktop runs
+            // when it opens it), a link, a folder named Tool.app
+            // (launched as an app), or a path out of the work tree. Only
+            // a folder is handed to the desktop, a file's own for a file,
+            // and only one in the work tree.
             connect(widget, &widgets::SubmoduleWidget::revealRequested,
                     this, [dlg, workdir](const QString& p) {
-                        const QString folder =
-                            util::folderToShow(QDir(workdir).absoluteFilePath(p));
-                        if (!util::isWithinFolder(folder, workdir)) {
+                        const auto refuse = [dlg](const QString& why) {
                             QMessageBox box(QMessageBox::Information, tr("Open in File Explorer"),
-                                            tr("The submodule path %1 leads to %2, outside the "
-                                               "working tree, so it was not shown.")
-                                                .arg(QDir::toNativeSeparators(p),
-                                                     QDir::toNativeSeparators(folder)),
-                                            QMessageBox::Ok, dlg);
+                                            why, QMessageBox::Ok, dlg);
                             box.setObjectName(QStringLiteral("dlg.submoduleRevealOutside"));
                             box.setTextFormat(Qt::PlainText);
                             box.exec();
+                        };
+                        if (!util::isRelativeInside(p)) {
+                            refuse(tr("The submodule path %1 is not a path in the working "
+                                      "tree, so it was not shown.")
+                                       .arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
+                        const QString folder =
+                            util::folderToShow(QDir(workdir).absoluteFilePath(p));
+                        if (!util::isWithinFolder(folder, workdir)) {
+                            refuse(tr("The submodule path %1 leads to %2, outside the "
+                                      "working tree, so it was not shown.")
+                                       .arg(QDir::toNativeSeparators(p),
+                                            QDir::toNativeSeparators(folder)));
                             return;
                         }
                         QDesktopServices::openUrl(QUrl::fromLocalFile(folder));

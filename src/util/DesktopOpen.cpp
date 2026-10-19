@@ -24,6 +24,10 @@ QStringList runnableSuffixes()
         // JavaLauncher, every Mac's default app for them, runs them
         // with whatever Java is installed.
         QStringLiteral("jar"), QStringLiteral("class"), QStringLiteral("jnlp"),
+        // Python Launcher, which python.org's installer adds, runs a
+        // script it is asked to open, and it can be the app that opens
+        // them. (Terminal runs no .sh: it takes only .command and .tool.)
+        QStringLiteral("py"), QStringLiteral("pyw"), QStringLiteral("pyc"), QStringLiteral("pyo"),
         // Location files: Finder, Safari, Mail, Screen Sharing and the
         // like open what they point to, a file:// URL included.
         QStringLiteral("fileloc"), QStringLiteral("inetloc"), QStringLiteral("webloc"),
@@ -58,15 +62,31 @@ QStringList runnableSuffixes()
              << QStringLiteral("application") << QStringLiteral("settingcontent-ms")
              << QStringLiteral("library-ms") << QStringLiteral("search-ms")
              << QStringLiteral("scf") << QStringLiteral("theme") << QStringLiteral("themepack")
-             << QStringLiteral("diagcab");
+             << QStringLiteral("diagcab")
+             // App Installer installs an app package as msiexec does an
+             // .msi, and a search connector opens a place as .search-ms.
+             << QStringLiteral("appx") << QStringLiteral("appxbundle") << QStringLiteral("msix")
+             << QStringLiteral("msixbundle") << QStringLiteral("appinstaller")
+             << QStringLiteral("searchconnector-ms");
+    // Scripts that an interpreter, once installed, runs when they are
+    // opened: Git Bash a .sh (Git for Windows, which GitBolt needs, has
+    // it take them unless told not to) and a .bash where it took those
+    // too, Python's py launcher a .py and Python's other types,
+    // RubyInstaller's Ruby a .rb, Perl a .pl, Java Web Start a .jnlp.
+    // Taking a type doesn't put it in PATHEXT.
+    suffixes << QStringLiteral("sh") << QStringLiteral("bash") << QStringLiteral("py")
+             << QStringLiteral("pyw") << QStringLiteral("pyz") << QStringLiteral("pyzw")
+             << QStringLiteral("pyc") << QStringLiteral("pyo") << QStringLiteral("rb")
+             << QStringLiteral("rbw") << QStringLiteral("pl") << QStringLiteral("jnlp");
     return suffixes;
 #else
-    // A launcher, a jar (java -jar), and the Windows programs and
-    // shortcuts Wine runs where it is installed: its desktop file
-    // takes them, executable bit or not.
-    return {QStringLiteral("desktop"), QStringLiteral("jar"), QStringLiteral("exe"),
-            QStringLiteral("com"), QStringLiteral("msi"), QStringLiteral("bat"),
-            QStringLiteral("cmd"), QStringLiteral("lnk"), QStringLiteral("url")};
+    // A launcher, a jar (java -jar) or a .jnlp (javaws), and the
+    // Windows programs and shortcuts Wine runs where it is installed:
+    // its desktop file takes them, executable bit or not.
+    return {QStringLiteral("desktop"), QStringLiteral("jar"), QStringLiteral("jnlp"),
+            QStringLiteral("exe"), QStringLiteral("com"), QStringLiteral("msi"),
+            QStringLiteral("bat"), QStringLiteral("cmd"), QStringLiteral("lnk"),
+            QStringLiteral("url")};
 #endif
 }
 
@@ -117,6 +137,20 @@ bool isWithinFolder(const QString& path, const QString& folder)
 #endif
     const QString rootSlash = root.endsWith(QLatin1Char('/')) ? root : root + QLatin1Char('/');
     return real.compare(root, pathCase) == 0 || real.startsWith(rootSlash, pathCase);
+}
+
+bool isRelativeInside(const QString& path)
+{
+    // Windows takes either slash. A leading one is a path from a root
+    // ("/x", "\x"), or two of them another computer's ("//host/share");
+    // a colon second is a drive's ("C:", "C:x", "C:/x"), and first one
+    // of Qt's resources (":/x").
+    const QString slashed = QString(path).replace(QLatin1Char('\\'), QLatin1Char('/'));
+    if (slashed.isEmpty() || slashed.startsWith(QLatin1Char('/'))
+        || slashed.startsWith(QLatin1Char(':'))
+        || (slashed.size() > 1 && slashed.at(1) == QLatin1Char(':')))
+        return false;
+    return !slashed.split(QLatin1Char('/')).contains(QStringLiteral(".."));
 }
 
 } // namespace gitbolt::util

@@ -18,7 +18,11 @@
 //     handed the desktop the file, which runs it); for a link, what it
 //     leads to; any other folder is shown as it is;
 //   - a path is in a folder by where it leads, not by how it is
-//     spelled.
+//     spelled;
+//   - but a submodule's path is judged as written first, before
+//     anything looks on disk (on Windows //host/share is another
+//     computer): one with a root, a drive, a UNC host or a ".." step
+//     isn't in the work tree.
 //
 
 #include <QDir>
@@ -90,6 +94,8 @@ private slots:
         for (const char* name : {"session.term", "SESSION.TERM", "run.tool", "dark.terminal",
                                  // JavaLauncher, the default app for them.
                                  "tool.jar", "Main.class", "app.jnlp",
+                                 // Python Launcher, where it is theirs.
+                                 "tool.py", "tool.pyw", "tool.pyc", "tool.pyo",
                                  // Finder, Safari, Screen Sharing, Mail...
                                  "a.fileloc", "a.inetloc", "a.webloc", "link.url",
                                  "share.afploc", "site.ftploc", "a.smbloc", "a.vncloc",
@@ -100,18 +106,31 @@ private slots:
                                  "x.hta", "x.cpl", "x.chm", "x.jar", "x.reg", "x.appref-ms",
                                  "x.application", "x.settingcontent-ms", "x.library-ms",
                                  "x.search-ms", "x.scf", "x.theme", "x.themepack",
-                                 "x.diagcab", "X.CPL"})
+                                 "x.diagcab", "X.CPL", "x.appx", "x.appxbundle", "x.msix",
+                                 "x.msixbundle", "x.appinstaller", "x.searchConnector-ms",
+                                 // What an installed interpreter takes,
+                                 // PATHEXT or not: Git Bash, Python's py
+                                 // launcher, Ruby, Perl, Java Web Start.
+                                 "install.sh", "build.bash", "tool.py", "tool.pyw",
+                                 "tool.pyz", "tool.pyzw", "tool.pyc", "tool.pyo", "tool.rb",
+                                 "tool.rbw", "tool.pl", "app.jnlp", "INSTALL.SH"})
             QTest::newRow(name) << QString::fromLatin1(name);
 #else
         // Wine's desktop file takes Windows programs and installers.
-        for (const char* name : {"run.desktop", "tool.jar", "setup.exe", "setup.msi",
-                                 "run.bat", "SETUP.EXE"})
+        for (const char* name : {"run.desktop", "tool.jar", "app.jnlp", "setup.exe",
+                                 "setup.msi", "run.bat", "SETUP.EXE"})
             QTest::newRow(name) << QString::fromLatin1(name);
 #endif
     }
 
     void runnableTypes() {
         QFETCH(QString, name);
+#if defined(Q_OS_WIN)
+        // By the type alone: the runner's PATHEXT may list some of them.
+        const QByteArray was = qgetenv("PATHEXT");
+        const auto restore = qScopeGuard([&] { qputenv("PATHEXT", was); });
+        qputenv("PATHEXT", ".EXE");
+#endif
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
         QVERIFY(util::mayRunWhenOpened(QFileInfo(writeFile(dir, name, false))));
@@ -214,6 +233,43 @@ private slots:
 #endif
     }
 #endif
+
+    // A submodule's path is the repository's to write, and on Windows
+    // //host/share/x is another computer's folder: whatever looks at
+    // it on disk connects to that host. So it is judged as written
+    // first, with the same rule on every platform.
+    void relativeInsideAsWritten_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<bool>("inside");
+        QTest::newRow("a folder") << QStringLiteral("sub") << true;
+        QTest::newRow("a folder in one") << QStringLiteral("libs/sub/") << true;
+        QTest::newRow("backslashes") << QStringLiteral("libs\\sub") << true;
+        QTest::newRow("dot steps") << QStringLiteral("./libs/./sub") << true;
+        QTest::newRow("dots in names") << QStringLiteral("a..b/...") << true;
+        QTest::newRow("empty") << QString() << false;
+        QTest::newRow("absolute") << QStringLiteral("/etc") << false;
+        QTest::newRow("from the drive's root") << QStringLiteral("\\Windows") << false;
+        QTest::newRow("UNC") << QStringLiteral("//host/share/x") << false;
+        QTest::newRow("UNC, backslashes") << QStringLiteral("\\\\host\\share\\x") << false;
+        QTest::newRow("UNC, both slashes") << QStringLiteral("\\/host/share") << false;
+        QTest::newRow("a device") << QStringLiteral("\\\\?\\C:\\x") << false;
+        QTest::newRow("a drive") << QStringLiteral("C:/Windows") << false;
+        QTest::newRow("a drive, backslash") << QStringLiteral("c:\\Windows") << false;
+        QTest::newRow("a drive's folder") << QStringLiteral("C:Windows") << false;
+        QTest::newRow("a drive alone") << QStringLiteral("C:") << false;
+        QTest::newRow("a Qt resource") << QStringLiteral(":/x") << false;
+        QTest::newRow("up") << QStringLiteral("../x") << false;
+        QTest::newRow("up alone") << QStringLiteral("..") << false;
+        QTest::newRow("up and back in") << QStringLiteral("sub/../sub") << false;
+        QTest::newRow("up, backslashes") << QStringLiteral("a\\..\\..\\x") << false;
+        QTest::newRow("up at the end") << QStringLiteral("a/..") << false;
+    }
+
+    void relativeInsideAsWritten() {
+        QFETCH(QString, path);
+        QFETCH(bool, inside);
+        QCOMPARE(util::isRelativeInside(path), inside);
+    }
 
     void withinAFolderIsWhereItLeads() {
         QTemporaryDir dir;

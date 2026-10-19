@@ -15,7 +15,8 @@
 //     never a bundle (macOS launches a folder named Tool.app);
 //   - so is a file of a type whose default app runs it or follows it
 //     though git checked it out at mode 644 (a Terminal session file,
-//     a jar, a location file, on macOS);
+//     a jar, a location file, on macOS; a .sh or a .py, which Git
+//     Bash or Python runs, on Windows);
 //   - a link is judged by the file it leads to, and one that leads out
 //     of the work tree is not opened at all, only the folder it leads
 //     into shown if the user asks; a link to a folder shows the folder,
@@ -243,13 +244,16 @@ private slots:
         QTest::addColumn<QString>("path");
 #if defined(Q_OS_MACOS)
         for (const char* name : {"session.term", "tool.jar", "Main.class", "app.jnlp",
-                                 "share.afploc", "site.ftploc", "link.url", "a.vncloc"})
+                                 "share.afploc", "site.ftploc", "link.url", "a.vncloc",
+                                 "tool.py"})
             QTest::newRow(name) << QString::fromLatin1(name);
 #elif defined(Q_OS_WIN)
-        for (const char* name : {"x.cpl", "x.chm", "x.application", "x.jar"})
+        // Git Bash runs a .sh, Python's py launcher a .py.
+        for (const char* name : {"x.cpl", "x.chm", "x.application", "x.jar", "install.sh",
+                                 "tool.py"})
             QTest::newRow(name) << QString::fromLatin1(name);
 #else
-        for (const char* name : {"setup.exe", "tool.jar"})
+        for (const char* name : {"setup.exe", "tool.jar", "app.jnlp"})
             QTest::newRow(name) << QString::fromLatin1(name);
 #endif
     }
