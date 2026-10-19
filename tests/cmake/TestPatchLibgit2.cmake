@@ -63,7 +63,8 @@ set(_merge_new_from
     "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
 set(_merge_new_to
     "\t\terror = git_config_get_entry(&entry, cfg, \"merge.default\");\n\n\t\tif (error == 0 && !entry->value) {\n\t\t\tgit_error_set(GIT_ERROR_MERGE,\n\t\t\t\t\"missing value for 'merge.default'\");\n\t\t\terror = GIT_EINVALID;\n\t\t\tif (!given || !given->metric) {\n\t\t\t\tgit__free(opts->metric);\n\t\t\t\topts->metric = NULL;\n\t\t\t}\n\t\t\tgoto done;\n\t\t} else if (error == 0) {\n\t\t\topts->default_driver = git__strdup(entry->value);\n")
-# The limits on hostile content: wildmatch's budget, the tree depth.
+# The limits on hostile content: wildmatch's budget, the tree depth,
+# what attribute macros expand to.
 set(_wildmatch_new_from
     "/* Match pattern \"p\" against \"text\" */\nstatic int dowild(const uchar *p, const uchar *text, unsigned int flags)\n{\n\tuchar p_ch;\n\tconst uchar *pattern = p;\n\n\tfor ( ; (p_ch = *p) != '\\0'; text++, p++) {\n\t\tint matched, match_slash, negated;\n\t\tuchar t_ch, prev_ch;\n\t\tif ((t_ch = *text) == '\\0' && p_ch != '*')\n\t\t\t\tconst uchar *prev_p = p - 2;\n\t\t\t\twhile (*++p == '*') {}\n\t\t\t\tif (!(flags & WM_PATHNAME))\n\t\t\t\t\t/* without WM_PATHNAME, '*' == '**' */\n\t\t\t\t\tif (p[0] == '/' &&\n\t\t\t\t\t    dowild(p + 1, text, flags) == WM_MATCH)\n\t\t\t\t\t\treturn WM_MATCH;\n\t\t\t\t\tmatch_slash = 1;\n\t\t\t\tif (!match_slash) {\n\t\t\t\t\tif (strchr((char*)text, '/') != NULL)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\treturn WM_MATCH;\n\t\t\t\tconst char *slash = strchr((char*)text, '/');\n\t\t\t\tif (!slash)\n\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\ttext = (const uchar*)slash;\n\t\t\t\t/* the slash is consumed by the top-level for loop */\n\t\t\t\t\t\tif (t_ch == p_ch)\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\ttext++;\n\t\t\t\t\t}\n\t\t\t\t\tif (t_ch != p_ch)\n\t\t\t\t\t\treturn WM_NOMATCH;\n\t\t\t\t}\n\t\t\t\tif ((matched = dowild(p, text, flags)) != WM_NOMATCH) {\n\t\t\tdo {\n\t\t\t\tif (!p_ch)\n\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\tif (p_ch == '\\\\') {\n\t\t\t\t\tfor (s = p += 2; (p_ch = *p) && p_ch != ']'; p++) {} /*SHARED ITERATOR*/\n\t\t\t\t\tif (!p_ch)\n\t\t\t\t\t\treturn WM_ABORT_ALL;\n\t\t\t\t\ti = (int)(p - s - 1);\nint wildmatch(const char *pattern, const char *text, unsigned int flags)\n{\n\treturn dowild((const uchar*)pattern, (const uchar*)text, flags);\n}\n")
 set(_wildmatch_new_to
@@ -80,13 +81,17 @@ set(_tree_c_new_from
     "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n\n\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder);\n\n\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE));\n")
 set(_tree_c_new_to
     "\tgit_str *path,\n\tvoid *payload,\n\tbool preorder,\n\tsize_t depth)\n{\n\tint error = 0;\n\tsize_t i;\n\tconst git_tree_entry *entry;\n\n\t\t\tsize_t path_len = git_str_len(path);\n\n\t\t\t/* GitBolt: no deeper than GIT_TREE_MAX_DEPTH (see tree.h). */\n\t\t\terror = git_tree__descend_ok(depth,\n\t\t\t\tpath_len + entry->filename_len + 1);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\terror = git_tree_lookup(&subtree, tree->object.repo, &entry->oid);\n\t\t\tif (error < 0)\n\t\t\t\tbreak;\n\n\t\t\t/* append the next entry to the path */\n\t\t\tgit_str_puts(path, entry->filename);\n\t\t\tgit_str_putc(path, '/');\n\n\t\t\tif (git_str_oom(path))\n\t\t\t\terror = -1;\n\t\t\telse\n\t\t\t\terror = tree_walk(subtree, callback, path, payload, preorder, depth + 1);\n\n\terror = tree_walk(\n\t\ttree, callback, &root_path, payload, (mode == GIT_TREEWALK_PRE), 1);\n")
+set(_attr_file_new_from
+    "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\n\t/* If subdir file path, convert context for file paths */\n\t\tif ((error = git_attr_fnmatch__parse(&rule->match, &attrs->pool, context, &scan)) < 0 ||\n\t\t    (error = git_attr_assignment__parse(repo, &attrs->pool, &rule->assigns, &scan)) < 0)\nint git_attr_assignment__parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base)\n{\n\tint error;\n\tconst char *scan = *base;\n\tgit_attr_assignment *assign = NULL;\n\t\t\t\tgit_attr_assignment *massign;\n\n\t\t\t\tgit_vector_foreach(&macro->assigns, i, massign) {\n\t\t/* insert allocated assign into vector */\n\t\terror = git_vector_insert_sorted(assigns, assign, &merge_assignments);\n\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n}\n")
+set(_attr_file_new_to
+    "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\n/*\n * GitBolt: libgit2 copies a macro into each rule that names it, so N\n * rules naming a macro of K names took N x K. A rule takes at most this\n * many assignments, its macros' included (a macro is a rule too): git\n * skips a line of 2048 bytes or more, and a shorter one names no more.\n * Each goes into the rule's sorted list, which took time as the square\n * of a long line's names.\n */\n#define GIT_ATTR_MAX_RULE_ASSIGNS 1024\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\t/* GitBolt: and the file's rules, all together, a rule's worth plus\n\t * one for each byte of the file. A name written out takes two bytes\n\t * at least, so macros can't make a file hold much more than its\n\t * names would. A rule past either limit is skipped. */\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS + strlen(data);\n\n\t/* If subdir file path, convert context for file paths */\n\t\tif ((error = git_attr_fnmatch__parse(&rule->match, &attrs->pool, context, &scan)) < 0 ||\n\t\t    (error = attr_assignment_parse(repo, &attrs->pool, &rule->assigns, &scan, &budget)) < 0)\nint git_attr_assignment__parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base)\n{\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS;\n\n\treturn attr_assignment_parse(repo, pool, assigns, base, &budget);\n}\n\n/*\n * GitBolt: takes n more assignments for a rule, from what the rule and\n * its file have left, or says one of them hasn't that many.\n */\nstatic bool attr_assignments_take(size_t *rule_left, size_t *budget, size_t n)\n{\n\tif (n > *rule_left || n > *budget)\n\t\treturn false;\n\t*rule_left -= n;\n\t*budget -= n;\n\treturn true;\n}\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget)\n{\n\tint error;\n\tconst char *scan = *base;\n\tgit_attr_assignment *assign = NULL;\n\tsize_t rule_left = GIT_ATTR_MAX_RULE_ASSIGNS;\n\t\t\t\tgit_attr_assignment *massign;\n\n\t\t\t\t/* GitBolt: a macro's assignments count as the rule's. */\n\t\t\t\tif (!attr_assignments_take(&rule_left, budget, macro->assigns.length))\n\t\t\t\t\tgoto skip;\n\n\t\t\t\tgit_vector_foreach(&macro->assigns, i, massign) {\n\t\t/* insert allocated assign into vector */\n\t\tif (!attr_assignments_take(&rule_left, budget, 1))\n\t\t\tgoto skip;\n\t\terror = git_vector_insert_sorted(assigns, assign, &merge_assignments);\n\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n\nskip:\n\t/* GitBolt: the rule took too many; it is skipped, as one with\n\t * none. What it took is the caller's to free with the rule. */\n\tgit_attr_assignment__free(assign);\n\t*base = git__next_line(scan);\n\treturn GIT_ENOTFOUND;\n}\n")
 foreach(_file config config_file repository)
     set(_${_file}_from "${_${_file}_old_from}${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_old_to}${_${_file}_new_to}")
     # As the 0.9.7 script left it.
     set(_${_file}_097 "${_${_file}_old_to}${_${_file}_new_from}")
 endforeach()
-foreach(_file checkout merge wildmatch tree_h iterator tree_c)
+foreach(_file checkout merge wildmatch tree_h iterator tree_c attr_file)
     set(_${_file}_from "${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_new_to}")
     set(_${_file}_097 "${_${_file}_new_from}")
@@ -95,7 +100,7 @@ foreach(_file cflags common submodule remote)
     set(_${_file}_097 "${_${_file}_to}")
 endforeach()
 
-# A tree with the thirteen files: <suffix> picks each one's text (_from,
+# A tree with the fourteen files: <suffix> picks each one's text (_from,
 # _to or _097), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
@@ -112,6 +117,7 @@ function(write_tree dir suffix config_file)
     file(WRITE ${dir}/src/libgit2/tree.h "${_tree_h${suffix}}")
     file(WRITE ${dir}/src/libgit2/iterator.c "${_iterator${suffix}}")
     file(WRITE ${dir}/src/libgit2/tree.c "${_tree_c${suffix}}")
+    file(WRITE ${dir}/src/libgit2/attr_file.c "${_attr_file${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -129,7 +135,7 @@ function(expect_patched what dir)
                   "src/libgit2/repository.c;_repository_to" "src/libgit2/checkout.c;_checkout_to"
                   "src/libgit2/merge.c;_merge_to" "src/util/wildmatch.c;_wildmatch_to"
                   "src/libgit2/tree.h;_tree_h_to" "src/libgit2/iterator.c;_iterator_to"
-                  "src/libgit2/tree.c;_tree_c_to")
+                  "src/libgit2/tree.c;_tree_c_to" "src/libgit2/attr_file.c;_attr_file_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)
