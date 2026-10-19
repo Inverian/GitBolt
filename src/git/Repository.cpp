@@ -2473,7 +2473,13 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
 
 Result<std::vector<SubmoduleInfo>> Repository::submodules() const {
     std::vector<SubmoduleInfo> result;
-    git_submodule_foreach(repo_, [](git_submodule* sm, const char* name, void* payload) -> int {
+    // A bare repository has none checked out, and libgit2 turns it down.
+    if (git_repository_is_bare(repo_))
+        return result;
+    // libgit2 reads HEAD's tree, all of it, and fails on one nested too
+    // deep: that failure went unseen, and the list was empty, as if the
+    // repository had no submodules.
+    const int err = git_submodule_foreach(repo_, [](git_submodule* sm, const char* name, void* payload) -> int {
         auto* subs = static_cast<std::vector<SubmoduleInfo>*>(payload);
         SubmoduleInfo info;
         info.name = name ? name : "";
@@ -2487,6 +2493,7 @@ Result<std::vector<SubmoduleInfo>> Repository::submodules() const {
         subs->push_back(std::move(info));
         return 0;
     }, &result);
+    if (err < 0) return GitError::fromLibgit2(err);
     return result;
 }
 

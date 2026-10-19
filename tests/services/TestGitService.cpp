@@ -12,6 +12,8 @@
 //   - async open success AND failure delivery,
 //   - statusReady / logReady payloads for a real repo, and why status
 //     couldn't be read (a tree nested too deep) in statusReady's place,
+//     but not for a bare repository, which has none; and why the
+//     submodules couldn't be,
 //   - commitChanges round trip, through `git commit`: the repository's
 //     hooks run (core.hooksPath too) and can refuse it, a slow hook is
 //     waited for and a quit stops it, a merge's autostash comes back,
@@ -1001,9 +1003,10 @@ private slots:
     // files of 40 lines) went on to its end: the next read waited for it
     // on the read thread, the close and the open on the repository's
     // lock, and quitting in ~GitService. Now the next
-    // read's answer, the close, the open and the destructor come well
-    // before the whole diff would have been done, and the stopped read
-    // answers nothing.
+    // read's answer, the close, the open (an async one too, the pool's
+    // threads all taken by refreshes waiting behind the read) and the
+    // destructor come well before the whole diff would have been done,
+    // and the stopped read answers nothing.
     void aReadStopsWhenItIsForNothing_data() {
         QTest::addColumn<QString>("how");
         QTest::newRow("superseded") << QStringLiteral("superseded");
@@ -1059,6 +1062,13 @@ private slots:
         } else if (how == QLatin1String("opened")) {
             QVERIFY(svc->openRepository(other->path()));
         } else if (how == QLatin1String("opened async")) {
+            // With refreshes asked for meanwhile, as the watcher does at
+            // each change in the work tree: more than the pool has
+            // threads, each waiting on the repository's lock behind the
+            // read. Stopped only where the open landed, the read ran to
+            // its end, the open's worker waiting for a thread meanwhile.
+            for (int i = 0; i < QThreadPool::globalInstance()->maxThreadCount() + 2; ++i)
+                svc->refreshStatus();
             bool opened = false;
             connect(svc.get(), &GitService::repositoryOpened, &context, [&opened] { opened = true; });
             svc->openRepositoryAsync(other->path());
@@ -1136,6 +1146,69 @@ private slots:
                      qPrintable(args.at(1).toString()));
         }
         QVERIFY(status.isEmpty());
+#endif
+    }
+
+    // A bare repository has no work tree, and libgit2 turns its status
+    // down: no failure, as that is all it ever does, but no changes.
+    // Passed on as one, it was said on the status bar at every open of
+    // a bare repository, in place of "Opened: …".
+    void aBareRepositorysStatusIsNoFailure() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString bare = scratch.filePath(QStringLiteral("bare.git"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"clone", "-q", "--bare", repo->path().toStdString(),
+                                    bare.toStdString()})));
+
+        GitService svc;
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy status(&svc, &GitService::statusReady);
+        MainThreadSpy states(&svc, &GitService::repoStateReady);
+        QVERIFY(svc.openRepository(bare));
+        svc.refreshStatus();
+        QVERIFY(QTest::qWaitFor([&] { return states.size() >= 2; }, 10000));
+        QVERIFY2(failed.isEmpty(), qPrintable(failed.value(0).value(1).toString()));
+        QCOMPARE(status.size(), 2);
+        for (const QVariantList& args : status)
+            QVERIFY(args.at(0).value<std::vector<gitbolt::git::StatusEntry>>().empty());
+    }
+
+    // The submodules where HEAD's tree is nested deeper than the bundled
+    // libgit2 goes (it reads all of it for them, with a .gitmodules): an
+    // operationFailed("submodules", why). The failure went unseen, and
+    // the sidebar listed no submodules, as if there were none.
+    void refreshSubmodulesReportsWhyItFailed() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral(".gitmodules"),
+                                    "[submodule \"s\"]\n\tpath = s\n\turl = ./\n",
+                                    QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy listed(&svc, &GitService::submodulesReady);
+        svc.refreshSubmodules();
+        QVERIFY(QTest::qWaitFor([&] {
+            return std::any_of(failed.begin(), failed.end(), [](const QVariantList& args) {
+                return args.at(0).toString() == QLatin1String("submodules");
+            }) || !listed.isEmpty();
+        }, 10000));
+        QVERIFY(listed.isEmpty());
+        bool said = false;
+        for (const QVariantList& args : failed) {
+            if (args.at(0).toString() != QLatin1String("submodules"))
+                continue;
+            said = true;
+            QCOMPARE(args.at(1).toString(), QStringLiteral("tree too deep: more than 2048 levels"));
+        }
+        QVERIFY(said);
 #endif
     }
 

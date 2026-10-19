@@ -63,7 +63,8 @@
 //   - Format Patch takes a count ("-2") as git does;
 //   - status that can't be read (a tree nested too deep for libgit2) is
 //     said on the status bar, once rather than at every refresh, and
-//     the Commit count goes.
+//     the Commit button says no count is known, why on hover; Manage
+//     Submodules says why the submodules can't be listed.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -2346,11 +2347,13 @@ private slots:
 
     // Status that can't be read (HEAD's tree nested deeper than the
     // bundled libgit2 goes): the status bar says so, and why, and the
-    // Commit count goes, as no count is known. It stayed at the count
-    // of the last status read, and the failure was said nowhere. Said
-    // once: the watcher asks for status at every change in the work
-    // tree, and each failure would go over whatever the status bar said
-    // since. Once status has read again, a failure is said again.
+    // Commit button that no count is known, why on hover. It stayed at
+    // the count of the last status read, and the failure was said
+    // nowhere; then "Commit..." alone, a clean work tree's. Said on the
+    // status bar once: the watcher asks for status at every change in
+    // the work tree, and each failure would go over whatever the status
+    // bar said since. Once status has read again, a failure is said
+    // again.
     void aStatusThatCantBeReadIsSaidOnce() {
 #ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
@@ -2370,10 +2373,14 @@ private slots:
         connect(svc, &GitService::operationFailed, &window, [&failures] { ++failures; });
 
         const QString said = QStringLiteral("status failed: tree too deep: more than 2048 levels");
+        const QString why =
+            QStringLiteral("Status couldn't be read: tree too deep: more than 2048 levels");
+        QCOMPARE(commit->toolTip(), QStringLiteral("Commit (1)"));
         const auto deep = repo.commitDeepTree(2350);
         svc->refreshStatus();
         QTRY_COMPARE(window.statusBar()->currentMessage(), said);
-        QCOMPARE(commit->text(), QStringLiteral("Co&mmit..."));
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit (?)..."));
+        QCOMPARE(commit->toolTip(), why);
 
         // Failing again, as at the next change in the work tree.
         window.statusBar()->showMessage(QStringLiteral("Something else"));
@@ -2387,10 +2394,42 @@ private slots:
         QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", base->toHex()})));
         svc->refreshStatus();
         QTRY_COMPARE(commit->text(), QStringLiteral("Co&mmit (1)..."));
+        QCOMPARE(commit->toolTip(), QStringLiteral("Commit (1)"));
         QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", deep.toHex()})));
         svc->refreshStatus();
         QTRY_COMPARE(window.statusBar()->currentMessage(), said);
-        QCOMPARE(commit->text(), QStringLiteral("Co&mmit..."));
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit (?)..."));
+        QCOMPARE(commit->toolTip(), why);
+#endif
+    }
+
+    // Repository > Manage submodules… where HEAD's tree is nested deeper
+    // than the bundled libgit2 goes (it reads all of it for the
+    // submodules, with a .gitmodules): the dialog says the submodules
+    // can't be listed, and why. Its list was just empty, as if the
+    // repository had none.
+    void submodulesThatCantBeListedSayWhy() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral(".gitmodules"),
+                                    "[submodule \"s\"]\n\tpath = s\n\turl = ./\n",
+                                    QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        auto* failure = widget->window()->findChild<QLabel*>(QStringLiteral("submodules.failure"));
+        QVERIFY(failure);
+        QVERIFY(failure->isVisible());
+        QCOMPARE(failure->text(), QStringLiteral("The submodules can't be listed: "
+                                                 "tree too deep: more than 2048 levels"));
+        if (auto* dialog = qobject_cast<QDialog*>(widget->window()))
+            dialog->close();
 #endif
     }
 

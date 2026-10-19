@@ -485,7 +485,8 @@ public:
     void deleteTag(const QString& name);
 
     // Submodules. Init and update are MainWindow's local ops (an update
-    // clones and checks out), as sync and deinit are.
+    // clones and checks out), as sync and deinit are. A list that can't
+    // be read is an operationFailed("submodules", why).
     void refreshSubmodules();
 
     // Worktrees
@@ -774,10 +775,10 @@ private:
     // signals.
     quint64 openGeneration_ = 0;
 
-    // Bumped (service thread) when the repository is closed or another
-    // one takes its place: a readAsync's read started before is for
-    // nothing then, and stops (its `cancelled` compares). Atomic, as the
-    // read thread reads it as the read goes.
+    // Bumped (service thread) when the repository is closed, or an open
+    // starts or lands: a readAsync's read started before is for nothing
+    // then, and stops (its `cancelled` compares). Atomic, as the read
+    // thread reads it as the read goes.
     std::atomic<quint64> readGeneration_{0};
 
     // Cancellation flag for the in-flight watch-directory walk.

@@ -2902,6 +2902,19 @@ private slots:
 #endif
     }
 
+    // A bare repository has no submodules checked out, and libgit2
+    // turns the listing down: no submodules, rather than a failure that
+    // would be said at every open of one.
+    void aBareRepositoryListsNoSubmodules() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto bare = gitbolt::git::Repository::init(dir.path().toStdString(), /*bare=*/true);
+        QVERIFY(bare.ok());
+        const auto subs = bare->submodules();
+        QVERIFY2(subs.ok(), subs.ok() ? "" : subs.error().message().c_str());
+        QVERIFY(subs->empty());
+    }
+
     // A submodule whose folder is the superproject: `path = /`, or a
     // path through a committed symlink to `.`. Status opened the
     // superproject as its own submodule, over and over, until the stack
@@ -4418,7 +4431,9 @@ private slots:
     // diffCommit and the File Tree's walk grew without bound (memory as
     // the square of the depth; the walk's recursion ran the stack out).
     // They stop with a "tree too deep" error now, while a tree a little
-    // under the limit still works.
+    // under the limit still works. The submodules, which libgit2 reads
+    // HEAD's tree for where there is a .gitmodules, say so too: their
+    // failure went unseen, and the list was empty, as if there were none.
     void deepTreeIsBounded() {
 #ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
@@ -4454,6 +4469,9 @@ private slots:
             QVERIFY2(tooDeep(opened->diffCommit(id)), "diffCommit did not stop at the depth limit");
             QVERIFY2(tooDeep(opened->walkTreeAtCommit(id)),
                      "walkTreeAtCommit did not stop at the depth limit");
+            repo.writeFile(QStringLiteral(".gitmodules"),
+                           "[submodule \"s\"]\n\tpath = s\n\turl = ./\n");
+            QVERIFY2(tooDeep(opened->submodules()), "submodules() did not stop at the depth limit");
         }
 #endif
     }

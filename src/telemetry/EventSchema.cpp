@@ -190,6 +190,7 @@ QString operationName(const QString& opLiteral) {
         QStringLiteral("stash_pop"),        QStringLiteral("stash_save"),
         QStringLiteral("status"),
         QStringLiteral("submodule_init"),   QStringLiteral("submodule_update"),
+        QStringLiteral("submodules"),
         QStringLiteral("unlock_worktree"),  QStringLiteral("unstage"),
         QStringLiteral("unstage_all"),
     };

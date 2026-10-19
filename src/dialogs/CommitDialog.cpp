@@ -992,8 +992,11 @@ void CommitDialog::onOperationFailed(const QString& op, const QString& err)
 {
     // Status that couldn't be read (a tree nested too deep for libgit2):
     // the lists can't say what changed, and empty they looked as if
-    // nothing had. Said until status reads again (onStatusReady).
+    // nothing had. Said until status reads again (onStatusReady). Nor
+    // do the lists keep what the last status that read had in them: an
+    // entry of it clicked showed no diff, which can't be read either.
     if (op == QLatin1String("status")) {
+        onStatusReady({});
         statusFailure_ = op + tr(" failed: ") + err;
         errorLabel_->setText(statusFailure_);
         errorLabel_->show();

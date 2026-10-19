@@ -616,23 +616,43 @@ void MainWindow::buildRepositoryMenu()
             dlg->resize(720, 420);
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
+            // Why the list is empty when it can't be read (libgit2 reads
+            // HEAD's tree for it, and turns down one nested too deep):
+            // empty alone, it said there were no submodules. libgit2's
+            // words, with a path of the repository's in them: plain text.
+            auto* failure = new QLabel(dlg);
+            failure->setObjectName(QStringLiteral("submodules.failure"));
+            failure->setWordWrap(true);
+            failure->setTextFormat(Qt::PlainText);
+            failure->setMargin(8);
+            failure->hide();
+            layout->addWidget(failure);
             auto* widget = new widgets::SubmoduleWidget(dlg);
             layout->addWidget(widget);
+            const auto showFailure = [widget, failure](const QString& why) {
+                widget->clear();
+                failure->setText(tr("The submodules can't be listed: %1")
+                                     .arg(util::elided(why)));
+                failure->show();
+            };
 
             // Prime the widget with the current submodule list and
             // keep it in sync as GitService re-emits after mutations.
-            auto populate = [widget, this]() {
-                auto res = gitService_->withRepository(
-                    [](git::Repository& r) { return r.submodules(); });
-                if (res.ok())
-                    widget->setSubmodules(res.value());
-                else
-                    widget->clear();
-            };
-            populate();
+            auto res = gitService_->withRepository(
+                [](git::Repository& r) { return r.submodules(); });
+            if (res.ok())
+                widget->setSubmodules(res.value());
+            else
+                showFailure(QString::fromStdString(res.error().message()));
             connect(gitService_, &services::GitService::submodulesReady,
-                    widget, [widget](std::vector<git::SubmoduleInfo> s) {
+                    widget, [widget, failure](std::vector<git::SubmoduleInfo> s) {
+                        failure->hide();
                         widget->setSubmodules(std::move(s));
+                    });
+            connect(gitService_, &services::GitService::operationFailed,
+                    widget, [showFailure](const QString& op, const QString& err) {
+                        if (op == QLatin1String("submodules"))
+                            showFailure(err);
                     });
 
             // Row actions: local ops through the git CLI (libgit2 has
@@ -1209,8 +1229,10 @@ void MainWindow::buildRepositoryMenu()
         cancelRevealedAutoFetch();
         // Clear the dynamic Commit (N) suffix back to plain "Commit"
         // — no count is meaningful when no repo is open.
-        if (commitAction_)
+        if (commitAction_) {
             commitAction_->setText(tr("Co&mmit..."));
+            commitAction_->setToolTip(QString());
+        }
     });
     repoMenu->addAction(closeAction);
 }
@@ -4826,6 +4848,7 @@ void MainWindow::setupConnections()
             this, [this](std::vector<git::StatusEntry> entries) {
         statusFailure_.clear();
         if (!commitAction_) return;
+        commitAction_->setToolTip(QString());   // its text again
         int n = 0;
         for (const auto& e : entries) {
             if (git::hasFlag(e.status, git::FileStatus::Ignored))
@@ -4884,10 +4907,15 @@ void MainWindow::setupConnections()
                 // asks for one at each change in the work tree: no count
                 // of changes is known, and why is said once, not over
                 // every message that comes after it, until status reads
-                // again or fails otherwise.
+                // again or fails otherwise. The Commit button says it
+                // for as long, and why on hover: "Commit..." alone is a
+                // clean work tree's.
                 if (op == QLatin1String("status")) {
-                    if (commitAction_)
-                        commitAction_->setText(tr("Co&mmit..."));
+                    if (commitAction_) {
+                        commitAction_->setText(tr("Co&mmit (?)..."));
+                        commitAction_->setToolTip(util::plainToolTip(
+                            tr("Status couldn't be read: %1").arg(util::elided(err))));
+                    }
                     if (err == statusFailure_)
                         return;
                     statusFailure_ = err;

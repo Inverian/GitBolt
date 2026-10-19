@@ -15,7 +15,7 @@
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
 //   - status that can't be read (a tree nested too deep for libgit2)
-//     says so, and why, until it reads again;
+//     says so, and why, until it reads again, the lists empty;
 //   - while the commit runs, nothing stages, unstages or commits, the
 //     button clicked says "Committing…", and Commit & Push still pushes
 //     once it's in; the file lists and the diff stay live to review;
@@ -511,8 +511,10 @@ private slots:
 
     // Status that can't be read (HEAD's tree nested deeper than the
     // bundled libgit2 goes): the dialog says so, and why. Its lists were
-    // left empty, as if nothing had changed. Once status reads again,
-    // the note goes.
+    // left as they were, empty as if nothing had changed, or with the
+    // last status's entries, one of which clicked showed no diff (it
+    // can't be read either): empty now, under the note. Once status
+    // reads again, the note goes and the entries come back.
     void aStatusThatCantBeReadSaysWhy() {
 #ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
         QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
@@ -520,8 +522,10 @@ private slots:
         gitbolt::test::TestRepo repo;
         auto base = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base"));
         QVERIFY(base.ok());
-        repo.commitDeepTree(2350);
         repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        repo.writeFile(QStringLiteral("c.txt"), "c\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "c.txt"})));
 
         GitService svc;
         QVERIFY(svc.openRepository(repo.path()));
@@ -529,22 +533,30 @@ private slots:
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         auto* error = child<QLabel>(dialog, "commit.error");
-        QVERIFY(error);
+        auto* unstaged = child<QAbstractItemView>(dialog, "commit.unstagedList");
+        auto* staged = child<QAbstractItemView>(dialog, "commit.stagedList");
+        QVERIFY(error && unstaged && staged);
+        QTRY_COMPARE(unstaged->model()->rowCount(), 1);
+        QCOMPARE(staged->model()->rowCount(), 1);
+
+        repo.commitDeepTree(2350);
+        svc.refreshStatus();
         QTRY_VERIFY(error->isVisible());
         QCOMPARE(error->text(),
                  QStringLiteral("status failed: tree too deep: more than 2048 levels"));
+        QCOMPARE(unstaged->model()->rowCount(), 0);
+        QCOMPARE(staged->model()->rowCount(), 0);
 
-        // HEAD back on the commit before: status reads, b.txt in it.
-        gitbolt::git::GitProcess git(repo.path().toStdString());
+        // HEAD back on the commit before: status reads, b.txt and c.txt
+        // in it.
         QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", base->toHex()})));
         bool read = false;
         connect(&svc, &GitService::statusReady, &dialog, [&read] { read = true; });
         svc.refreshStatus();
         QTRY_VERIFY(read);
         QVERIFY(!error->isVisible());
-        auto* unstaged = child<QAbstractItemView>(dialog, "commit.unstagedList");
-        QVERIFY(unstaged);
         QCOMPARE(unstaged->model()->rowCount(), 1);
+        QCOMPARE(staged->model()->rowCount(), 1);
 #endif
     }
 

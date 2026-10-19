@@ -107,6 +107,14 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
     if (watchEnumCancel_)
         watchEnumCancel_->store(true);
     openPending_ = true;
+    // A read of the repository open until now is for nothing from here:
+    // what it returns while the open is on its way goes nowhere
+    // (deliverFor), and a failed open asks for everything again. Stopped
+    // only where the open lands, it held repoMutex_, the refreshes asked
+    // for meanwhile waited on it on the pool's threads, and once they
+    // had them all, the open's own worker waited for one, and the read
+    // ran to its end.
+    ++readGeneration_;
 
     // Worker outcome: exactly one of repo / error is set. Must be
     // copyable + default-constructible for QFutureWatcher::result().
@@ -151,7 +159,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
                 return;
             }
 
-            ++readGeneration_;     // as in openRepository
+            ++readGeneration_;     // and one asked for since it started
             {
                 std::lock_guard<std::mutex> lock(repoMutex_);
                 repo_ = std::move(outcome.repo);
@@ -318,7 +326,10 @@ void GitService::refreshStatus() {
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
-        auto result = r->status();
+        // A bare repository has no work tree, and nothing to commit:
+        // libgit2 turns its status down, which is no failure to say.
+        git::Result<std::vector<git::StatusEntry>> result =
+            r->isBare() ? std::vector<git::StatusEntry>{} : r->status();
         int conflicts = 0;
         if (result) {
             conflicts = static_cast<int>(std::count_if(
@@ -1764,11 +1775,15 @@ void GitService::refreshSubmodules() {
     runner_.run([this, r]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
-        auto result = r->submodules();
-        if (result)
-            deliverFor(r, [this, submodules = std::move(*result)]() mutable {
-                emit submodulesReady(std::move(submodules));
-            });
+        // Not dropped when it fails (HEAD's tree nested too deep for
+        // libgit2): the sidebar showed no submodules, as if none.
+        deliverFor(r, [this, result = r->submodules()]() mutable {
+            if (result)
+                emit submodulesReady(std::move(*result));
+            else
+                emit operationFailed(QStringLiteral("submodules"),
+                                     QString::fromStdString(result.error().message()));
+        });
     });
 }
 
