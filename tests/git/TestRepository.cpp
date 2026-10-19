@@ -19,6 +19,15 @@
 #endif
 #include <memory>
 #include <optional>
+#if defined(Q_OS_MACOS)
+#include <mach/mach.h>
+#elif defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#endif
 
 namespace {
 
@@ -153,6 +162,30 @@ void writeBytes(const QString& path, const QByteArray& bytes) {
 #endif
 
 #if defined(GITBOLT_LIBGIT2_LIMITS_PATCHED)
+// The memory the process holds (its resident set), in bytes, or 0
+// where that can't be read.
+qint64 residentBytes() {
+#if defined(Q_OS_MACOS)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+        return 0;
+    return static_cast<qint64>(info.resident_size);
+#elif defined(Q_OS_WIN)
+    PROCESS_MEMORY_COUNTERS counters;
+    if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters, static_cast<DWORD>(sizeof(counters))))
+        return 0;
+    return static_cast<qint64>(counters.WorkingSetSize);
+#else
+    QFile statm(QStringLiteral("/proc/self/statm"));
+    if (!statm.open(QIODevice::ReadOnly))
+        return 0;
+    const QList<QByteArray> pages = statm.readAll().split(' ');
+    return pages.size() > 1 ? pages.at(1).toLongLong() * sysconf(_SC_PAGESIZE) : 0;
+#endif
+}
+
 // Commits a tree that is `depth` nested single-entry directories named
 // "d", with a blob "leaf.txt" at the bottom, and points HEAD at it. The
 // objects are a few kilobytes whatever the depth. Returns the commit's
@@ -3639,6 +3672,135 @@ private slots:
         QVERIFY(isSet(as + QLatin1Char('/') + as + QLatin1Char('/') + as + QStringLiteral("/xa.txt"),
                       "has_a"));
 #endif
+#endif
+    }
+
+    // A committed .gitattributes of 8,000 rules naming one macro, built
+    // up from four before it, 200 names a line (git reads them all and
+    // says nothing). libgit2 copied the macro's thousand names into every
+    // rule as it read the file, and kept them while the repository was
+    // open: status and a commit's diff took 130 MB for these 87 KB (8 MB
+    // now), and memory went as the square of the file. A file's rules
+    // now take no more than its size allows, the first ones still
+    // applying, and a rule of 2,000 names, a line git skips as too long,
+    // is skipped too. The memory is the process's resident set, so the
+    // bound is loose.
+    void macroGitattributesStayBounded() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        QByteArray attrs = "long.txt";
+        for (int i = 0; i < 2000; ++i)
+            attrs += " c" + QByteArray::number(i);
+        attrs += '\n';
+        for (int m = 0, name = 0; m < 5; ++m) {
+            attrs += "[attr]m" + QByteArray::number(m);
+            if (m > 0)
+                attrs += " m" + QByteArray::number(m - 1);
+            for (int i = 0; i < 200; ++i, ++name)
+                attrs += " a" + QByteArray::number(name);
+            attrs += '\n';
+        }
+        for (int i = 0; i < 8000; ++i)
+            attrs += "f" + QByteArray::number(i) + " m4\n";
+
+        gitbolt::test::TestRepo repo;
+        const QStringList files{QStringLiteral("f0"), QStringLiteral("f1"), QStringLiteral("f2")};
+        for (const QString& file : files)
+            repo.writeFile(file, "one\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "A"})));
+        repo.writeFile(".gitattributes", attrs);
+        for (const QString& file : files)
+            repo.writeFile(file, "two\n");
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "B"})));
+        // A change of the same size: status reads the file, through the
+        // attributes (its filters), to see it.
+        repo.writeFile("f0", "TWO\n");
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto head = opened->head();
+        QVERIFY(head.ok());
+
+        const qint64 before = residentBytes();
+        QElapsedTimer timer;
+        timer.start();
+        const auto status = opened->status();
+        const auto diff = opened->diffCommit(*head);
+        const qint64 elapsed = timer.elapsed();
+        const qint64 grown = residentBytes() - before;
+        QVERIFY2(status.ok(), status.ok() ? "" : status.error().message().c_str());
+        QVERIFY2(diff.ok(), diff.ok() ? "" : diff.error().message().c_str());
+        QCOMPARE(diff->files.size(), static_cast<size_t>(files.size() + 1));
+        QCOMPARE(statusLines(*opened), QStringList{QStringLiteral("f0 changed")});
+        // A few megabytes now.
+        QVERIFY2(grown < 64 * 1024 * 1024,
+                 qPrintable(QStringLiteral("status and diffCommit took %1 MB").arg(grown >> 20)));
+        QVERIFY2(elapsed < 5000,
+                 qPrintable(QStringLiteral("status and diffCommit took %1 ms").arg(elapsed)));
+
+        const char* value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "f0", "a999"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_TRUE);
+        value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "long.txt", "c0"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_UNSPECIFIED);
+        QCOMPARE(output(git.run({"check-attr", "c0", "--", "long.txt"})),
+                 QStringLiteral("long.txt: c0: unspecified"));
+#endif
+    }
+
+    // The macros of an ordinary .gitattributes still apply: `binary`,
+    // macros the file defines, one defined from another, and a name
+    // after a macro on its line still wins over it.
+    void ordinaryAttributeMacrosStillApply() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(".gitattributes",
+                                    "[attr]generated -diff -merge linguist-generated\n"
+                                    "[attr]vendored generated linguist-vendored=yes\n"
+                                    "*.png binary\n"
+                                    "*.svg binary diff\n"
+                                    "*.pb.go generated\n"
+                                    "vendor/** vendored\n",
+                                    "attrs").ok());
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+
+        // "set", "unset", "unspecified", or the attribute's value.
+        auto attr = [&](const char* path, const char* name) {
+            const char* value = nullptr;
+            if (git_attr_get(&value, opened->raw(), 0, path, name) < 0)
+                return QStringLiteral("<failed>");
+            switch (git_attr_value(value)) {
+            case GIT_ATTR_VALUE_TRUE:
+                return QStringLiteral("set");
+            case GIT_ATTR_VALUE_FALSE:
+                return QStringLiteral("unset");
+            case GIT_ATTR_VALUE_UNSPECIFIED:
+                return QStringLiteral("unspecified");
+            case GIT_ATTR_VALUE_STRING:
+                return QString::fromUtf8(value);
+            }
+            return QStringLiteral("<unknown>");
+        };
+        QCOMPARE(attr("logo.png", "diff"), QStringLiteral("unset"));
+        QCOMPARE(attr("logo.png", "text"), QStringLiteral("unset"));
+        QCOMPARE(attr("logo.svg", "diff"), QStringLiteral("set"));
+        QCOMPARE(attr("logo.svg", "merge"), QStringLiteral("unset"));
+        QCOMPARE(attr("api/v1.pb.go", "diff"), QStringLiteral("unset"));
+        QCOMPARE(attr("api/v1.pb.go", "linguist-generated"), QStringLiteral("set"));
+        QCOMPARE(attr("vendor/lib/x.c", "merge"), QStringLiteral("unset"));
+        QCOMPARE(attr("vendor/lib/x.c", "linguist-generated"), QStringLiteral("set"));
+        QCOMPARE(attr("vendor/lib/x.c", "linguist-vendored"), QStringLiteral("yes"));
+        QCOMPARE(attr("main.c", "diff"), QStringLiteral("unspecified"));
 #endif
     }
 
