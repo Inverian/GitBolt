@@ -471,8 +471,7 @@ void GitService::refreshConflicts() {
     });
 }
 
-bool GitService::resolveConflicts(
-        const std::vector<std::pair<QString, QString>>& resolutions) {
+bool GitService::resolveConflicts(const std::vector<ConflictResolution>& resolutions) {
     if (!repo_) return true;
     // A resolver left open from an earlier stop, while Continue runs:
     // staged now, its files went into whatever git was committing.
@@ -482,7 +481,7 @@ bool GitService::resolveConflicts(
     }
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
-        for (const auto& [path, content] : resolutions) {
+        for (const auto& [path, content, accepted] : resolutions) {
             // Staged first and then written from the index, rather than
             // written and then staged: the work tree's path can be a
             // symbolic link (a conflict on a link leaves one side's
@@ -490,7 +489,7 @@ bool GitService::resolveConflicts(
             // it pointed, outside the work tree too, while staging it
             // kept the link. See Repository::resolveConflict.
             auto res = repo_->resolveConflict(path.toStdString(),
-                                              content.toUtf8().toStdString());
+                                              content.toUtf8().toStdString(), accepted);
             if (!res)
                 emit operationFailed(
                     QStringLiteral("resolve conflicts"),

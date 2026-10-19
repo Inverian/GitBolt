@@ -5,6 +5,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QWidget>
+#include <optional>
 #include <vector>
 
 class QEvent;
@@ -31,6 +32,14 @@ public:
     /// before emitting); the host zips these with the conflict
     /// paths to write files and stage them.
     std::vector<QString> allResolvedContents() const { return resolvedContents_; }
+
+    /// For each conflict on a symbolic link, the side its result is:
+    /// Ours, or Theirs once Accept Theirs was clicked last. The host
+    /// stages that side as it is rather than the result's text, which
+    /// the editor doesn't give back byte for byte (a no-break space in
+    /// a link's target comes back as a space). None for the others.
+    /// Index-aligned with allResolvedContents().
+    std::vector<std::optional<gitbolt::git::ConflictSide>> allAcceptedSides() const;
 
     /// The conflicts currently loaded, as passed to setConflicts().
     const std::vector<gitbolt::git::MergeConflictEntry>& conflicts() const {
@@ -85,6 +94,7 @@ private:
     std::vector<gitbolt::git::MergeConflictEntry> conflicts_;
     int currentConflict_ = -1;
     std::vector<QString> resolvedContents_;
+    std::vector<gitbolt::git::ConflictSide> acceptedSides_;
 };
 
 } // namespace gitbolt::widgets

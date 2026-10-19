@@ -32,6 +32,15 @@ struct StopFacts {
     QString unpickedSequenceStop;
 };
 
+/// A conflict as the resolver resolved it: the text of its result, or,
+/// for a conflict on a symbolic link, the side accepted, which is
+/// staged as it is and not as the text (Repository::resolveConflict).
+struct ConflictResolution {
+    QString path;
+    QString content;
+    std::optional<git::ConflictSide> accepted = std::nullopt;
+};
+
 /// Threading rule. A GitService's state belongs to the thread it lives
 /// on (the GUI thread): repo_ is swapped there, the log scope and
 /// branch selection are set there, and only that thread submits work
@@ -214,10 +223,11 @@ public:
     /// source: merge, cherry-pick, rebase, revert.
     void refreshConflicts();
 
-    /// Stage each (repo-relative path, resolved content) pair,
-    /// collapsing the conflict entries, and write the file from the
-    /// index (Repository::resolveConflict): never through a symbolic
-    /// link, and a link's conflict only to one side's link as it is.
+    /// Stage each resolution (a repo-relative path and its content, or
+    /// the side accepted), collapsing the conflict entries, and write
+    /// the file from the index (Repository::resolveConflict): never
+    /// through a symbolic link, and a link's conflict only to one side
+    /// as it is.
     /// Synchronous (index adds + one-file checkouts are fast);
     /// failures surface per-file via operationFailed. Ends with a
     /// status refresh. The caller then concludes the merge with a
@@ -226,8 +236,7 @@ public:
     /// Returns false, having written nothing, while a rebase step runs
     /// on the repository (see rebaseStepRunning()), reported as an
     /// operationFailed.
-    bool resolveConflicts(
-        const std::vector<std::pair<QString, QString>>& resolutions);
+    bool resolveConflicts(const std::vector<ConflictResolution>& resolutions);
 
     /// Abort whatever conflicted operation is in progress, using
     /// the command that matches the repository state: merge /

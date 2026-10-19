@@ -4508,6 +4508,44 @@ private slots:
 #endif
     }
 
+    // Accept Theirs on a link whose target has a no-break space: the
+    // resolver's editor gives it back as a space, and that text, all the
+    // resolver handed over, was neither side's, so the link could not be
+    // resolved ("accept Ours or Theirs for it"). The side accepted goes
+    // with the text now, and is staged as it is.
+    void resolvingALinkConflictStagesTheSideAccepted() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        const QString target = QString::fromUtf8("x\xc2\xa0y");
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), target));
+        QVERIFY(repo.commit(QStringLiteral("link to x y")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("z")));
+        QVERIFY(repo.commit(QStringLiteral("link to z")).ok());
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        QVERIFY(svc.resolveConflicts(
+            {{QStringLiteral("link"), QStringLiteral("x y"), gitbolt::git::ConflictSide::Theirs}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink")
+                     .arg(output(work.run({"rev-parse", "side:link"}))));
+        QCOMPARE(linkTarget(QDir(repo.path()).filePath(QStringLiteral("link"))), target);
+#endif
+    }
+
     // A text conflict resolves as it always has: the result is the work
     // tree's file and the index's, the conflict is gone (kept for
     // resolve-undo, as `git add` keeps it), and an executable is still

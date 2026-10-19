@@ -58,6 +58,13 @@ struct MergeConflictEntry {
     }
 };
 
+/// The side of a conflict a resolution takes as it is: Accept Ours or
+/// Accept Theirs on a conflict on a symbolic link.
+enum class ConflictSide {
+    Ours,
+    Theirs,
+};
+
 struct MergeResult {
     MergeAnalysis analysis;
     bool hasConflicts = false;

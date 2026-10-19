@@ -104,6 +104,37 @@ private slots:
         QCOMPARE(widget.allResolvedContents(),
                  (std::vector<QString>{QStringLiteral("b"), QStringLiteral("ours\ntheirs\n")}));
     }
+
+    // A link's result went to the host as the editor's text, which isn't
+    // the target's bytes: the editor gives a no-break space back as a
+    // space. Accepting the side whose target had one was refused, as
+    // neither side's. The widget says which side each link's result is
+    // now: Ours until Accept Theirs, and Ours again on Accept Ours.
+    void linkConflictTellsTheSideAccepted() {
+        using gitbolt::git::ConflictSide;
+        MergeConflictWidget widget;
+        widget.setConflicts({conflict("link", "z", "x\xc2\xa0y", MergeConflictEntry::kSymlinkMode),
+                             conflict("other", "x\xc2\xa0y", "w", MergeConflictEntry::kSymlinkMode),
+                             conflict("again", "o", "t", MergeConflictEntry::kSymlinkMode),
+                             conflict("a.txt", "ours\n", "theirs\n", 0100644)});
+        QPushButton* acceptOurs = button(widget, MergeConflictWidget::tr("Accept Ours"));
+        QPushButton* acceptTheirs = button(widget, MergeConflictWidget::tr("Accept Theirs"));
+        QPushButton* next = button(widget, MergeConflictWidget::tr("Next >>"));
+        QPushButton* markAll = button(widget, MergeConflictWidget::tr("Mark All Resolved"));
+        QVERIFY(acceptOurs && acceptTheirs && next && markAll);
+
+        acceptTheirs->click();
+        next->click();   // "other" stays as it came: Ours
+        next->click();
+        acceptTheirs->click();
+        acceptOurs->click();
+        next->click();
+        acceptTheirs->click();   // a text conflict: its text is its result
+        markAll->click();
+        QCOMPARE(widget.allAcceptedSides(),
+                 (std::vector<std::optional<ConflictSide>>{ConflictSide::Theirs, ConflictSide::Ours,
+                                                           ConflictSide::Ours, std::nullopt}));
+    }
 };
 
 QTEST_MAIN(TestMergeConflictWidget)

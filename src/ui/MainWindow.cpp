@@ -5815,13 +5815,13 @@ void MainWindow::showConflictResolver()
             return;
         const auto& conflicts = widget->conflicts();
         const auto contents = widget->allResolvedContents();
-        std::vector<std::pair<QString, QString>> resolutions;
+        const auto sides = widget->allAcceptedSides();
+        std::vector<services::ConflictResolution> resolutions;
         resolutions.reserve(conflicts.size());
         for (size_t i = 0;
-             i < conflicts.size() && i < contents.size(); ++i) {
-            resolutions.emplace_back(
-                QString::fromStdString(conflicts[i].path),
-                contents[i]);
+             i < conflicts.size() && i < contents.size() && i < sides.size(); ++i) {
+            resolutions.push_back({QString::fromStdString(conflicts[i].path),
+                                   contents[i], sides[i]});
         }
         // Turned down while a rebase step runs (git is at the index):
         // the dialog stays, resolutions and all.
