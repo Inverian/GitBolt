@@ -341,8 +341,12 @@ private slots:
         }
         QCOMPARE(remote.serverRefs(), QStringLiteral("refs/heads/main ")
                                           + output(git.run({"rev-parse", "main"})));
-        QCOMPARE(output(git.run({"for-each-ref", "--format=%(refname)", "refs/remotes/origin"})),
-                 QStringLiteral("refs/remotes/origin/main"));
+        // git 2.48 and later make origin/HEAD on fetch as well.
+        QStringList tracking = output(git.run({"for-each-ref", "--format=%(refname)",
+                                               "refs/remotes/origin"}))
+                                   .split(QLatin1Char('\n'));
+        tracking.removeAll(QStringLiteral("refs/remotes/origin/HEAD"));
+        QCOMPARE(tracking, QStringList{QStringLiteral("refs/remotes/origin/main")});
         QVERIFY(!QFileInfo::exists(remote.dir.filePath(QStringLiteral("work/ran"))));
     }
 
