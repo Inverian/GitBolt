@@ -4536,12 +4536,15 @@ private slots:
         QVERIFY(svc.openRepository(repo.path()));
         QVERIFY(log.waitFor({"status", "log", "branches"}));
         log.clear();
+        const QString theirs = output(work.run({"rev-parse", "side:link"}));
         QVERIFY(svc.resolveConflicts(
-            {{QStringLiteral("link"), QStringLiteral("x y"), gitbolt::git::ConflictSide::Theirs}}));
+            {{QStringLiteral("link"), QStringLiteral("x y"),
+              gitbolt::git::AcceptedSide{gitbolt::git::ConflictSide::Theirs,
+                                         gitbolt::git::ObjectId::fromHex(theirs.toStdString()),
+                                         0120000}}}));
         QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
-                 QStringLiteral("120000 %1 0\tlink")
-                     .arg(output(work.run({"rev-parse", "side:link"}))));
+                 QStringLiteral("120000 %1 0\tlink").arg(theirs));
         QCOMPARE(linkTarget(QDir(repo.path()).filePath(QStringLiteral("link"))), target);
 #endif
     }

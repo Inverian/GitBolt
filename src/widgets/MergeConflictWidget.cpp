@@ -251,11 +251,17 @@ void MergeConflictWidget::clear() {
     nextBtn_->setEnabled(false);
 }
 
-std::vector<std::optional<git::ConflictSide>> MergeConflictWidget::allAcceptedSides() const {
-    std::vector<std::optional<git::ConflictSide>> sides(conflicts_.size());
+std::vector<std::optional<git::AcceptedSide>> MergeConflictWidget::allAcceptedSides() const {
+    std::vector<std::optional<git::AcceptedSide>> sides(conflicts_.size());
     for (size_t i = 0; i < conflicts_.size() && i < acceptedSides_.size(); ++i) {
-        if (conflicts_[i].isSymlink())
-            sides[i] = acceptedSides_[i];
+        const auto& conflict = conflicts_[i];
+        if (!conflict.isSymlink())
+            continue;
+        if (acceptedSides_[i] == git::ConflictSide::Ours)
+            sides[i] = git::AcceptedSide{git::ConflictSide::Ours, conflict.oursId, conflict.oursMode};
+        else
+            sides[i] = git::AcceptedSide{git::ConflictSide::Theirs, conflict.theirsId,
+                                         conflict.theirsMode};
     }
     return sides;
 }

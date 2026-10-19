@@ -33,13 +33,13 @@ public:
     /// paths to write files and stage them.
     std::vector<QString> allResolvedContents() const { return resolvedContents_; }
 
-    /// For each conflict on a symbolic link, the side its result is:
-    /// Ours, or Theirs once Accept Theirs was clicked last. The host
-    /// stages that side as it is rather than the result's text, which
-    /// the editor doesn't give back byte for byte (a no-break space in
-    /// a link's target comes back as a space). None for the others.
-    /// Index-aligned with allResolvedContents().
-    std::vector<std::optional<gitbolt::git::ConflictSide>> allAcceptedSides() const;
+    /// For each conflict on a symbolic link, the side its result is, as
+    /// setConflicts() listed it: Ours, or Theirs once Accept Theirs was
+    /// clicked last. The host stages that side as it is rather than the
+    /// result's text, which the editor doesn't give back byte for byte
+    /// (a no-break space in a link's target comes back as a space).
+    /// None for the others. Index-aligned with allResolvedContents().
+    std::vector<std::optional<gitbolt::git::AcceptedSide>> allAcceptedSides() const;
 
     /// The conflicts currently loaded, as passed to setConflicts().
     const std::vector<gitbolt::git::MergeConflictEntry>& conflicts() const {

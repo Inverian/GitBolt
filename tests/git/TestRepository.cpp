@@ -1513,7 +1513,10 @@ private slots:
     // aren't UTF-8 were the same text on both sides, and so were a link
     // and a file holding its target: the wrong side could be staged. The
     // side accepted is staged as it is now, whatever text comes with it
-    // (here the other side's).
+    // (here the other side's). And as the resolver listed it: where the
+    // conflict was staged since as the other side (from the file list,
+    // say), Accept Theirs was refused, as if there were no theirs, and
+    // Accept Ours kept theirs.
     void resolveConflictStagesTheSideAccepted_data() {
         QTest::addColumn<QByteArray>("ours");
         QTest::addColumn<QByteArray>("theirs");
@@ -1556,25 +1559,39 @@ private slots:
             return succeeded(git.runWithInput({"update-index", "--index-info"}, info));
         };
 
+        const std::string oursEntry = "120000 " + oursId + " 0\tp";
+        const std::string theirsEntry = theirsMode.toStdString() + " " + theirsId + " 0\tp";
+        const auto stage = [&](const std::string& entry) {
+            return succeeded(git.runWithInput({"update-index", "--index-info"},
+                                              "0 " + std::string(40, '0') + "\tp\n" + entry
+                                                  + "\n"));
+        };
+
+        using gitbolt::git::AcceptedSide;
         using gitbolt::git::ConflictSide;
-        for (const ConflictSide side : {ConflictSide::Ours, ConflictSide::Theirs}) {
-            QVERIFY(conflict(true));
-            const bool isOurs = side == ConflictSide::Ours;
-            const auto resolved = repo.repo().resolveConflict(
-                "p", (isOurs ? theirs : ours).toStdString(), side);
-            QVERIFY2(resolved.ok(), resolved.ok() ? "" : resolved.error().message().c_str());
-            QCOMPARE(output(git.run({"ls-files", "-s", "--", "p"})),
-                     QString::fromStdString(isOurs ? "120000 " + oursId + " 0\tp"
-                                                   : theirsMode.toStdString() + " " + theirsId
-                                                         + " 0\tp"));
-            // And the work tree has it as staged.
-            QCOMPARE(output(git.run({"diff", "--name-only", "--", "p"})), QString());
+        using gitbolt::git::ObjectId;
+        const AcceptedSide listedOurs{ConflictSide::Ours, ObjectId::fromHex(oursId), 0120000};
+        const AcceptedSide listedTheirs{ConflictSide::Theirs, ObjectId::fromHex(theirsId),
+                                        theirsMode.toUInt(nullptr, 8)};
+        for (const bool stagedSince : {false, true}) {
+            for (const AcceptedSide& side : {listedOurs, listedTheirs}) {
+                const bool isOurs = side.side == ConflictSide::Ours;
+                QVERIFY(stagedSince ? stage(isOurs ? theirsEntry : oursEntry) : conflict(true));
+                const auto resolved = repo.repo().resolveConflict(
+                    "p", (isOurs ? theirs : ours).toStdString(), side);
+                QVERIFY2(resolved.ok(), resolved.ok() ? "" : resolved.error().message().c_str());
+                QCOMPARE(output(git.run({"ls-files", "-s", "--", "p"})),
+                         QString::fromStdString(isOurs ? oursEntry : theirsEntry));
+                // And the work tree has it as staged.
+                QCOMPARE(output(git.run({"diff", "--name-only", "--", "p"})), QString());
+            }
         }
 
         // A side that isn't there is refused, and the conflict stays.
         QVERIFY(conflict(false));
         const QString before = output(git.run({"ls-files", "-s", "--", "p"}));
-        const auto refused = repo.repo().resolveConflict("p", "", ConflictSide::Theirs);
+        const auto refused =
+            repo.repo().resolveConflict("p", "", AcceptedSide{ConflictSide::Theirs, {}, 0});
         QVERIFY(!refused.ok());
         QCOMPARE(QString::fromStdString(refused.error().message()),
                  QStringLiteral("p has no Theirs to accept."));
@@ -1739,6 +1756,52 @@ private slots:
             QCOMPARE(output(git.run({"diff", "-z", "--name-only", "--cached"})), two + QChar(0));
         }
 #endif
+    }
+
+    // A file that is a directory now, everything staged: the index had
+    // d deleted and d/x added. Unstaging d put HEAD's d back beside
+    // d/x, an index git makes no tree from ("You have both d and d/x"),
+    // and of which GitBolt's commit made a tree without d. libgit2 drops
+    // d/x for the d it adds only where nothing sorts before d/x, and a
+    // sorts before it. The other way round, a directory that is a file
+    // now, unstaging d took the file out and left the directory's files
+    // out too. What the index has below d goes back to HEAD's as well
+    // now, as `git reset -- d` has it.
+    void unstageFileReplacedByADirectory_data() {
+        QTest::addColumn<bool>("wasFile");
+        QTest::newRow("a file, a directory now") << true;
+        QTest::newRow("a directory, a file now") << false;
+    }
+
+    void unstageFileReplacedByADirectory() {
+        QFETCH(bool, wasFile);
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("a", "a\n");
+        if (wasFile) {
+            repo.writeFile("d", "d\n");
+        } else {
+            repo.writeFile("d/x", "x\n");
+            repo.writeFile("d/y", "y\n");
+        }
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "base"})));
+        const QString d = QDir(repo.path()).filePath(QStringLiteral("d"));
+        if (wasFile) {
+            QVERIFY(QFile::remove(d));
+            repo.writeFile("d/x", "x\n");
+        } else {
+            QVERIFY(QDir(d).removeRecursively());
+            repo.writeFile("d", "d\n");
+        }
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+
+        QVERIFY(repo.repo().unstageFile("d").ok());
+        // Nothing staged: the index is HEAD's tree, and one git writes.
+        QCOMPARE(output(git.run({"write-tree"})), output(git.run({"rev-parse", "HEAD^{tree}"})));
+        QCOMPARE(output(git.run({"ls-files", "--others"})),
+                 wasFile ? QStringLiteral("d/x") : QStringLiteral("d"));
     }
 
     void commitWhileARebaseIsStoppedKeepsTheRebase() {
@@ -3917,15 +3980,15 @@ private slots:
     }
 
     // A file whose name reads as a negated pathspec, "!*b[ab]". Unstaging
-    // passes its path as a pathspec; libgit2 takes the '!' to negate
-    // `*b[ab]`, then falls back to the name itself when that pattern
-    // doesn't match it, but only when the match said WM_NOMATCH. Matches
-    // like this one now stop early, in an abort, and unstaging the file
-    // did nothing; wildmatch() says WM_NOMATCH for any failure.
+    // passed its path as a pathspec; libgit2 took the '!' to negate
+    // `*b[ab]`, then fell back to the name itself when that pattern
+    // didn't match it, but only when the match said WM_NOMATCH. With
+    // cmake/PatchLibgit2.cmake's limits, matches like this one stop
+    // early, in an abort, and unstaging the file did nothing; wildmatch()
+    // says WM_NOMATCH for any failure. Unstaging takes the name as
+    // itself now, with any libgit2.
     void unstageFileNamedLikeANegatedPathspec() {
-#if !defined(GITBOLT_LIBGIT2_LIMITS_PATCHED)
-        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
-#elif defined(Q_OS_WIN)
+#ifdef Q_OS_WIN
         QSKIP("a Windows file name can't hold '*'");
 #else
         gitbolt::test::TestRepo repo;

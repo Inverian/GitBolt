@@ -33,12 +33,13 @@ struct StopFacts {
 };
 
 /// A conflict as the resolver resolved it: the text of its result, or,
-/// for a conflict on a symbolic link, the side accepted, which is
-/// staged as it is and not as the text (Repository::resolveConflict).
+/// for a conflict on a symbolic link, the side accepted as it listed
+/// it, which is staged as it is and not as the text
+/// (Repository::resolveConflict).
 struct ConflictResolution {
     QString path;
     QString content;
-    std::optional<git::ConflictSide> accepted = std::nullopt;
+    std::optional<git::AcceptedSide> accepted = std::nullopt;
 };
 
 /// Threading rule. A GitService's state belongs to the thread it lives

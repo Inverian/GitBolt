@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstring>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -763,40 +764,84 @@ Result<void> Repository::stageFile(const std::string& path) {
 }
 
 Result<void> Repository::unstageFile(const std::string& path) {
-    // The index's entry for `path` goes back to HEAD's, or goes where
-    // HEAD has none (or there is no HEAD yet), and a conflict on it
-    // goes, as `git reset -- <path>` has it. git_reset_default did
-    // this, but took the path as a pattern (see literalPathspec):
-    // unstaging a file named * unstaged every file, and a partly
-    // staged one lost its staged hunks.
+    // The index's entries for `path`, and for what is below it as a
+    // directory, go back to HEAD's, or go where HEAD has none (or there
+    // is no HEAD yet), conflicts and all, as `git reset -- <path>` has
+    // it. git_reset_default did this, but took the path as a pattern
+    // (see literalPathspec): unstaging a file named * unstaged every
+    // file, and a partly staged one lost its staged hunks.
     git_index* index = nullptr;
     int err = freshIndex(&index, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
     const auto freeIndex = qScopeGuard([index] { git_index_free(index); });
 
-    git_tree_entry* head = nullptr;
+    // HEAD's files at the path, or below it where HEAD has a directory
+    // there. What is below the path matters too: a file that is a
+    // directory now has d/x in the index, and HEAD's d, put back alone,
+    // stayed beside it (libgit2 drops d/x for d only where nothing sorts
+    // before d/x), an index git makes no tree from; and a directory that
+    // is a file now got none of its files back.
+    struct HeadFiles {
+        std::string below;
+        std::map<std::string, std::pair<git_oid, uint32_t>> files;
+    } head{path + '/', {}};
     git_object* tree = nullptr;
     if (git_revparse_single(&tree, repo_, "HEAD^{tree}") == 0) {
-        err = git_tree_entry_bypath(&head, reinterpret_cast<git_tree*>(tree), path.c_str());
+        git_tree_entry* entry = nullptr;
+        err = git_tree_entry_bypath(&entry, reinterpret_cast<git_tree*>(tree), path.c_str());
         git_object_free(tree);
         if (err < 0 && err != GIT_ENOTFOUND)
             return GitError::fromLibgit2(err);
+        const auto freeEntry = qScopeGuard([entry] { git_tree_entry_free(entry); });
+        if (entry && git_tree_entry_type(entry) == GIT_OBJECT_TREE) {
+            git_tree* dir = nullptr;
+            err = git_tree_lookup(&dir, repo_, git_tree_entry_id(entry));
+            if (err >= 0) {
+                err = git_tree_walk(
+                    dir, GIT_TREEWALK_PRE,
+                    [](const char* root, const git_tree_entry* file, void* payload) -> int {
+                        auto* walked = static_cast<HeadFiles*>(payload);
+                        if (git_tree_entry_type(file) != GIT_OBJECT_TREE)
+                            walked->files[walked->below + root + git_tree_entry_name(file)] = {
+                                *git_tree_entry_id(file), git_tree_entry_filemode(file)};
+                        return 0;
+                    },
+                    &head);
+                git_tree_free(dir);
+            }
+            if (err < 0)
+                return GitError::fromLibgit2(err);
+        } else if (entry) {
+            head.files[path] = {*git_tree_entry_id(entry), git_tree_entry_filemode(entry)};
+        }
     }
-    const auto freeHead = qScopeGuard([head] { git_tree_entry_free(head); });
 
-    err = git_index_conflict_remove(index, path.c_str());
-    if (err == GIT_ENOTFOUND)
-        err = 0;
-    if (err >= 0 && head && git_tree_entry_type(head) != GIT_OBJECT_TREE) {
+    // The index's entries at the path and below it go, all but those
+    // that are HEAD's already; HEAD's others go in after, with nothing
+    // left in their way.
+    std::vector<std::pair<std::string, int>> gone;
+    for (size_t i = 0, count = git_index_entrycount(index); i < count; ++i) {
+        const git_index_entry* entry = git_index_get_byindex(index, i);
+        if (entry->path != path
+            && std::strncmp(entry->path, head.below.c_str(), head.below.size()) != 0)
+            continue;
+        const int stage = git_index_entry_stage(entry);
+        const auto it = head.files.find(entry->path);
+        if (stage == 0 && it != head.files.end() && git_oid_equal(&it->second.first, &entry->id)
+            && it->second.second == entry->mode)
+            head.files.erase(it);
+        else
+            gone.emplace_back(entry->path, stage);
+    }
+    err = 0;
+    for (size_t i = 0; err >= 0 && i < gone.size(); ++i)
+        err = git_index_remove(index, gone[i].first.c_str(), gone[i].second);
+    for (auto it = head.files.begin(); err >= 0 && it != head.files.end(); ++it) {
         git_index_entry entry{};
-        entry.path = path.c_str();
-        entry.mode = git_tree_entry_filemode(head);
-        entry.id = *git_tree_entry_id(head);
+        entry.path = it->first.c_str();
+        entry.id = it->second.first;
+        entry.mode = it->second.second;
         err = git_index_add(index, &entry);
-    } else if (err >= 0) {
-        err = git_index_remove(index, path.c_str(), 0);
-        if (err == GIT_ENOTFOUND)
-            err = 0;
     }
     if (err >= 0)
         err = git_index_write(index);
@@ -1649,7 +1694,7 @@ std::string workTreePathProblem(const QString& workdir, const std::string& path)
 } // namespace
 
 Result<void> Repository::resolveConflict(const std::string& path, const std::string& content,
-                                         std::optional<ConflictSide> accepted) {
+                                         std::optional<AcceptedSide> accepted) {
     const QString workdir = QString::fromStdString(this->workdir());
     if (workdir.isEmpty())
         return GitError(GitErrorCode::BareRepo, "A bare repository has no work tree to resolve in.");
@@ -1707,18 +1752,20 @@ Result<void> Repository::resolveConflict(const std::string& path, const std::str
         // space, a line separator as a line feed), and that text was
         // neither side below: the link could not be resolved. Nor does
         // text tell apart sides that differ only in their mode, or in
-        // bytes that aren't UTF-8.
-        const git_index_entry* chosen = *accepted == ConflictSide::Ours ? ours : theirs;
-        if (!chosen)
+        // bytes that aren't UTF-8. And the side as the resolver listed
+        // it, not the index's now: staged since (above), the conflict
+        // has no theirs, and its ours is what was staged. Accept Theirs
+        // was refused there, and Accept Ours kept that, theirs or not.
+        if (accepted->mode == 0)
             return GitError(GitErrorCode::NotFound,
                             path + " has no "
-                                + (*accepted == ConflictSide::Ours ? "Ours" : "Theirs")
+                                + (accepted->side == ConflictSide::Ours ? "Ours" : "Theirs")
                                 + " to accept.");
-        auto bytes = readBlob(ObjectId(&chosen->id));
+        auto bytes = readBlob(accepted->id);
         if (!bytes)
             return bytes.error();
         staged.assign(bytes->begin(), bytes->end());
-        mode = chosen->mode;
+        mode = accepted->mode;
     } else if (isLinkEntry(ours) || isLinkEntry(theirs)) {
         // A link's content is the path it points to. The resolver shows
         // it as text, but the only resolutions are the sides themselves,

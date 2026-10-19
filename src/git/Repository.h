@@ -118,8 +118,9 @@ public:
 
     // Staging
     Result<void> stageFile(const std::string& path);
-    /// The file `path`, whatever its name, as HEAD has it in the index
-    /// again (out of it where HEAD has none), as `git reset -- <path>`.
+    /// The file `path`, whatever its name, and what is below it as a
+    /// directory, as HEAD has them in the index again (out of it where
+    /// HEAD has none), as `git reset -- <path>`.
     Result<void> unstageFile(const std::string& path);
     Result<void> stageAll();
     /// The file `path`, whatever its name, as HEAD has it in the work
@@ -223,15 +224,15 @@ public:
     /// merge.conflictstyle. Refuses as well, keeping the conflict, a
     /// path whose checkout would also write another file, or end
     /// another's conflict.
-    /// With `accepted`, that side is staged as it is, its content and
-    /// its mode, and `content` isn't looked at: how the resolver
-    /// resolves a conflict on a link. Its editor doesn't give a side's
-    /// content back byte for byte (a no-break space comes back as a
-    /// space), and two sides can have the same content (a link, and a
-    /// file holding its target). Refused, changing nothing, where there
-    /// is no such side (a deleted one).
+    /// With `accepted`, that side as the resolver listed it is staged as
+    /// it is, its content and its mode, and `content` isn't looked at:
+    /// how the resolver resolves a conflict on a link. Its editor
+    /// doesn't give a side's content back byte for byte (a no-break
+    /// space comes back as a space), and two sides can have the same
+    /// content (a link, and a file holding its target). Refused,
+    /// changing nothing, where there is no such side (a deleted one).
     Result<void> resolveConflict(const std::string& path, const std::string& content,
-                                 std::optional<ConflictSide> accepted = std::nullopt);
+                                 std::optional<AcceptedSide> accepted = std::nullopt);
 
     // Remotes
     Result<std::vector<RemoteInfo>> remotes() const;
