@@ -58,6 +58,24 @@ struct MergeConflictEntry {
     }
 };
 
+/// The side of a conflict a resolution takes as it is: Accept Ours or
+/// Accept Theirs on a conflict on a symbolic link.
+enum class ConflictSide {
+    Ours,
+    Theirs,
+};
+
+/// That side as the resolver listed it: its blob and its mode, 0 where
+/// the side doesn't exist. What is staged is the side the user saw,
+/// whatever the index has for the path by then.
+struct AcceptedSide {
+    ConflictSide side = ConflictSide::Ours;
+    ObjectId id;
+    uint32_t mode = 0;
+
+    bool operator==(const AcceptedSide&) const = default;
+};
+
 struct MergeResult {
     MergeAnalysis analysis;
     bool hasConflicts = false;

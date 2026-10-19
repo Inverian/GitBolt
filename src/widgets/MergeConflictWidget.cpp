@@ -220,6 +220,7 @@ void MergeConflictWidget::setConflicts(
     conflicts_ = conflicts;
     resolvedContents_.clear();
     resolvedContents_.resize(conflicts_.size());
+    acceptedSides_.assign(conflicts_.size(), git::ConflictSide::Ours);
 
     if (!conflicts_.empty()) {
         acceptOursBtn_->setEnabled(true);
@@ -234,6 +235,7 @@ void MergeConflictWidget::setConflicts(
 void MergeConflictWidget::clear() {
     conflicts_.clear();
     resolvedContents_.clear();
+    acceptedSides_.clear();
     currentConflict_ = -1;
 
     oursEditor_->clear();
@@ -247,6 +249,21 @@ void MergeConflictWidget::clear() {
     markAllResolvedBtn_->setEnabled(false);
     prevBtn_->setEnabled(false);
     nextBtn_->setEnabled(false);
+}
+
+std::vector<std::optional<git::AcceptedSide>> MergeConflictWidget::allAcceptedSides() const {
+    std::vector<std::optional<git::AcceptedSide>> sides(conflicts_.size());
+    for (size_t i = 0; i < conflicts_.size() && i < acceptedSides_.size(); ++i) {
+        const auto& conflict = conflicts_[i];
+        if (!conflict.isSymlink())
+            continue;
+        if (acceptedSides_[i] == git::ConflictSide::Ours)
+            sides[i] = git::AcceptedSide{git::ConflictSide::Ours, conflict.oursId, conflict.oursMode};
+        else
+            sides[i] = git::AcceptedSide{git::ConflictSide::Theirs, conflict.theirsId,
+                                         conflict.theirsMode};
+    }
+    return sides;
 }
 
 QString MergeConflictWidget::resolvedContent() const {
@@ -338,6 +355,7 @@ void MergeConflictWidget::onAcceptOurs() {
     if (currentConflict_ < 0)
         return;
     const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
+    acceptedSides_[static_cast<size_t>(currentConflict_)] = git::ConflictSide::Ours;
     resultEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
 }
 
@@ -345,6 +363,7 @@ void MergeConflictWidget::onAcceptTheirs() {
     if (currentConflict_ < 0)
         return;
     const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
+    acceptedSides_[static_cast<size_t>(currentConflict_)] = git::ConflictSide::Theirs;
     resultEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
 }
 

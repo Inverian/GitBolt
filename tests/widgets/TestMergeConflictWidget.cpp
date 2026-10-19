@@ -104,6 +104,58 @@ private slots:
         QCOMPARE(widget.allResolvedContents(),
                  (std::vector<QString>{QStringLiteral("b"), QStringLiteral("ours\ntheirs\n")}));
     }
+
+    // A link's result went to the host as the editor's text, which isn't
+    // the target's bytes: the editor gives a no-break space back as a
+    // space. Accepting the side whose target had one was refused, as
+    // neither side's. The widget says which side each link's result is
+    // now, as it was listed: Ours until Accept Theirs, and Ours again on
+    // Accept Ours.
+    void linkConflictTellsTheSideAccepted() {
+        using gitbolt::git::AcceptedSide;
+        using gitbolt::git::ConflictSide;
+        using gitbolt::git::ObjectId;
+        std::vector<MergeConflictEntry> conflicts = {
+            conflict("link", "z", "x\xc2\xa0y", MergeConflictEntry::kSymlinkMode),
+            conflict("other", "x\xc2\xa0y", "w", MergeConflictEntry::kSymlinkMode),
+            conflict("again", "o", "t", MergeConflictEntry::kSymlinkMode),
+            conflict("a.txt", "ours\n", "theirs\n", 0100644)};
+        // Each side its own blob, and theirs of "link" a file holding
+        // its target.
+        for (size_t i = 0; i < conflicts.size(); ++i) {
+            conflicts[i].oursId = ObjectId::fromHex(std::string(40, char('1' + 2 * i)));
+            conflicts[i].theirsId = ObjectId::fromHex(std::string(40, char('2' + 2 * i)));
+        }
+        conflicts[0].theirsMode = 0100644;
+        const auto listed = [&](size_t i, ConflictSide side) {
+            const MergeConflictEntry& entry = conflicts[i];
+            return side == ConflictSide::Ours
+                       ? AcceptedSide{side, entry.oursId, entry.oursMode}
+                       : AcceptedSide{side, entry.theirsId, entry.theirsMode};
+        };
+        MergeConflictWidget widget;
+        widget.setConflicts(conflicts);
+        QPushButton* acceptOurs = button(widget, MergeConflictWidget::tr("Accept Ours"));
+        QPushButton* acceptTheirs = button(widget, MergeConflictWidget::tr("Accept Theirs"));
+        QPushButton* next = button(widget, MergeConflictWidget::tr("Next >>"));
+        QPushButton* markAll = button(widget, MergeConflictWidget::tr("Mark All Resolved"));
+        QVERIFY(acceptOurs && acceptTheirs && next && markAll);
+
+        acceptTheirs->click();
+        next->click();   // "other" stays as it came: Ours
+        next->click();
+        acceptTheirs->click();
+        acceptOurs->click();
+        next->click();
+        acceptTheirs->click();   // a text conflict: its text is its result
+        markAll->click();
+        const auto sides = widget.allAcceptedSides();
+        QCOMPARE(sides.size(), size_t(4));
+        QVERIFY(sides[0] == listed(0, ConflictSide::Theirs));
+        QVERIFY(sides[1] == listed(1, ConflictSide::Ours));
+        QVERIFY(sides[2] == listed(2, ConflictSide::Ours));
+        QVERIFY(!sides[3]);
+    }
 };
 
 QTEST_MAIN(TestMergeConflictWidget)
