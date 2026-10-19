@@ -21,6 +21,7 @@ class QSplitter;
 class QStandardItemModel;
 class QTabWidget;
 class QTextBrowser;
+class QTimer;
 class QTreeView;
 class QShowEvent;
 class QUrl;
@@ -157,10 +158,28 @@ private:
     // The Stats of the latest diff in, to render the commit again with
     // (a theme switch) without asking for it again.
     std::optional<DiffStats> shownStats_;
-    // Until the diff of the commit on show is in: its metadata HTML and
-    // the placeholder in it that the Stats row replaces.
-    QString statsPendingHtml_;
-    QString statsPlaceholder_;
+    // Until the selected commit's diff is in, the Diff tab keeps the
+    // previous commit's files and the Stats row is blank, so a diff in
+    // within milliseconds, as most are, shows in one change. Emptied at
+    // once, the tab and the row painted an empty or "(counting…)" state
+    // on every selection, and flickered as the user arrowed through the
+    // log. (The row doesn't keep the previous commit's numbers: beside
+    // this one's details they would read as its own.) That lasts
+    // kDiffLoadingDelayMs at most, counted from the first selection
+    // whose diff is still out, so arrowing on through slow ones can't
+    // keep one commit's files up for another: then the tab is emptied
+    // and the row says "(counting…)" (showDiffLoading), and diffLoading_
+    // stays set, for the commits selected meanwhile too, until a diff
+    // comes in.
+    QTimer* diffLoadingTimer_ = nullptr;
+    bool diffLoading_ = false;
+
+    // The avatar's colour for the commit on show (showCommitDetails),
+    // from the author's email as shown: util::kMaxLineChars of it at
+    // most. fitCommitInfoTopRow, which runs on every re-wrap, hashed
+    // the whole email, and an email of tens of MB (git takes one) cost
+    // a decode and a hash of all of it each time the window resized.
+    QString avatarColor_;
 
     // The files whose history showFileHistory is loading.
     QSet<QString> historyLoading_;
@@ -188,8 +207,13 @@ private:
     /// Stats row, and its files in the Diff tab.
     void showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff);
     void showDiffFiles(std::shared_ptr<git::DiffResult> diff);
-    /// The Stats row's HTML, in the colours of the theme in effect.
-    static QString statsRowHtml(const DiffStats& stats);
+    void clearDiffFiles();
+    /// The selected commit's diff isn't in after kDiffLoadingDelayMs.
+    void showDiffLoading();
+    /// Writes the Commit tab's Stats value over in place, in the colours
+    /// of the theme in effect: `stats`'s numbers, or "(counting…)"
+    /// without. A diff that couldn't be read takes the row out.
+    void setStatsRow(const DiffStats* stats);
 
     // Services
     services::GitService*    gitService_  = nullptr;
