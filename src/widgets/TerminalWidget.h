@@ -144,8 +144,9 @@ private slots:
 
 private:
     void stopShell();
-    /// changeRepository's start again: now, unless a command the shell
-    /// started is running, and then once it no longer is.
+    /// changeRepository's start again (or only its `cd`, back to the
+    /// GIT_DIR the shell has): now, unless a command the shell started
+    /// is running, and then once it no longer is.
     void restartWhenIdle();
     /// Whether a command the shell started holds its terminal (never
     /// known on Windows).
@@ -164,6 +165,10 @@ private:
     void screenMoveTo(QTextCursor& cur, int row, int column);
     void screenLineFeed(QTextCursor& cur);
     void resizeScreen(const QSize& grid);
+#else
+    /// Read what the PTY holds, kMaxReadPerWake at most, and draw it;
+    /// false once the shell's end of it is closed.
+    bool takePtyOutput();
 #endif
     /// Act on a CSI sequence: the moves and erases within a row
     /// everywhere, and on Windows the screen's too.
@@ -191,7 +196,7 @@ private:
     int              screenColumns_ = 80;
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
-    /// Active while a start again waits for a command to end
+    /// Active while a start again, or a `cd`, waits for a command to end
     /// (restartWhenIdle), which it checks for every so often.
     QTimer*          restartTimer_ = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY
@@ -220,6 +225,7 @@ private:
     // before the user ever opens the Console tab.
     QString          pendingCwd_;
     QString          gitDir_;          // setGitDir
+    QString          shellGitDir_;     // gitDir_ at the running shell's start
     bool             autoStarted_  = false;
 };
 

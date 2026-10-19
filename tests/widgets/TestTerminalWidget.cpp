@@ -54,7 +54,11 @@
 //   - a repository switch that changes GIT_DIR while a command runs in
 //     the shell lets the command finish, and starts the shell again
 //     after it, with the new GIT_DIR. The shell used to be started again
-//     at once, which hung the command up with it.
+//     at once, which hung the command up with it;
+//   - and before that the command's output is shown to its last line:
+//     what the PTY still held went with the old shell;
+//   - a switch back meanwhile to the shell's GIT_DIR takes only a `cd`,
+//     once the command has ended: the shell keeps its variables.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -1308,27 +1312,48 @@ private slots:
     // note in the meantime, and the shell starts again after it with the
     // new GIT_DIR. A second switch meanwhile changes only where it
     // starts: no `cd` is typed into the command, and no second note.
+    //
+    // All of the command's output is shown, to its last line: the start
+    // again came as soon as the command was seen to have ended, and
+    // closed the PTY on what it held still, the command's last lines and
+    // the line saying it was done. And a switch back meanwhile to the
+    // GIT_DIR the shell has (none, a repository with a work tree) calls
+    // the start again off: the shell keeps its variables and takes only
+    // the `cd`, once the command has ended, and the note goes. The shell
+    // was started again all the same.
+    void ptyRestartWaitsForTheRunningCommand_data()
+    {
+        QTest::addColumn<bool>("thenWorkTree");
+        QTest::newRow("to a bare repository") << false;
+        QTest::newRow("to a bare one, then to a work tree") << true;
+    }
+
     void ptyRestartWaitsForTheRunningCommand()
     {
 #ifdef Q_OS_WIN
         QSKIP("The PTY is the Unix terminal backend");
 #else
+        QFETCH(bool, thenWorkTree);
         PlainShell shell;
         QVERIFY(shell.isValid());
         QTemporaryDir dirs;
         QVERIFY(dirs.isValid());
         const QString bare = dirs.filePath(QStringLiteral("bare.git"));
-        QVERIFY(QDir().mkpath(bare));
+        const QString work = dirs.filePath(QStringLiteral("work"));
+        QVERIFY(QDir().mkpath(bare) && QDir().mkpath(work));
         // A command of its own (`sh`, not `.`, which the shell would run
         // itself), so in a process group of its own: it says it has
-        // started, sleeps until the test lets it go on, and says it is
-        // done. In a script, so the line typed is short.
+        // started, sleeps until the test lets it go on, then prints many
+        // times what the PTY holds unread and says it is done. In a
+        // script, so the line typed is short.
+        constexpr int kJobLines = 20000;
         const QString go = QDir(shell.home()).filePath(QStringLiteral("go"));
         QFile script(QDir(shell.home()).filePath(QStringLiteral("job.sh")));
         QVERIFY(script.open(QIODevice::WriteOnly));
         script.write("echo gbjob started\n"
                      "while [ ! -e \"$HOME/go\" ]; do sleep 1; done\n"
-                     "echo gbjob done\n");
+                     + floodCommand(kJobLines).toLatin1()
+                     + "\necho gbjob done\n");
         script.close();
 
         TerminalWidget terminal;
@@ -1342,6 +1367,11 @@ private slots:
         const auto notes = [&terminal] {
             return terminal.toPlainText().count(QStringLiteral("[gitbolt] the shell will restart"));
         };
+        // The last rows, not all 5000 of the scrollback.
+        const auto tail = [&terminal] {
+            const QStringList shown = rows(terminal);
+            return shown.mid(qMax<qsizetype>(0, shown.size() - 8)).join(QLatin1Char('\n'));
+        };
         type(QStringLiteral("gbmark=kept"));
         type(QStringLiteral("sh \"$HOME/job.sh\""));
         QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob started")),
@@ -1350,7 +1380,10 @@ private slots:
         terminal.changeRepository(bare, bare);
         QVERIFY(terminal.isRunning());
         QCOMPARE(notes(), 1);
-        terminal.changeRepository(bare, bare);
+        if (thenWorkTree)
+            terminal.changeRepository(work, {});
+        else
+            terminal.changeRepository(bare, bare);
         // A few of the checks for the end of the command go by, and it
         // still runs: what it prints next isn't there, nor the prompt of
         // a new shell, nor a `cd` echoed.
@@ -1364,21 +1397,26 @@ private slots:
         QFile goFile(go);
         QVERIFY(goFile.open(QIODevice::WriteOnly));
         goFile.close();
-        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob done")),
-                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
         // The new shell's prompt, below the note, which the command's
-        // output went on above.
-        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal), qPrintable(terminal.toPlainText()),
-                                  kTimeoutMs);
-        QCOMPARE(notes(), 1);
+        // output went on above; or with the note gone, the old shell's,
+        // which the `cd` goes to.
+        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal), qPrintable(tail()), kTimeoutMs);
         const QStringList shown = rows(terminal);
-        QVERIFY2(shown.indexOf(QStringLiteral("gbjob done"))
-                     < shown.indexOf(QRegularExpression(QStringLiteral("\\[gitbolt\\] the shell .*"))),
-                 qPrintable(terminal.toPlainText()));
+        const QList<int> flood = numberedRows(terminal, QStringLiteral("gbflood"));
+        const qsizetype done = shown.indexOf(QStringLiteral("gbjob done"));
+        QVERIFY2(done >= 0 && !flood.isEmpty() && flood.last() == kJobLines && consecutive(flood),
+                 qPrintable(tail()));
+        if (thenWorkTree) {
+            QCOMPARE(notes(), 0);
+        } else {
+            QCOMPARE(notes(), 1);
+            QVERIFY2(done < shown.indexOf(QRegularExpression(QStringLiteral("\\[gitbolt\\] the shell .*"))),
+                     qPrintable(tail()));
+        }
         type(QStringLiteral("echo gbafter[$GIT_DIR][$gbmark][${PWD##*/}]"));
-        QTRY_VERIFY2_WITH_TIMEOUT(
-            rows(terminal).contains(QStringLiteral("gbafter[%1][][bare.git]").arg(bare)),
-            qPrintable(terminal.toPlainText()), kTimeoutMs);
+        const QString after = thenWorkTree ? QStringLiteral("gbafter[][kept][work]")
+                                           : QStringLiteral("gbafter[%1][][bare.git]").arg(bare);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(after), qPrintable(tail()), kTimeoutMs);
 #endif
     }
 

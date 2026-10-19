@@ -225,6 +225,7 @@ void TerminalWidget::start(const QString& workingDirectory)
 
     if (!workingDirectory.isEmpty())
         pendingCwd_ = workingDirectory;
+    shellGitDir_ = gitDir_;
 
 #ifdef Q_OS_WIN
     // A hidden widget has no real size yet, and ConPTY lays its screen
@@ -490,7 +491,7 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 {
     if (path.isEmpty())
         return;
-    // While a start again waits, the shell starts in the latest
+    // While a start again waits, the shell goes to the latest
     // repository, and no `cd` is typed into the command running.
     if (gitDir == gitDir_ && !restartTimer_->isActive()) {
         changeDirectory(path);
@@ -508,10 +509,44 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 // a command is left to finish. The shell starts again once it is back at
 // its prompt, which is looked for as its output arrives (the prompt is
 // output) and every so often in case none does; meanwhile a note says
-// so, below the command's output.
+// so, below the command's output. A switch back meanwhile to the GIT_DIR
+// the shell has calls the start again off, and the shell keeps its
+// variables: only the `cd` is left, which waits for the command all the
+// same.
 void TerminalWidget::restartWhenIdle()
 {
+    const QString note = tr("[gitbolt] the shell will restart for this repository "
+                            "when the running command ends");
     if (!commandRunning()) {
+        if (gitDir_ == shellGitDir_) {
+            if (restartTimer_->isActive()) {
+                restartTimer_->stop();
+                // The note goes too, or it stays below the prompt: the
+                // shell's output went on above it. It is the last row
+                // but one, below it the row a new shell would have
+                // started on.
+                QTextCursor last(document());
+                last.movePosition(QTextCursor::End);
+                last.movePosition(QTextCursor::PreviousBlock, QTextCursor::KeepAnchor);
+                if (last.block().text() == note) {
+                    last.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+                    last.removeSelectedText();
+                }
+            }
+            changeDirectory(pendingCwd_);
+            return;
+        }
+#ifndef Q_OS_WIN
+        // Closing the PTY loses what it holds unread, and a command that
+        // has just ended, the one waited for above say, can have left
+        // its last lines there (a summary, an error): it wrote them all
+        // before the shell took the terminal back, which the check above
+        // saw, but they are only drawn once read. So the PTY is read once
+        // more first. A slice at most, as on any wake: much more than a
+        // PTY holds unread (1 KiB on macOS), and a background job that
+        // goes on writing doesn't keep it reading.
+        takePtyOutput();
+#endif
         start(pendingCwd_);
         return;
     }
@@ -524,8 +559,7 @@ void TerminalWidget::restartWhenIdle()
     // anchor goes along all the same: left there, it selected the note,
     // and the command's next output wrote over it.
     screenCursor_.setKeepPositionOnInsert(true);
-    appendPlainText(tr("[gitbolt] the shell will restart for this repository "
-                       "when the running command ends\n"));
+    appendPlainText(note + QLatin1Char('\n'));
     screenCursor_.setKeepPositionOnInsert(false);
     screenCursor_.clearSelection();
 }
@@ -536,7 +570,14 @@ void TerminalWidget::restartWhenIdle()
 // forkpty made it a session leader. What the shell runs in itself (a
 // builtin such as `read`, a loop between its commands) is not told
 // apart from the prompt, nor is anything a shell without job control
-// runs.
+// runs. Nor are the shell's jobs: one stopped with Ctrl+Z (a pager, the
+// editor of a `git commit`) or run in the background leaves the shell
+// at its prompt, so it starts again at once, and the hang-up can end
+// the job with it, as closing a terminal window does (a stopped one is
+// sent SIGHUP and SIGCONT once the shell is gone, and zsh hangs up its
+// running ones itself). Waiting for them instead would leave the shell
+// at its prompt, with the old repository's GIT_DIR and directory, for
+// as long as a job is kept.
 //
 // Windows: ConPTY doesn't say. A console has no process groups, and its
 // process list is only for a process attached to it (attaching GitBolt,
@@ -661,6 +702,18 @@ void TerminalWidget::onPtyReadable()
     // kept the GUI thread here for as long as the flood lasted, with
     // nothing repainted and Ctrl+C stuck behind it. In between, the full
     // PTY holds the shell back, as ConPtyProcess's cap does on Windows.
+    if (!takePtyOutput()) {
+        stopShell();
+        appendPlainText(tr("\n[gitbolt] shell exited"));
+    } else if (restartTimer_->isActive()) {
+        restartWhenIdle();  // the command's last output, or the prompt after it
+    }
+#endif
+}
+
+#ifndef Q_OS_WIN
+bool TerminalWidget::takePtyOutput()
+{
     QByteArray slice(kMaxReadPerWake, Qt::Uninitialized);
     qsizetype got = 0;
     bool exited = false;
@@ -686,14 +739,9 @@ void TerminalWidget::onPtyReadable()
         outputRead(slice);
         appendOutput(slice);
     }
-    if (exited) {
-        stopShell();
-        appendPlainText(tr("\n[gitbolt] shell exited"));
-    } else if (restartTimer_->isActive()) {
-        restartWhenIdle();  // the command's last output, or the prompt after it
-    }
-#endif
+    return !exited;
 }
+#endif
 
 // Stream PTY output into the scrollback with just-enough terminal
 // emulation for the shells' line editors (zsh's ZLE, bash's readline)
