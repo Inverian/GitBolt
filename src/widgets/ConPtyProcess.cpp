@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 #include <process.h>   // _beginthreadex
+#include <tlhelp32.h>  // CreateToolhelp32Snapshot
 
 #include <algorithm>
 #include <climits>
@@ -159,6 +160,39 @@ std::wstring environmentBlock(
     }
     block += L'\0';  // an empty environment is two NULs: this + c_str()'s
     return block;
+}
+
+// Whether the program file at `path` is a console one, by the subsystem
+// its PE header names. One that can't be read is taken for one.
+bool isConsoleProgram(const std::wstring& path)
+{
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return true;
+    const auto readAt = [file](LONGLONG offset, void* buffer, DWORD size) {
+        LARGE_INTEGER at{};
+        at.QuadPart = offset;
+        DWORD got = 0;
+        return SetFilePointerEx(file, at, nullptr, FILE_BEGIN)
+               && ReadFile(file, buffer, size, &got, nullptr) && got == size;
+    };
+    // At the same place in a 32-bit program's header and a 64-bit one's.
+    static_assert(offsetof(IMAGE_OPTIONAL_HEADER32, Subsystem)
+                  == offsetof(IMAGE_OPTIONAL_HEADER64, Subsystem));
+    constexpr LONGLONG kSubsystemAt = static_cast<LONGLONG>(
+        sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) + offsetof(IMAGE_OPTIONAL_HEADER32, Subsystem));
+    IMAGE_DOS_HEADER dos{};
+    DWORD signature = 0;
+    WORD subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    if (readAt(0, &dos, static_cast<DWORD>(sizeof(dos))) && dos.e_magic == IMAGE_DOS_SIGNATURE
+        && readAt(dos.e_lfanew, &signature, static_cast<DWORD>(sizeof(signature)))
+        && signature == IMAGE_NT_SIGNATURE) {
+        readAt(dos.e_lfanew + kSubsystemAt, &subsystem, static_cast<DWORD>(sizeof(subsystem)));
+    }
+    CloseHandle(file);
+    return subsystem != IMAGE_SUBSYSTEM_WINDOWS_GUI;
 }
 
 } // namespace
@@ -517,6 +551,46 @@ bool ConPtyProcess::stop(unsigned long timeoutMs)
 bool ConPtyProcess::isRunning() const
 {
     return session_ && WaitForSingleObject(session_->process, 0) == WAIT_TIMEOUT;
+}
+
+// A process listing gives each process its parent's pid as it was when
+// the process started, and Windows hands a pid out again once its
+// process has gone: a process older than the child is someone else's.
+bool ConPtyProcess::hasConsoleChild() const
+{
+    if (!session_)
+        return false;
+    FILETIME childStart{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(session_->process, &childStart, &exited, &kernel, &user))
+        return false;
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+    bool found = false;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = static_cast<DWORD>(sizeof(entry));
+    for (BOOL more = Process32FirstW(snapshot, &entry); more && !found;
+         more = Process32NextW(snapshot, &entry)) {
+        if (entry.th32ParentProcessID != session_->processId)
+            continue;
+        const HANDLE process =
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        if (!process)
+            continue;
+        FILETIME start{};
+        DWORD exitCode = 0;
+        if (GetProcessTimes(process, &start, &exited, &kernel, &user)
+            && CompareFileTime(&start, &childStart) >= 0
+            && GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE) {
+            std::wstring path(32768, L'\0');  // the longest a path gets
+            auto size = static_cast<DWORD>(path.size());
+            found = !QueryFullProcessImageNameW(process, 0, path.data(), &size)
+                    || isConsoleProgram(path.substr(0, size));
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snapshot);
+    return found;
 }
 
 unsigned long ConPtyProcess::processId() const

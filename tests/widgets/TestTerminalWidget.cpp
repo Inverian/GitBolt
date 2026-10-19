@@ -51,14 +51,19 @@
 //     CR, redraw one row instead of piling up on it;
 //   - a shell started again while the old one's CSI was being dropped
 //     (see above) shows its output whole;
-//   - a repository switch that changes GIT_DIR while a command runs in
-//     the shell lets the command finish, and starts the shell again
-//     after it, with the new GIT_DIR. The shell used to be started again
-//     at once, which hung the command up with it;
-//   - and before that the command's output is shown to its last line:
-//     what the PTY still held went with the old shell;
-//   - a switch back meanwhile to the shell's GIT_DIR takes only a `cd`,
-//     once the command has ended: the shell keeps its variables.
+//   - a repository switch that changes GIT_DIR types the change into the
+//     shell with the `cd`, quoted for it (a quote, a space, a $), and the
+//     shell keeps its variables and its jobs, one stopped with Ctrl+Z and
+//     one in the background. The shell used to be started again, which
+//     hung the jobs up;
+//   - while a command runs in the shell, the switch lets it finish and
+//     types the change after it. The shell used to be started again at
+//     once, which hung the command up with it. A switch back meanwhile
+//     to the shell's GIT_DIR takes only a `cd`;
+//   - a shell the change can't be typed into (bash under another name)
+//     is still started again after the command, and before that the
+//     command's output is shown to its last line: what the PTY still
+//     held went with the old shell.
 //
 // And end to end on Windows: the widget over a real ConPTY and cmd.exe,
 // driven by key events.
@@ -77,6 +82,10 @@
 //     more than its cap;
 //   - Ctrl+C stops a flood at once, rather than once a backlog has
 //     been drawn, and the shell takes commands again;
+//   - a repository switch that changes GIT_DIR while a program runs
+//     lets it finish, and then types the change into cmd, quoted for it
+//     (%, &, ^, parentheses): cmd keeps its variables. cmd used to be
+//     started again at once, which ended the program with it;
 //   - a row conhost paints with a surrogate pair, or a letter and its
 //     combining mark, in its last column keeps the character whole,
 //     as the fed wrap tests do with synthetic output.
@@ -305,6 +314,33 @@ bool atShPrompt(const TerminalWidget& terminal)
 qsizetype shPrompts(const TerminalWidget& terminal)
 {
     return terminal.toPlainText().count(kShPrompt);
+}
+
+// Takes `step` (a line typed, a repository opened) and waits for the
+// prompt after it: one more than before, and the last thing shown, so
+// the next step isn't typed ahead. dash (Ubuntu's sh) has no line
+// editor: a line typed ahead of its prompt is echoed by the terminal
+// there and then, the prompt comes after it, and the command's output
+// shares the prompt's row ("gbprompt> gbstep1[...]"). bash's readline
+// (macOS's sh) shows the line again after its prompt, so the output had
+// a row of its own there.
+template <typename Step>
+bool prompted(const TerminalWidget& terminal, const Step& step)
+{
+    const qsizetype before = shPrompts(terminal);
+    step();
+    return QTest::qWaitFor([&] {
+        return shPrompts(terminal) > before && lastRow(terminal).endsWith(kShPrompt);
+    }, kTimeoutMs);
+}
+
+// Types `line` and Enter, and waits for the prompt after it.
+bool typed(TerminalWidget& terminal, const QString& line)
+{
+    return prompted(terminal, [&] {
+        QTest::keyClicks(&terminal, line);
+        QTest::keyClick(&terminal, Qt::Key_Return);
+    });
 }
 
 // A running terminal with the first prompt up. Not shown: nothing here
@@ -1087,6 +1123,65 @@ private slots:
 #endif
     }
 
+    // A bare repository opened while cmd runs a program. cmd was started
+    // again at once for the new GIT_DIR, which ended the program with it.
+    // The program now runs to its end, and the change is then typed into
+    // cmd, quoted for it: %NAME% would expand, and & ^ ( ) mean something
+    // to cmd. cmd keeps its own variables.
+    void gitDirWaitsForTheRunningProgram()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString bare =
+            QDir::toNativeSeparators(dirs.filePath(QStringLiteral("gb 100%PATH%&^(x).git")));
+        QVERIFY(QDir().mkpath(bare));
+
+        TerminalWidget terminal;
+        terminal.start(QDir::tempPath());
+        showAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const auto type = [&terminal](const QString& line) {
+            QTest::keyClicks(&terminal, line);
+            QTest::keyClick(&terminal, Qt::Key_Return);
+        };
+        // A long row can wrap: the text with its rows put back together.
+        const auto unwrapped = [&terminal] {
+            return terminal.toPlainText().remove(QLatin1Char('\n'));
+        };
+        type(QStringLiteral("set gbmark=kept"));
+        // A program, another cmd, rather than one of cmd's builtins: it
+        // says it has started, waits three seconds, and says it is done.
+        type(QStringLiteral("cmd /c \"echo gbjob started& ping -n 4 127.0.0.1 >nul& echo gbjob done\""));
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob started")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+
+        terminal.changeRepository(bare, bare);
+        // A few of the checks for the end of the program go by, and it
+        // still runs, with nothing typed.
+        QTest::qWait(1000);
+        QVERIFY2(!rows(terminal).contains(QStringLiteral("gbjob done"))
+                     && !terminal.toPlainText().contains(QStringLiteral("GIT_DIR")),
+                 qPrintable(terminal.toPlainText()));
+
+        // The program's end, then the change typed, and the prompt after
+        // it, in the bare repository.
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob done"))
+                                      && terminal.toPlainText().contains(QStringLiteral("set GIT_DIR="))
+                                      && atPrompt(terminal),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        type(QStringLiteral("set GIT_DIR"));
+        QTRY_VERIFY2_WITH_TIMEOUT(unwrapped().contains(QStringLiteral("GIT_DIR=") + bare),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        type(QStringLiteral("echo gbmark[%gbmark%]"));
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbmark[kept]")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+#endif
+    }
+
     // The same two on Unix, over a real PTY and /bin/sh. A shell that
     // writes faster than the widget draws keeps the PTY full, and the
     // read handler used to read on until it ran dry: the GUI thread
@@ -1263,7 +1358,9 @@ private slots:
     // The Console followed the repository opened with a `cd` only, so a
     // bare one got no GIT_DIR, and git there failed where
     // safe.bareRepository is "explicit" (Git bash had it). A change of
-    // GIT_DIR starts the shell again with it; the same one only cds.
+    // GIT_DIR is typed into the shell with the `cd`; the same one only
+    // cds. Either way the shell keeps its own variables: it used to be
+    // started again for a new GIT_DIR.
     void ptyShellFollowsTheRepositorysGitDir()
     {
 #ifdef Q_OS_WIN
@@ -1281,35 +1378,15 @@ private slots:
         startAtPrompt(terminal);
         if (QTest::currentTestFailed())
             return;
-        // Each step waits for the prompt after it (one more than before,
-        // and the last thing shown) before the next is typed. dash
-        // (Ubuntu's sh) has no line editor: a line typed ahead of its
-        // prompt is echoed by the terminal there and then, the prompt
-        // comes after it, and the command's output shares the prompt's
-        // row ("gbprompt> gbstep1[...]"). bash's readline (macOS's sh)
-        // shows the line again after its prompt, so the output had a row
-        // of its own there.
-        const auto prompted = [&terminal](const auto& step) {
-            const qsizetype before = shPrompts(terminal);
-            step();
-            return QTest::qWaitFor([&] {
-                return shPrompts(terminal) > before && lastRow(terminal).endsWith(kShPrompt);
-            }, kTimeoutMs);
-        };
-        const auto type = [&](const QString& line) {
-            return prompted([&] {
-                QTest::keyClicks(&terminal, line);
-                QTest::keyClick(&terminal, Qt::Key_Return);
-            });
-        };
-        const auto open = [&](const QString& path, const QString& gitDir) {
-            return prompted([&] { terminal.changeRepository(path, gitDir); });
+        // Each step waits for the prompt after it (see prompted).
+        const auto type = [&terminal](const QString& line) { return typed(terminal, line); };
+        const auto open = [&terminal](const QString& path, const QString& gitDir) {
+            return prompted(terminal, [&] { terminal.changeRepository(path, gitDir); });
         };
         const auto shows = [&terminal](const QString& row) {
             return QTest::qWaitFor([&] { return rows(terminal).contains(row); }, kTimeoutMs);
         };
-        // A variable of the shell's own: a `cd` keeps it, a new shell
-        // hasn't got it.
+        // A variable of the shell's own, which a new shell wouldn't have.
         const QString echo = QStringLiteral("echo %1[$GIT_DIR][$gbmark][${PWD##*/}]");
         QVERIFY2(type(QStringLiteral("gbmark=kept")), qPrintable(terminal.toPlainText()));
 
@@ -1319,7 +1396,7 @@ private slots:
 
         QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
         QVERIFY2(type(echo.arg(QStringLiteral("gbstep2"))), qPrintable(terminal.toPlainText()));
-        QVERIFY2(shows(QStringLiteral("gbstep2[%1][][bare.git]").arg(bare)),
+        QVERIFY2(shows(QStringLiteral("gbstep2[%1][kept][bare.git]").arg(bare)),
                  qPrintable(terminal.toPlainText()));
 
         QVERIFY2(type(QStringLiteral("gbmark=again")), qPrintable(terminal.toPlainText()));
@@ -1330,40 +1407,163 @@ private slots:
 
         QVERIFY2(open(work, {}), qPrintable(terminal.toPlainText()));
         QVERIFY2(type(echo.arg(QStringLiteral("gbstep4"))), qPrintable(terminal.toPlainText()));
-        QVERIFY2(shows(QStringLiteral("gbstep4[][][work]")), qPrintable(terminal.toPlainText()));
+        QVERIFY2(shows(QStringLiteral("gbstep4[][again][work]")), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // The GIT_DIR typed into the shell is quoted for it: a path with a
+    // quote, a space, a $ and the like comes out as it went in. And
+    // leaving the bare repository unsets GIT_DIR rather than emptying it:
+    // git takes an empty one for a path, and finds no repository there.
+    void ptyTypedGitDirKeepsItsCharacters()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString name = QStringLiteral("it's a $HOME \"bare\" \\ `repo`.git");
+        const QString bare = dirs.filePath(name);
+        const QString work = dirs.filePath(QStringLiteral("work"));
+        QVERIFY(QDir().mkpath(bare) && QDir().mkpath(work));
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const auto open = [&terminal](const QString& path, const QString& gitDir) {
+            return prompted(terminal, [&] { terminal.changeRepository(path, gitDir); });
+        };
+        QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("printf '%s\\n' \"gbdir[$GIT_DIR][${PWD##*/}]\"")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbdir[%1][%2]").arg(bare, name)),
+                 qPrintable(terminal.toPlainText()));
+
+        QVERIFY2(open(work, {}), qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbleft[${GIT_DIR-unset}][${PWD##*/}]\"")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbleft[unset][work]")),
+                 qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // A shell's jobs, one stopped with Ctrl+Z and one run in the
+    // background, leave it at its prompt, so a change of GIT_DIR started
+    // the shell again at once, and the hang-up ended them both: the one
+    // in the background printed nothing more, and `fg` found no job. The
+    // change is now typed into the shell, which keeps its jobs.
+    void ptyGitDirChangeKeepsTheShellsJobs()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString bare = dirs.filePath(QStringLiteral("bare.git"));
+        QVERIFY(QDir().mkpath(bare));
+        // Each job waits for a file of its own, then says it is done; or
+        // for HOME to go, so that none outlives the test. In scripts, so
+        // the lines typed are short.
+        const QDir home(shell.home());
+        const auto script = [&home](const QString& name, const QByteArray& body) {
+            QFile file(home.filePath(name));
+            return file.open(QIODevice::WriteOnly) && file.write(body) == body.size();
+        };
+        QVERIFY(script(QStringLiteral("bg.sh"),
+                       "while [ -d \"$HOME\" ] && [ ! -e \"$HOME/gobg\" ]; do sleep 1; done\n"
+                       "echo gbbg done\n"));
+        QVERIFY(script(QStringLiteral("stop.sh"),
+                       "echo gbstop started\n"
+                       "while [ -d \"$HOME\" ] && [ ! -e \"$HOME/gostop\" ]; do sleep 1; done\n"
+                       "echo gbstop done\n"));
+        const auto go = [&home](const QString& name) {
+            QFile file(home.filePath(name));
+            return file.open(QIODevice::WriteOnly);
+        };
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QVERIFY2(typed(terminal, QStringLiteral("sh \"$HOME/bg.sh\" &")),
+                 qPrintable(terminal.toPlainText()));
+        QTest::keyClicks(&terminal, QStringLiteral("sh \"$HOME/stop.sh\""));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbstop started")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QVERIFY2(prompted(terminal, [&] { QTest::keyClick(&terminal, Qt::Key_Z, kTerminalCtrl); }),
+                 qPrintable(terminal.toPlainText()));
+
+        QVERIFY2(prompted(terminal, [&] { terminal.changeRepository(bare, bare); }),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbafter[$GIT_DIR]\"")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbafter[%1]").arg(bare)),
+                 qPrintable(terminal.toPlainText()));
+
+        // The stopped job goes on where it was...
+        QVERIFY(go(QStringLiteral("gostop")));
+        QVERIFY2(typed(terminal, QStringLiteral("fg")), qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbstop done")),
+                 qPrintable(terminal.toPlainText()));
+        // ...and the one in the background still writes to the terminal.
+        QVERIFY(go(QStringLiteral("gobg")));
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.toPlainText().contains(QStringLiteral("gbbg done")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
 #endif
     }
 
     // The same while a command runs in the shell. Starting the shell
     // again hung the command up along with it (an editor git started, a
-    // fetch, a gc), unasked. The command now runs to its end, with a
-    // note in the meantime, and the shell starts again after it with the
-    // new GIT_DIR. A second switch meanwhile changes only where it
-    // starts: no `cd` is typed into the command, and no second note.
+    // fetch, a gc), unasked; typed into it, the change would go to the
+    // command. The command now runs to its end, with a note in the
+    // meantime, and the change is typed into the shell after it: the
+    // shell keeps its variables, and the note goes. A second switch
+    // meanwhile changes only where the shell goes: no `cd` is typed into
+    // the command, and no second note. A switch back meanwhile to the
+    // GIT_DIR the shell has (none, a repository with a work tree) leaves
+    // only the `cd`.
     //
-    // All of the command's output is shown, to its last line: the start
-    // again came as soon as the command was seen to have ended, and
-    // closed the PTY on what it held still, the command's last lines and
-    // the line saying it was done. And a switch back meanwhile to the
-    // GIT_DIR the shell has (none, a repository with a work tree) calls
-    // the start again off: the shell keeps its variables and takes only
-    // the `cd`, once the command has ended, and the note goes. The shell
-    // was started again all the same.
-    void ptyRestartWaitsForTheRunningCommand_data()
+    // A shell with no such line, bash under another name here, is still
+    // started again, after the command, below the note. All of the
+    // command's output is shown, to its last line: the start again came
+    // as soon as the command was seen to have ended, and closed the PTY
+    // on what it held still, the command's last lines and the line
+    // saying it was done.
+    void ptySwitchWaitsForTheRunningCommand_data()
     {
         QTest::addColumn<bool>("thenWorkTree");
-        QTest::newRow("to a bare repository") << false;
-        QTest::newRow("to a bare one, then to a work tree") << true;
+        QTest::addColumn<bool>("startedAgain");
+        QTest::newRow("to a bare repository") << false << false;
+        QTest::newRow("to a bare one, then to a work tree") << true << false;
+        QTest::newRow("to a bare repository, in a shell started again") << false << true;
     }
 
-    void ptyRestartWaitsForTheRunningCommand()
+    void ptySwitchWaitsForTheRunningCommand()
     {
 #ifdef Q_OS_WIN
         QSKIP("The PTY is the Unix terminal backend");
 #else
         QFETCH(bool, thenWorkTree);
+        QFETCH(bool, startedAgain);
         PlainShell shell;
         QVERIFY(shell.isValid());
+        if (startedAgain) {
+            // A copy, which the system knows by its own name (a symbolic
+            // link runs under its target's on macOS). PlainShell puts
+            // SHELL back on the way out.
+            if (!QFileInfo::exists(QStringLiteral("/bin/bash")))
+                QSKIP("no /bin/bash");
+            const QString copy = QDir(shell.home()).filePath(QStringLiteral("gbsh"));
+            QVERIFY(QFile::copy(QStringLiteral("/bin/bash"), copy));
+            QVERIFY(QFile::setPermissions(copy, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+            qputenv("SHELL", QFile::encodeName(copy));
+        }
         QTemporaryDir dirs;
         QVERIFY(dirs.isValid());
         const QString bare = dirs.filePath(QStringLiteral("bare.git"));
@@ -1392,15 +1592,16 @@ private slots:
             QTest::keyClicks(&terminal, line);
             QTest::keyClick(&terminal, Qt::Key_Return);
         };
-        const auto notes = [&terminal] {
-            return terminal.toPlainText().count(QStringLiteral("[gitbolt] the shell will restart"));
-        };
+        const QString note = QStringLiteral("[gitbolt] the shell will switch");
+        const auto notes = [&terminal, &note] { return terminal.toPlainText().count(note); };
         // The last rows, not all 5000 of the scrollback.
         const auto tail = [&terminal] {
             const QStringList shown = rows(terminal);
             return shown.mid(qMax<qsizetype>(0, shown.size() - 8)).join(QLatin1Char('\n'));
         };
-        type(QStringLiteral("gbmark=kept"));
+        // At the prompt, not typed ahead of it: dash would print the
+        // job's first line on the prompt's row (see prompted).
+        QVERIFY2(typed(terminal, QStringLiteral("gbmark=kept")), qPrintable(terminal.toPlainText()));
         type(QStringLiteral("sh \"$HOME/job.sh\""));
         QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbjob started")),
                                   qPrintable(terminal.toPlainText()), kTimeoutMs);
@@ -1413,37 +1614,48 @@ private slots:
         else
             terminal.changeRepository(bare, bare);
         // A few of the checks for the end of the command go by, and it
-        // still runs: what it prints next isn't there, nor the prompt of
-        // a new shell, nor a `cd` echoed.
+        // still runs: what it prints next isn't there, nor a prompt, nor
+        // anything typed.
         QTest::qWait(1000);
         QCOMPARE(notes(), 1);
         QVERIFY2(!rows(terminal).contains(QStringLiteral("gbjob done"))
                      && !lastRow(terminal).startsWith(kShPrompt)
-                     && !terminal.toPlainText().contains(QStringLiteral("cd '")),
+                     && !terminal.toPlainText().contains(QStringLiteral("cd '"))
+                     && !terminal.toPlainText().contains(QStringLiteral("GIT_DIR")),
                  qPrintable(terminal.toPlainText()));
 
         QFile goFile(go);
         QVERIFY(goFile.open(QIODevice::WriteOnly));
         goFile.close();
-        // The new shell's prompt, below the note, which the command's
-        // output went on above; or with the note gone, the old shell's,
-        // which the `cd` goes to.
-        QTRY_VERIFY2_WITH_TIMEOUT(atShPrompt(terminal), qPrintable(tail()), kTimeoutMs);
+        // The prompt after what the switch did: the line typed, the `cd`
+        // alone, or the new shell's start below the note, which the
+        // command's output went on above.
+        const QString trace = startedAgain ? note
+                            : thenWorkTree ? QStringLiteral(" cd '")
+                                           : QStringLiteral(" export GIT_DIR='");
+        const auto switched = [&] {
+            const QString text = terminal.toPlainText();
+            const qsizetype at = text.lastIndexOf(trace);
+            return at >= 0 && text.indexOf(kShPrompt, at) >= 0
+                   && lastRow(terminal).endsWith(kShPrompt);
+        };
+        QTRY_VERIFY2_WITH_TIMEOUT(switched(), qPrintable(tail()), kTimeoutMs);
         const QStringList shown = rows(terminal);
         const QList<int> flood = numberedRows(terminal, QStringLiteral("gbflood"));
         const qsizetype done = shown.indexOf(QStringLiteral("gbjob done"));
         QVERIFY2(done >= 0 && !flood.isEmpty() && flood.last() == kJobLines && consecutive(flood),
                  qPrintable(tail()));
-        if (thenWorkTree) {
-            QCOMPARE(notes(), 0);
-        } else {
+        if (startedAgain) {
             QCOMPARE(notes(), 1);
             QVERIFY2(done < shown.indexOf(QRegularExpression(QStringLiteral("\\[gitbolt\\] the shell .*"))),
                      qPrintable(tail()));
+        } else {
+            QCOMPARE(notes(), 0);
         }
         type(QStringLiteral("echo gbafter[$GIT_DIR][$gbmark][${PWD##*/}]"));
         const QString after = thenWorkTree ? QStringLiteral("gbafter[][kept][work]")
-                                           : QStringLiteral("gbafter[%1][][bare.git]").arg(bare);
+                            : startedAgain ? QStringLiteral("gbafter[%1][][bare.git]").arg(bare)
+                                           : QStringLiteral("gbafter[%1][kept][bare.git]").arg(bare);
         QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(after), qPrintable(tail()), kTimeoutMs);
 #endif
     }
