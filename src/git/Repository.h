@@ -23,6 +23,7 @@
 #include "git/Worktree.h"
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -104,7 +105,14 @@ public:
     Result<DiffResult> diffIndexToWorkdir() const;
     Result<DiffResult> diffHeadToIndex() const;
     Result<DiffResult> diffTreeToTree(const ObjectId& oldTree, const ObjectId& newTree) const;
-    Result<DiffResult> diffCommit(const ObjectId& commitId) const;
+    /// `cancelled`, when given, is asked as the diff goes, on the thread
+    /// it runs on (at each entry of the two trees, and before each
+    /// file's patch): once it says true, the diff stops there and fails
+    /// with GitErrorCode::User "Cancelled". The diff of a commit with a
+    /// huge tree takes minutes, and one the user had moved on from held
+    /// up the next selection's until it was done.
+    Result<DiffResult> diffCommit(const ObjectId& commitId,
+                                  const std::function<bool()>& cancelled = {}) const;
 
     // Tree browsing — flat depth-first walk from a commit's root
     // tree, plus blob content reads. Used by the File tree tab.
@@ -113,7 +121,10 @@ public:
     // the raw bytes (binary-safe) and is bounded by libgit2's own
     // size limits — call sites should still impose a sensible
     // upper bound before showing untrusted blobs in the UI.
-    Result<std::vector<TreeEntry>> walkTreeAtCommit(const ObjectId& commitId) const;
+    // walkTreeAtCommit asks `cancelled` at each entry, as diffCommit
+    // does.
+    Result<std::vector<TreeEntry>> walkTreeAtCommit(
+        const ObjectId& commitId, const std::function<bool()>& cancelled = {}) const;
     Result<std::vector<char>>      readBlob(const ObjectId& blobId) const;
 
     // Staging

@@ -15,6 +15,7 @@ struct RecentRepoInfo {
     QString   branch;         ///< e.g. "main"; empty for detached HEAD
     bool      detachedHead = false;
     int       dirtyCount = 0; ///< count of modified/staged/untracked files
+    QString   statusError;    ///< why that count couldn't be read, if it couldn't
     bool      hasUpstream = false;
     int       ahead  = 0;     ///< commits on local not yet in upstream
     int       behind = 0;     ///< commits on upstream not yet in local

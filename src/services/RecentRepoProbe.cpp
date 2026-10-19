@@ -49,6 +49,10 @@ RecentRepoInfo probeRecentRepo(const QString& path)
                     entry.isUntracked() || entry.isConflicted())
                     ++out.dirtyCount;
             }
+        } else {
+            // A count of 0 read as clean: a status libgit2 turns down
+            // (a tree nested too deep) says so, and why.
+            out.statusError = QString::fromStdString(statusRes.error().message());
         }
     }
 

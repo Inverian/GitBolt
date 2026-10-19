@@ -10,7 +10,8 @@
 //
 //   - open/close lifecycle and its signals,
 //   - async open success AND failure delivery,
-//   - statusReady / logReady payloads for a real repo,
+//   - statusReady / logReady payloads for a real repo, and why status
+//     couldn't be read (a tree nested too deep) in statusReady's place,
 //   - commitChanges round trip, through `git commit`: the repository's
 //     hooks run (core.hooksPath too) and can refuse it, a slow hook is
 //     waited for and a quit stops it, a merge's autostash comes back,
@@ -81,7 +82,9 @@
 //     through the link, and a text conflict as it always was,
 //   - readAsync's reads walk a tree 6,000 levels deep on the read
 //     thread's stack, and an answer whose asker is gone, or whose
-//     repository was closed, goes nowhere,
+//     repository was closed, goes nowhere; a read stops, answering
+//     nothing, once its asker moves on, the repository is closed or
+//     switched, or the service goes,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
 //     leaves out (.git, node_modules, build, …),
@@ -932,7 +935,7 @@ private slots:
         uint stack = 0;
         svc.readAsync(
             &context,
-            [commit](gitbolt::git::Repository& r) {
+            [commit](gitbolt::git::Repository& r, const std::function<bool()>&) {
                 auto walk = r.walkTreeAtCommit(commit);
                 return std::pair{walk ? static_cast<long>(walk->size()) : -1L,
                                  QThread::currentThread()->stackSize()};
@@ -960,7 +963,9 @@ private slots:
         QVERIFY(repo);
         GitService svc;
         QVERIFY(svc.openRepository(repo->path()));
-        const auto read = [](gitbolt::git::Repository& r) { return r.workdir(); };
+        const auto read = [](gitbolt::git::Repository& r, const std::function<bool()>&) {
+            return r.workdir();
+        };
 
         bool toTheGone = false;
         auto* gone = new QObject;
@@ -988,6 +993,87 @@ private slots:
         std::string workdir;
         svc.readAsync(&alive, read, [&workdir](const std::string& w) { workdir = w; });
         QTRY_VERIFY(!workdir.empty());
+    }
+
+    // A read stops once it is for nothing: its asker has moved on
+    // (`superseded`), the repository was closed or another opened, or
+    // the service is going. A commit's diff over a big tree (here 20,000
+    // files of 40 lines) went on to its end: the next read waited for it
+    // on the read thread, the close and the open on the repository's
+    // lock, and quitting in ~GitService. Now the next
+    // read's answer, the close, the open and the destructor come well
+    // before the whole diff would have been done, and the stopped read
+    // answers nothing.
+    void aReadStopsWhenItIsForNothing_data() {
+        QTest::addColumn<QString>("how");
+        QTest::newRow("superseded") << QStringLiteral("superseded");
+        QTest::newRow("closed") << QStringLiteral("closed");
+        QTest::newRow("another opened") << QStringLiteral("opened");
+        QTest::newRow("another opened async") << QStringLiteral("opened async");
+        QTest::newRow("destroyed") << QStringLiteral("destroyed");
+    }
+    void aReadStopsWhenItIsForNothing() {
+        QFETCH(QString, how);
+        gitbolt::test::TestRepo repo;
+        const auto wide = repo.commitWideTree(20000, QByteArray("a line\n").repeated(40));
+        auto other = repoWithCommits(1);
+        QVERIFY(other);
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(repo.repo().diffCommit(wide).ok());
+        const qint64 wholeMs = timer.elapsed();
+
+        auto svc = std::make_unique<GitService>();
+        QVERIFY(svc->openRepository(repo.path()));
+        QObject context;
+        std::atomic<bool> started{false};
+        bool answered = false;
+        auto superseded = std::make_shared<std::atomic<bool>>(false);
+        svc->readAsync(
+            &context,
+            [wide, &started](gitbolt::git::Repository& r, const std::function<bool()>& cancelled) {
+                started = true;
+                return r.diffCommit(wide, cancelled).ok();
+            },
+            [&answered](bool) { answered = true; },
+            [superseded] { return superseded->load(); });
+        QElapsedTimer waited;
+        waited.start();
+        while (!started && waited.elapsed() < 10000)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        QVERIFY(started);
+
+        timer.restart();
+        if (how == QLatin1String("superseded")) {
+            superseded->store(true);
+            std::string workdir;
+            svc->readAsync(
+                &context,
+                [](gitbolt::git::Repository& r, const std::function<bool()>&) {
+                    return r.workdir();
+                },
+                [&workdir](const std::string& w) { workdir = w; });
+            QVERIFY(QTest::qWaitFor([&] { return !workdir.empty(); }, 60000));
+        } else if (how == QLatin1String("closed")) {
+            svc->closeRepository();
+        } else if (how == QLatin1String("opened")) {
+            QVERIFY(svc->openRepository(other->path()));
+        } else if (how == QLatin1String("opened async")) {
+            bool opened = false;
+            connect(svc.get(), &GitService::repositoryOpened, &context, [&opened] { opened = true; });
+            svc->openRepositoryAsync(other->path());
+            QVERIFY(QTest::qWaitFor([&] { return opened; }, 60000));
+        } else {
+            svc.reset();
+        }
+        const qint64 tookMs = timer.elapsed();
+        QVERIFY2(tookMs < wholeMs / 2,
+                 qPrintable(QStringLiteral("%1 ms, where the whole diff takes %2 ms")
+                                .arg(tookMs).arg(wholeMs)));
+        if (svc)
+            QTRY_VERIFY(!svc->workRunning());
+        QTest::qWait(100);
+        QVERIFY(!answered);
     }
 
     // -----------------------------------------------------------------
@@ -1020,6 +1106,37 @@ private slots:
         };
         QVERIFY2(QTest::qWaitFor(sawDirty, 5000),
                  "statusReady did not include the dirty file");
+    }
+
+    // -----------------------------------------------------------------
+    // refreshStatus where status can't be read (HEAD's tree nested
+    // deeper than the bundled libgit2 goes): an operationFailed("status",
+    // why) comes in place of statusReady, the repository's state behind
+    // it as ever. The failure was dropped, and the Commit dialog and the
+    // Commit count stayed as they were, as if nothing had changed.
+    // -----------------------------------------------------------------
+    void refreshStatusReportsWhyItFailed() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        GitService svc;
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy status(&svc, &GitService::statusReady);
+        MainThreadSpy states(&svc, &GitService::repoStateReady);
+        QVERIFY(svc.openRepository(repo.path()));
+        svc.refreshStatus();
+        QVERIFY(QTest::qWaitFor([&] { return failed.size() >= 2 && states.size() >= 2; }, 10000));
+        for (const QVariantList& args : failed) {
+            QCOMPARE(args.at(0).toString(), QStringLiteral("status"));
+            QVERIFY2(args.at(1).toString().contains(QLatin1String("tree too deep")),
+                     qPrintable(args.at(1).toString()));
+        }
+        QVERIFY(status.isEmpty());
+#endif
     }
 
     // -----------------------------------------------------------------

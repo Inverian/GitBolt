@@ -3,6 +3,7 @@
 #include "git/Repository.h"
 #include "git/Tree.h"
 #include "services/GitService.h"
+#include "util/MessageText.h"
 
 #include <QAction>
 #include <QApplication>
@@ -29,7 +30,6 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
-#include <optional>
 #include <unordered_map>
 
 namespace gitbolt::widgets {
@@ -333,32 +333,35 @@ void FileTreeWidget::rebuildTree()
     // depth is a limit in libgit2, not the thread. The sort goes along:
     // its keys hold a component per path segment, quadratic in the
     // depth.
-    using Walk = std::optional<git::Result<std::vector<git::TreeEntry>>>;
+    using Walk = git::Result<std::vector<git::TreeEntry>>;
     const git::ObjectId commit = currentCommit_;
     svc_->readAsync(
         this,
-        [commit, token, latest = walkToken_](git::Repository& r) -> Walk {
-            if (latest->load() != token)
-                return std::nullopt;   // superseded before its turn came
-            auto walk = r.walkTreeAtCommit(commit);
+        [commit](git::Repository& r, const std::function<bool()>& cancelled) -> Walk {
+            auto walk = r.walkTreeAtCommit(commit, cancelled);
             if (!walk)
-                return Walk(std::move(walk));
-            return Walk(sortedForTree(std::move(*walk)));
+                return walk;
+            return sortedForTree(std::move(*walk));
         },
         [this, token](Walk walk) {
-            if (token != walkToken_->load() || !walk)
+            if (token != walkToken_->load())
                 return;                // for a commit no longer shown
             loadingTimer_->stop();
             model_->clear();
             preview_->clear();
-            if (!*walk) {
-                previewHeader_->setText(tr("Failed to load tree at commit %1")
+            if (!walk) {
+                // And why: libgit2's words (a tree nested too deep).
+                previewHeader_->setText(tr("Failed to load tree at commit %1: %2")
                                             .arg(QString::fromStdString(
-                                                currentCommit_.toShortHex())));
+                                                     currentCommit_.toShortHex()),
+                                                 util::elided(walk.error().message())));
                 return;
             }
-            showTree(**walk);
-        });
+            showTree(*walk);
+        },
+        // Once another commit is asked for, or the view cleared, the walk
+        // stops where it is.
+        [token, latest = walkToken_] { return latest->load() != token; });
 }
 
 void FileTreeWidget::showLoading()

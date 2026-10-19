@@ -25,6 +25,11 @@
 //   - the Stats row coming in late leaves the details pane scrolled as
 //     it was and the text selected in it selected: setting the pane's
 //     HTML again for it put it back at its top, the selection gone;
+//   - a commit whose diff and tree libgit2 turns down (a tree nested
+//     too deep) says why in the Stats row, the Diff tab and the File
+//     Tree, rather than looking as if it changed nothing;
+//   - a commit selected while the one before's diff and tree are still
+//     being read doesn't wait for them: those reads stop;
 //   - the avatar's colour comes from the author's email as shown, cut
 //     to util::kMaxLineChars: the whole of it was hashed on every
 //     re-wrap of the pane, tens of MB for a hostile one;
@@ -77,6 +82,7 @@
 #include "widgets/InteractiveRebaseWidget.h"
 #include "widgets/RevisionGraphWidget.h"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -557,6 +563,107 @@ private slots:
         QTRY_COMPARE(rows(diffFiles->model()).size(), 1);
         QVERIFY(rows(diffFiles->model()).first().contains(QStringLiteral("f8.txt")));
         QTRY_COMPARE(rows(fileTree->model()).size(), 9);
+    }
+
+    // A commit whose diff and tree libgit2 turns down (a tree nested
+    // deeper than the bundled one goes): the Stats row and the Diff tab
+    // say its changes can't be read, and why, as the File Tree does. The
+    // row was taken out and the Diff tab left empty, and the commit
+    // looked as if it changed nothing. The next commit shows as ever.
+    void aDiffThatCantBeReadSaysWhy() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        TestRepo repo;
+        auto base = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base"));
+        QVERIFY(base.ok());
+        const auto deep = repo.commitDeepTree(2350);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        model.setCommits({commitData(repo, deep), commitData(repo, *base)});
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* diffFiles = view.findChild<QTreeView*>(QStringLiteral("diff.files"));
+        auto* failure = view.findChild<QLabel*>(QStringLiteral("diff.failure"));
+        auto* treeHeader = view.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
+        QVERIFY(diffFiles && failure && treeHeader);
+        QVERIFY(failure->isHidden());
+
+        view.onCommitSelected(hex(deep));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        const QString why = QStringLiteral("tree too deep: more than 2048 levels");
+        QTRY_COMPARE(statsValue(details), QStringLiteral("(can't be read: %1)").arg(why));
+        QVERIFY(!failure->isHidden());
+        QCOMPARE(failure->text(), QStringLiteral("The changes can't be shown: %1").arg(why));
+        QCOMPARE(rows(diffFiles->model()), QStringList{});
+        QTRY_COMPARE(treeHeader->text(), QStringLiteral("Failed to load tree at commit %1: %2")
+                                             .arg(QString::fromStdString(deep.toShortHex()), why));
+
+        view.onCommitSelected(hex(*base));
+        QTRY_COMPARE(statsValue(details), QStringLiteral("1 file changed, +1 −0"));
+        QCOMPARE(rows(diffFiles->model()).size(), 1);
+        QVERIFY(failure->isHidden());
+#endif
+    }
+
+    // A commit whose diff and tree are slow to read (20,000 files, each
+    // a binary blob read whole for the diff and again for the walk), and
+    // then another selected: the next commit's diff and tree come in well
+    // before the first one's diff, or its tree, would have been done.
+    // Both went on to their end, and the next selection's, on the same
+    // read thread, waited for all of it.
+    void aNewSelectionDoesNotWaitForTheReadsBefore() {
+        TestRepo repo;
+        auto small = repo.writeAndCommit(QStringLiteral("small.txt"), "1\n", QStringLiteral("small"));
+        QVERIFY(small.ok());
+        const auto wide = repo.commitWideTree(20000, QByteArray(1, '\0') + QByteArray(16 * 1024, 'x'));
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(repo.repo().diffCommit(wide).ok());
+        const qint64 diffMs = timer.elapsed();
+        timer.restart();
+        QVERIFY(repo.repo().walkTreeAtCommit(wide).ok());
+        const qint64 walkMs = timer.elapsed();
+        const qint64 wholeMs = std::min(diffMs, walkMs);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        model.setCommits({commitData(repo, wide), commitData(repo, *small)});
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* diffFiles = view.findChild<QTreeView*>(QStringLiteral("diff.files"));
+        auto* fileTree = view.findChild<QTreeView*>(QStringLiteral("fileTree.view"));
+        QVERIFY(diffFiles && fileTree);
+
+        view.onCommitSelected(hex(wide));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        // On its way: the view says so after a moment.
+        QTRY_COMPARE(statsValue(details), QStringLiteral("(counting…)"));
+        timer.restart();
+        view.onCommitSelected(hex(*small));
+        QVERIFY(QTest::qWaitFor([&] {
+            return statsValue(details) == QStringLiteral("1 file changed, +1 −0")
+                   && rows(diffFiles->model()).size() == 1
+                   && rows(fileTree->model()).size() == 1;
+        }, 60000));
+        const qint64 tookMs = timer.elapsed();
+        QVERIFY2(tookMs < wholeMs / 2,
+                 qPrintable(QStringLiteral("%1 ms, where the first commit's diff takes %2 ms "
+                                           "and its tree %3 ms")
+                                .arg(tookMs).arg(diffMs).arg(walkMs)));
     }
 
     // Authors whose emails differ only past util::kMaxLineChars, where

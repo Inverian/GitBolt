@@ -107,8 +107,9 @@ private:
     services::GitService* svc_     = nullptr;
     git::ObjectId    currentCommit_;
     // Bumped by every walk asked for and by clear(), and shared with the
-    // worker: a walk's reply for an earlier commit is dropped, and one
-    // superseded before its turn doesn't run.
+    // worker: a walk's reply for an earlier commit is dropped, and a walk
+    // superseded stops where it is, or doesn't run if its turn hadn't
+    // come.
     std::shared_ptr<std::atomic<quint64>> walkToken_ =
         std::make_shared<std::atomic<quint64>>(0);
     // Until a walk is in, the tree on show (the previous commit's) stays,

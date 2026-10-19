@@ -60,7 +60,10 @@
 //     instead, and nothing changes; Rename renames such a branch away
 //     and Delete from remote deletes it on the server, after "--", and
 //     an existing local one is checked out;
-//   - Format Patch takes a count ("-2") as git does.
+//   - Format Patch takes a count ("-2") as git does;
+//   - status that can't be read (a tree nested too deep for libgit2) is
+//     said on the status bar, once rather than at every refresh, and
+//     the Commit count goes.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -2339,6 +2342,56 @@ private slots:
         QCOMPARE(label->text(), QString());
         QVERIFY(newBranch->isEnabled());
         QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("topic"));
+    }
+
+    // Status that can't be read (HEAD's tree nested deeper than the
+    // bundled libgit2 goes): the status bar says so, and why, and the
+    // Commit count goes, as no count is known. It stayed at the count
+    // of the last status read, and the failure was said nowhere. Said
+    // once: the watcher asks for status at every change in the work
+    // tree, and each failure would go over whatever the status bar said
+    // since. Once status has read again, a failure is said again.
+    void aStatusThatCantBeReadIsSaidOnce() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        auto base = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base"));
+        QVERIFY(base.ok());
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        QAction* commit = action(window, "act.commit");
+        QTRY_COMPARE(commit->text(), QStringLiteral("Co&mmit (1)..."));
+        int failures = 0;
+        connect(svc, &GitService::operationFailed, &window, [&failures] { ++failures; });
+
+        const QString said = QStringLiteral("status failed: tree too deep: more than 2048 levels");
+        const auto deep = repo.commitDeepTree(2350);
+        svc->refreshStatus();
+        QTRY_COMPARE(window.statusBar()->currentMessage(), said);
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit..."));
+
+        // Failing again, as at the next change in the work tree.
+        window.statusBar()->showMessage(QStringLiteral("Something else"));
+        const int before = failures;
+        svc->refreshStatus();
+        QTRY_VERIFY(failures > before);
+        QTest::qWait(100);
+        QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Something else"));
+
+        // Read again, and then not.
+        QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", base->toHex()})));
+        svc->refreshStatus();
+        QTRY_COMPARE(commit->text(), QStringLiteral("Co&mmit (1)..."));
+        QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", deep.toHex()})));
+        svc->refreshStatus();
+        QTRY_COMPARE(window.statusBar()->currentMessage(), said);
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit..."));
+#endif
     }
 
 private:

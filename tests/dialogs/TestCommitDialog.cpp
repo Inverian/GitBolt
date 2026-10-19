@@ -14,6 +14,8 @@
 //     of a line of megabytes is filled in cut, with a note;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
+//   - status that can't be read (a tree nested too deep for libgit2)
+//     says so, and why, until it reads again;
 //   - while the commit runs, nothing stages, unstages or commits, the
 //     button clicked says "Committing…", and Commit & Push still pushes
 //     once it's in; the file lists and the diff stay live to review;
@@ -505,6 +507,45 @@ private slots:
         QVERIFY(commit->isEnabled());
         QCOMPARE(message->toPlainText(), QStringLiteral("refused"));
         QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
+    }
+
+    // Status that can't be read (HEAD's tree nested deeper than the
+    // bundled libgit2 goes): the dialog says so, and why. Its lists were
+    // left empty, as if nothing had changed. Once status reads again,
+    // the note goes.
+    void aStatusThatCantBeReadSaysWhy() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        auto base = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base"));
+        QVERIFY(base.ok());
+        repo.commitDeepTree(2350);
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* error = child<QLabel>(dialog, "commit.error");
+        QVERIFY(error);
+        QTRY_VERIFY(error->isVisible());
+        QCOMPARE(error->text(),
+                 QStringLiteral("status failed: tree too deep: more than 2048 levels"));
+
+        // HEAD back on the commit before: status reads, b.txt in it.
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", base->toHex()})));
+        bool read = false;
+        connect(&svc, &GitService::statusReady, &dialog, [&read] { read = true; });
+        svc.refreshStatus();
+        QTRY_VERIFY(read);
+        QVERIFY(!error->isVisible());
+        auto* unstaged = child<QAbstractItemView>(dialog, "commit.unstagedList");
+        QVERIFY(unstaged);
+        QCOMPARE(unstaged->model()->rowCount(), 1);
+#endif
     }
 
     // git commit reads the index again after the pre-commit hook, and

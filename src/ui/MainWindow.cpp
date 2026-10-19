@@ -4824,6 +4824,7 @@ void MainWindow::setupConnections()
     // Commit dialog can stage them too).
     connect(gitService_, &services::GitService::statusReady,
             this, [this](std::vector<git::StatusEntry> entries) {
+        statusFailure_.clear();
         if (!commitAction_) return;
         int n = 0;
         for (const auto& e : entries) {
@@ -4877,6 +4878,19 @@ void MainWindow::setupConnections()
                         tr("Auto-fetch failed: %1").arg(firstLine), 10000);
                     updatePeriodicFetchStatus();
                     return;
+                }
+                // Status that can't be read (a tree nested too deep for
+                // libgit2) fails again at every refresh, and the watcher
+                // asks for one at each change in the work tree: no count
+                // of changes is known, and why is said once, not over
+                // every message that comes after it, until status reads
+                // again or fails otherwise.
+                if (op == QLatin1String("status")) {
+                    if (commitAction_)
+                        commitAction_->setText(tr("Co&mmit..."));
+                    if (err == statusFailure_)
+                        return;
+                    statusFailure_ = err;
                 }
                 // Usage statistics: the error's KIND only. `op` is one
                 // of GitService's fixed literals (operationName() maps
@@ -5315,6 +5329,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // Clear stale state from the previous repo before loading the new one.
     if (filterInput_)
         filterInput_->clear();
+    statusFailure_.clear();     // its status failing says so again
     if (repoView_) {
         // Busy only while a rebase step runs on this repository. The
         // same one opened again (Recent, the dashboard, a second

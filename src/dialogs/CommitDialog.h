@@ -183,6 +183,9 @@ private:
 
     // Inline error surface (above status strip)
     QLabel*                     errorLabel_    = nullptr;
+    // What errorLabel_ was given when status couldn't be read; taken
+    // down when it reads again.
+    QString                     statusFailure_;
 
     // Cached state
     QString  repoName_;

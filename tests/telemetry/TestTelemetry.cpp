@@ -468,7 +468,7 @@ private slots:
             {"stage", "stage"},
             {"stage all", "stage_all"}, {"stage hunk", "stage_hunk"},
             {"stashApply", "stash_apply"}, {"stashDrop", "stash_drop"},
-            {"stashPop", "stash_pop"}, {"stashSave", "stash_save"},
+            {"stashPop", "stash_pop"}, {"stashSave", "stash_save"}, {"status", "status"},
             {"submoduleInit", "submodule_init"}, {"submoduleUpdate", "submodule_update"},
             {"unlockWorktree", "unlock_worktree"}, {"unstage", "unstage"},
             {"unstageAll", "unstage_all"},

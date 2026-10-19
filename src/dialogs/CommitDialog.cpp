@@ -675,6 +675,9 @@ void CommitDialog::readCommitterFromConfig()
 
 void CommitDialog::onStatusReady(std::vector<gitbolt::git::StatusEntry> entries)
 {
+    if (!statusFailure_.isEmpty() && errorLabel_->text() == statusFailure_)
+        errorLabel_->hide();
+    statusFailure_.clear();
     unstagedModel_->setEntries(entries);
     stagedModel_->setEntries(std::move(entries));
 
@@ -987,6 +990,15 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
 
 void CommitDialog::onOperationFailed(const QString& op, const QString& err)
 {
+    // Status that couldn't be read (a tree nested too deep for libgit2):
+    // the lists can't say what changed, and empty they looked as if
+    // nothing had. Said until status reads again (onStatusReady).
+    if (op == QLatin1String("status")) {
+        statusFailure_ = op + tr(" failed: ") + err;
+        errorLabel_->setText(statusFailure_);
+        errorLabel_->show();
+        return;
+    }
     const bool commit = op.startsWith(QLatin1String("commit"), Qt::CaseInsensitive);
     if (commit ||
         op.startsWith(QLatin1String("stage"),   Qt::CaseInsensitive) ||

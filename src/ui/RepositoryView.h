@@ -141,16 +141,17 @@ private:
     // nested tree froze the window, for minutes. It fills the Stats row
     // and the Diff tab when it lands. Monotonic like the token above,
     // and shared with the worker: a reply for an earlier selection is
-    // dropped, and a request the selection has left behind before its
-    // turn came doesn't run at all.
+    // dropped, and a read the selection has left behind stops where it
+    // is, or doesn't run at all if its turn hadn't come.
     std::shared_ptr<std::atomic<quint64>> diffQueryToken_ =
         std::make_shared<std::atomic<quint64>>(0);
 
     // A commit's Stats row, once its diff is in (ok false: it couldn't
-    // be read, and the row is left out).
+    // be read, and the row says why, `error`, in place of the numbers).
     struct DiffStats {
         git::ObjectId commit;
         bool ok = false;
+        QString error;
         size_t files = 0;
         size_t additions = 0;
         size_t deletions = 0;
@@ -203,16 +204,17 @@ private:
     /// laid out; again whenever its laid-out size changes.
     void fitCommitInfoTopRow();
     void showCommitDiff(const git::ObjectId& commitId);
-    /// The diff of `commitId` is in (null: it couldn't be read): its
-    /// Stats row, and its files in the Diff tab.
-    void showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff);
+    /// The diff of `commitId` is in (null: it couldn't be read, `error`
+    /// says why): its Stats row.
+    void showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff,
+                       const QString& error = {});
     void showDiffFiles(std::shared_ptr<git::DiffResult> diff);
     void clearDiffFiles();
     /// The selected commit's diff isn't in after kDiffLoadingDelayMs.
     void showDiffLoading();
     /// Writes the Commit tab's Stats value over in place, in the colours
-    /// of the theme in effect: `stats`'s numbers, or "(counting…)"
-    /// without. A diff that couldn't be read takes the row out.
+    /// of the theme in effect: `stats`'s numbers, or why its diff
+    /// couldn't be read, or "(counting…)" without.
     void setStatsRow(const DiffStats* stats);
 
     // Services
@@ -237,6 +239,7 @@ private:
 
     // Diff tab
     QLineEdit*                    diffFilterInput_   = nullptr;
+    QLabel*                       diffFailure_       = nullptr;
     QTreeView*                    changedFilesTree_  = nullptr;
     QStandardItemModel*           changedFilesModel_ = nullptr;
     QSortFilterProxyModel*        changedFilesProxy_ = nullptr;

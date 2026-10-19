@@ -393,13 +393,31 @@ static DiffStatus convertDeltaStatus(git_delta_t status) {
     }
 }
 
-// Helper to load hunks and lines from a diff
-static DiffResult loadDiffResult(git_diff* diff) {
+// What a read that `cancelled` stopped fails with (diffCommit,
+// walkTreeAtCommit), as a git command cancelled does (GitProcess).
+static GitError cancelledRead() {
+    return GitError(GitErrorCode::User, "Cancelled");
+}
+
+// libgit2's progress callback for a diff (diffCommit): asked at each
+// entry of the trees, and a non-zero answer stops the diff.
+static int diffCancelCheck(const git_diff*, const char*, const char*, void* payload) {
+    const auto& cancelled = *static_cast<const std::function<bool()>*>(payload);
+    return cancelled() ? GIT_EUSER : 0;
+}
+
+// Helper to load hunks and lines from a diff. Each file's patch is read
+// and diffed here, the costly part of a big diff: `cancelled`, when
+// given, is asked before each.
+static Result<DiffResult> loadDiffResult(git_diff* diff,
+                                         const std::function<bool()>& cancelled = {}) {
     DiffResult result;
     size_t numDeltas = git_diff_num_deltas(diff);
     result.files.reserve(numDeltas);
 
     for (size_t i = 0; i < numDeltas; ++i) {
+        if (cancelled && cancelled())
+            return cancelledRead();
         const git_diff_delta* delta = git_diff_get_delta(diff, i);
         DiffFileEntry entry;
         entry.oldPath = delta->old_file.path ? delta->old_file.path : "";
@@ -511,7 +529,8 @@ Result<DiffResult> Repository::diffTreeToTree(const ObjectId& oldTreeId, const O
     return result;
 }
 
-Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
+Result<DiffResult> Repository::diffCommit(const ObjectId& commitId,
+                                          const std::function<bool()>& cancelled) const {
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
 
@@ -537,14 +556,24 @@ Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
         }
     }
 
+    git_diff_options opts;
+    git_diff_options_init(&opts, GIT_DIFF_OPTIONS_VERSION);
+    if (cancelled) {
+        opts.progress_cb = diffCancelCheck;
+        opts.payload = const_cast<std::function<bool()>*>(&cancelled);
+    }
     git_diff* diff = nullptr;
-    err = git_diff_tree_to_tree(&diff, repo_, parentTree, commitTree, nullptr);
+    err = git_diff_tree_to_tree(&diff, repo_, parentTree, commitTree, &opts);
     if (parentTree) git_tree_free(parentTree);
     git_tree_free(commitTree);
     git_commit_free(commit);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        if (cancelled && cancelled())
+            return cancelledRead();
+        return GitError::fromLibgit2(err);
+    }
 
-    auto result = loadDiffResult(diff);
+    auto result = loadDiffResult(diff, cancelled);
     git_diff_free(diff);
     return result;
 }
@@ -569,11 +598,14 @@ namespace {
 struct TreeWalkPayload {
     git_repository*        repo;
     std::vector<TreeEntry>* out;
+    const std::function<bool()>* cancelled;
 };
 
 int treeWalkCallback(const char* root, const git_tree_entry* entry, void* payload)
 {
     auto* ctx = static_cast<TreeWalkPayload*>(payload);
+    if (*ctx->cancelled && (*ctx->cancelled)())
+        return GIT_EUSER;  // a negative answer stops the walk
 
     TreeEntry e;
     e.name   = git_tree_entry_name(entry);
@@ -598,7 +630,8 @@ int treeWalkCallback(const char* root, const git_tree_entry* entry, void* payloa
 
 } // namespace
 
-Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(const ObjectId& commitId) const
+Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(
+    const ObjectId& commitId, const std::function<bool()>& cancelled) const
 {
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
@@ -613,10 +646,14 @@ Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(const ObjectId& comm
     if (err < 0) return GitError::fromLibgit2(err);
 
     std::vector<TreeEntry> entries;
-    TreeWalkPayload payload{ repo_, &entries };
+    TreeWalkPayload payload{ repo_, &entries, &cancelled };
     err = git_tree_walk(tree, GIT_TREEWALK_PRE, treeWalkCallback, &payload);
     git_tree_free(tree);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        if (cancelled && cancelled())
+            return cancelledRead();
+        return GitError::fromLibgit2(err);
+    }
 
     return entries;
 }

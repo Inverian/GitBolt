@@ -168,20 +168,42 @@ public:
     /// repository is still the open one (deliverFor) and `context` still
     /// exists; otherwise it is dropped. Nothing runs when no repository
     /// is open. Service thread only. A caller that asks again before the
-    /// answer comes tells its replies apart itself, and its `read` can
-    /// skip a request already superseded when its turn comes.
+    /// answer comes tells its replies apart itself.
+    ///
+    /// A read can be stopped. `read(repo, cancelled)` gets a check, for
+    /// Repository::diffCommit and walkTreeAtCommit, that turns true from
+    /// any thread once the read is for nothing: `superseded`, if given,
+    /// says so (its asker has moved on, to a newer selection), or the
+    /// service closed or switched the repository (closeRepository, an
+    /// open), or is going (cancelGitOps(), which ~GitService calls). A
+    /// read let run to its end held up the next one, the refreshes
+    /// waiting on repoMutex_, and quitting, for as long as a huge tree
+    /// took. A read already for nothing when its turn comes doesn't
+    /// run, and what one returns once it is for nothing goes nowhere:
+    /// `done` isn't called, so a stopped read says nothing.
     template <typename Read, typename Done>
-    void readAsync(QObject* context, Read read, Done done)
+    void readAsync(QObject* context, Read read, Done done,
+                   std::function<bool()> superseded = {})
     {
         if (!repo_)
             return;
         std::shared_ptr<git::Repository> r = repo_;
-        readRunner_.run([this, r, context = QPointer<QObject>(context),
-                         read = std::move(read), done = std::move(done)]() mutable {
+        readRunner_.run([this, r, generation = readGeneration_.load(),
+                         context = QPointer<QObject>(context), read = std::move(read),
+                         done = std::move(done), superseded = std::move(superseded)]() mutable {
+            const std::function<bool()> cancelled = [this, generation, &superseded] {
+                return readGeneration_.load() != generation || opsCancelled_->load()
+                       || (superseded && superseded());
+            };
+            if (cancelled())
+                return;   // for nothing before its turn came
             std::lock_guard<std::mutex> lock(repoMutex_);
-            if (r != repo_)
-                return;   // superseded by a repo switch
-            deliverFor(r, [context, result = read(*r), done = std::move(done)]() mutable {
+            if (r != repo_ || cancelled())
+                return;   // superseded by a repo switch, or while it waited
+            auto result = read(*r, cancelled);
+            if (cancelled())
+                return;   // stopped, or for nothing by now
+            deliverFor(r, [context, result = std::move(result), done = std::move(done)]() mutable {
                 if (context)
                     done(std::move(result));
             });
@@ -372,7 +394,8 @@ public:
     /// their console on Windows; see GitProcess::run), so git rolls its
     /// lockfiles back, a hook finishes cleaning up (pre-commit puts the
     /// unstaged changes back), and a rebase stopped mid-step stays in
-    /// progress, to be carried on later. For shutdown: MainWindow calls it before
+    /// progress, to be carried on later. A readAsync's read stops too, and
+    /// later ones don't run. For shutdown: MainWindow calls it before
     /// waiting for its pool threads, and the destructor before waiting
     /// for the service's own. Thread-safe.
     void cancelGitOps();
@@ -514,6 +537,10 @@ signals:
     /// repo_open_failed, which never sends the message.
     void repositoryOpenFailed(const QString& path, const QString& error, int errorCode);
     void repositoryClosed();
+    /// When status can't be read (libgit2 turns down a tree nested too
+    /// deep), operationFailed("status", why) comes in its place: dropped,
+    /// the failure left the Commit dialog's lists and the Commit count as
+    /// they were, as if nothing had changed.
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
     /// Right after each statusReady (and in its place when status
     /// couldn't be read): the operation the repository is in the
@@ -746,6 +773,12 @@ private:
     // second open cleanly supersedes the first with no stale
     // signals.
     quint64 openGeneration_ = 0;
+
+    // Bumped (service thread) when the repository is closed or another
+    // one takes its place: a readAsync's read started before is for
+    // nothing then, and stops (its `cancelled` compares). Atomic, as the
+    // read thread reads it as the read goes.
+    std::atomic<quint64> readGeneration_{0};
 
     // Cancellation flag for the in-flight watch-directory walk.
     // Replaced (not just toggled) per enumeration so each walk has

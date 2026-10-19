@@ -19,8 +19,10 @@
 #else
 #include <QProcess>
 #endif
+#include <functional>
 #include <memory>
 #include <optional>
+#include <tuple>
 #if defined(Q_OS_MACOS)
 #include <mach/mach.h>
 #elif defined(Q_OS_WIN)
@@ -4454,6 +4456,56 @@ private slots:
                      "walkTreeAtCommit did not stop at the depth limit");
         }
 #endif
+    }
+
+    // diffCommit and walkTreeAtCommit ask `cancelled` as they go, at each
+    // entry (and the diff before each file's patch too), and stop, with
+    // "Cancelled", the moment it says so, wherever they are: a read the
+    // user had moved on from (GitService::readAsync) ran on to the end
+    // of a huge tree. Never saying so, it changes nothing.
+    void readsStopWhenCancelled() {
+        gitbolt::test::TestRepo repo;
+        const auto wide = repo.commitWideTree(1000, "1\n2\n3\n");
+        // How many files the diff has, or entries the walk (10 folders
+        // of 100).
+        using Read = std::function<gitbolt::git::Result<size_t>(const std::function<bool()>&)>;
+        const Read diff = [&](const std::function<bool()>& cancelled) -> gitbolt::git::Result<size_t> {
+            auto read = repo.repo().diffCommit(wide, cancelled);
+            if (!read)
+                return read.error();
+            return read->files.size();
+        };
+        const Read walk = [&](const std::function<bool()>& cancelled) -> gitbolt::git::Result<size_t> {
+            auto read = repo.repo().walkTreeAtCommit(wide, cancelled);
+            if (!read)
+                return read.error();
+            return read->size();
+        };
+        // And how often each asks at least: the diff at each file in the
+        // trees and before its patch, the walk at each entry.
+        for (const auto& [name, read, size, atLeast] :
+             {std::tuple{"diffCommit", diff, size_t(1000), 2000},
+              {"walkTreeAtCommit", walk, size_t(1010), 1010}}) {
+            int asked = 0;
+            const auto whole = read([&] { ++asked; return false; });
+            QVERIFY2(whole.ok(), name);
+            QCOMPARE(*whole, size);
+            QVERIFY2(asked >= atLeast, qPrintable(QStringLiteral("%1: asked %2 times")
+                                                      .arg(name).arg(asked)));
+            for (const int stopAt : {1, asked / 2, asked}) {
+                int askedNow = 0;
+                const auto stopped = read([&] { return ++askedNow >= stopAt; });
+                QVERIFY2(!stopped.ok()
+                             && stopped.error().code() == gitbolt::git::GitErrorCode::User
+                             && stopped.error().message() == "Cancelled",
+                         qPrintable(QStringLiteral("%1 at %2").arg(name).arg(stopAt)));
+                // Stopped right there (its own check of why libgit2
+                // stopped asks once more).
+                QVERIFY2(askedNow <= stopAt + 1,
+                         qPrintable(QStringLiteral("%1 at %2: asked %3 times")
+                                        .arg(name).arg(stopAt).arg(askedNow)));
+            }
+        }
     }
 };
 

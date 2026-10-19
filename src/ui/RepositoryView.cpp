@@ -770,6 +770,17 @@ QWidget* RepositoryView::buildDiffTab()
             });
     leftLayout->addWidget(diffFilterInput_);
 
+    // Why the commit's changes can't be shown, when its diff couldn't be
+    // read (a tree nested deeper than libgit2 goes): the list was just
+    // empty, as for a commit that changed nothing. libgit2's words, with
+    // a path of the repository's in them: plain text.
+    diffFailure_ = new QLabel(leftPane);
+    diffFailure_->setObjectName(QStringLiteral("diff.failure"));
+    diffFailure_->setWordWrap(true);
+    diffFailure_->setTextFormat(Qt::PlainText);
+    diffFailure_->hide();
+    leftLayout->addWidget(diffFailure_);
+
     changedFilesTree_ = new QTreeView(leftPane);
     changedFilesTree_->setObjectName(QStringLiteral("diff.files"));
     changedFilesTree_->setHeaderHidden(true);
@@ -934,6 +945,8 @@ void RepositoryView::resetInspectorTabs()
         diffFilterInput_->clear();
     if (changedFilesModel_)
         changedFilesModel_->clear();
+    if (diffFailure_)
+        diffFailure_->hide();
     if (diffWidget_)
         diffWidget_->clear();
 
@@ -1099,6 +1112,8 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
             diffFilterInput_->clear();
         if (changedFilesModel_)
             changedFilesModel_->clear();
+        if (diffFailure_)
+            diffFailure_->hide();
         if (diffWidget_)
             diffWidget_->clear();
         if (fileTreeWidget_)
@@ -1616,23 +1631,30 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
     // waits for the same diff, so it's read once for both.
     gitService_->readAsync(
         this,
-        [commitId, token, latest = diffQueryToken_](git::Repository& r)
-            -> std::shared_ptr<git::DiffResult> {
-            if (latest->load() != token)
-                return nullptr;   // the selection moved on before its turn
-            auto diff = r.diffCommit(commitId);
-            return diff ? std::make_shared<git::DiffResult>(std::move(*diff)) : nullptr;
+        [commitId](git::Repository& r, const std::function<bool()>& cancelled) {
+            return r.diffCommit(commitId, cancelled);
         },
-        [this, commitId, token](std::shared_ptr<git::DiffResult> diff) {
+        [this, commitId, token](git::Result<git::DiffResult> diff) {
             if (token != diffQueryToken_->load())
                 return;           // for a commit no longer selected
             diffLoadingTimer_->stop();
             diffLoading_ = false;
-            showDiffStats(commitId, diff.get());
             clearDiffFiles();
-            if (diff)
-                showDiffFiles(std::move(diff));
-        });
+            if (!diff) {
+                // Said where the changes would be, so that the commit
+                // doesn't look as if it changed nothing.
+                const QString why = util::elided(diff.error().message());
+                showDiffStats(commitId, nullptr, why);
+                diffFailure_->setText(tr("The changes can't be shown: %1").arg(why));
+                diffFailure_->show();
+                return;
+            }
+            auto shown = std::make_shared<git::DiffResult>(std::move(*diff));
+            showDiffStats(commitId, shown.get());
+            showDiffFiles(std::move(shown));
+        },
+        // Once the selection moves on, the diff stops where it is.
+        [token, latest = diffQueryToken_] { return latest->load() != token; });
 }
 
 void RepositoryView::clearDiffFiles()
@@ -1648,6 +1670,7 @@ void RepositoryView::clearDiffFiles()
 
     if (changedFilesModel_)
         changedFilesModel_->clear();
+    diffFailure_->hide();
     diffWidget_->clear();
 }
 
@@ -1659,10 +1682,12 @@ void RepositoryView::showDiffLoading()
         setStatsRow(nullptr);
 }
 
-void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff)
+void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff,
+                                   const QString& error)
 {
     DiffStats stats;
     stats.commit = commitId;
+    stats.error = error;
     if (diff) {
         stats.ok = true;
         stats.files = diff->files.size();
@@ -1682,10 +1707,6 @@ void RepositoryView::setStatsRow(const DiffStats* stats)
         return;
     QTextCursor value = cell.firstCursorPosition();
     value.setPosition(cell.lastCursorPosition().position(), QTextCursor::KeepAnchor);
-    if (stats && !stats->ok) {
-        value.currentTable()->removeRows(cell.row(), 1);
-        return;
-    }
     // In the font the HTML gave the cell: that of the character in it,
     // without the italics and colour of "(counting…)".
     QTextCharFormat plain = cell.firstCursorPosition().charFormat();
@@ -1697,11 +1718,15 @@ void RepositoryView::setStatsRow(const DiffStats* stats)
                       > app.color(QPalette::Window).lightness();
     value.beginEditBlock();
     value.removeSelectedText();
-    if (!stats) {
+    if (!stats || !stats->ok) {
         QTextCharFormat muted = plain;
         muted.setFontItalic(true);
         muted.setForeground(dark ? QColor(0x9e, 0x9e, 0x9e) : QColor(0x6a, 0x6a, 0x6a));
-        value.insertText(QStringLiteral("(counting…)"), muted);
+        // A diff that couldn't be read says why. The row was taken out,
+        // and the commit looked as if it changed nothing.
+        value.insertText(stats ? tr("(can't be read: %1)").arg(stats->error)
+                               : QStringLiteral("(counting…)"),
+                         muted);
     } else {
         QTextCharFormat added = plain;
         added.setForeground(dark ? QColor(0x3f, 0xb9, 0x50) : QColor(0x1e, 0x7b, 0x34));

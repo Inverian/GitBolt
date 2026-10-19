@@ -503,6 +503,10 @@ private:
     bool barStateHeld_ = false;
     QString localOpMessage_;
     bool localOpNarrated_ = false;
+    // Why the open repository's status can't be read, as the status bar
+    // said it last; empty while it reads (statusReady), and for a
+    // repository just opened.
+    QString statusFailure_;
     // GitService::stepWarning of the step about to report: git's
     // warnings on a step that went through.
     QString stepWarning_;

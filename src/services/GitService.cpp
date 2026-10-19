@@ -56,7 +56,8 @@ GitService::~GitService() {
     // And stop the git of every job runner_ is about to wait for: a
     // rebase step's hook, a slow checkout, gc. Quitting waited for the
     // whole of it, and a second launch meanwhile found nobody to hand
-    // its path to and gave up.
+    // its path to and gave up. The read readRunner_ waits for stops
+    // with it (readAsync), a commit's diff or tree over a huge one.
     cancelGitOps();
 }
 
@@ -81,6 +82,9 @@ bool GitService::openRepository(const QString& path) {
     const QString root = QString::fromStdString(found);
     const QString gitDir = QString::fromStdString(result->path());
     const QString commonDir = QString::fromStdString(result->commonDir());
+    // A read of the repository open until now is for nothing, and the
+    // swap below would wait for all of it.
+    ++readGeneration_;
     {
         // Swap under the libgit2 mutex so an in-flight refresh
         // worker can't have the old repo destroyed mid-call.
@@ -147,6 +151,7 @@ quint64 GitService::openRepositoryAsync(const QString& path) {
                 return;
             }
 
+            ++readGeneration_;     // as in openRepository
             {
                 std::lock_guard<std::mutex> lock(repoMutex_);
                 repo_ = std::move(outcome.repo);
@@ -208,6 +213,7 @@ void GitService::closeRepository() {
     openPending_ = false;
 
     watcher_.stop();
+    ++readGeneration_;     // as in openRepository
     {
         std::lock_guard<std::mutex> lock(repoMutex_);
         repo_.reset();
@@ -287,7 +293,7 @@ std::optional<git::GitProcess> GitService::processIfOpen(
 }
 
 void GitService::cancelGitOps() {
-    opsCancelled_->store(true);
+    opsCancelled_->store(true);     // readAsync's reads look at it too
 }
 
 // Refresh workers capture repo_ as a shared_ptr (pinning the object
@@ -324,6 +330,9 @@ void GitService::refreshStatus() {
                        skippable = r->sequenceSkippable()]() mutable {
             if (result)
                 emit statusReady(std::move(*result));
+            else
+                emit operationFailed(QStringLiteral("status"),
+                                     QString::fromStdString(result.error().message()));
             emit repoStateReady(state, conflicts, paused, skippable);
         });
     });
