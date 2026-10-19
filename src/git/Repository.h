@@ -207,6 +207,11 @@ public:
     /// alone: no blob is read.
     Result<int> conflictCount() const;
 
+    /// The mode the index has for `path`, relative to the work tree's
+    /// top (0100755 for a file committed executable), or 0 where it has
+    /// none: an untracked path, or one in conflict.
+    uint32_t indexMode(const std::string& path) const;
+
     /// Resolves the conflict on `path` with `content`, the resolver's
     /// result, as `git add` would after the file was edited: the
     /// content is staged with the mode git's merge gives it (a side's

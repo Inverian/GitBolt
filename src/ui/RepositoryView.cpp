@@ -468,8 +468,22 @@ void RepositoryView::openFileExternally(const QString& path)
     // an executable file with no extension, CHANGELOG at mode 755 say,
     // and runs it, and a .command file too. Nothing in the tree tells
     // such a file from a text file, so ask first, with Cancel the
-    // default, and offer its folder instead.
-    if (util::mayRunWhenOpened(target)) {
+    // default, and offer its folder instead. Where the work tree keeps
+    // no modes (an exFAT drive, WSL's /mnt/c), every file is marked
+    // executable, and the index has the mode git committed it with.
+    // Only a marked file needs the index read: Windows keeps no modes,
+    // and marks only its programs.
+    bool modesKept = true;
+    uint32_t indexMode = 0;
+    const QString relative =
+        QDir(QFileInfo(workdir).canonicalFilePath()).relativeFilePath(target.filePath());
+    gitService_->withRepository([&](git::Repository& r) {
+        const auto fileMode = r.config().getBool("core.fileMode");
+        modesKept = !fileMode.ok() || *fileMode;
+        if (!modesKept && target.isExecutable())
+            indexMode = r.indexMode(relative.toStdString());
+    });
+    if (util::mayRunWhenOpened(target, modesKept, indexMode)) {
         QMessageBox box(QMessageBox::Warning, tr("Open Externally"),
                         tr("%1 may run as a program if it is opened.")
                             .arg(QDir::toNativeSeparators(path)),
