@@ -56,6 +56,12 @@
 //     shell keeps its variables and its jobs, one stopped with Ctrl+Z and
 //     one in the background. The shell used to be started again, which
 //     hung the jobs up;
+//   - so does tcsh, in its own syntax, with a `!` kept from its history;
+//     it was started again. And in bash or tcsh where the locale is C, a
+//     path with a character outside ASCII keeps it: their line editors
+//     took its bytes for Meta keys, and dropped it;
+//   - a line partly typed at the prompt is dropped first. The change went
+//     on its end, and ran with it as its arguments;
 //   - while a command runs in the shell, the switch lets it finish and
 //     types the change after it. The shell used to be started again at
 //     once, which hung the command up with it. A switch back meanwhile
@@ -86,6 +92,8 @@
 //     lets it finish, and then types the change into cmd, quoted for it
 //     (%, &, ^, parentheses): cmd keeps its variables. cmd used to be
 //     started again at once, which ended the program with it;
+//   - over a line partly typed at cmd's prompt, cmd is started again,
+//     which drops the line. The change went on its end, and ran with it;
 //   - a row conhost paints with a surrogate pair, or a letter and its
 //     combining mark, in its last column keeps the character whole,
 //     as the fed wrap tests do with synthetic output.
@@ -281,14 +289,7 @@ public:
     bool isValid() const { return home_.isValid(); }
     QString home() const { return home_.path(); }
 
-private:
-    struct Saved {
-        QByteArray name;
-        bool       wasSet;
-        QByteArray value;
-    };
-
-    // An empty value unsets it.
+    // An empty value unsets it. Put back by the destructor too.
     void set(const char* name, const QByteArray& value)
     {
         saved_.append({name, qEnvironmentVariableIsSet(name), qgetenv(name)});
@@ -297,6 +298,13 @@ private:
         else
             qputenv(name, value);
     }
+
+private:
+    struct Saved {
+        QByteArray name;
+        bool       wasSet;
+        QByteArray value;
+    };
 
     QTemporaryDir home_;
     QList<Saved>  saved_;
@@ -1182,6 +1190,44 @@ private slots:
 #endif
     }
 
+    // A bare repository opened with a line partly typed at cmd's prompt.
+    // The change was typed on the end of the line, and Enter with it: the
+    // line ran, the change for its arguments, and GIT_DIR stayed unset.
+    // cmd is now started again instead, which drops the line.
+    void gitDirChangeDropsALinePartlyTypedIntoCmd()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString bare = QDir::toNativeSeparators(dirs.filePath(QStringLiteral("bare.git")));
+        QVERIFY(QDir().mkpath(bare));
+
+        TerminalWidget terminal;
+        terminal.start(QDir::tempPath());
+        showAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral("echo gbhalf"));
+        QTRY_VERIFY2_WITH_TIMEOUT(lastRow(terminal).endsWith(QStringLiteral("echo gbhalf")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+
+        const qsizetype before = prompts(terminal);
+        terminal.changeRepository(bare, bare);
+        QTRY_VERIFY2_WITH_TIMEOUT(prompts(terminal) > before && atPrompt(terminal),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QTest::keyClicks(&terminal, QStringLiteral("set GIT_DIR"));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        // A long row can wrap: the text with its rows put back together.
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.toPlainText().remove(QLatin1Char('\n'))
+                                      .contains(QStringLiteral("GIT_DIR=") + bare),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        static const QRegularExpression ran(QStringLiteral("(?<!echo )gbhalf"));
+        QVERIFY2(!terminal.toPlainText().contains(ran), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
     // The same two on Unix, over a real PTY and /bin/sh. A shell that
     // writes faster than the widget draws keeps the PTY full, and the
     // read handler used to read on until it ran dry: the GUI thread
@@ -1415,16 +1461,54 @@ private slots:
     // quote, a space, a $ and the like comes out as it went in. And
     // leaving the bare repository unsets GIT_DIR rather than emptying it:
     // git takes an empty one for a path, and finds no repository there.
+    //
+    // In bash where the locale is C, as where none is set, a path with a
+    // character outside ASCII came out without it ("café" as "caf"): the
+    // line editor took its bytes for Meta keys. And tcsh, which was
+    // started again, losing its jobs, is typed its own `setenv`, with a
+    // `!` escaped for its history. Both keep a variable of their own.
+    void ptyTypedGitDirKeepsItsCharacters_data()
+    {
+        QTest::addColumn<QString>("program");  // empty: sh
+        QTest::addColumn<bool>("cLocale");
+        QTest::addColumn<QString>("name");
+        const QString special = QStringLiteral("it's a $HOME \"bare\" \\ `repo`");
+        const QString outside = QStringLiteral("it's a café, 100% \\ $HOME");
+        QTest::newRow("sh") << QString() << false << special + QStringLiteral(".git");
+        QTest::newRow("bash, outside ASCII, C locale")
+            << QStringLiteral("/bin/bash") << true << outside + QStringLiteral(".git");
+        QTest::newRow("tcsh")
+            << QStringLiteral("/bin/tcsh") << false << special + QStringLiteral(" !x.git");
+        QTest::newRow("tcsh, outside ASCII, C locale")
+            << QStringLiteral("/bin/tcsh") << true << outside + QStringLiteral(" !x.git");
+    }
+
     void ptyTypedGitDirKeepsItsCharacters()
     {
 #ifdef Q_OS_WIN
         QSKIP("The PTY is the Unix terminal backend");
 #else
+        QFETCH(QString, program);
+        QFETCH(bool, cLocale);
+        QFETCH(QString, name);
         PlainShell shell;
         QVERIFY(shell.isValid());
+        const bool csh = program.endsWith(QLatin1String("csh"));
+        if (!program.isEmpty()) {
+            if (!QFileInfo::exists(program))
+                QSKIP("the shell isn't installed");
+            shell.set("SHELL", QFile::encodeName(program));
+        }
+        if (cLocale)
+            shell.set("LC_ALL", QByteArrayLiteral("C"));
+        if (csh) {
+            // csh's prompt is a variable of its own.
+            QFile tcshrc(QDir(shell.home()).filePath(QStringLiteral(".tcshrc")));
+            QVERIFY(tcshrc.open(QIODevice::WriteOnly));
+            tcshrc.write("set prompt='" + kShPrompt.toLatin1() + " '\n");
+        }
         QTemporaryDir dirs;
         QVERIFY(dirs.isValid());
-        const QString name = QStringLiteral("it's a $HOME \"bare\" \\ `repo`.git");
         const QString bare = dirs.filePath(name);
         const QString work = dirs.filePath(QStringLiteral("work"));
         QVERIFY(QDir().mkpath(bare) && QDir().mkpath(work));
@@ -1436,17 +1520,72 @@ private slots:
         const auto open = [&terminal](const QString& path, const QString& gitDir) {
             return prompted(terminal, [&] { terminal.changeRepository(path, gitDir); });
         };
-        QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
-        QVERIFY2(typed(terminal, QStringLiteral("printf '%s\\n' \"gbdir[$GIT_DIR][${PWD##*/}]\"")),
+        // Composed, whichever form the file system gave the name back in.
+        const auto shows = [&terminal](const QString& row) {
+            const QString composed = row.normalized(QString::NormalizationForm_C);
+            for (const QString& shown : rows(terminal)) {
+                if (shown.normalized(QString::NormalizationForm_C) == composed)
+                    return true;
+            }
+            return false;
+        };
+        QVERIFY2(typed(terminal, csh ? QStringLiteral("set gbmark=kept") : QStringLiteral("gbmark=kept")),
                  qPrintable(terminal.toPlainText()));
-        QVERIFY2(rows(terminal).contains(QStringLiteral("gbdir[%1][%2]").arg(bare, name)),
+
+        QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, csh ? QStringLiteral("printf '%s\\n' \"gbdir[$GIT_DIR][$cwd:t][$gbmark]\"")
+                                     : QStringLiteral("printf '%s\\n' \"gbdir[$GIT_DIR][${PWD##*/}][$gbmark]\"")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(shows(QStringLiteral("gbdir[%1][%2][kept]").arg(bare, name)),
                  qPrintable(terminal.toPlainText()));
 
         QVERIFY2(open(work, {}), qPrintable(terminal.toPlainText()));
-        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbleft[${GIT_DIR-unset}][${PWD##*/}]\"")),
+        QVERIFY2(typed(terminal, csh ? QStringLiteral("printenv GIT_DIR || echo \"gbleft[unset][$cwd:t]\"")
+                                     : QStringLiteral("echo \"gbleft[${GIT_DIR-unset}][${PWD##*/}]\"")),
                  qPrintable(terminal.toPlainText()));
-        QVERIFY2(rows(terminal).contains(QStringLiteral("gbleft[unset][work]")),
+        QVERIFY2(shows(QStringLiteral("gbleft[unset][work]")), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // A bare repository opened with a line partly typed at the shell's
+    // prompt. The change was typed on the end of the line, and Enter
+    // with it: the line ran, the change for its arguments, and GIT_DIR
+    // stayed unset. The line is now dropped first.
+    void ptyGitDirChangeDropsALinePartlyTyped()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString bare = dirs.filePath(QStringLiteral("bare.git"));
+        QVERIFY(QDir().mkpath(bare));
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral("echo gbhalf"));
+        QTRY_VERIFY2_WITH_TIMEOUT(lastRow(terminal).endsWith(QStringLiteral("echo gbhalf")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+
+        terminal.changeRepository(bare, bare);
+        // The change typed, and the prompt after it.
+        const auto switched = [&terminal] {
+            const QString text = terminal.toPlainText();
+            const qsizetype at = text.lastIndexOf(QStringLiteral(" export GIT_DIR='"));
+            return at >= 0 && text.indexOf(kShPrompt, at) >= 0
+                   && lastRow(terminal).endsWith(kShPrompt);
+        };
+        QTRY_VERIFY2_WITH_TIMEOUT(switched(), qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbafter[${GIT_DIR-unset}][${PWD##*/}]\"")),
                  qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbafter[%1][bare.git]").arg(bare)),
+                 qPrintable(terminal.toPlainText()));
+        static const QRegularExpression ran(QStringLiteral("(?<!echo )gbhalf"));
+        QVERIFY2(!terminal.toPlainText().contains(ran), qPrintable(terminal.toPlainText()));
 #endif
     }
 

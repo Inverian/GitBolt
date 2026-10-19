@@ -97,10 +97,11 @@ public:
     /// changeDirectory, with `gitDir` as setGitDir has it. A running
     /// shell whose GIT_DIR changes (a bare repository opened or left) is
     /// typed the change with the `cd`, in its own syntax (sh's `export`
-    /// and `unset`, fish's `set`, cmd's `set`): at once at its prompt,
-    /// but once the command running in it ends if there is one. A shell
-    /// that syntax isn't known for is started again there instead (see
-    /// switchWhenIdle).
+    /// and `unset`, csh's `setenv` and `unsetenv`, fish's `set`, cmd's
+    /// `set`): at once at its prompt, but once the command running in it
+    /// ends if there is one. A line the user has partly typed there is
+    /// dropped first. A shell that syntax isn't known for is started
+    /// again there instead (see switchWhenIdle).
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
@@ -157,6 +158,9 @@ private:
     /// gitDir_ as its GIT_DIR or to unset it; null where that can't be
     /// typed.
     QString gitDirCommand() const;
+    /// Keeps lineTyped_ up to date with `bytes`, which the user sends
+    /// the shell.
+    void noteTyped(const QByteArray& bytes);
 #ifndef Q_OS_WIN
     /// The name of the program the shell's process runs now.
     QString shellProgram() const;
@@ -237,6 +241,12 @@ private:
     QString          gitDir_;          // setGitDir
     QString          shellGitDir_;     // the running shell's GIT_DIR, as far as is known
     QString          shellName_;       // the file name of the shell started
+    /// Keys went to the shell at its prompt since its last Enter or
+    /// Ctrl+C: a line may be partly typed there (see noteTyped).
+    bool             lineTyped_    = false;
+    /// A Ctrl+C has gone to the shell to drop that line, and the GIT_DIR
+    /// waits for switchTimer_'s next tick (see switchWhenIdle).
+    bool             interrupted_  = false;
     bool             autoStarted_  = false;
 };
 
