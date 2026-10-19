@@ -3679,7 +3679,7 @@ private slots:
     // up from four before it, 200 names a line (git reads them all and
     // says nothing). libgit2 copied the macro's thousand names into every
     // rule as it read the file, and kept them while the repository was
-    // open: status and a commit's diff took 130 MB for these 87 KB (8 MB
+    // open: status and a commit's diff took 130 MB for these 87 KB (4 MB
     // now), and memory went as the square of the file. A file's rules
     // now take no more than its size allows, the first ones still
     // applying, and a rule of 2,000 names, a line git skips as too long,
@@ -3752,6 +3752,76 @@ private slots:
         QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_UNSPECIFIED);
         QCOMPARE(output(git.run({"check-attr", "c0", "--", "long.txt"})),
                  QStringLiteral("long.txt: c0: unspecified"));
+#endif
+    }
+
+    // Short lines that each name 31 macros of 32 names, 116 bytes for
+    // 1,023 assignments (under a rule's limit), repeated to 2 MB: git
+    // reads every line, quickly and without a word. A file's rules could
+    // take four assignments for each of its bytes, and status and a
+    // commit's diff held 235 MB for these 2 MB (64 MB now), nearly four
+    // times what as big a file of names written out costs. At one a
+    // byte, naming macros costs about what spelling the names out does.
+    // The first rules still apply.
+    void manyMacrosGitattributesStayBounded() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        QByteArray attrs;
+        QByteArray rule = "f";
+        for (int m = 0, name = 0; m < 31; ++m) {
+            attrs += "[attr]M" + QByteArray::number(m);
+            for (int i = 0; i < 32; ++i, ++name)
+                attrs += " n" + QByteArray::number(name);
+            attrs += '\n';
+            rule += " M" + QByteArray::number(m);
+        }
+        rule += '\n';
+        while (attrs.size() < 2 * 1024 * 1024)
+            attrs += rule;
+
+        gitbolt::test::TestRepo repo;
+        const QStringList files{QStringLiteral("f0"), QStringLiteral("f1"), QStringLiteral("f2")};
+        for (const QString& file : files)
+            repo.writeFile(file, "one\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "A"})));
+        repo.writeFile(".gitattributes", attrs);
+        for (const QString& file : files)
+            repo.writeFile(file, "two\n");
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"-c", "user.name=T", "-c", "user.email=t@gitbolt.local",
+                                   "-c", "commit.gpgsign=false", "commit", "-q", "-m", "B"})));
+        repo.writeFile("f0", "TWO\n");
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        const auto head = opened->head();
+        QVERIFY(head.ok());
+
+        const qint64 before = residentBytes();
+        QElapsedTimer timer;
+        timer.start();
+        const auto status = opened->status();
+        const auto diff = opened->diffCommit(*head);
+        const qint64 elapsed = timer.elapsed();
+        const qint64 grown = residentBytes() - before;
+        QVERIFY2(status.ok(), status.ok() ? "" : status.error().message().c_str());
+        QVERIFY2(diff.ok(), diff.ok() ? "" : diff.error().message().c_str());
+        QCOMPARE(diff->files.size(), static_cast<size_t>(files.size() + 1));
+        QVERIFY2(grown < 128 * 1024 * 1024,
+                 qPrintable(QStringLiteral("status and diffCommit took %1 MB").arg(grown >> 20)));
+        QVERIFY2(elapsed < 5000,
+                 qPrintable(QStringLiteral("status and diffCommit took %1 ms").arg(elapsed)));
+
+        const char* value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "f", "n0"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_TRUE);
+        value = nullptr;
+        QCOMPARE(git_attr_get(&value, opened->raw(), 0, "f", "n991"), 0);
+        QCOMPARE(git_attr_value(value), GIT_ATTR_VALUE_TRUE);
 #endif
     }
 

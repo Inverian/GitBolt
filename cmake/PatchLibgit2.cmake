@@ -313,18 +313,24 @@ gitbolt_patch(src/libgit2/tree.c
 # is committed, so a clone brings it, and selecting a commit with a
 # change (the diff driver is an attribute) read it; the memory stayed
 # taken as long as the repository was open. Now a file's rules take at
-# most 1024 assignments plus 4 for each byte of the file, their macros'
-# included: what the macros expand to grows with the file, as the rest
-# of what libgit2 keeps of it does (a .gitattributes in each of many
-# folders, each naming the macro, gets no more than its size allows
-# either). And one rule takes at most 1024, more than a line git reads
-# (under 2048 bytes) can name: each goes into the rule's sorted list,
-# and a line of thousands of names took time as their square (80,000:
-# 0.4 s). A rule that would take more is skipped, as git skips a line
-# too long. The 110 KB file now diffs in 5 ms and 8 MB.
+# most 1024 assignments plus one for each byte of the file, their
+# macros' included: what the macros expand to grows with the file, as
+# the rest of what libgit2 keeps of it does (a .gitattributes in each of
+# many folders, each naming the macro, gets no more than its size allows
+# either). A name written out takes two bytes at least, a letter and a
+# space, so that is twice what a file without macros can reach, and
+# real files stay far below it (`*.png binary` takes 4 in 13 bytes).
+# At four a byte, short lines that each named 31 macros of 32 names held
+# 110 MB for each MB of the file, nearly four times what the names
+# written out cost; now 30, as they do. And one rule takes at most 1024,
+# more than a line git reads (under 2048 bytes) can name: each goes into
+# the rule's sorted list, and a line of thousands of names took time as
+# their square (80,000: 0.4 s). A rule that would take more is skipped,
+# as git skips a line too long. The 110 KB file now diffs in 5 ms and
+# 8 MB.
 gitbolt_patch(src/libgit2/attr_file.c
     "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n"
-    "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\n/*\n * GitBolt: libgit2 copies a macro into each rule that names it, so N\n * rules naming a macro of K names took N x K. A rule takes at most this\n * many assignments, its macros' included (a macro is a rule too): git\n * skips a line of 2048 bytes or more, and a shorter one names no more.\n * Each goes into the rule's sorted list, which took time as the square\n * of a long line's names.\n */\n#define GIT_ATTR_MAX_RULE_ASSIGNS 1024\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\t/* GitBolt: and the file's rules, all together, a rule's worth plus\n\t * four for each byte of the file (at most GIT_ATTR_MAX_FILE_SIZE of\n\t * them: no overflow). A rule past either limit is skipped. */\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS + 4 * strlen(data);\n"
+    "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\n/*\n * GitBolt: libgit2 copies a macro into each rule that names it, so N\n * rules naming a macro of K names took N x K. A rule takes at most this\n * many assignments, its macros' included (a macro is a rule too): git\n * skips a line of 2048 bytes or more, and a shorter one names no more.\n * Each goes into the rule's sorted list, which took time as the square\n * of a long line's names.\n */\n#define GIT_ATTR_MAX_RULE_ASSIGNS 1024\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\t/* GitBolt: and the file's rules, all together, a rule's worth plus\n\t * one for each byte of the file. A name written out takes two bytes\n\t * at least, so macros can't make a file hold much more than its\n\t * names would. A rule past either limit is skipped. */\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS + strlen(data);\n"
     "int ignorecase = 0, error = 0;\n\n\t/\\* If subdir file path")
 gitbolt_patch(src/libgit2/attr_file.c
     "(error = git_attr_assignment__parse(repo, &attrs->pool, &rule->assigns, &scan)) < 0)"
