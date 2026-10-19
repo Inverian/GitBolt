@@ -54,4 +54,20 @@ inline QString shownToolTip(const QString& tip)
     return shownText(tip, Qt::AutoText);
 }
 
+// `markup` as a folder's or a ref's name. Windows has no '<' or '>' in
+// a file name, and libgit2 turns down a ref named with them there (a
+// loose ref is a file), so there they are "&lt;" and "&gt;": markup too,
+// as Qt::mightBeRichText() takes "&lt;" for it, which rendered shows as
+// '<'. Elsewhere the name is the markup itself.
+inline QString asName(const QString& markup)
+{
+#ifdef Q_OS_WIN
+    return QString(markup)
+        .replace(QLatin1Char('<'), QStringLiteral("&lt;"))
+        .replace(QLatin1Char('>'), QStringLiteral("&gt;"));
+#else
+    return markup;
+#endif
+}
+
 } // namespace gitbolt::test

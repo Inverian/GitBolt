@@ -104,6 +104,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
 #include <QThreadPool>
 
 #include "../TestProcessHelper.h"
@@ -887,8 +888,14 @@ private slots:
     // git_tree_walk recurses once per directory level: on a pool
     // thread's default stack (512 KB on macOS) a tree some 4,500 levels
     // deep crashed it, where the GUI thread's 8 MB, on which it ran
-    // before, took 60,000. 6,000 levels here. The walk may turn such a
-    // tree down; what mustn't happen is the crash.
+    // before, took 60,000. The read thread has as much. 6,000 levels
+    // here, which a system libgit2 walks on that stack (unless it turns
+    // the tree down; what mustn't happen is the crash). The bundled one
+    // (cmake/PatchLibgit2.cmake), which CI builds, turns down a tree
+    // deeper than 2048 levels, and the deepest walk it allows takes well
+    // under 512 KB (some 100 bytes a level), so no tree can overflow the
+    // default stack there. So the read also says how big its thread's
+    // stack is: the GUI thread's 8 MB, whichever libgit2 there is.
     // -----------------------------------------------------------------
     void readAsyncWalksADeepTree() {
         constexpr int kDepth = 6000;
@@ -922,15 +929,28 @@ private slots:
         QVERIFY(svc.openRepository(repo.path()));
         QObject context;
         long entries = -2;   // -1: turned down
+        uint stack = 0;
         svc.readAsync(
             &context,
-            [commit](gitbolt::git::Repository& r) -> long {
+            [commit](gitbolt::git::Repository& r) {
                 auto walk = r.walkTreeAtCommit(commit);
-                return walk ? static_cast<long>(walk->size()) : -1;
+                return std::pair{walk ? static_cast<long>(walk->size()) : -1L,
+                                 QThread::currentThread()->stackSize()};
             },
-            [&entries](long n) { entries = n; });
-        QTRY_VERIFY_WITH_TIMEOUT(entries != -2, 60000);
+            [&](std::pair<long, uint> answer) {
+                entries = answer.first;
+                stack = answer.second;
+            });
+        // A quarter of QtTest's watchdog (QTEST_FUNCTION_TIMEOUT, 60 s):
+        // a read that never answers fails here, rather than the watchdog
+        // aborting the whole binary.
+        QTRY_VERIFY_WITH_TIMEOUT(entries != -2, 15000);
+        QVERIFY2(stack >= 8u * 1024 * 1024, qPrintable(QString::number(stack)));
+#ifdef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QCOMPARE(entries, -1L);
+#else
         QVERIFY2(entries == kDepth + 1 || entries == -1, qPrintable(QString::number(entries)));
+#endif
     }
 
     // An answer whose asker is gone, or whose repository was closed

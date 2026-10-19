@@ -288,6 +288,14 @@ bool atShPrompt(const TerminalWidget& terminal)
     return lastRow(terminal) == kShPrompt;
 }
 
+// The shell's prompts shown so far. Counted in the text, not by rows: a
+// shell started again writes on from the old one's cursor, so its first
+// prompt follows the old one's last on the same row.
+qsizetype shPrompts(const TerminalWidget& terminal)
+{
+    return terminal.toPlainText().count(kShPrompt);
+}
+
 // A running terminal with the first prompt up. Not shown: nothing here
 // needs a window, and none pops up.
 void startAtPrompt(TerminalWidget& terminal)
@@ -1208,35 +1216,55 @@ private slots:
         startAtPrompt(terminal);
         if (QTest::currentTestFailed())
             return;
-        // A variable of the shell's own: a `cd` keeps it, a new shell
-        // hasn't got it.
-        const auto type = [&terminal](const QString& line) {
-            QTest::keyClicks(&terminal, line);
-            QTest::keyClick(&terminal, Qt::Key_Return);
+        // Each step waits for the prompt after it (one more than before,
+        // and the last thing shown) before the next is typed. dash
+        // (Ubuntu's sh) has no line editor: a line typed ahead of its
+        // prompt is echoed by the terminal there and then, the prompt
+        // comes after it, and the command's output shares the prompt's
+        // row ("gbprompt> gbstep1[...]"). bash's readline (macOS's sh)
+        // shows the line again after its prompt, so the output had a row
+        // of its own there.
+        const auto prompted = [&terminal](const auto& step) {
+            const qsizetype before = shPrompts(terminal);
+            step();
+            return QTest::qWaitFor([&] {
+                return shPrompts(terminal) > before && lastRow(terminal).endsWith(kShPrompt);
+            }, kTimeoutMs);
+        };
+        const auto type = [&](const QString& line) {
+            return prompted([&] {
+                QTest::keyClicks(&terminal, line);
+                QTest::keyClick(&terminal, Qt::Key_Return);
+            });
+        };
+        const auto open = [&](const QString& path, const QString& gitDir) {
+            return prompted([&] { terminal.changeRepository(path, gitDir); });
         };
         const auto shows = [&terminal](const QString& row) {
             return QTest::qWaitFor([&] { return rows(terminal).contains(row); }, kTimeoutMs);
         };
+        // A variable of the shell's own: a `cd` keeps it, a new shell
+        // hasn't got it.
         const QString echo = QStringLiteral("echo %1[$GIT_DIR][$gbmark][${PWD##*/}]");
-        type(QStringLiteral("gbmark=kept"));
+        QVERIFY2(type(QStringLiteral("gbmark=kept")), qPrintable(terminal.toPlainText()));
 
-        terminal.changeRepository(work, {});
-        type(echo.arg(QStringLiteral("gbstep1")));
+        QVERIFY2(open(work, {}), qPrintable(terminal.toPlainText()));
+        QVERIFY2(type(echo.arg(QStringLiteral("gbstep1"))), qPrintable(terminal.toPlainText()));
         QVERIFY2(shows(QStringLiteral("gbstep1[][kept][work]")), qPrintable(terminal.toPlainText()));
 
-        terminal.changeRepository(bare, bare);
-        type(echo.arg(QStringLiteral("gbstep2")));
+        QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
+        QVERIFY2(type(echo.arg(QStringLiteral("gbstep2"))), qPrintable(terminal.toPlainText()));
         QVERIFY2(shows(QStringLiteral("gbstep2[%1][][bare.git]").arg(bare)),
                  qPrintable(terminal.toPlainText()));
 
-        type(QStringLiteral("gbmark=again"));
-        terminal.changeRepository(bare, bare);
-        type(echo.arg(QStringLiteral("gbstep3")));
+        QVERIFY2(type(QStringLiteral("gbmark=again")), qPrintable(terminal.toPlainText()));
+        QVERIFY2(open(bare, bare), qPrintable(terminal.toPlainText()));
+        QVERIFY2(type(echo.arg(QStringLiteral("gbstep3"))), qPrintable(terminal.toPlainText()));
         QVERIFY2(shows(QStringLiteral("gbstep3[%1][again][bare.git]").arg(bare)),
                  qPrintable(terminal.toPlainText()));
 
-        terminal.changeRepository(work, {});
-        type(echo.arg(QStringLiteral("gbstep4")));
+        QVERIFY2(open(work, {}), qPrintable(terminal.toPlainText()));
+        QVERIFY2(type(echo.arg(QStringLiteral("gbstep4"))), qPrintable(terminal.toPlainText()));
         QVERIFY2(shows(QStringLiteral("gbstep4[][][work]")), qPrintable(terminal.toPlainText()));
 #endif
     }

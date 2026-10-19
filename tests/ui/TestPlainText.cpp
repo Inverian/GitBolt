@@ -15,11 +15,13 @@
 //     (one built as QMessageBox::question() builds it does); its icon,
 //     buttons and default button are QMessageBox's;
 //   - a repository in a folder "<b>MARKER</b>", with a branch of that
-//     name checked out: the status bar's branch and path, a push that a
-//     server's hook refuses (the toolbar's label and its tooltip, git's
-//     lines kept), the sidebar's Rename, New Branch and Set Upstream
-//     prompts and Delete question, Manage Submodules' Deinit question
-//     and the box of an Init that git turns down;
+//     name checked out ("&lt;b&gt;MARKER&lt;/b&gt;" on Windows, which
+//     has no '<' or '>' in a name: gitbolt::test::asName()): the status
+//     bar's branch and path, a push that a server's hook refuses (the
+//     toolbar's label and its tooltip, git's lines kept), the sidebar's
+//     Rename, New Branch and Set Upstream prompts and Delete question,
+//     Manage Submodules' Deinit question and the box of an Init that
+//     git turns down;
 //   - the Clone dialog's status, the Commit dialog's error (a hook's
 //     output) and branch, the askpass prompt
 //     (PlainInputDialog::setLabelText, an "&" in it included), the
@@ -94,6 +96,7 @@
 #include "widgets/WorktreeWidget.h"
 
 using gitbolt::services::GitService;
+using gitbolt::test::asName;
 using gitbolt::test::shownText;
 using gitbolt::test::shownToolTip;
 using gitbolt::ui::MainWindow;
@@ -103,6 +106,8 @@ using gitbolt::widgets::PlainMessageBox;
 namespace {
 
 const QString kBold = QStringLiteral("<b>MARKER</b>");
+// kBold as a folder's or a branch's name.
+const QString kBoldName = asName(kBold);
 const QString kLink = QStringLiteral("<a href=\"x-test:1\">L</a>");
 
 bool succeeded(const gitbolt::git::Result<gitbolt::git::ProcessOutput>& r) {
@@ -390,11 +395,11 @@ private slots:
         // In a folder "<b>MARKER</b>" (two, as the name has a slash).
         QTemporaryDir scratch;
         QVERIFY(scratch.isValid());
-        const QString repoPath = scratch.filePath(kBold);
+        const QString repoPath = scratch.filePath(kBoldName);
         QVERIFY(QDir().mkpath(repoPath));
-        const QString other = QStringLiteral("<i>other</i>");
+        const QString other = asName(QStringLiteral("<i>other</i>"));
         gitbolt::git::GitProcess git(repoPath.toStdString());
-        QVERIFY(succeeded(git.run({"init", "-q", "-b", kBold.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q", "-b", kBoldName.toStdString()})));
         QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
         QVERIFY(succeeded(git.run({"branch", other.toStdString()})));
         const QString originPath = scratch.filePath(QStringLiteral("origin.git"));
@@ -414,11 +419,11 @@ private slots:
         for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
             if (label->text().startsWith(QStringLiteral("Branch: ")))
                 branchLabel = label;
-            else if (label->text().contains(kBold))
+            else if (label->text().contains(kBoldName))
                 pathLabel = label;
         }
         QVERIFY(branchLabel && pathLabel);
-        QCOMPARE(shownText(branchLabel), QStringLiteral("Branch: ") + kBold);
+        QCOMPARE(shownText(branchLabel), QStringLiteral("Branch: ") + kBoldName);
         QCOMPARE(shownText(pathLabel), pathLabel->text());
 
         auto* opLabel = window.findChild<QLabel*>(QStringLiteral("toolbar.opIndicator"));
@@ -426,14 +431,25 @@ private slots:
         action(window, "act.push")->trigger();
         QTRY_VERIFY_WITH_TIMEOUT(opLabel->text().startsWith(QStringLiteral("✗")), 20000);
         QCOMPARE(opLabel->textFormat(), Qt::PlainText);
-        QVERIFY2(shownText(opLabel).contains(QStringLiteral("remote: ") + kBold),
-                 qPrintable(shownText(opLabel)));
         // git pads a server's lines with spaces; its line breaks and
         // the server's indentation stay.
         const QString tip = shownToolTip(opLabel->toolTip());
         QVERIFY2(tip.contains(QStringLiteral("remote: %1 %2").arg(kBold, kLink)),
                  qPrintable(tip));
         QVERIFY2(tip.contains(QStringLiteral("\nremote:     indented")), qPrintable(tip));
+        // The label is that text on one row, elided at a set width, so
+        // how much of it shows is the font's to say (the boxes Windows'
+        // offscreen platform draws, having no fonts, cut it inside the
+        // server's tag): it is the text as the label's own metrics elide
+        // it, as written, the server's tag in it.
+        QString line = QStringLiteral("✗ ") + tip;
+        line.replace(QLatin1Char('\n'), QStringLiteral(" | "));
+        const QMargins margins = opLabel->contentsMargins();
+        const QString shown = shownText(opLabel);
+        QVERIFY2(shown.contains(QStringLiteral("remote: <b>")), qPrintable(shown));
+        QCOMPARE(shown, opLabel->fontMetrics().elidedText(
+                            line, Qt::ElideRight,
+                            opLabel->maximumWidth() - margins.left() - margins.right()));
         clickAcross(opLabel);
 
         auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
@@ -509,7 +525,7 @@ private slots:
     void cloneStatusShowsItsTextAsWritten() {
         QTemporaryDir scratch;
         QVERIFY(scratch.isValid());
-        const QString target = scratch.filePath(kBold);
+        const QString target = scratch.filePath(kBoldName);
         QVERIFY(writeFile(target + QStringLiteral("/marker.txt"), "x\n"));
 
         gitbolt::dialogs::CloneDialog dialog;
@@ -540,8 +556,8 @@ private slots:
         gitbolt::test::TestRepo repo;
         auto head = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("a"));
         QVERIFY(head.ok());
-        QVERIFY(repo.repo().createBranch(kBold.toStdString(), *head).ok());
-        QVERIFY(repo.repo().checkout(kBold.toStdString()).ok());
+        QVERIFY(repo.repo().createBranch(kBoldName.toStdString(), *head).ok());
+        QVERIFY(repo.repo().checkout(kBoldName.toStdString()).ok());
         QVERIFY(writeHook(repo.path() + QStringLiteral("/.git"), "pre-commit",
                           "echo '<b>MARKER</b> <a href=\"x-test:1\">L</a>' >&2\nexit 1\n"));
         repo.writeFile(QStringLiteral("b.txt"), "b\n");
@@ -557,8 +573,8 @@ private slots:
         auto* error = dialog.findChild<QLabel*>(QStringLiteral("commit.error"));
         QVERIFY(message && commit && error);
         QLabel* branch = nullptr;
-        QTRY_VERIFY((branch = labelSaying(dialog, kBold)) != nullptr);
-        QCOMPARE(shownText(branch), kBold);
+        QTRY_VERIFY((branch = labelSaying(dialog, kBoldName)) != nullptr);
+        QCOMPARE(shownText(branch), kBoldName);
         message->setPlainText(QStringLiteral("refused"));
         commit->click();
         QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
@@ -659,7 +675,7 @@ private slots:
     void recentListToolTipShowsThePathAsWritten() {
         QTemporaryDir scratch;
         QVERIFY(scratch.isValid());
-        const QString folder = QDir::toNativeSeparators(scratch.filePath(kBold));
+        const QString folder = QDir::toNativeSeparators(scratch.filePath(kBoldName));
         QVERIFY(QDir().mkpath(folder));
         QVERIFY(succeeded(gitbolt::git::GitProcess(folder.toStdString()).run({"init", "-q"})));
         gitbolt::conf::SettingsService settings;
@@ -671,7 +687,7 @@ private slots:
         QVERIFY(list);
         QCOMPARE(list->topLevelItemCount(), 1);
         const QString path = list->topLevelItem(0)->data(0, Qt::UserRole).toString();
-        QVERIFY(path.endsWith(kBold));
+        QVERIFY(path.endsWith(QDir::toNativeSeparators(kBoldName)));
         for (int column = 0; column < list->columnCount(); ++column)
             QCOMPARE(shownToolTip(list->topLevelItem(0)->toolTip(column)), path);
         // Its probe lands before the view goes.
@@ -703,7 +719,12 @@ private slots:
 
         // With a tag in its first line, escaped: shown as written, in
         // as many lines as the same text with other brackets, which Qt
-        // takes for plain text.
+        // takes for plain text. Its height is compared with those lines
+        // laid out as rich text too, each kept whole: a plain tooltip
+        // spaces its lines without the font's leading, and wraps a line
+        // wider than the screen (as the boxes of Windows' offscreen
+        // platform, which has no fonts, are), so how tall it is next to
+        // a rich one is the font's to say.
         const QString marked =
             QStringLiteral("remote: %1 a line as long as a server's can be, with words to "
                            "break at\nremote:     indented")
@@ -714,7 +735,9 @@ private slots:
         QVERIFY(Qt::mightBeRichText(marked));
         QVERIFY(!Qt::mightBeRichText(unmarked));
         QCOMPARE(shownToolTip(plainToolTip(marked)), marked);
-        QCOMPARE(toolTipSize(plainToolTip(marked)).height(), toolTipSize(unmarked).height());
+        const QString unmarkedLines = QStringLiteral("<p style='white-space:pre'>")
+                                    + unmarked.toHtmlEscaped() + QStringLiteral("</p>");
+        QCOMPARE(toolTipSize(plainToolTip(marked)).height(), toolTipSize(unmarkedLines).height());
         QCOMPARE(plainToolTip(QString()), QString());
     }
 

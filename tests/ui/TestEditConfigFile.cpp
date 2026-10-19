@@ -55,6 +55,16 @@ QByteArray fileBytes(const QString& path) {
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArrayLiteral("<missing>");
 }
 
+// The bytes the editor saves for `text`. It writes in text mode, as it
+// always has, and so on Windows each line ends in CRLF, as Git for
+// Windows checks text files out by default (core.autocrlf true).
+QByteArray savedText(QByteArray text) {
+#ifdef Q_OS_WIN
+    text.replace("\n", "\r\n");
+#endif
+    return text;
+}
+
 // Answers the window's modal dialogs while it lives: a message box with
 // OK, noting its text; the text editor by calling `edit` with it (which
 // sets the text it saves), then saving.
@@ -202,9 +212,9 @@ private slots:
         });
         action(window, "repository.edit-gitignore")->trigger();
         QCOMPARE(shown, QStringLiteral("build/\n"));
-        QCOMPARE(fileBytes(ignore), QByteArrayLiteral("build/\n*.o\n"));
+        QCOMPARE(fileBytes(ignore), savedText("build/\n*.o\n"));
         action(window, "repository.edit-mailmap")->trigger();
-        QCOMPARE(fileBytes(mailmap), QByteArrayLiteral("*.o\n"));
+        QCOMPARE(fileBytes(mailmap), savedText("*.o\n"));
         QCOMPARE(answerer.boxes, QStringList());
         QCOMPARE(answerer.editors.size(), 2);
     }

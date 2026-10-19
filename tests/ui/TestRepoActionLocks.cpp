@@ -591,6 +591,8 @@ private slots:
         QTest::addColumn<QString>("shown");  // in the superproject; empty: nothing
         QTest::newRow("CHANGELOG at 755") << QStringLiteral("CHANGELOG") << QStringLiteral(".");
         QTest::newRow("run.command") << QStringLiteral("run.command") << QStringLiteral(".");
+        // Not on Windows: QFile::link makes a shortcut there, not a link.
+#ifndef Q_OS_WIN
         QTest::newRow("a link to a script")
             << QStringLiteral("linked") << QStringLiteral("tools");
 #ifdef Q_OS_MACOS
@@ -598,6 +600,7 @@ private slots:
 #else
         QTest::newRow("a link to Tool.app")
             << QStringLiteral("applink") << QStringLiteral("x/Tool.app");
+#endif
 #endif
         QTest::newRow("up and out") << QStringLiteral("../victim/CHANGELOG") << QString();
         // The absolute path, filled in below: the scratch folder's.
@@ -626,12 +629,16 @@ private slots:
                                     victim + QStringLiteral("/CHANGELOG")})
             QVERIFY(writeFile(file, script) && executable(file));
         QVERIFY(writeFile(super + QStringLiteral("/run.command"), script));
+#ifndef Q_OS_WIN
         QVERIFY(QFile::link(super + QStringLiteral("/tools/CHANGELOG"),
                             super + QStringLiteral("/linked")));
         QVERIFY(QFile::link(super + QStringLiteral("/x/Tool.app"),
                             super + QStringLiteral("/applink")));
+#endif
         const QStringList paths{QStringLiteral("CHANGELOG"), QStringLiteral("run.command"),
+#ifndef Q_OS_WIN
                                 QStringLiteral("linked"), QStringLiteral("applink"),
+#endif
                                 QStringLiteral("../victim/CHANGELOG"),
                                 victim + QStringLiteral("/CHANGELOG")};
         QByteArray modules;
