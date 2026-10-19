@@ -19,7 +19,9 @@
 //     until they're in, the Stats value is blank and the previous
 //     commit's files and tree stay. Cleared at once, every selection
 //     painted those, and arrowing through the log flickered. A read that
-//     takes longer says so after a moment;
+//     takes longer says so after a moment, counted from the first
+//     selection still waiting, so arrowing on through slow ones doesn't
+//     keep one commit's files up under another's details;
 //   - the Stats row coming in late leaves the details pane scrolled as
 //     it was and the text selected in it selected: setting the pane's
 //     HTML again for it put it back at its top, the selection gone;
@@ -487,6 +489,74 @@ private slots:
         QCOMPARE(details->textCursor().selectedText(), hex(second));
         QTRY_COMPARE(rows(diffFiles->model()).size(), 3);
         QTRY_COMPARE(rows(fileTree->model()).size(), 4);
+    }
+
+    // Arrowing on through commits whose diffs and trees are slow to come
+    // in, each selected sooner than the view waits before it says they're
+    // on their way. That wait counts from the first selection still
+    // waiting, not from each: counted from each, the first commit's files
+    // and tree would stay up under the next ones' details for as long as
+    // the user kept arrowing. After it the Diff tab is empty, the File
+    // Tree says it's loading, and each commit selected meanwhile has
+    // "(counting…)" in its Stats row at once, not a blank value until its
+    // own numbers are in.
+    void arrowingOnDoesNotKeepTheFirstCommitsFilesUp() {
+        TestRepo repo;
+        std::vector<gitbolt::git::ObjectId> ids;
+        for (int i = 0; i <= 8; ++i) {
+            auto id = repo.writeAndCommit(QStringLiteral("f%1.txt").arg(i), "1\n",
+                                          QStringLiteral("commit %1").arg(i));
+            QVERIFY(id.ok());
+            ids.push_back(*id);
+        }
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitLogModel model;
+        std::vector<gitbolt::git::CommitData> commits;
+        for (auto id = ids.rbegin(); id != ids.rend(); ++id)
+            commits.push_back(commitData(repo, *id));
+        model.setCommits(commits);
+        RepositoryView view;
+        view.setGitService(&svc);
+        view.setCommitLogModel(&model);
+        view.resize(1000, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        auto* diffFiles = view.findChild<QTreeView*>(QStringLiteral("diff.files"));
+        auto* fileTree = view.findChild<QTreeView*>(QStringLiteral("fileTree.view"));
+        auto* treeHeader = view.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
+        QVERIFY(diffFiles && fileTree && treeHeader);
+
+        view.onCommitSelected(hex(ids.front()));
+        QTextBrowser* details = browserWith(view, QStringLiteral("Author:"));
+        QVERIFY(details);
+        QTRY_COMPARE(statsValue(details), QStringLiteral("1 file changed, +1 −0"));
+        QTRY_COMPARE(rows(diffFiles->model()).size(), 1);
+        QVERIFY(rows(diffFiles->model()).first().contains(QStringLiteral("f0.txt")));
+        QTRY_COMPARE(rows(fileTree->model()).size(), 1);
+
+        {
+            RepoHeld held(svc.repoMutex(), 10000);
+            // A commit every 50 ms, events handled in between: each
+            // sooner than the 150 ms the view waits, the last 350 ms
+            // after the first.
+            for (size_t i = 1; i < ids.size(); ++i) {
+                if (i > 1)
+                    QTest::qWait(50);
+                view.onCommitSelected(hex(ids[i]));
+            }
+            QVERIFY(details->toPlainText().contains(hex(ids.back())));
+            QCOMPARE(rows(diffFiles->model()), QStringList{});
+            QCOMPARE(rows(fileTree->model()), QStringList{});
+            QCOMPARE(treeHeader->text(), QStringLiteral("Loading file tree…"));
+            QCOMPARE(statsValue(details), QStringLiteral("(counting…)"));
+            held.release();
+        }
+        QTRY_COMPARE(statsValue(details), QStringLiteral("1 file changed, +1 −0"));
+        QTRY_COMPARE(rows(diffFiles->model()).size(), 1);
+        QVERIFY(rows(diffFiles->model()).first().contains(QStringLiteral("f8.txt")));
+        QTRY_COMPARE(rows(fileTree->model()).size(), 9);
     }
 
     // Authors whose emails differ only past util::kMaxLineChars, where
