@@ -34,6 +34,85 @@ semver once 1.0 lands.
   and a `merge.default` with none crashed cherry-picks; they now stop
   with git's own message ("missing value for …"). As in 0.9.7, the
   fixes are in the libgit2 built into every GitBolt download.
+- **Selecting a commit no longer waits for its diff.** The Stats row,
+  the Diff tab and the File Tree now fill in from a background thread,
+  so a large commit no longer freezes the window; the Stats row says
+  "(counting…)" meanwhile.
+- **A commit message or name of one line of megabytes** froze the
+  window while GitBolt laid it out. Such a line is now shown cut, with
+  "…" and a note, in the Commit tab, the log and the other views that
+  show commits; Copy in the log still copies all of it.
+
+### Security
+
+These fixes close ways in which a repository you clone or open, or a
+server you fetch from, could use GitBolt against you. Most needed you
+to do something in GitBolt with the content, such as push, resolve a
+conflict or open a file.
+
+- **Push could run a command named by a branch.** A branch name that
+  begins with `-` reached git as an option instead of a name: from the
+  sidebar's Push, Merge, Rename, Set Upstream, Checkout as local branch
+  and Delete from remote, and from the toolbar's Push. In a repository
+  whose `origin` is a folder on your disk, a branch could be named so
+  that pushing it ran a program. GitBolt now passes names after git's
+  `--` and pushes branches by their full name, and where that isn't
+  possible it refuses a name that begins with `-` and says why. Rename
+  and Delete from remote still work on such a branch, to get rid of it.
+- **Resolve Conflicts wrote through symbolic links.** When the file in
+  conflict was a symbolic link, the resolution was written to wherever
+  the link pointed, which could be any file of yours outside the
+  repository. Resolutions now go into the repository's index and are
+  written to the working tree from there, never through a link. A
+  link in conflict is resolved by taking Ours or Theirs as it is; the
+  dialog says which sides are links. Such a file's resolution used to
+  be lost from the index, too. A file whose executable bit only the
+  other side changed keeps it, as git does. Repository › Edit
+  .gitignore, .gitattributes and .mailmap don't open or save one of
+  those files when it is a link.
+- **Open Externally ran programs.** On macOS, a file marked executable
+  opens in Terminal and runs, whatever its name (`CHANGELOG`, say), and
+  so does a `.command` file; a cloned repository can contain either.
+  Open Externally now asks before opening a file marked executable or
+  of a type that runs, or that opens what it points to, with Cancel as
+  the default and Open Containing Folder offered instead. A symbolic
+  link that leads out of the working tree isn't opened. File Explorer,
+  and Open in File Explorer for submodules and worktrees, show folders
+  and never launch an app.
+- **Removing a worktree could delete another folder.** Manage
+  Worktrees › Remove deleted whichever folder the worktree's files in
+  `.git` named. Anyone who could write to the repository's `.git`
+  folder (a repository handed over as a folder or an archive, or kept
+  in a shared folder) could make it delete any folder. GitBolt now
+  checks that the worktree links back to the repository, as git does,
+  and deletes nothing when it doesn't. The question names the folder
+  that will be deleted.
+- **Text from repositories and servers was read as formatting.**
+  Branch, tag, path and submodule names, and messages from git and
+  from servers, could carry markup that changed what a question said
+  (another name shown in place of the real one) or, in a message box,
+  added a link that one click sent to your browser or another app.
+  Message boxes, status labels, tooltips and the password prompt now
+  show such text exactly as it is written.
+- **The Commit tab**: a commit's author or committer email could add
+  attributes to its link, to restyle the tab or point the link at a
+  file. The email is now just the email. Clicking a link there blanked
+  the tab; a Parent or Child hash now selects that commit, and an email
+  opens your mail app. A long author name or email no longer pushes the
+  other rows out of view.
+- **The Console** kept an escape sequence that never ended in memory,
+  all of it, so printing a crafted file, or a server's messages, slowed
+  the Console down more and more; and one short escape sequence could
+  make it take gigabytes of memory. Both are limited now.
+- **Repositories that froze or crashed GitBolt.** A pattern of many
+  `*` in a committed `.gitattributes` or `.gitignore` made selecting a
+  commit (in some repositories, opening one) run forever at full CPU.
+  Patterns now give up after a bounded effort, and the patterns real
+  repositories use match as before. A repository whose commits nest
+  folders thousands of levels deep used up all memory when GitBolt
+  opened it, and crashed the File Tree; as git does, GitBolt now stops
+  at 2,048 levels ("tree too deep"). These fixes are in the libgit2
+  built into every GitBolt download.
 
 ## [0.9.7] — 2026-10-18
 
