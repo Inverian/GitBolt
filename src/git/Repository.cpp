@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
 #include <initializer_list>
 #include <map>
 #include <optional>
@@ -131,17 +132,52 @@ constexpr Qt::CaseSensitivity kPathCase = Qt::CaseInsensitive;
 constexpr Qt::CaseSensitivity kPathCase = Qt::CaseSensitive;
 #endif
 
+// `path` with every link on the way resolved, as git resolves it, or
+// empty if it isn't there. On Windows canonicalFilePath() follows
+// symbolic links alone, and keeps a subst or mapped drive and a
+// junction as they are spelled; git for Windows asks the system for
+// the file's final path, which takes a subst drive to its folder, a
+// mapped one to //server/share and a junction to its target, and so
+// does std::filesystem::canonical there. A worktree git made names its
+// repository by that path, however the repository was opened.
+QString realPath(const QString& path) {
+#ifdef Q_OS_WIN
+    std::error_code error;
+    const std::filesystem::path real = std::filesystem::canonical(path.toStdWString(), error);
+    return error ? QString() : QString::fromStdWString(real.generic_wstring());
+#else
+    return QFileInfo(path).canonicalFilePath();
+#endif
+}
+
 // `path` is `ceiling`, or a folder above it. libgit2 applies a ceiling
 // only to a search that starts below it: from $HOME itself it would
-// search on up, past the ceiling.
+// search on up, past the ceiling. On Windows it is enough that either
+// spelling says so: as written, as libgit2 compares them there (it
+// follows no junction or subst drive) and as Remove deletes a folder,
+// or as the system resolves them (realPath()). As written, C:\Users
+// holds a home folder that is a junction to D:\Users\me, and libgit2
+// searched on from C:\Users to C:\; resolved, S:\me is the home folder
+// itself where S: is a subst drive of C:\Users, and libgit2 searched
+// S:\, which is C:\Users.
 bool atOrAbove(const std::string& path, const std::string& ceiling) {
-    const QString p = QFileInfo(QString::fromStdString(path)).canonicalFilePath();
-    const QString c = QFileInfo(QString::fromStdString(ceiling)).canonicalFilePath();
-    if (p.isEmpty() || c.isEmpty())
-        return false;
-    if (c.compare(p, kPathCase) == 0)
+    const auto holds = [](const QString& p, const QString& c) {
+        if (p.isEmpty() || c.isEmpty())
+            return false;
+        if (c.compare(p, kPathCase) == 0)
+            return true;
+        return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+    };
+    const QString p = QString::fromStdString(path);
+    const QString c = QString::fromStdString(ceiling);
+#ifdef Q_OS_WIN
+    const auto asWritten = [](const QString& x) {
+        return QDir::cleanPath(QFileInfo(x).absoluteFilePath());
+    };
+    if (holds(asWritten(p), asWritten(c)))
         return true;
-    return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+#endif
+    return holds(realPath(p), realPath(c));
 }
 
 // The folder `found`, as `path` spells it: the nearest of `path`'s own
@@ -2574,11 +2610,11 @@ QString gitFileLink(const QString& dotGit) {
     return QFileInfo(dotGit).dir().filePath(link);
 }
 
-// Both name the same folder, once symbolic links are resolved. False
-// if either is missing.
+// Both name the same folder, once links are resolved as git resolves
+// them (realPath()). False if either is missing.
 bool sameFolder(const QString& a, const QString& b) {
-    const QString ca = QFileInfo(a).canonicalFilePath();
-    const QString cb = QFileInfo(b).canonicalFilePath();
+    const QString ca = realPath(a);
+    const QString cb = realPath(b);
     return !ca.isEmpty() && ca.compare(cb, kPathCase) == 0;
 }
 
