@@ -41,7 +41,9 @@ namespace gitbolt::util {
 /// 0100755; 0 where the index has none), or if the platform's opener
 /// runs it for the mark all the same: on macOS one with no extension
 /// (Launch Services makes a Unix executable of it, which Terminal
-/// runs), elsewhere a program (see isProgram()).
+/// runs), a .dylib (one to Launch Services too), or a shell or Perl
+/// script (a terminal app such as iTerm2 can take them, and runs them),
+/// elsewhere a program (see isProgram()).
 bool mayRunWhenOpened(const QFileInfo& file, bool modesKept = true, uint32_t indexMode = 0);
 
 /// What mayRunWhenOpened() judges a file by, the folder aside.

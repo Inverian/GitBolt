@@ -289,7 +289,8 @@ private slots:
     // executable, and every one was asked about. There a file is asked
     // about if git has it executable, or if the opener runs it for the
     // mark all the same: on macOS one with no extension (Terminal runs
-    // it), elsewhere a program (a "#!" line).
+    // it) or a shell script (iTerm2 does), elsewhere a program (a "#!"
+    // line, a shell script's name).
     void markedWhereModesAreNotKept_data() {
         QTest::addColumn<QString>("path");
         QTest::addColumn<QByteArray>("content");
@@ -299,6 +300,8 @@ private slots:
                                       << false;
         QTest::newRow("committed executable") << QStringLiteral("tools/release.txt")
                                               << QByteArray("notes\n") << true;
+        QTest::newRow("shell script") << QStringLiteral("build.sh") << QByteArray("notes\n")
+                                      << true;
 #if defined(Q_OS_MACOS)
         QTest::newRow("no extension") << QStringLiteral("CHANGELOG") << QByteArray("notes\n")
                                       << true;

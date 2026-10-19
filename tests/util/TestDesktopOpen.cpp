@@ -16,9 +16,10 @@
 //     sets it on an exFAT drive or WSL's /mnt/c), every file is marked
 //     executable, and every one was asked about. There a marked file
 //     may run if the index has it executable, or if the opener runs it
-//     for the mark all the same: on macOS one with no extension
-//     (Terminal runs it), elsewhere a program (an ELF binary, a "#!"
-//     line, a shell script's name);
+//     for the mark all the same: on macOS one with no extension, as
+//     Launch Services finds it, or a .dylib (Terminal runs them), or a
+//     shell script (iTerm2 does), elsewhere a program (an ELF binary, a
+//     "#!" line, a shell script's name);
 //   - the folder shown for a bundle is the nearest one above it that
 //     isn't one (macOS); for a file, the folder it is in (Open in File
 //     Explorer on a submodule whose path is an executable CHANGELOG
@@ -171,7 +172,8 @@ private slots:
     // executable, so the mark tells nothing: on Linux every file on an
     // exFAT drive or under WSL's /mnt/c was asked about. The index's
     // mode tells, or what the opener runs all the same: Launch Services
-    // a file with no extension, xdg-open's openers a program.
+    // a file with no extension and a .dylib, a terminal app a shell
+    // script, xdg-open's openers a program.
     void markedWhereModesAreNotKept_data() {
         QTest::addColumn<QString>("name");
         QTest::addColumn<QByteArray>("head");
@@ -193,13 +195,27 @@ private slots:
         QTest::newRow("a dot file") << QStringLiteral(".notes") << text << 0u << true << false;
         QTest::newRow("a trailing dot") << QStringLiteral("notes.") << text << 0u << true << false;
         QTest::newRow("a number's dot") << QStringLiteral("v1.2") << text << 0u << false << false;
-        // xdg-open's openers: a program by its content or its name.
+        // Text after the last dot with a space in it is no extension
+        // either; a tab, or anything else, leaves it one.
+        QTest::newRow("a space after the dot") << QStringLiteral("Version 1.2 notes") << text
+                                               << 0100644u << true << false;
+        QTest::newRow("a trailing space") << QStringLiteral("build.txt ") << text << 0u << true
+                                          << false;
+        QTest::newRow("a tab after the dot") << QStringLiteral("notes.a\tb") << text << 0u
+                                             << false << false;
+        // A Unix executable to Launch Services too.
+        QTest::newRow("a library") << QStringLiteral("x.dylib") << text << 0100644u << true
+                                   << false;
+        // xdg-open's openers: a program by its content or its name. On
+        // macOS a terminal app can take a shell script, and runs it.
         QTest::newRow("#! line") << QStringLiteral("run.md") << script << 0100644u << false
                                  << true;
         QTest::newRow("ELF") << QStringLiteral("data.bin") << kElf << 0u << false << true;
         QTest::newRow("ELF, no extension") << QStringLiteral("tool") << kElf << 0u << true << true;
-        QTest::newRow("shell script") << QStringLiteral("build.sh") << text << 0100644u << false
+        QTest::newRow("shell script") << QStringLiteral("build.sh") << text << 0100644u << true
                                       << true;
+        QTest::newRow("shell script, upper case") << QStringLiteral("BUILD.SH") << text << 0u
+                                                  << true << true;
         // Runs by its type, mark or not.
         QTest::newRow("runs by its type") << runnableName() << text << 0u << true << true;
     }
