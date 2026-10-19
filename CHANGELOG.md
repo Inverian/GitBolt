@@ -17,11 +17,15 @@ semver once 1.0 lands.
 - **The Console tab in a bare repository** now sets GIT_DIR, as Git
   bash has since 0.9.7, so git typed there works where git's
   `safe.bareRepository` setting is `explicit`. Opening a bare
-  repository, or leaving one, starts the Console's shell again.
+  repository, or leaving one, starts the Console's shell again; on
+  macOS and Linux a command still running in it is left to finish
+  first.
 - **Recent repositories listed a repository twice** when it was opened
   by two spellings of its path: on macOS, `/tmp/…` from Finder and
-  `/private/tmp/…` from Terminal, or a path through a symlinked folder.
-  It is now listed once, under the spelling it was last opened by.
+  `/private/tmp/…` from Terminal, a path through a symlinked folder,
+  and on Windows a short (8.3) name, a `subst` or mapped drive, or a
+  junction. It is now listed once, under the spelling it was last
+  opened by.
 - **More crashes on config lines with no value** (a name and no
   `= value`; see 0.9.7). A line with none in a branch's section of
   `.git/config` (`rebase`, say, which git reads as `true`) crashed
@@ -36,8 +40,12 @@ semver once 1.0 lands.
   fixes are in the libgit2 built into every GitBolt download.
 - **Selecting a commit no longer waits for its diff.** The Stats row,
   the Diff tab and the File Tree now fill in from a background thread,
-  so a large commit no longer freezes the window; the Stats row says
-  "(counting…)" meanwhile.
+  so a large commit no longer freezes the window; when that takes more
+  than a moment, the Stats row says "(counting…)" meanwhile.
+- **Discard and Unstage of a file whose name looks like a pattern**
+  (`*`, `[ab]`, `!x`, or one ending in a space) acted on every file the
+  pattern matched: discarding a file named `*` threw away the changes
+  to all of them. They now act on that one file.
 - **A commit message or name of one line of megabytes** froze the
   window while GitBolt laid it out. Such a line is now shown cut, with
   "…" and a note, in the Commit tab, the log and the other views that
@@ -74,11 +82,14 @@ conflict or open a file.
   opens in Terminal and runs, whatever its name (`CHANGELOG`, say), and
   so does a `.command` file; a cloned repository can contain either.
   Open Externally now asks before opening a file marked executable or
-  of a type that runs, or that opens what it points to, with Cancel as
-  the default and Open Containing Folder offered instead. A symbolic
+  of a type that runs, or that opens what it points to (on Windows
+  also shell, Python, Ruby and Perl scripts), with Cancel as the
+  default and Open Containing Folder offered instead. A symbolic
   link that leads out of the working tree isn't opened. File Explorer,
   and Open in File Explorer for submodules and worktrees, show folders
-  and never launch an app.
+  and never launch an app, and a submodule path that isn't a path in
+  the working tree (on Windows, a network path) is refused before
+  anything touches it.
 - **Removing a worktree could delete another folder.** Manage
   Worktrees › Remove deleted whichever folder the worktree's files in
   `.git` named. Anyone who could write to the repository's `.git`
@@ -103,7 +114,8 @@ conflict or open a file.
 - **The Console** kept an escape sequence that never ended in memory,
   all of it, so printing a crafted file, or a server's messages, slowed
   the Console down more and more; and one short escape sequence could
-  make it take gigabytes of memory. Both are limited now.
+  make it take gigabytes of memory, or, repeated, grow one line without
+  end. All are limited now.
 - **Repositories that froze or crashed GitBolt.** A pattern of many
   `*` in a committed `.gitattributes` or `.gitignore` made selecting a
   commit (in some repositories, opening one) run forever at full CPU.
@@ -111,8 +123,10 @@ conflict or open a file.
   repositories use match as before. A repository whose commits nest
   folders thousands of levels deep used up all memory when GitBolt
   opened it, and crashed the File Tree; as git does, GitBolt now stops
-  at 2,048 levels ("tree too deep"). These fixes are in the libgit2
-  built into every GitBolt download.
+  at 2,048 levels ("tree too deep"). And a small `.gitattributes` that
+  nests attribute macros could make GitBolt take gigabytes of memory;
+  what one file's rules can expand to is now limited. These fixes are
+  in the libgit2 built into every GitBolt download.
 
 ## [0.9.7] — 2026-10-18
 
