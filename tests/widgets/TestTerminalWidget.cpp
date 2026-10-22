@@ -1277,7 +1277,10 @@ private slots:
         if (QTest::currentTestFailed())
             return;
         QTest::keyClicks(&terminal, QStringLiteral("echo gbhalf"));
-        QTRY_VERIFY2_WITH_TIMEOUT(lastRow(terminal).endsWith(QStringLiteral("echo gbhalf")),
+        // The prompt (the runner's temporary folder) and the line can wrap
+        // onto a second row: the text with its rows put back together.
+        QTRY_VERIFY2_WITH_TIMEOUT(terminal.toPlainText().remove(QLatin1Char('\n')).trimmed()
+                                      .endsWith(QStringLiteral("echo gbhalf")),
                                   qPrintable(terminal.toPlainText()), kTimeoutMs);
 
         const qsizetype before = prompts(terminal);
