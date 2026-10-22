@@ -17,9 +17,11 @@ semver once 1.0 lands.
 - **The Console tab in a bare repository** now sets GIT_DIR, as Git
   bash has since 0.9.7, so git typed there works where git's
   `safe.bareRepository` setting is `explicit`. Opening a bare
-  repository, or leaving one, starts the Console's shell again; on
-  macOS and Linux a command still running in it is left to finish
-  first.
+  repository, or leaving one, sets or unsets GIT_DIR in the Console's
+  shell (sh, bash, zsh, ksh, csh, tcsh, fish or cmd) at its prompt, so
+  the shell keeps its jobs and history; a command still running in it
+  is left to finish first, and a line half typed at the prompt is
+  cleared first. A shell of another kind is started again.
 - **Recent repositories listed a repository twice** when it was opened
   by two spellings of its path: on macOS, `/tmp/…` from Finder and
   `/private/tmp/…` from Terminal, a path through a symlinked folder,
@@ -41,7 +43,23 @@ semver once 1.0 lands.
 - **Selecting a commit no longer waits for its diff.** The Stats row,
   the Diff tab and the File Tree now fill in from a background thread,
   so a large commit no longer freezes the window; when that takes more
-  than a moment, the Stats row says "(counting…)" meanwhile.
+  than a moment, the Stats row says "(counting…)" meanwhile. Selecting
+  another commit, switching repositories or quitting stops a read
+  still going for the commit before, where they used to wait for it.
+- **A commit or a working tree that couldn't be read looked
+  unchanged.** When git can't read a commit's files (a tree nested
+  past the 2,048-level limit, say), the Stats row, the Diff tab and the
+  File Tree now say why, where the commit looked as if it changed
+  nothing. When the working tree's status can't be read, the toolbar
+  shows "Commit (?)" with the reason in its tooltip, the Commit dialog
+  says why, and Recent repositories shows "—" instead of what read as
+  a clean status; a submodule list that can't be read says so too.
+- **Open Externally on drives that keep no file modes** (FAT, exFAT
+  and NTFS drives, and WSL's `/mnt/c`) asked about every file, since
+  every file there looks executable. It now goes by the mode git has
+  for the file, and by what the file is: a program, or a script your
+  system would run (on macOS one with no extension, or a shell or Perl
+  script, which iTerm2 runs).
 - **Discard and Unstage of a file whose name looks like a pattern**
   (`*`, `[ab]`, `!x`, or one ending in a space) acted on every file the
   pattern matched: discarding a file named `*` threw away the changes
@@ -83,7 +101,9 @@ conflict or open a file.
   so does a `.command` file; a cloned repository can contain either.
   Open Externally now asks before opening a file marked executable or
   of a type that runs, or that opens what it points to (on Windows
-  also shell, Python, Ruby and Perl scripts), with Cancel as the
+  also shell, Python, Ruby and Perl scripts; on a drive that keeps no
+  file modes, where every file looks executable, one git has as
+  executable or one your system would run), with Cancel as the
   default and Open Containing Folder offered instead. A symbolic
   link that leads out of the working tree isn't opened. File Explorer,
   and Open in File Explorer for submodules and worktrees, show folders
