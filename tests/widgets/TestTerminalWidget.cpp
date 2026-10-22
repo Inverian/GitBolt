@@ -1933,12 +1933,21 @@ private slots:
     // typed ahead runs, and the change goes in after it. The Ctrl+C ahead
     // of the change went as soon as the shell took its terminal back, and
     // zsh shows its prompt before it reads what was typed ahead: it
-    // dropped the line unread, though it was on the screen.
+    // dropped the line unread, though it was on the screen. A prompt that
+    // runs something in itself (`$(…)`, as git prompts do) holds the
+    // shell off reading the line for longer than the tick after the end,
+    // and runs in the shell's own process group, so nothing was seen
+    // running: the Ctrl+C dropped the line all the same.
     void ptyGitDirChangeLetsACommandTypedAheadRun_data()
     {
         QTest::addColumn<QString>("program");  // empty: sh
-        QTest::newRow("sh") << QString();
-        QTest::newRow("zsh") << QStringLiteral("/bin/zsh");
+        QTest::addColumn<QByteArray>("hook");
+        QTest::newRow("sh") << QString() << QByteArray();
+        QTest::newRow("zsh") << QStringLiteral("/bin/zsh") << QByteArray();
+        QTest::newRow("bash, a slow prompt")
+            << QStringLiteral("/bin/bash") << QByteArrayLiteral("PROMPT_COMMAND='gbslow=$(sleep 1)'");
+        QTest::newRow("zsh, a slow prompt")
+            << QStringLiteral("/bin/zsh") << QByteArrayLiteral("precmd() { gbslow=$(sleep 1) }");
     }
 
     void ptyGitDirChangeLetsACommandTypedAheadRun()
@@ -1947,12 +1956,13 @@ private slots:
         QSKIP("The PTY is the Unix terminal backend");
 #else
         QFETCH(QString, program);
+        QFETCH(QByteArray, hook);
         PlainShell shell;
         QVERIFY(shell.isValid());
         if (!program.isEmpty()) {
             if (!QFileInfo::exists(program))
                 QSKIP("the shell isn't installed");
-            useShell(shell, program, {});
+            useShell(shell, program, hook);
             if (QTest::currentTestFailed())
                 return;
         }

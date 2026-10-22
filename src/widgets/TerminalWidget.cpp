@@ -92,6 +92,10 @@ constexpr int kMaxCount = 99999;
 // how long it waits after the command's end and after the Ctrl+C that
 // drops the shell's line (see TerminalWidget::switchWhenIdle).
 constexpr int kSwitchCheckMs = 250;
+// How many of those ticks the Ctrl+C waits at most for the shell to read
+// a line typed ahead (see TerminalWidget::switchWhenIdle): a slow prompt
+// holds it up, but a line nothing reads mustn't hold the switch off.
+constexpr int kMaxUnreadWaits = 8;
 
 #ifndef Q_OS_WIN
 // The most onPtyReadable() reads, and draws in one appendOutput(), before
@@ -511,6 +515,7 @@ void TerminalWidget::stopShell()
     lineDropped_ = false;
     commandRan_ = false;
     waitForTick_ = false;
+    unreadWaits_ = 0;
 #ifdef Q_OS_WIN
     if (conpty_) {
         // Returns at once: ConPtyProcess finishes the hang-up on its
@@ -640,8 +645,14 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 // ahead, with its Enter, then gets to start, and the switch waits for it
 // in turn: a Ctrl+C sent as soon as the shell took its terminal back
 // reached zsh before it had read the line, which it dropped unread,
-// though the terminal had shown it typed. And on Windows conhost has
-// painted the program's last output by then (see below).
+// though the terminal had shown it typed. A tick isn't always enough: a
+// prompt that runs something in itself (`$(git …)` in PS1, precmd or
+// PROMPT_COMMAND, as git prompts and starship do) keeps the shell from
+// reading the line for as long as that takes, and it runs in the shell's
+// own process group, so no command is seen running. So the Ctrl+C also
+// waits while the terminal holds a whole line the shell hasn't read
+// (lineUnread), a few ticks at most. And on Windows conhost has painted
+// the program's last output by then (see below).
 //
 // On Windows there is no note: conhost paints its screen with absolute
 // cursor moves, and would paint over it. And cmd is started again for a
@@ -668,7 +679,15 @@ void TerminalWidget::switchWhenIdle()
         const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
         if (sameGitDir || !gitDirLine.isNull()) {
 #ifndef Q_OS_WIN
+            if (!sameGitDir && !lineDropped_ && lineUnread()
+                && unreadWaits_ < kMaxUnreadWaits) {
+                ++unreadWaits_;
+                waitForTick_ = true;
+                switchTimer_->start();
+                return;
+            }
             if (!sameGitDir && !lineDropped_) {
+                unreadWaits_ = 0;
                 takePtyOutput();
                 writeToPty(QByteArrayLiteral("\x03"));
                 lineDropped_ = true;
@@ -760,6 +779,29 @@ void TerminalWidget::switchWhenIdle()
 // started again for a new GIT_DIR (see gitDirCommand) ends them. And it
 // counts a console program cmd `start`ed in a window of its own, which
 // the switch then waits for.
+#ifndef Q_OS_WIN
+// Whether the shell's terminal holds input it hasn't read: a whole line,
+// with its Enter, while the terminal is in its line mode, as it is while
+// the shell runs something and before its line editor takes the
+// terminal for the prompt; a line partly typed doesn't count there. Read
+// from the terminal's own side, which the master's FIONREAD isn't.
+bool TerminalWidget::lineUnread() const
+{
+    if (masterFd_ < 0)
+        return false;
+    const char* name = ::ptsname(masterFd_);
+    if (!name)
+        return false;
+    const int fd = ::open(name, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    int unread = 0;
+    const bool ok = ::ioctl(fd, FIONREAD, &unread) == 0;
+    ::close(fd);
+    return ok && unread > 0;
+}
+#endif
+
 bool TerminalWidget::commandRunning() const
 {
 #ifdef Q_OS_WIN

@@ -164,6 +164,8 @@ private:
 #ifndef Q_OS_WIN
     /// The name of the program the shell's process runs now.
     QString shellProgram() const;
+    /// The shell's terminal holds a whole line it hasn't read yet.
+    bool lineUnread() const;
 #endif
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
@@ -255,6 +257,9 @@ private:
     /// The GIT_DIR waits for switchTimer_'s next tick: the Ctrl+C has
     /// only just gone, or the command only just ended.
     bool             waitForTick_  = false;
+    /// Ticks the Ctrl+C has waited for the shell to read a line typed
+    /// ahead (see switchWhenIdle), up to kMaxUnreadWaits.
+    int              unreadWaits_  = 0;
     bool             autoStarted_  = false;
 };
 
