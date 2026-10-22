@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <QShowEvent>
 #include <QSocketNotifier>
+#include <QStringList>
 #include <QTextBoundaryFinder>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -39,6 +40,8 @@
 #include <termios.h>
 #include <unistd.h>
 #if defined(Q_OS_MACOS)
+#include <libproc.h>   // proc_name
+#include <sys/param.h> // MAXCOMLEN
 #include <util.h>      // forkpty
 #elif defined(Q_OS_LINUX)
 #include <pty.h>       // forkpty (glibc; linked from libutil before 2.34)
@@ -85,9 +88,9 @@ constexpr int kMaxPendingOsc = 4096;
 constexpr qsizetype kMaxCountDigits = 5;
 constexpr int kMaxCount = 99999;
 
-// How often a start again that waits for a command to end looks again
-// (see TerminalWidget::restartWhenIdle).
-constexpr int kRestartCheckMs = 250;
+// How often a GIT_DIR that waits for a command to end looks again (see
+// TerminalWidget::switchWhenIdle).
+constexpr int kSwitchCheckMs = 250;
 
 #ifndef Q_OS_WIN
 // The most onPtyReadable() reads, and draws in one appendOutput(), before
@@ -109,6 +112,77 @@ QByteArray toTerminalBytes(const QString& text)
     return text.toLocal8Bit();
 #endif
 }
+
+// Whether `text` can be typed into the shell as it is: a control
+// character would act as a key there (Ctrl+C, Enter, Tab).
+bool typeable(const QString& text)
+{
+    return std::none_of(text.begin(), text.end(), [](QChar c) {
+        return c.unicode() < 0x20 || c.unicode() == 0x7f;
+    });
+}
+
+#ifndef Q_OS_WIN
+// The shells that take sh's `export` and `unset`, and its quoting, by
+// the name of their program.
+bool isShFamily(const QString& name)
+{
+    static const QStringList names{
+        QStringLiteral("sh"),  QStringLiteral("ash"),   QStringLiteral("dash"),
+        QStringLiteral("bash"), QStringLiteral("ksh"),  QStringLiteral("ksh93"),
+        QStringLiteral("mksh"), QStringLiteral("oksh"), QStringLiteral("yash"),
+        QStringLiteral("zsh")};
+    return names.contains(name);
+}
+
+// The shells that take csh's `setenv` and `unsetenv`.
+bool isCshFamily(const QString& name)
+{
+    return name == QLatin1String("csh") || name == QLatin1String("tcsh");
+}
+
+// `text` as one word of a line typed into the shell whose program is
+// `shell`: in single quotes, with a quote in it as '\'' (in fish \', and
+// a backslash \\). csh substitutes history inside them too, so a `!`
+// goes as \!.
+//
+// In sh and csh a character outside ASCII goes as printf's octal escapes
+// of its bytes, in a command substitution. Their line editors, bash's
+// and tcsh's, take a byte with its high bit set for a Meta key where the
+// locale has no such characters, as where none is set (GitBolt started
+// from the Finder or the Dock has none to pass on): typed as it was,
+// "café" came out "caf". There the characters that mean something to
+// printf, or to the quotes around it, are escaped too.
+QString shellWord(const QString& text, const QString& shell)
+{
+    if (shell == QLatin1String("fish")) {
+        QString word = text;
+        word.replace(QLatin1Char('\\'), QStringLiteral("\\\\"));
+        word.replace(QLatin1Char('\''), QStringLiteral("\\'"));
+        return QLatin1Char('\'') + word + QLatin1Char('\'');
+    }
+    const bool csh = isCshFamily(shell);
+    const bool ascii = std::all_of(text.begin(), text.end(),
+                                   [](QChar c) { return c.unicode() < 0x80; });
+    if (!ascii && (csh || isShFamily(shell))) {
+        QString format;
+        for (const char byte : toTerminalBytes(text)) {
+            const auto code = static_cast<unsigned char>(byte);
+            if (code >= 0x80 || QByteArrayLiteral("'\"\\%!$`").contains(byte))
+                format += QStringLiteral("\\%1").arg(uint(code), 3, 8, QLatin1Char('0'));
+            else
+                format += QLatin1Char(byte);
+        }
+        return csh ? QStringLiteral("\"`printf '%1'`\"").arg(format)
+                   : QStringLiteral("\"$(printf '%1')\"").arg(format);
+    }
+    QString word = text;
+    word.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+    if (csh)
+        word.replace(QLatin1Char('!'), QStringLiteral("\\!"));
+    return QLatin1Char('\'') + word + QLatin1Char('\'');
+}
+#endif
 
 // What appendOutput draws as text: everything but the C0 controls,
 // though a tab is text too.
@@ -199,9 +273,12 @@ TerminalWidget::TerminalWidget(QWidget* parent)
     // A 2px bar caret is easy to spot against the dark background.
     setCursorWidth(2);
 
-    restartTimer_ = new QTimer(this);
-    restartTimer_->setInterval(kRestartCheckMs);
-    connect(restartTimer_, &QTimer::timeout, this, &TerminalWidget::restartWhenIdle);
+    switchTimer_ = new QTimer(this);
+    switchTimer_->setInterval(kSwitchCheckMs);
+    connect(switchTimer_, &QTimer::timeout, this, [this] {
+        interrupted_ = false;  // the shell has had its Ctrl+C by now
+        switchWhenIdle();
+    });
 }
 
 TerminalWidget::~TerminalWidget()
@@ -306,6 +383,7 @@ void TerminalWidget::start(const QString& workingDirectory)
         return;
     }
     conpty_ = std::move(process);
+    shellName_ = QFileInfo(shell).fileName();
     // The new shell's screen starts below whatever is shown (its
     // output is queued, so none of it has been drawn yet).
     screenTop_     = QTextCursor();
@@ -395,6 +473,7 @@ void TerminalWidget::start(const QString& workingDirectory)
     // ----- parent -----
     masterFd_ = fd;
     childPid_ = pid;
+    shellName_ = QFile::decodeName(shellBytes.mid(shellBytes.lastIndexOf('/') + 1));
     screenCursor_ = QTextCursor();  // the new shell writes below
 
     // Non-blocking reads so we never deadlock the GUI thread when
@@ -427,7 +506,9 @@ void TerminalWidget::stopShell()
     pendingOutput_.clear();
     droppingCsi_ = false;
     decoder_.resetState();
-    restartTimer_->stop();
+    switchTimer_->stop();
+    lineTyped_ = false;
+    interrupted_ = false;
 #ifdef Q_OS_WIN
     if (conpty_) {
         // Returns at once: ConPtyProcess finishes the hang-up on its
@@ -476,13 +557,10 @@ void TerminalWidget::changeDirectory(const QString& path)
     safe.replace(QLatin1Char('%'), QStringLiteral("\"^%\""));
     const QString cmd = QStringLiteral("cd /d \"%1\"\r").arg(safe);
 #else
-    // Shell-quote the path with single quotes; escape any embedded
-    // single quotes via the standard '\'' sequence.
-    QString safe = path;
-    safe.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
-    // Leading space lets the user keep HISTCONTROL=ignorespace if
-    // they want to, but the cd will still take effect.
-    const QString cmd = QStringLiteral(" cd '%1'\n").arg(safe);
+    // Shell-quoted, for the shell that runs (see shellWord). Leading
+    // space lets the user keep HISTCONTROL=ignorespace if they want
+    // to, but the cd will still take effect.
+    const QString cmd = QStringLiteral(" cd %1\n").arg(shellWord(path, shellProgram()));
 #endif
     writeToPty(toTerminalBytes(cmd));
 }
@@ -491,9 +569,9 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 {
     if (path.isEmpty())
         return;
-    // While a start again waits, the shell goes to the latest
-    // repository, and no `cd` is typed into the command running.
-    if (gitDir == gitDir_ && !restartTimer_->isActive()) {
+    // While a GIT_DIR waits, the shell goes to the latest repository,
+    // and no `cd` is typed into the command running.
+    if (gitDir == gitDir_ && !switchTimer_->isActive()) {
         changeDirectory(path);
         return;
     }
@@ -501,26 +579,65 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
     pendingCwd_ = path;
     // A shell not started yet takes both at its start (showEvent).
     if (isRunning())
-        restartWhenIdle();
+        switchWhenIdle();
 }
 
-// Starting the shell again hangs it up, and with it whatever it runs: the
-// editor of a `git commit` or a `git rebase -i`, a long fetch or gc. Such
-// a command is left to finish. The shell starts again once it is back at
-// its prompt, which is looked for as its output arrives (the prompt is
-// output) and every so often in case none does; meanwhile a note says
-// so, below the command's output. A switch back meanwhile to the GIT_DIR
-// the shell has calls the start again off, and the shell keeps its
-// variables: only the `cd` is left, which waits for the command all the
-// same.
-void TerminalWidget::restartWhenIdle()
+// GIT_DIR is in the shell's environment, and a new one goes in as the
+// `cd` does: typed into the shell at its prompt, on the cd's line (see
+// gitDirCommand). The shell keeps its variables, its history and its
+// jobs. It used to be started again, which hung up what it ran: its
+// jobs, one stopped with Ctrl+Z (the editor of a `git commit`) or run
+// in the background, which leave it at its prompt (see commandRunning),
+// and on Windows the command running too. Typed while a command runs,
+// the line would go to the command (an editor, a pager), so it waits
+// for the prompt, which is looked for as the shell's output arrives (the
+// prompt is output) and every so often in case none does; meanwhile a
+// note says so, below the command's output. A switch back meanwhile to
+// the GIT_DIR the shell has leaves only the `cd`, which waits all the
+// same. A shell gitDirCommand has no line for is still started again,
+// once the command has ended, and its jobs are hung up with it.
+//
+// A line the user has partly typed at the prompt took the change on its
+// end, and the Enter after it: the line ran, the change its arguments,
+// and GIT_DIR stayed as it was. So that line is dropped first, with a
+// Ctrl+C, as a shell started again dropped it. Every shell drops its
+// line on one, in whatever mode its line editor is: Ctrl+E Ctrl+U, say,
+// left the line where it was in vi's command mode. The change goes in
+// at the timer's next tick rather than with the Ctrl+C, which is a
+// signal: on Linux a shell that reads a whole line at a time (dash) can
+// read the change before the signal reaches it (a read of the terminal
+// waits for input under way before it looks for one), and then drop the
+// change with the line. And the PTY is read first, since a Ctrl+C makes
+// it drop what it holds unread (on macOS, a background job's last
+// lines). Keys typed ahead while a command runs aren't known for a line
+// (see noteTyped), nor is a line continued after an Enter (an open
+// quote).
+//
+// On Windows there is no note: conhost paints its screen with absolute
+// cursor moves, and would paint over it. cmd is started again over a
+// line partly typed (see gitDirCommand).
+void TerminalWidget::switchWhenIdle()
 {
-    const QString note = tr("[gitbolt] the shell will restart for this repository "
+    const QString note = tr("[gitbolt] the shell will switch to this repository "
                             "when the running command ends");
     if (!commandRunning()) {
-        if (gitDir_ == shellGitDir_) {
-            if (restartTimer_->isActive()) {
-                restartTimer_->stop();
+        if (interrupted_)
+            return;
+        const bool sameGitDir = gitDir_ == shellGitDir_;
+        const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
+        if (sameGitDir || !gitDirLine.isNull()) {
+#ifndef Q_OS_WIN
+            if (!sameGitDir && lineTyped_) {
+                takePtyOutput();
+                writeToPty(QByteArrayLiteral("\x03"));
+                lineTyped_ = false;
+                interrupted_ = true;
+                switchTimer_->start();
+                return;
+            }
+#endif
+            if (switchTimer_->isActive()) {
+                switchTimer_->stop();
                 // The note goes too, or it stays below the prompt: the
                 // shell's output went on above it. It is the last row
                 // but one, below it the row a new shell would have
@@ -533,6 +650,8 @@ void TerminalWidget::restartWhenIdle()
                     last.removeSelectedText();
                 }
             }
+            writeToPty(toTerminalBytes(gitDirLine));
+            shellGitDir_ = gitDir_;
             changeDirectory(pendingCwd_);
             return;
         }
@@ -550,18 +669,20 @@ void TerminalWidget::restartWhenIdle()
         start(pendingCwd_);
         return;
     }
-    if (restartTimer_->isActive())
+    if (switchTimer_->isActive())
         return;
-    restartTimer_->start();
+    switchTimer_->start();
+#ifndef Q_OS_WIN
     // The note goes at the end, which can be just where the shell's
     // cursor is. The cursor stays put, so the command's output goes on
-    // above the note, and the new shell starts on the row below it. Its
+    // above the note, and a new shell starts on the row below it. Its
     // anchor goes along all the same: left there, it selected the note,
     // and the command's next output wrote over it.
     screenCursor_.setKeepPositionOnInsert(true);
     appendPlainText(note + QLatin1Char('\n'));
     screenCursor_.setKeepPositionOnInsert(false);
     screenCursor_.clearSelection();
+#endif
 }
 
 // On Unix the terminal's foreground process group: an interactive shell
@@ -570,25 +691,30 @@ void TerminalWidget::restartWhenIdle()
 // forkpty made it a session leader. What the shell runs in itself (a
 // builtin such as `read`, a loop between its commands) is not told
 // apart from the prompt, nor is anything a shell without job control
-// runs. Nor are the shell's jobs: one stopped with Ctrl+Z (a pager, the
-// editor of a `git commit`) or run in the background leaves the shell
-// at its prompt, so it starts again at once, and the hang-up can end
-// the job with it, as closing a terminal window does (a stopped one is
+// runs. The shell's jobs, one stopped with Ctrl+Z (a pager, the editor
+// of a `git commit`) or run in the background, leave it at its prompt,
+// and that is right here: the line typed goes to the shell, and the
+// jobs keep the GIT_DIR they started with. (Only a shell started again
+// would end them, as closing a terminal window does: a stopped one is
 // sent SIGHUP and SIGCONT once the shell is gone, and zsh hangs up its
-// running ones itself). Waiting for them instead would leave the shell
-// at its prompt, with the old repository's GIT_DIR and directory, for
-// as long as a job is kept.
+// running ones itself.)
 //
 // Windows: ConPTY doesn't say. A console has no process groups, and its
 // process list is only for a process attached to it (attaching GitBolt,
 // as interruptTree in git/GitProcess.cpp does to send git a Ctrl-C,
-// swaps out GitBolt's Ctrl-C handlers); cmd's child processes would
-// leave out its builtins (`type`, `for`) and count a program it
-// `start`ed. There the shell starts again at once, as it did before.
+// swaps out GitBolt's Ctrl-C handlers). What cmd waits for is a console
+// program it runs, so a child of cmd's running one is taken for a
+// command (ConPtyProcess::hasConsoleChild). That leaves out cmd's
+// builtins (`type`, `for`), and a batch file between the programs it
+// runs: a line typed meanwhile waits in the console's input until cmd
+// reads it at its prompt, unless something else reads the console
+// first (`pause`, `set /p`, a program the batch file runs next). And it
+// counts a console program cmd `start`ed in a window of its own, which
+// the line then waits for.
 bool TerminalWidget::commandRunning() const
 {
 #ifdef Q_OS_WIN
-    return false;
+    return conpty_ && conpty_->hasConsoleChild();
 #else
     if (!isRunning())
         return false;
@@ -596,6 +722,79 @@ bool TerminalWidget::commandRunning() const
     return group > 0 && group != childPid_;
 #endif
 }
+
+// GIT_DIR goes ahead of the `cd` (changeDirectory) on its line, so the
+// shell takes both in one go, in the syntax of the shell that runs: sh's
+// `export` and `unset` in the shells that have them, csh's `setenv` and
+// `unsetenv`, fish's `set`, and on Windows cmd's. Null for any other
+// (nushell, PowerShell, or a program an rc file `exec`ed, such as tmux),
+// and for a path with a control character, which would act as a key.
+QString TerminalWidget::gitDirCommand() const
+{
+    if (!typeable(gitDir_) || !typeable(pendingCwd_))
+        return {};
+#ifdef Q_OS_WIN
+    if (shellName_.compare(QLatin1String("cmd.exe"), Qt::CaseInsensitive) != 0)
+        return {};
+    // A line partly typed at cmd's prompt would take the change on its
+    // end (see switchWhenIdle), so cmd is started again instead, which
+    // drops it. Only cmd's own variables go with it: it has no jobs, and
+    // a console program it runs is waited for (commandRunning).
+    if (lineTyped_)
+        return {};
+    // `set NAME=value` takes the rest of the command as the value, so the
+    // `&` that ends it comes right after. Quotes would stay in the value,
+    // so it goes unquoted, with a caret before each character that means
+    // something to cmd there. A caret doesn't keep %NAME% from expanding,
+    // which comes first, but one right after each '%' does: no variable's
+    // name starts with one.
+    QString value;
+    bool afterPercent = false;
+    for (const QChar c : QDir::toNativeSeparators(gitDir_)) {
+        if (afterPercent || QStringView(u"^&|<>()").contains(c))
+            value += QLatin1Char('^');
+        value += c;
+        afterPercent = c == QLatin1Char('%');
+    }
+    return QStringLiteral("set GIT_DIR=%1&").arg(value);
+#else
+    // Quoted as changeDirectory quotes, and with its leading space.
+    const QString shell = shellProgram();
+    const QString value = shellWord(gitDir_, shell);
+    if (shell == QLatin1String("fish")) {
+        return gitDir_.isEmpty() ? QStringLiteral(" set -e GIT_DIR;")
+                                 : QStringLiteral(" set -gx GIT_DIR %1;").arg(value);
+    }
+    if (isCshFamily(shell)) {
+        return gitDir_.isEmpty() ? QStringLiteral(" unsetenv GIT_DIR;")
+                                 : QStringLiteral(" setenv GIT_DIR %1;").arg(value);
+    }
+    if (isShFamily(shell)) {
+        return gitDir_.isEmpty() ? QStringLiteral(" unset GIT_DIR;")
+                                 : QStringLiteral(" export GIT_DIR=%1;").arg(value);
+    }
+    return {};
+#endif
+}
+
+#ifndef Q_OS_WIN
+// The process's name, where the system tells it: an rc file can `exec`
+// another shell (fish from a .bashrc) or something else (tmux), which
+// $SHELL doesn't say. Elsewhere the name of the shell started.
+QString TerminalWidget::shellProgram() const
+{
+#if defined(Q_OS_MACOS)
+    char name[2 * MAXCOMLEN + 1] = {};
+    if (proc_name(childPid_, name, sizeof(name)) > 0)
+        return QFile::decodeName(name);
+#elif defined(Q_OS_LINUX)
+    QFile comm(QStringLiteral("/proc/%1/comm").arg(childPid_));
+    if (comm.open(QIODevice::ReadOnly))
+        return QFile::decodeName(comm.readAll().trimmed());
+#endif
+    return shellName_;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // PTY I/O
@@ -705,8 +904,8 @@ void TerminalWidget::onPtyReadable()
     if (!takePtyOutput()) {
         stopShell();
         appendPlainText(tr("\n[gitbolt] shell exited"));
-    } else if (restartTimer_->isActive()) {
-        restartWhenIdle();  // the command's last output, or the prompt after it
+    } else if (switchTimer_->isActive()) {
+        switchWhenIdle();  // the command's last output, or the prompt after it
     }
 #endif
 }
@@ -1323,8 +1522,11 @@ void TerminalWidget::keyPressEvent(QKeyEvent* event)
         text.replace(QStringLiteral("\r\n"), QStringLiteral("\r"));
         text.replace(QLatin1Char('\n'), QLatin1Char('\r'));
 #endif
-        if (!text.isEmpty())
-            writeToPty(toTerminalBytes(text));
+        if (!text.isEmpty()) {
+            const QByteArray bytes = toTerminalBytes(text);
+            noteTyped(bytes);
+            writeToPty(bytes);
+        }
         return;
     }
 
@@ -1380,8 +1582,25 @@ void TerminalWidget::keyPressEvent(QKeyEvent* event)
             break;
     }
 
-    if (!bytes.isEmpty())
+    if (!bytes.isEmpty()) {
+        noteTyped(bytes);
         writeToPty(bytes);
+    }
+}
+
+// Enter has the shell take its line, and Ctrl+C drop it. Anything else
+// typed at its prompt can leave a line there, partly typed, an arrow
+// key or a Tab as much as a letter. One that leaves none (a Backspace, a
+// Ctrl+L) only costs an empty line dropped at the next change of GIT_DIR
+// (see switchWhenIdle). Keys typed while a command runs go to the
+// command, a pager's `q` say, and leave the prompt's line as it was.
+void TerminalWidget::noteTyped(const QByteArray& bytes)
+{
+    const char last = bytes.back();
+    if (last == '\r' || last == '\n' || last == '\x03')
+        lineTyped_ = false;
+    else if (!lineTyped_ && !commandRunning())
+        lineTyped_ = true;
 }
 
 void TerminalWidget::resizeEvent(QResizeEvent* event)

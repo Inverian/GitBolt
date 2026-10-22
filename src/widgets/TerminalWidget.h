@@ -82,7 +82,8 @@ public:
     /// git needs where safe.bareRepository is "explicit". Empty: no
     /// GIT_DIR at all (an inherited one is left out too, as are git's
     /// other repository variables: git::GitProcess::repositoryEnvVars).
-    /// Takes effect at start().
+    /// Takes effect at start(); changeRepository() changes it in a
+    /// running shell.
     void setGitDir(const QString& gitDir) { gitDir_ = gitDir; }
     QString gitDir() const { return gitDir_; }
 
@@ -93,12 +94,14 @@ public:
     void changeDirectory(const QString& path);
 
     /// The repository the shell works in: `cd` there, as
-    /// changeDirectory, with `gitDir` as setGitDir has it. GIT_DIR is in
-    /// the shell's environment, which only its start sets (`export` is
-    /// sh's, fish and cmd have their own), so a running shell whose
-    /// GIT_DIR changes (a bare repository opened or left) is started
-    /// again there: at once at its prompt, but once the command running
-    /// in it ends if there is one (see restartWhenIdle).
+    /// changeDirectory, with `gitDir` as setGitDir has it. A running
+    /// shell whose GIT_DIR changes (a bare repository opened or left) is
+    /// typed the change with the `cd`, in its own syntax (sh's `export`
+    /// and `unset`, csh's `setenv` and `unsetenv`, fish's `set`, cmd's
+    /// `set`): at once at its prompt, but once the command running in it
+    /// ends if there is one. A line the user has partly typed there is
+    /// dropped first. A shell that syntax isn't known for is started
+    /// again there instead (see switchWhenIdle).
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
@@ -144,13 +147,24 @@ private slots:
 
 private:
     void stopShell();
-    /// changeRepository's start again (or only its `cd`, back to the
-    /// GIT_DIR the shell has): now, unless a command the shell started
-    /// is running, and then once it no longer is.
-    void restartWhenIdle();
-    /// Whether a command the shell started holds its terminal (never
-    /// known on Windows).
+    /// changeRepository's GIT_DIR and `cd` (or only its `cd`, back to the
+    /// GIT_DIR the shell has, or a start again): now, unless a command
+    /// the shell started is running, and then once it no longer is.
+    void switchWhenIdle();
+    /// Whether a command the shell started holds its terminal (on
+    /// Windows, a console program cmd runs).
     bool commandRunning() const;
+    /// What goes ahead of the `cd`, on its line, to give the shell
+    /// gitDir_ as its GIT_DIR or to unset it; null where that can't be
+    /// typed.
+    QString gitDirCommand() const;
+    /// Keeps lineTyped_ up to date with `bytes`, which the user sends
+    /// the shell.
+    void noteTyped(const QByteArray& bytes);
+#ifndef Q_OS_WIN
+    /// The name of the program the shell's process runs now.
+    QString shellProgram() const;
+#endif
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
     /// byte count written (stops at EAGAIN without dropping).
@@ -196,9 +210,9 @@ private:
     int              screenColumns_ = 80;
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
-    /// Active while a start again, or a `cd`, waits for a command to end
-    /// (restartWhenIdle), which it checks for every so often.
-    QTimer*          restartTimer_ = nullptr;
+    /// Active while a GIT_DIR, or a `cd`, waits for a command to end
+    /// (switchWhenIdle), which it checks for every so often.
+    QTimer*          switchTimer_  = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY
     /// master buffer is only ~1-4 KB, so a paste overflows it
     /// easily. Drained via writeNotifier_ as the fd becomes
@@ -225,7 +239,14 @@ private:
     // before the user ever opens the Console tab.
     QString          pendingCwd_;
     QString          gitDir_;          // setGitDir
-    QString          shellGitDir_;     // gitDir_ at the running shell's start
+    QString          shellGitDir_;     // the running shell's GIT_DIR, as far as is known
+    QString          shellName_;       // the file name of the shell started
+    /// Keys went to the shell at its prompt since its last Enter or
+    /// Ctrl+C: a line may be partly typed there (see noteTyped).
+    bool             lineTyped_    = false;
+    /// A Ctrl+C has gone to the shell to drop that line, and the GIT_DIR
+    /// waits for switchTimer_'s next tick (see switchWhenIdle).
+    bool             interrupted_  = false;
     bool             autoStarted_  = false;
 };
 
