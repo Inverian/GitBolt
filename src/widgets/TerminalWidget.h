@@ -99,9 +99,9 @@ public:
     /// typed the change with the `cd`, in its own syntax (sh's `export`
     /// and `unset`, csh's `setenv` and `unsetenv`, fish's `set`), once a
     /// Ctrl+C has dropped whatever its line holds: at once at its
-    /// prompt, but once the command running in it ends if there is one.
-    /// A shell that syntax isn't known for, and cmd on Windows, is
-    /// started again there instead (see switchWhenIdle).
+    /// prompt, but a moment after the command running in it ends if
+    /// there is one. A shell that syntax isn't known for, and cmd on
+    /// Windows, is started again there instead (see switchWhenIdle).
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
@@ -211,8 +211,9 @@ private:
     QSocketNotifier* readNotifier_ = nullptr;
     QSocketNotifier* writeNotifier_ = nullptr;
     /// Active while a GIT_DIR, or a `cd`, waits for a command to end
-    /// (switchWhenIdle), which it checks for every so often, or for the
-    /// Ctrl+C sent ahead of a GIT_DIR to take.
+    /// (switchWhenIdle), which it checks for every so often, or for a
+    /// tick after the command's end, or for the Ctrl+C sent ahead of a
+    /// GIT_DIR to take.
     QTimer*          switchTimer_  = nullptr;
     /// Bytes accepted by writeToPty but not yet written — the PTY
     /// master buffer is only ~1-4 KB, so a paste overflows it
@@ -243,13 +244,17 @@ private:
     QString          shellGitDir_;     // the running shell's GIT_DIR, as far as is known
     QString          shellName_;       // the file name of the shell started
     /// A Ctrl+C has dropped the shell's line for the GIT_DIR that waits,
-    /// and nothing has gone to the shell since, nor has a command run in
-    /// it: the change can be typed (see switchWhenIdle). Once per switch;
-    /// cleared as it is typed, and for a new shell (stopShell).
+    /// and nothing has gone to the shell since (noteTyped): the change
+    /// can be typed (see switchWhenIdle). A command that runs after the
+    /// Ctrl+C, a prompt hook's, leaves it set. Once per switch; cleared
+    /// as the change is typed, and for a new shell (stopShell).
     bool             lineDropped_  = false;
-    /// That Ctrl+C has only just gone, and the GIT_DIR waits for
-    /// switchTimer_'s next tick.
-    bool             interrupted_  = false;
+    /// The switch has seen a command run, and a change of GIT_DIR waits
+    /// a tick after its end before it goes on (see switchWhenIdle).
+    bool             commandRan_   = false;
+    /// The GIT_DIR waits for switchTimer_'s next tick: the Ctrl+C has
+    /// only just gone, or the command only just ended.
+    bool             waitForTick_  = false;
     bool             autoStarted_  = false;
 };
 
