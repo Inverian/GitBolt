@@ -284,6 +284,64 @@ private slots:
     }
 
 #ifndef Q_OS_WIN
+    // Where the work tree keeps no modes (core.fileMode off, as git
+    // sets it on an exFAT drive or WSL's /mnt/c), every file is marked
+    // executable, and every one was asked about. There a file is asked
+    // about if git has it executable, or if the opener runs it for the
+    // mark all the same: on macOS one with no extension (Terminal runs
+    // it) or a shell script (iTerm2 does), elsewhere a program (a "#!"
+    // line, a shell script's name).
+    void markedWhereModesAreNotKept_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QByteArray>("content");
+        QTest::addColumn<bool>("asked");
+        QTest::newRow("text") << QStringLiteral("notes.md") << QByteArray("notes\n") << false;
+        QTest::newRow("tracked text") << QStringLiteral("notes.txt") << QByteArray("notes\n")
+                                      << false;
+        QTest::newRow("committed executable") << QStringLiteral("tools/release.txt")
+                                              << QByteArray("notes\n") << true;
+        QTest::newRow("shell script") << QStringLiteral("build.sh") << QByteArray("notes\n")
+                                      << true;
+#if defined(Q_OS_MACOS)
+        QTest::newRow("no extension") << QStringLiteral("CHANGELOG") << QByteArray("notes\n")
+                                      << true;
+        QTest::newRow("#! line") << QStringLiteral("run.md") << kScript << false;
+#else
+        QTest::newRow("no extension") << QStringLiteral("CHANGELOG") << QByteArray("notes\n")
+                                      << false;
+        QTest::newRow("#! line") << QStringLiteral("run.md") << kScript << true;
+#endif
+    }
+
+    void markedWhereModesAreNotKept() {
+        QFETCH(QString, path);
+        QFETCH(QByteArray, content);
+        QFETCH(bool, asked);
+        const QString root = repo_->path() + QLatin1Char('/');
+        // Committed executable where modes were kept, then the work tree
+        // on a drive that keeps none: every file marked.
+        writeFile(root + QStringLiteral("tools/release.txt"), "notes\n", true);
+        QVERIFY(repo_->stageFile(QStringLiteral("tools/release.txt")).ok());
+        QVERIFY(repo_->commit(QStringLiteral("release")).ok());
+        QVERIFY(repo_->repo().config().setBool("core.fileMode", false).ok());
+        writeFile(root + path, content, true);
+
+        UrlCatcher desktop;
+        BoxAnswerer box(QStringLiteral("Cancel"));
+        emit fileTree()->openExternallyRequested(path);
+        if (asked) {
+            QCOMPARE(box.asked, 1);
+            QCOMPARE(box.name, QStringLiteral("dlg.openExternallyRuns"));
+            QCOMPARE(desktop.urls.size(), 0);
+            return;
+        }
+        QCOMPARE(box.asked, 0);
+        QCOMPARE(desktop.urls.size(), 1);
+        QCOMPARE(canonical(desktop.urls.first()), canonical(root + path));
+    }
+#endif
+
+#ifndef Q_OS_WIN
     // A tracked symbolic link (or a folder on the way that is one) that
     // leads out of the work tree is not opened, whatever is there; the
     // folder it leads into is shown if the user asks, to open it from

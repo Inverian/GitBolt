@@ -1,6 +1,9 @@
 #pragma once
 
+#include <QByteArray>
 #include <QString>
+
+#include <cstdint>
 
 class QFileInfo;
 
@@ -29,7 +32,41 @@ namespace gitbolt::util {
 /// .desktop, .jar, .jnlp, and the Windows programs Wine runs. A folder
 /// only when it is a bundle (see folderToShow()). The type is read
 /// from `file`'s own name, so resolve a symbolic link first.
-bool mayRunWhenOpened(const QFileInfo& file);
+///
+/// Where the work tree keeps no modes (`modesKept` false: core.fileMode
+/// is off, as git sets it at clone or init where a file's mode doesn't
+/// stick, on FAT, exFAT and NTFS drives and WSL's /mnt/c), every file
+/// is marked executable, and the mark says nothing of the file. There
+/// a marked file may run if the index has it executable (`indexMode`
+/// 0100755; 0 where the index has none), or if the platform's opener
+/// runs it for the mark all the same: on macOS one with no extension
+/// (Launch Services makes a Unix executable of it, which Terminal
+/// runs), a .dylib (one to Launch Services too), or a shell or Perl
+/// script (a terminal app such as iTerm2 can take them, and runs them),
+/// elsewhere a program (see isProgram()).
+bool mayRunWhenOpened(const QFileInfo& file, bool modesKept = true, uint32_t indexMode = 0);
+
+/// What mayRunWhenOpened() judges a file by, the folder aside.
+struct FileToOpen {
+    QString name;            ///< its name, which gives its type
+    bool executable = false; ///< the file system marks it executable
+    bool modesKept = true;   ///< the work tree keeps modes (core.fileMode)
+    uint32_t indexMode = 0;  ///< the index's mode for it, 0 where it has none
+    QByteArray head;         ///< its first bytes, where they are needed
+};
+
+/// mayRunWhenOpened() of a file that isn't a folder, from what is
+/// known of it.
+bool mayRunWhenOpened(const FileToOpen& file);
+
+/// Whether the openers that xdg-open hands a file to take it for a
+/// program, and run it, or ask whether to, when it is marked
+/// executable: an ELF binary, a file that starts with "#!" (LXDE's
+/// pcmanfm asks about any), or one whose type the shared MIME database
+/// they go by counts as a program's, by its name (a .sh file) or by
+/// `head`, its first bytes. KDE runs a marked script where the app
+/// that asked lets it, and opens one that isn't marked in an editor.
+bool isProgram(const QString& name, const QByteArray& head);
 
 /// The folder to hand the desktop to show `path`, and only ever a
 /// folder: the desktop opens a file it is handed, and runs some (see

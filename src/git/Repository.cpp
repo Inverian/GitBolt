@@ -1728,6 +1728,16 @@ Result<int> Repository::conflictCount() const {
     return count;
 }
 
+uint32_t Repository::indexMode(const std::string& path) const {
+    git_index* index = nullptr;
+    if (freshIndex(&index, repo_) < 0)
+        return 0;
+    const git_index_entry* entry = git_index_get_bypath(index, path.c_str(), 0);
+    const uint32_t mode = entry ? entry->mode : 0;
+    git_index_free(index);
+    return mode;
+}
+
 namespace {
 // A symbolic link, or on Windows a junction (a folder's link), and not
 // what it points to.

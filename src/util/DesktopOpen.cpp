@@ -1,7 +1,10 @@
 #include "util/DesktopOpen.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QMimeDatabase>
+#include <QMimeType>
 #include <QStringList>
 
 namespace gitbolt::util {
@@ -90,16 +93,99 @@ QStringList runnableSuffixes()
 #endif
 }
 
+// The mode git gives a file committed executable.
+constexpr uint32_t kExecutableMode = 0100755;
+
+#if defined(Q_OS_MACOS)
+// Whether Launch Services finds no extension in `name`, as Foundation's
+// pathExtension finds none: a leading dot starts no extension (.bashrc
+// has none), a trailing one ends an empty one ("notes." has none), and
+// text after the last dot with a space in it is none ("Version 1.2
+// notes" and "notes.txt " have none; a tab, or anything else, leaves it
+// one).
+bool hasNoExtension(const QString& name)
+{
+    qsizetype start = 0;
+    while (start < name.size() && name.at(start) == QLatin1Char('.'))
+        ++start;
+    const qsizetype dot = name.lastIndexOf(QLatin1Char('.'));
+    return dot < start || dot == name.size() - 1 || name.indexOf(QLatin1Char(' '), dot) >= 0;
+}
+
+// Extensions, lower case, of the files a terminal opens, which it runs
+// if they are marked executable. Launch Services counts a .dylib as a
+// Unix executable, which Terminal takes, and a terminal app can take
+// the shells' scripts and Perl's: iTerm2 takes .sh, .zsh, .csh and .pl,
+// and runs a file it is asked to open, as Terminal does a .command (it
+// asks first, until told not to).
+QStringList suffixesRunWhenMarked()
+{
+    return {QStringLiteral("dylib"), QStringLiteral("sh"), QStringLiteral("bash"),
+            QStringLiteral("zsh"), QStringLiteral("ksh"), QStringLiteral("csh"),
+            QStringLiteral("tcsh"), QStringLiteral("pl")};
+}
+#endif
+
 } // namespace
 
-bool mayRunWhenOpened(const QFileInfo& file)
+bool mayRunWhenOpened(const FileToOpen& file)
+{
+    if (runnableSuffixes().contains(QFileInfo(file.name).suffix().toLower()))
+        return true;
+    if (!file.executable)
+        return false;
+    // Where the work tree keeps no modes, every file is marked
+    // executable, and every one was asked about. The index keeps the
+    // mode the file was committed with, and the opener runs a marked
+    // file only if it takes it for a program.
+    if (file.modesKept || file.indexMode == kExecutableMode)
+        return true;
+#if defined(Q_OS_MACOS)
+    // Launch Services makes a Unix executable of a marked file with no
+    // extension, and Terminal runs it. One with an extension opens by its
+    // type, a .txt in TextEdit, and runs only where a terminal takes that
+    // type (above). It goes by the name alone: a .txt that starts with
+    // "#!" opens in TextEdit.
+    return hasNoExtension(file.name)
+           || suffixesRunWhenMarked().contains(QFileInfo(file.name).suffix().toLower());
+#else
+    // (Qt marks a file executable on Windows by its type alone, .exe,
+    // .com, .bat, .cmd or .pif, and those are listed above.)
+    return isProgram(file.name, file.head);
+#endif
+}
+
+bool mayRunWhenOpened(const QFileInfo& file, bool modesKept, uint32_t indexMode)
 {
     // A folder's executable bit only lets it be searched.
     if (file.isDir())
         return file.isBundle();
-    if (file.isExecutable())
+    FileToOpen what{file.fileName(), file.isExecutable(), modesKept, indexMode, {}};
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+    // Its content, where that is what tells (above): as much of it as Qt
+    // reads to tell a file's type. Only a plain file is read: opening a
+    // FIFO waits for something to write to it.
+    if (what.executable && !modesKept && indexMode != kExecutableMode && file.isFile()) {
+        QFile content(file.filePath());
+        if (content.open(QIODevice::ReadOnly))
+            what.head = content.read(16 * 1024);
+    }
+#endif
+    return mayRunWhenOpened(what);
+}
+
+bool isProgram(const QString& name, const QByteArray& head)
+{
+    if (head.startsWith("\x7f" "ELF") || head.startsWith("#!"))
         return true;
-    return runnableSuffixes().contains(file.suffix().toLower());
+    // A shell script by its name (build.sh) or its content, an ELF
+    // binary or library, a launcher. KDE tells a file's type with Qt's
+    // MIME database, which on Linux is the system's, and GLib with the
+    // same.
+    const QMimeType type = QMimeDatabase().mimeTypeForFileNameAndData(name, head);
+    return type.inherits(QStringLiteral("application/x-executable"))
+           || type.inherits(QStringLiteral("application/x-sharedlib"))
+           || type.inherits(QStringLiteral("application/x-desktop"));
 }
 
 QString folderToShow(const QString& path)
