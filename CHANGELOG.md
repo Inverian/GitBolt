@@ -18,10 +18,11 @@ semver once 1.0 lands.
   bash has since 0.9.7, so git typed there works where git's
   `safe.bareRepository` setting is `explicit`. Opening a bare
   repository, or leaving one, sets or unsets GIT_DIR in the Console's
-  shell (sh, bash, zsh, ksh, csh, tcsh, fish or cmd) at its prompt, so
-  the shell keeps its jobs and history; a command still running in it
-  is left to finish first, and a line half typed at the prompt is
-  cleared first. A shell of another kind is started again.
+  shell at its prompt (sh, bash, zsh, ksh, csh, tcsh or fish), so the
+  shell keeps its jobs and history; a command still running in it is
+  left to finish first, and the line at the prompt is cleared with a
+  Ctrl+C first. On Windows, and with a shell of another kind, the
+  shell is started again once no command runs in it.
 - **Recent repositories listed a repository twice** when it was opened
   by two spellings of its path: on macOS, `/tmp/…` from Finder and
   `/private/tmp/…` from Terminal, a path through a symlinked folder,
