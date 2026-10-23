@@ -1,4 +1,5 @@
 #include "widgets/MergeConflictWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QApplication>
 #include <QEvent>
@@ -219,6 +220,7 @@ void MergeConflictWidget::setConflicts(
     conflicts_ = conflicts;
     resolvedContents_.clear();
     resolvedContents_.resize(conflicts_.size());
+    acceptedSides_.assign(conflicts_.size(), git::ConflictSide::Ours);
 
     if (!conflicts_.empty()) {
         acceptOursBtn_->setEnabled(true);
@@ -233,6 +235,7 @@ void MergeConflictWidget::setConflicts(
 void MergeConflictWidget::clear() {
     conflicts_.clear();
     resolvedContents_.clear();
+    acceptedSides_.clear();
     currentConflict_ = -1;
 
     oursEditor_->clear();
@@ -246,6 +249,21 @@ void MergeConflictWidget::clear() {
     markAllResolvedBtn_->setEnabled(false);
     prevBtn_->setEnabled(false);
     nextBtn_->setEnabled(false);
+}
+
+std::vector<std::optional<git::AcceptedSide>> MergeConflictWidget::allAcceptedSides() const {
+    std::vector<std::optional<git::AcceptedSide>> sides(conflicts_.size());
+    for (size_t i = 0; i < conflicts_.size() && i < acceptedSides_.size(); ++i) {
+        const auto& conflict = conflicts_[i];
+        if (!conflict.isSymlink())
+            continue;
+        if (acceptedSides_[i] == git::ConflictSide::Ours)
+            sides[i] = git::AcceptedSide{git::ConflictSide::Ours, conflict.oursId, conflict.oursMode};
+        else
+            sides[i] = git::AcceptedSide{git::ConflictSide::Theirs, conflict.theirsId,
+                                         conflict.theirsMode};
+    }
+    return sides;
 }
 
 QString MergeConflictWidget::resolvedContent() const {
@@ -272,6 +290,25 @@ void MergeConflictWidget::showConflict(int index) {
     oursEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
     baseEditor_->setPlainText(QString::fromStdString(conflict.ancestorContent));
     theirsEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
+
+    // A side that is a symbolic link shows the path it points to, and
+    // says so: nothing else tells it from a one-line file. Such a
+    // conflict is resolved by accepting a side as it is, never by
+    // editing it (Repository::resolveConflict refuses any other text),
+    // so its result is read-only and there's no Accept Both.
+    constexpr uint32_t link = git::MergeConflictEntry::kSymlinkMode;
+    oursLabel_->setText(conflict.oursMode == link ? tr("Ours (Local), a symbolic link")
+                                                  : tr("Ours (Local)"));
+    baseLabel_->setText(conflict.ancestorMode == link
+                            ? tr("Base (Common Ancestor), a symbolic link")
+                            : tr("Base (Common Ancestor)"));
+    theirsLabel_->setText(conflict.theirsMode == link ? tr("Theirs (Remote), a symbolic link")
+                                                      : tr("Theirs (Remote)"));
+    resultLabel_->setText(conflict.isSymlink()
+                              ? tr("Merged Result (a symbolic link: accept Ours or Theirs)")
+                              : tr("Merged Result (editable)"));
+    resultEditor_->setReadOnly(conflict.isSymlink());
+    acceptBothBtn_->setEnabled(!conflict.isSymlink());
 
     // If we already have a resolved version, show it; otherwise default to ours
     if (!resolvedContents_[idx].isEmpty()) {
@@ -318,6 +355,7 @@ void MergeConflictWidget::onAcceptOurs() {
     if (currentConflict_ < 0)
         return;
     const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
+    acceptedSides_[static_cast<size_t>(currentConflict_)] = git::ConflictSide::Ours;
     resultEditor_->setPlainText(QString::fromStdString(conflict.oursContent));
 }
 
@@ -325,6 +363,7 @@ void MergeConflictWidget::onAcceptTheirs() {
     if (currentConflict_ < 0)
         return;
     const auto& conflict = conflicts_[static_cast<size_t>(currentConflict_)];
+    acceptedSides_[static_cast<size_t>(currentConflict_)] = git::ConflictSide::Theirs;
     resultEditor_->setPlainText(QString::fromStdString(conflict.theirsContent));
 }
 
@@ -357,7 +396,7 @@ void MergeConflictWidget::onMarkAllResolved() {
     }
 
     if (!allResolved) {
-        auto answer = QMessageBox::question(
+        auto answer = PlainMessageBox::question(
             this, tr("Unresolved Conflicts"),
             tr("Some conflicts have not been explicitly resolved.\n"
                "The current content in each result panel will be used.\n"
@@ -380,7 +419,7 @@ void MergeConflictWidget::onMarkAllResolved() {
 }
 
 void MergeConflictWidget::onAbortMerge() {
-    auto answer = QMessageBox::question(
+    auto answer = PlainMessageBox::question(
         this, tr("Abort Merge"),
         tr("Are you sure you want to abort the merge?\n"
            "All conflict resolutions will be lost."),

@@ -15,6 +15,9 @@
 // Its header counts the commit's files and folders in English:
 // "1 file, 1 folder", not "1 files, 1 directories".
 //
+// The tree is walked on the service's read thread (GitService::
+// readAsync), so the tests wait for it to come in.
+//
 
 #include <QAbstractItemModel>
 #include <QAction>
@@ -98,17 +101,18 @@ private slots:
         tree.setGitService(&svc);
         auto* header = tree.findChild<QLabel*>(QStringLiteral("fileTree.previewHeader"));
         QVERIFY(header);
+        // The walk comes from the service's read thread.
         tree.setCommit(*only);
-        QVERIFY2(header->text().startsWith(QStringLiteral("1 file, 1 folder — ")),
-                 qPrintable(header->text()));
+        QTRY_VERIFY2(header->text().startsWith(QStringLiteral("1 file, 1 folder — ")),
+                     qPrintable(header->text()));
 
         // dir/, dir/sub/, dir/sub/file.txt and dir/other.txt
         GitService other;
         QVERIFY(other.openRepository(repo_.path()));
         tree.setGitService(&other);
         tree.setCommit(first_);
-        QVERIFY2(header->text().startsWith(QStringLiteral("2 files, 2 folders — ")),
-                 qPrintable(header->text()));
+        QTRY_VERIFY2(header->text().startsWith(QStringLiteral("2 files, 2 folders — ")),
+                     qPrintable(header->text()));
     }
 
     void menuActionsSurviveARebuild_data() {
@@ -131,6 +135,7 @@ private slots:
 
         auto* view = tree.findChild<QTreeView*>(QStringLiteral("fileTree.view"));
         QVERIFY(view);
+        QTRY_VERIFY(view->model()->rowCount() > 0);   // the walk is in
         const QModelIndex dir = view->model()->index(0, 0);
         QCOMPARE(dir.data().toString(), QStringLiteral("dir"));
         QCOMPARE(expanded(view), QStringList{QStringLiteral("dir")});   // the top level
@@ -144,6 +149,10 @@ private slots:
                 return;
             tree.clear();
             tree.setCommit(second_);
+            if (!QTest::qWaitFor([view] { return view->model()->rowCount() > 0; })) {
+                menu->close();   // no new tree: picked stays false
+                return;
+            }
             for (QAction* a : menu->actions()) {
                 if (a->text() == action) {
                     a->trigger();

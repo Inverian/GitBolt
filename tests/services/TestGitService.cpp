@@ -10,7 +10,10 @@
 //
 //   - open/close lifecycle and its signals,
 //   - async open success AND failure delivery,
-//   - statusReady / logReady payloads for a real repo,
+//   - statusReady / logReady payloads for a real repo, and why status
+//     couldn't be read (a tree nested too deep) in statusReady's place,
+//     but not for a bare repository, which has none; and why the
+//     submodules couldn't be,
 //   - commitChanges round trip, through `git commit`: the repository's
 //     hooks run (core.hooksPath too) and can refuse it, a slow hook is
 //     waited for and a quit stops it, a merge's autostash comes back,
@@ -70,11 +73,25 @@
 //     open on its way (and reaches its own repository, opened again),
 //   - a commit waiting on its hook leaves the thread pool room for an
 //     open (a job waiting on git lends its thread back),
-//   - the remote ops and checkoutBranch return their own outcome,
+//   - the remote ops and checkoutBranch return their own outcome, push
+//     refuses a branch name git would read as an option before any git
+//     runs (and remote branch delete a remote's), remote branch delete
+//     deletes a branch of such a name, and the toolbar's Push publishes
+//     a branch a tag shares its name with,
 //   - a conflicted merge is aborted off the GUI thread,
+//   - the resolver's results are staged and then written from the
+//     index: a symbolic link's conflict to a side's link alone, never
+//     through the link, and a text conflict as it always was,
+//   - readAsync's reads walk a tree 6,000 levels deep on the read
+//     thread's stack, and an answer whose asker is gone, or whose
+//     repository was closed, goes nowhere; a read stops, answering
+//     nothing, once its asker moves on, the repository is closed or
+//     switched, or the service goes,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
-//     leaves out (.git, node_modules, build, …).
+//     leaves out (.git, node_modules, build, …),
+//   - removeWorktree deletes the folder the user was asked about or
+//     nothing, whatever the worktree's files in .git/worktrees say.
 //
 // Signal delivery: workers emit from pool threads, and QSignalSpy
 // records those on the emitting thread, so the tests wait for worker
@@ -92,6 +109,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
 #include <QThreadPool>
 
 #include "../TestProcessHelper.h"
@@ -99,6 +117,7 @@
 #include "git/Askpass.h"
 #include "git/Error.h"
 #include "git/GitProcess.h"
+#include "git/GitProcessLog.h"
 #include "services/GitService.h"
 
 #include <algorithm>
@@ -266,6 +285,30 @@ bool writeHook(const QString& dir, const char* name, const QByteArray& body) {
     hook.close();
     return hook.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
 }
+
+// A file's bytes, or "<missing>".
+QByteArray fileBytes(const QString& path) {
+    QFile file(path);
+    return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArrayLiteral("<missing>");
+}
+
+#ifndef Q_OS_WIN
+// Makes the work tree's `path` a symbolic link to `target` and stages
+// it, as a link.
+bool stageLink(gitbolt::test::TestRepo& repo, const QString& path, const QString& target) {
+    const QString link = QDir(repo.path()).filePath(path);
+    QFile::remove(link);
+    return QFile::link(target, link) && repo.stageFile(path).ok();
+}
+
+// Where the symbolic link `path` points, as the link has it (QFileInfo
+// makes it absolute), or "" when `path` is no link.
+QString linkTarget(const QString& path) {
+    char target[4096];
+    const ssize_t size = ::readlink(QFile::encodeName(path).constData(), target, sizeof target);
+    return size < 0 ? QString() : QFile::decodeName(QByteArray(target, size));
+}
+#endif
 
 } // namespace
 
@@ -573,6 +616,70 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!changed.isEmpty(), 10000);
     }
 
+    // Remove deletes the worktree's folder that the user was asked
+    // about, or nothing: one elsewhere by now, or one whose gitdir file
+    // in .git/worktrees names a file in another folder (which libgit2
+    // deleted), is refused with an operationFailed.
+    void removeWorktreeDeletesOnlyTheFolderAsked() {
+        const IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString worktree = outside.filePath(QStringLiteral("wt"));
+        const QString victim = outside.filePath(QStringLiteral("victim"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(repo->path().toStdString())
+                              .run({"worktree", "add", "-q", "-b", "topic",
+                                    worktree.toStdString()})));
+        QVERIFY(QDir().mkpath(victim));
+        QFile marker(victim + QStringLiteral("/MARKER"));
+        QVERIFY(marker.open(QIODevice::WriteOnly));
+        marker.close();
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto listedPath = [&svc] {
+            const auto listed = svc.withRepository(
+                [](gitbolt::git::Repository& r) { return r.worktrees(); });
+            return listed.ok() && listed->size() == 1
+                       ? QString::fromStdString(listed->front().path) : QString();
+        };
+        const QString asked = listedPath();
+        QVERIFY(!asked.isEmpty());
+        QSignalSpy failed(&svc, &GitService::operationFailed);
+
+        svc.removeWorktree(QStringLiteral("wt"), victim);
+        QCOMPARE(failed.size(), 1);
+        QCOMPARE(failed.at(0).at(0).toString(), QStringLiteral("removeWorktree"));
+        QVERIFY2(failed.at(0).at(1).toString().contains(QLatin1String("Nothing was deleted")),
+                 qPrintable(failed.at(0).at(1).toString()));
+        QVERIFY(QFileInfo::exists(worktree + QStringLiteral("/f0.txt")));
+
+        const auto writeGitdir = [&repo](const QString& path) {
+            QSaveFile gitdir(repo->path() + QStringLiteral("/.git/worktrees/wt/gitdir"));
+            return gitdir.open(QIODevice::WriteOnly)
+                   && gitdir.write(QFile::encodeName(path) + '\n') > 0 && gitdir.commit();
+        };
+        QVERIFY(writeGitdir(victim + QStringLiteral("/MARKER")));
+        // As the list shows it now, and the question names it.
+        const QString shown = listedPath();
+        QCOMPARE(QFileInfo(shown).canonicalFilePath(), QFileInfo(victim).canonicalFilePath());
+        svc.removeWorktree(QStringLiteral("wt"), shown);
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(QFileInfo::exists(victim + QStringLiteral("/MARKER")));
+        QVERIFY(QFileInfo::exists(worktree + QStringLiteral("/f0.txt")));
+
+        QVERIFY(writeGitdir(asked + QStringLiteral("/.git")));
+        svc.removeWorktree(QStringLiteral("wt"), asked);
+        QCOMPARE(failed.size(), 2);
+        QVERIFY(!QFileInfo::exists(worktree));
+        const auto after = svc.withRepository(
+            [](gitbolt::git::Repository& r) { return r.worktrees(); });
+        QVERIFY(after.ok());
+        QVERIFY(after->empty());
+        QVERIFY(QFileInfo::exists(victim + QStringLiteral("/MARKER")));
+    }
+
     // The walk leaves out .git, node_modules, build and the like
     // themselves, but still goes into them: what refreshes the status
     // above, and a tracked file in a subdirectory of build/, is watched
@@ -781,6 +888,205 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // readAsync: a read on the service's read thread, its answer back
+    // on this one. The File Tree's walk runs there now, and libgit2's
+    // git_tree_walk recurses once per directory level: on a pool
+    // thread's default stack (512 KB on macOS) a tree some 4,500 levels
+    // deep crashed it, where the GUI thread's 8 MB, on which it ran
+    // before, took 60,000. The read thread has as much. 6,000 levels
+    // here, which a system libgit2 walks on that stack (unless it turns
+    // the tree down; what mustn't happen is the crash). The bundled one
+    // (cmake/PatchLibgit2.cmake), which CI builds, turns down a tree
+    // deeper than 2048 levels, and the deepest walk it allows takes well
+    // under 512 KB (some 100 bytes a level), so no tree can overflow the
+    // default stack there. So the read also says how big its thread's
+    // stack is: the GUI thread's 8 MB, whichever libgit2 there is.
+    // -----------------------------------------------------------------
+    void readAsyncWalksADeepTree() {
+        constexpr int kDepth = 6000;
+        gitbolt::test::TestRepo repo;
+        git_repository* raw = repo.repo().raw();
+        git_oid oid;
+        QCOMPARE(git_blob_create_from_buffer(&oid, raw, "x\n", 2), 0);
+        for (int level = 0; level <= kDepth; ++level) {
+            git_treebuilder* builder = nullptr;
+            QCOMPARE(git_treebuilder_new(&builder, raw, nullptr), 0);
+            const bool leaf = level == 0;
+            QCOMPARE(git_treebuilder_insert(nullptr, builder, leaf ? "leaf.txt" : "d", &oid,
+                                            leaf ? GIT_FILEMODE_BLOB : GIT_FILEMODE_TREE),
+                     0);
+            QCOMPARE(git_treebuilder_write(&oid, builder), 0);
+            git_treebuilder_free(builder);
+        }
+        git_tree* tree = nullptr;
+        QCOMPARE(git_tree_lookup(&tree, raw, &oid), 0);
+        git_signature* sig = nullptr;
+        QCOMPARE(git_signature_now(&sig, "Test User", "test@gitbolt.local"), 0);
+        git_oid commitOid;
+        const int made = git_commit_create(&commitOid, raw, "HEAD", sig, sig, nullptr, "deep",
+                                           tree, 0, nullptr);
+        git_signature_free(sig);
+        git_tree_free(tree);
+        QCOMPARE(made, 0);
+        const gitbolt::git::ObjectId commit(&commitOid);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        QObject context;
+        long entries = -2;   // -1: turned down
+        uint stack = 0;
+        svc.readAsync(
+            &context,
+            [commit](gitbolt::git::Repository& r, const std::function<bool()>&) {
+                auto walk = r.walkTreeAtCommit(commit);
+                return std::pair{walk ? static_cast<long>(walk->size()) : -1L,
+                                 QThread::currentThread()->stackSize()};
+            },
+            [&](std::pair<long, uint> answer) {
+                entries = answer.first;
+                stack = answer.second;
+            });
+        // A quarter of QtTest's watchdog (QTEST_FUNCTION_TIMEOUT, 60 s):
+        // a read that never answers fails here, rather than the watchdog
+        // aborting the whole binary.
+        QTRY_VERIFY_WITH_TIMEOUT(entries != -2, 15000);
+        QVERIFY2(stack >= 8u * 1024 * 1024, qPrintable(QString::number(stack)));
+#ifdef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QCOMPARE(entries, -1L);
+#else
+        QVERIFY2(entries == kDepth + 1 || entries == -1, qPrintable(QString::number(entries)));
+#endif
+    }
+
+    // An answer whose asker is gone, or whose repository was closed
+    // before it came, goes nowhere; one for a live asker comes.
+    void readAsyncDropsAnAnswerNobodyWaitsFor() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        GitService svc;
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto read = [](gitbolt::git::Repository& r, const std::function<bool()>&) {
+            return r.workdir();
+        };
+
+        bool toTheGone = false;
+        auto* gone = new QObject;
+        svc.readAsync(gone, read, [&toTheGone](const std::string&) { toTheGone = true; });
+        // Read, and its answer posted to this thread, before the asker
+        // goes (no event is handled meanwhile).
+        QElapsedTimer waited;
+        waited.start();
+        while (svc.workRunning() && waited.elapsed() < 10000)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        QVERIFY(!svc.workRunning());
+        delete gone;
+        QTest::qWait(100);
+        QVERIFY(!toTheGone);
+
+        bool afterClose = false;
+        QObject alive;
+        svc.readAsync(&alive, read, [&afterClose](const std::string&) { afterClose = true; });
+        svc.closeRepository();
+        QTRY_VERIFY(!svc.workRunning());
+        QTest::qWait(100);
+        QVERIFY(!afterClose);
+
+        QVERIFY(svc.openRepository(repo->path()));
+        std::string workdir;
+        svc.readAsync(&alive, read, [&workdir](const std::string& w) { workdir = w; });
+        QTRY_VERIFY(!workdir.empty());
+    }
+
+    // A read stops once it is for nothing: its asker has moved on
+    // (`superseded`), the repository was closed or another opened, or
+    // the service is going. A commit's diff over a big tree (here 20,000
+    // files of 40 lines) went on to its end: the next read waited for it
+    // on the read thread, the close and the open on the repository's
+    // lock, and quitting in ~GitService. Now the next
+    // read's answer, the close, the open (an async one too, the pool's
+    // threads all taken by refreshes waiting behind the read) and the
+    // destructor come well before the whole diff would have been done,
+    // and the stopped read answers nothing.
+    void aReadStopsWhenItIsForNothing_data() {
+        QTest::addColumn<QString>("how");
+        QTest::newRow("superseded") << QStringLiteral("superseded");
+        QTest::newRow("closed") << QStringLiteral("closed");
+        QTest::newRow("another opened") << QStringLiteral("opened");
+        QTest::newRow("another opened async") << QStringLiteral("opened async");
+        QTest::newRow("destroyed") << QStringLiteral("destroyed");
+    }
+    void aReadStopsWhenItIsForNothing() {
+        QFETCH(QString, how);
+        gitbolt::test::TestRepo repo;
+        const auto wide = repo.commitWideTree(20000, QByteArray("a line\n").repeated(40));
+        auto other = repoWithCommits(1);
+        QVERIFY(other);
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(repo.repo().diffCommit(wide).ok());
+        const qint64 wholeMs = timer.elapsed();
+
+        auto svc = std::make_unique<GitService>();
+        QVERIFY(svc->openRepository(repo.path()));
+        QObject context;
+        std::atomic<bool> started{false};
+        bool answered = false;
+        auto superseded = std::make_shared<std::atomic<bool>>(false);
+        svc->readAsync(
+            &context,
+            [wide, &started](gitbolt::git::Repository& r, const std::function<bool()>& cancelled) {
+                started = true;
+                return r.diffCommit(wide, cancelled).ok();
+            },
+            [&answered](bool) { answered = true; },
+            [superseded] { return superseded->load(); });
+        QElapsedTimer waited;
+        waited.start();
+        while (!started && waited.elapsed() < 10000)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        QVERIFY(started);
+
+        timer.restart();
+        if (how == QLatin1String("superseded")) {
+            superseded->store(true);
+            std::string workdir;
+            svc->readAsync(
+                &context,
+                [](gitbolt::git::Repository& r, const std::function<bool()>&) {
+                    return r.workdir();
+                },
+                [&workdir](const std::string& w) { workdir = w; });
+            QVERIFY(QTest::qWaitFor([&] { return !workdir.empty(); }, 60000));
+        } else if (how == QLatin1String("closed")) {
+            svc->closeRepository();
+        } else if (how == QLatin1String("opened")) {
+            QVERIFY(svc->openRepository(other->path()));
+        } else if (how == QLatin1String("opened async")) {
+            // With refreshes asked for meanwhile, as the watcher does at
+            // each change in the work tree: more than the pool has
+            // threads, each waiting on the repository's lock behind the
+            // read. Stopped only where the open landed, the read ran to
+            // its end, the open's worker waiting for a thread meanwhile.
+            for (int i = 0; i < QThreadPool::globalInstance()->maxThreadCount() + 2; ++i)
+                svc->refreshStatus();
+            bool opened = false;
+            connect(svc.get(), &GitService::repositoryOpened, &context, [&opened] { opened = true; });
+            svc->openRepositoryAsync(other->path());
+            QVERIFY(QTest::qWaitFor([&] { return opened; }, 60000));
+        } else {
+            svc.reset();
+        }
+        const qint64 tookMs = timer.elapsed();
+        QVERIFY2(tookMs < wholeMs / 2,
+                 qPrintable(QStringLiteral("%1 ms, where the whole diff takes %2 ms")
+                                .arg(tookMs).arg(wholeMs)));
+        if (svc)
+            QTRY_VERIFY(!svc->workRunning());
+        QTest::qWait(100);
+        QVERIFY(!answered);
+    }
+
+    // -----------------------------------------------------------------
     // refreshStatus: a dirty working tree shows up in statusReady.
     // -----------------------------------------------------------------
     void refreshStatusReportsDirtyFile() {
@@ -810,6 +1116,100 @@ private slots:
         };
         QVERIFY2(QTest::qWaitFor(sawDirty, 5000),
                  "statusReady did not include the dirty file");
+    }
+
+    // -----------------------------------------------------------------
+    // refreshStatus where status can't be read (HEAD's tree nested
+    // deeper than the bundled libgit2 goes): an operationFailed("status",
+    // why) comes in place of statusReady, the repository's state behind
+    // it as ever. The failure was dropped, and the Commit dialog and the
+    // Commit count stayed as they were, as if nothing had changed.
+    // -----------------------------------------------------------------
+    void refreshStatusReportsWhyItFailed() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        GitService svc;
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy status(&svc, &GitService::statusReady);
+        MainThreadSpy states(&svc, &GitService::repoStateReady);
+        QVERIFY(svc.openRepository(repo.path()));
+        svc.refreshStatus();
+        QVERIFY(QTest::qWaitFor([&] { return failed.size() >= 2 && states.size() >= 2; }, 10000));
+        for (const QVariantList& args : failed) {
+            QCOMPARE(args.at(0).toString(), QStringLiteral("status"));
+            QVERIFY2(args.at(1).toString().contains(QLatin1String("tree too deep")),
+                     qPrintable(args.at(1).toString()));
+        }
+        QVERIFY(status.isEmpty());
+#endif
+    }
+
+    // A bare repository has no work tree, and libgit2 turns its status
+    // down: no failure, as that is all it ever does, but no changes.
+    // Passed on as one, it was said on the status bar at every open of
+    // a bare repository, in place of "Opened: …".
+    void aBareRepositorysStatusIsNoFailure() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString bare = scratch.filePath(QStringLiteral("bare.git"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"clone", "-q", "--bare", repo->path().toStdString(),
+                                    bare.toStdString()})));
+
+        GitService svc;
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy status(&svc, &GitService::statusReady);
+        MainThreadSpy states(&svc, &GitService::repoStateReady);
+        QVERIFY(svc.openRepository(bare));
+        svc.refreshStatus();
+        QVERIFY(QTest::qWaitFor([&] { return states.size() >= 2; }, 10000));
+        QVERIFY2(failed.isEmpty(), qPrintable(failed.value(0).value(1).toString()));
+        QCOMPARE(status.size(), 2);
+        for (const QVariantList& args : status)
+            QVERIFY(args.at(0).value<std::vector<gitbolt::git::StatusEntry>>().empty());
+    }
+
+    // The submodules where HEAD's tree is nested deeper than the bundled
+    // libgit2 goes (it reads all of it for them, with a .gitmodules): an
+    // operationFailed("submodules", why). The failure went unseen, and
+    // the sidebar listed no submodules, as if there were none.
+    void refreshSubmodulesReportsWhyItFailed() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral(".gitmodules"),
+                                    "[submodule \"s\"]\n\tpath = s\n\turl = ./\n",
+                                    QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        MainThreadSpy failed(&svc, &GitService::operationFailed);
+        MainThreadSpy listed(&svc, &GitService::submodulesReady);
+        svc.refreshSubmodules();
+        QVERIFY(QTest::qWaitFor([&] {
+            return std::any_of(failed.begin(), failed.end(), [](const QVariantList& args) {
+                return args.at(0).toString() == QLatin1String("submodules");
+            }) || !listed.isEmpty();
+        }, 10000));
+        QVERIFY(listed.isEmpty());
+        bool said = false;
+        for (const QVariantList& args : failed) {
+            if (args.at(0).toString() != QLatin1String("submodules"))
+                continue;
+            said = true;
+            QCOMPARE(args.at(1).toString(), QStringLiteral("tree too deep: more than 2048 levels"));
+        }
+        QVERIFY(said);
+#endif
     }
 
     // -----------------------------------------------------------------
@@ -1548,6 +1948,45 @@ private slots:
         QVERIFY(!work.resolveRef("refs/remotes/origin/feature").ok());
     }
 
+    // The toolbar's Push (no branch named) on a branch that shares its
+    // name with a tag. git's short name for HEAD is "heads/v1" then,
+    // which @{upstream} knows no branch by, and push made it
+    // refs/heads/heads/v1, which isn't there: neither the first push
+    // (a publish) nor a later one went through. Both do now.
+    void toolbarPushOfABranchATagSharesItsNamePublishesIt() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        auto& work = repo->repo();
+        auto head = work.head();
+        QVERIFY(head.ok());
+        QVERIFY(work.createBranch("v1", head.value()).ok());
+        QVERIFY(work.createLightweightTag("v1", head.value()).ok());
+        QVERIFY(work.checkout("v1").ok());
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        const auto lastFailure = [&failedSpy] {
+            return failedSpy.isEmpty() ? QStringLiteral("(none)")
+                                       : failedSpy.last().at(1).toString();
+        };
+
+        QVERIFY2(svc.push(QStringLiteral("origin"), QString()), qPrintable(lastFailure()));
+        QCOMPARE(tip(*origin, "refs/heads/v1"), tip(work, "HEAD"));
+        QCOMPARE(upstreamOf(work, "v1"), std::string("refs/remotes/origin/v1"));
+
+        QVERIFY(repo->writeAndCommit(QStringLiteral("more.txt"),
+                                     QByteArrayLiteral("more\n"),
+                                     QStringLiteral("more")).ok());
+        QVERIFY2(svc.push(QStringLiteral("origin"), QString()), qPrintable(lastFailure()));
+        QCOMPARE(tip(*origin, "refs/heads/v1"), tip(work, "HEAD"));
+        QCOMPARE(failedSpy.count(), 0);
+    }
+
     // A failed remote delete must surface as operationFailed under the
     // op name MainWindow keys its remote-op feedback on.
     void deleteRemoteBranchFailureIsReported() {
@@ -1609,6 +2048,71 @@ private slots:
         svc.closeRepository();
         QVERIFY(!svc.fetch());
         QVERIFY(!svc.checkoutBranch(QStringLiteral("other")));
+    }
+
+    // A branch named "-x" (git allows it, and a fetch keeps one a remote
+    // advertises as "origin/-x"): push's publish check gave it to
+    // rev-parse, and the push to git, which read it as an option. Push
+    // refuses it now before any git runs, as operationFailed under its
+    // own op name; so does the toolbar's Push (no branch named) with it
+    // checked out, and remote branch delete a remote of such a name.
+    // The server keeps it, until it is deleted there: after "--" the
+    // branch is push's refspec, and nothing else.
+    void remoteOpsRefuseANameGitWouldReadAsAnOption() {
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        QTemporaryDir originDir;
+        QVERIFY(originDir.isValid());
+        auto origin = addBareOrigin(*repo, originDir);
+        QVERIFY2(origin.ok(), origin ? "" : origin.error().message().c_str());
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"push", "-q", "origin", "HEAD:refs/heads/-x"})));
+        QVERIFY(succeeded(work.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        const std::string onServer = tip(*origin, "refs/heads/-x");
+
+        GitService svc;
+        QSignalSpy failedSpy(&svc, &GitService::operationFailed);
+        QVERIFY(svc.openRepository(repo->path()));
+        // Every git of the service's that got the name.
+        QStringList ran;
+        bool watching = false;
+        QObject context;
+        QObject::connect(&gitbolt::git::GitProcessLog::instance(),
+                         &gitbolt::git::GitProcessLog::commandLogged, &context,
+                         [&ran, &watching](const QString&, const QStringList& args, int, qint64) {
+            if (watching && std::any_of(args.begin(), args.end(), [](const QString& a) {
+                    return a.contains(QLatin1String("-x"));
+                }))
+                ran << args.join(QLatin1Char(' '));
+        });
+        const auto refusedAs = [&failedSpy](const QString& op) {
+            return !failedSpy.isEmpty() && failedSpy.last().at(0).toString() == op
+                && failedSpy.last().at(1).toString().contains(QStringLiteral("begins with '-'"));
+        };
+        const auto lastFailure = [&failedSpy] {
+            return failedSpy.isEmpty() ? QStringLiteral("(none)")
+                                       : failedSpy.last().at(1).toString();
+        };
+
+        watching = true;
+        QVERIFY(!svc.push(QStringLiteral("origin"), QStringLiteral("-x")));
+        QVERIFY2(refusedAs(QStringLiteral("push")), qPrintable(lastFailure()));
+        watching = false;
+        QVERIFY(succeeded(work.run({"symbolic-ref", "HEAD", "refs/heads/-x"})));
+        watching = true;
+        QVERIFY(!svc.push(QStringLiteral("origin"), QString()));
+        QVERIFY2(refusedAs(QStringLiteral("push")), qPrintable(lastFailure()));
+        QVERIFY(!svc.deleteRemoteBranch(QStringLiteral("-x"), QStringLiteral("main")));
+        QVERIFY2(refusedAs(QStringLiteral("delete remote branch")), qPrintable(lastFailure()));
+        watching = false;
+        QCOMPARE(failedSpy.count(), 3);
+        QVERIFY2(ran.isEmpty(), qPrintable(ran.join(QStringLiteral(" | "))));
+        QCOMPARE(tip(*origin, "refs/heads/-x"), onServer);
+
+        QVERIFY2(svc.deleteRemoteBranch(QStringLiteral("origin"), QStringLiteral("-x")),
+                 qPrintable(lastFailure()));
+        QVERIFY(!origin->resolveRef("refs/heads/-x").ok());
+        QCOMPARE(failedSpy.count(), 3);
     }
 
     // Fetch prunes: a branch deleted on the server (merged and deleted
@@ -4084,6 +4588,236 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+    }
+
+    // A conflict on a symbolic link, which git leaves in the work tree as
+    // one side's link: here HEAD's, pointing at a file outside the
+    // repository. The resolver wrote its result to the work tree's path,
+    // and so through the link into that file, and staging the path then
+    // kept the link: the file was overwritten and the resolution lost.
+    // The resolver is told the conflict is a link's (its sides' modes).
+    // Text that is neither side is refused now, changing nothing, and
+    // the side picked is staged and written as the link it is.
+    void resolvingALinkConflictNeverWritesThroughTheLink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath(QStringLiteral("MARKER"));
+        {
+            QFile file(marker);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("original marker\n");
+        }
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("b")));
+        QVERIFY(repo.commit(QStringLiteral("link to b")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), marker));
+        QVERIFY(repo.commit(QStringLiteral("link out")).ok());
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        const QString link = QDir(repo.path()).filePath(QStringLiteral("link"));
+        QCOMPARE(linkTarget(link), marker);
+
+        GitService svc;
+        SignalLog log(svc);
+        QObject receiver;
+        std::vector<gitbolt::git::MergeConflictEntry> conflicts;
+        QObject::connect(&svc, &GitService::conflictsReady, &receiver,
+                         [&](std::vector<gitbolt::git::MergeConflictEntry> entries) {
+            conflicts = std::move(entries);
+        });
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.refreshConflicts();
+        QVERIFY(QTest::qWaitFor([&] { return !conflicts.empty(); }, 10000));
+        QCOMPARE(conflicts.size(), size_t(1));
+        QVERIFY(conflicts[0].isSymlink());
+        QCOMPARE(conflicts[0].oursMode, 0120000u);
+        QCOMPARE(conflicts[0].theirsMode, 0120000u);
+        QCOMPARE(QString::fromStdString(conflicts[0].oursContent), marker);
+        QCOMPARE(QString::fromStdString(conflicts[0].theirsContent), QStringLiteral("b"));
+
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), QStringLiteral("edited\n")}}));
+        QVERIFY2(log.contains(QStringLiteral(
+                     "operationFailed(resolve conflicts: link is a symbolic link: "
+                     "accept Ours or Theirs for it, as they are.)")),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(linkTarget(link), marker);
+        QCOMPARE(output(work.run({"ls-files", "-u", "--", "link"})).count(QLatin1Char('\n')), 2);
+
+        // Accept Theirs.
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), QStringLiteral("b")}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink")
+                     .arg(output(work.run({"rev-parse", "side:link"}))));
+        QCOMPARE(linkTarget(link), QStringLiteral("b"));
+        QCOMPARE(output(work.run({"status", "--porcelain", "--", "link"})),
+                 QStringLiteral("M  link"));
+#endif
+    }
+
+    // The same in a rebase, which leaves the upstream's link (ours: the
+    // commit the rebase builds on) in the work tree. Mark All Resolved
+    // takes ours for a conflict nobody looked at: it is staged as the
+    // link it is, and the file it points to stays as it was.
+    void resolvingALinkConflictInARebaseKeepsOursAsALink() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString marker = outside.filePath(QStringLiteral("MARKER"));
+        {
+            QFile file(marker);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("original marker\n");
+        }
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        const QString upstream = output(work.run({"branch", "--show-current"}));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "topic"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("b")));
+        QVERIFY(repo.commit(QStringLiteral("link to b")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", upstream.toStdString()})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), marker));
+        QVERIFY(repo.commit(QStringLiteral("link out")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "topic"})));
+        QVERIFY(!succeeded(work.run({"rebase", upstream.toStdString()})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Rebase);
+        const QString link = QDir(repo.path()).filePath(QStringLiteral("link"));
+        QCOMPARE(linkTarget(link), marker);
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        QVERIFY(svc.resolveConflicts({{QStringLiteral("link"), marker}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(fileBytes(marker), QByteArrayLiteral("original marker\n"));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink")
+                     .arg(output(work.run({"rev-parse", "HEAD:link"}))));
+        QCOMPARE(linkTarget(link), marker);
+        QCOMPARE(output(work.run({"status", "--porcelain", "--", "link"})), QString());
+#endif
+    }
+
+    // Accept Theirs on a link whose target has a no-break space: the
+    // resolver's editor gives it back as a space, and that text, all the
+    // resolver handed over, was neither side's, so the link could not be
+    // resolved ("accept Ours or Theirs for it"). The side accepted goes
+    // with the text now, and is staged as it is.
+    void resolvingALinkConflictStagesTheSideAccepted() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a shortcut on Windows, not a link");
+#else
+        const IsolatedGitConfig config;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        const QString target = QString::fromUtf8("x\xc2\xa0y");
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("a")));
+        QVERIFY(repo.commit(QStringLiteral("link to a")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), target));
+        QVERIFY(repo.commit(QStringLiteral("link to x y")).ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(stageLink(repo, QStringLiteral("link"), QStringLiteral("z")));
+        QVERIFY(repo.commit(QStringLiteral("link to z")).ok());
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        const QString theirs = output(work.run({"rev-parse", "side:link"}));
+        QVERIFY(svc.resolveConflicts(
+            {{QStringLiteral("link"), QStringLiteral("x y"),
+              gitbolt::git::AcceptedSide{gitbolt::git::ConflictSide::Theirs,
+                                         gitbolt::git::ObjectId::fromHex(theirs.toStdString()),
+                                         0120000}}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(output(work.run({"ls-files", "-s", "--", "link"})),
+                 QStringLiteral("120000 %1 0\tlink").arg(theirs));
+        QCOMPARE(linkTarget(QDir(repo.path()).filePath(QStringLiteral("link"))), target);
+#endif
+    }
+
+    // A text conflict resolves as it always has: the result is the work
+    // tree's file and the index's, the conflict is gone (kept for
+    // resolve-undo, as `git add` keeps it), and an executable is still
+    // one. Each is now staged first and then written from the index.
+    void resolvingATextConflictWritesAndStagesTheResult() {
+        const IsolatedGitConfig config;
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess work(repo.path().toStdString());
+        // Git for Windows' system config has core.autocrlf on, and the
+        // checks compare bytes.
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        const auto commitBoth = [&](const QByteArray& text, const QString& message) {
+            repo.writeFile(QStringLiteral("a.txt"), text + '\n');
+            repo.writeFile(QStringLiteral("run.sh"), "#!/bin/sh\necho " + text + '\n');
+            // Executable in the work tree, and in the index where git
+            // ignores the work tree's modes (core.fileMode off, Windows).
+            return QFile::setPermissions(repo.path() + QStringLiteral("/run.sh"),
+                                         QFile::permissions(repo.path() + QStringLiteral("/run.sh"))
+                                             | QFile::ExeOwner)
+                && succeeded(work.run({"add", "a.txt", "run.sh"}))
+                && succeeded(work.run({"update-index", "--chmod=+x", "run.sh"}))
+                && repo.commit(message).ok();
+        };
+        QVERIFY(commitBoth("base", QStringLiteral("base")));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        QVERIFY(commitBoth("side", QStringLiteral("side")));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        QVERIFY(commitBoth("main", QStringLiteral("main")));
+        QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        QCOMPARE(output(work.run({"diff", "--name-only", "--diff-filter=U"})),
+                 QStringLiteral("a.txt\nrun.sh"));
+
+        GitService svc;
+        SignalLog log(svc);
+        QVERIFY(svc.openRepository(repo.path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        QVERIFY(svc.resolveConflicts(
+            {{QStringLiteral("a.txt"), QStringLiteral("resolved\n")},
+             {QStringLiteral("run.sh"), QStringLiteral("#!/bin/sh\necho resolved\n")}}));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+
+        QCOMPARE(fileBytes(repo.path() + QStringLiteral("/a.txt")), QByteArrayLiteral("resolved\n"));
+        QCOMPARE(fileBytes(repo.path() + QStringLiteral("/run.sh")),
+                 QByteArrayLiteral("#!/bin/sh\necho resolved\n"));
+        QCOMPARE(output(work.run({"show", ":a.txt"})), QStringLiteral("resolved"));
+        QCOMPARE(output(work.run({"show", ":run.sh"})), QStringLiteral("#!/bin/sh\necho resolved"));
+        QCOMPARE(output(work.run({"ls-files", "-u"})), QString());
+        const QStringList staged = output(work.run({"ls-files", "-s", "--", "a.txt", "run.sh"}))
+                                       .split(QLatin1Char('\n'));
+        QCOMPARE(staged.size(), 2);
+        QVERIFY2(staged[0].startsWith(QLatin1String("100644 ")), qPrintable(staged[0]));
+        QVERIFY2(staged[1].startsWith(QLatin1String("100755 ")), qPrintable(staged[1]));
+        // Staged, and the work tree the same.
+        QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("M  a.txt\nM  run.sh"));
+        QVERIFY(!output(work.run({"ls-files", "--resolve-undo"})).isEmpty());
+#ifndef Q_OS_WIN
+        QVERIFY(QFileInfo(repo.path() + QStringLiteral("/run.sh")).isExecutable());
+#endif
     }
 
     // The cherry-pick worker asks for its refreshes while it still

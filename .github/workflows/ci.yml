@@ -261,11 +261,10 @@ jobs:
       # a cold launch, a running GitBolt, a second launch's hand-off and
       # Finder's service provider. It registers the build's GitBolt.app
       # with LaunchServices, which only this throwaway runner may have
-      # done; ctest skips it everywhere else. Not gating until it has
-      # proven stable on the hosted runners.
+      # done; ctest skips it everywhere else. Gating since every run from
+      # PR #44 to the 0.9.7 release passed it.
       - name: LaunchServices open (macOS)
         if: runner.os == 'macOS'
-        continue-on-error: true
         timeout-minutes: 5
         env:
           GITBOLT_E2E_LAUNCHSERVICES: '1'

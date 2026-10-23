@@ -4,6 +4,7 @@
 #include <QList>
 #include <QObject>
 #include <QThread>
+#include <QThreadPool>
 #include <QtConcurrent>
 
 #include <algorithm>
@@ -14,7 +15,8 @@
 
 namespace gitbolt::util {
 
-/// Submits work to the global thread pool. run() is fire-and-forget;
+/// Submits work to a thread pool (the global one unless the constructor
+/// is given another). run() is fire-and-forget;
 /// runWithResult() hands the result back on this object's thread via
 /// QFutureWatcher.
 ///
@@ -59,7 +61,9 @@ namespace gitbolt::util {
 class AsyncRunner : public QObject {
     Q_OBJECT
 public:
-    explicit AsyncRunner(QObject* parent = nullptr);
+    /// The jobs run on `pool`, the global thread pool when it is null.
+    /// A pool of the owner's must outlive the runner: declare it before.
+    explicit AsyncRunner(QObject* parent = nullptr, QThreadPool* pool = nullptr);
 
     ~AsyncRunner() override {
         // Refuse new work, drop queued jobs, then wait for the running
@@ -93,7 +97,7 @@ public:
         pruneFinished();
         // No watcher: nothing happens on completion, and the drain
         // list alone is what the destructor waits on.
-        futures_.append(QtConcurrent::run(
+        futures_.append(QtConcurrent::run(pool_,
             [fn = std::forward<Func>(func)]() mutable {
                 try {
                     fn();
@@ -129,7 +133,7 @@ public:
         // QFuture<void> and joins the same drain list, and (b) a
         // worker exception can't re-throw into the event loop.
         auto slot = std::make_shared<std::optional<T>>();
-        auto fut = QtConcurrent::run(
+        auto fut = QtConcurrent::run(pool_,
             [fn = std::forward<Func>(func), slot]() mutable {
                 try {
                     slot->emplace(fn());
@@ -175,6 +179,7 @@ private:
             [](const QFuture<void>& f) { return f.isFinished(); });
     }
 
+    QThreadPool* const pool_;
     // Both touched only on this object's thread (guarantee 3).
     QList<QFuture<void>> futures_;
     bool closing_ = false;

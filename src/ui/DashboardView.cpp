@@ -2,6 +2,8 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "services/RecentRepoProbe.h"
+#include "util/MessageText.h"
+#include "util/ToolTip.h"
 #include "widgets/BoltLogoWidget.h"
 
 #include <QApplication>
@@ -503,8 +505,10 @@ void DashboardView::refreshRecentList()
         // Stash the canonical path on column 0 so itemActivated can
         // retrieve it regardless of which column the user clicked in.
         item->setData(0, Qt::UserRole, path);
+        // A path's folder names can be anything, markup included.
+        const QString tip = util::plainToolTip(path);
         for (int c = 0; c < recentList_->columnCount(); ++c)
-            item->setToolTip(c, path);
+            item->setToolTip(c, tip);
 
         probeAndPopulate(path);
     }
@@ -554,13 +558,20 @@ void DashboardView::probeAndPopulate(const QString& path)
         // Column 2: Status (dirty count). Blank when clean keeps the
         // common case visually quiet; a leading bullet flags the
         // presence of uncommitted work at a glance.
-        if (!info.valid)
+        if (!info.valid) {
             target->setText(2, QStringLiteral("—"));
-        else if (info.dirtyCount == 0)
+        } else if (!info.statusError.isEmpty()) {
+            // Not known, rather than blank, which reads as clean; why,
+            // in libgit2's words, on hover.
+            target->setText(2, QStringLiteral("—"));
+            target->setToolTip(2, util::plainToolTip(
+                tr("Status couldn't be read: %1").arg(util::elided(info.statusError))));
+        } else if (info.dirtyCount == 0) {
             target->setText(2, QString{});
-        else
+        } else {
             target->setText(2, QString::fromUtf8("\xE2\x97\x8F ") +     // "● "
                                    QString::number(info.dirtyCount));
+        }
 
         // Column 3: ahead/behind. No upstream → em-dash; with upstream
         // but zero drift → "=" (in-sync). Otherwise "↑N ↓M", omitting

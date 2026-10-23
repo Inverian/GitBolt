@@ -190,6 +190,8 @@ void DiffViewerWidget::setupUi()
 
     fileLabel_ = new QLabel(this);
     fileLabel_->setObjectName(QStringLiteral("diff.fileLabel"));
+    // The file's path in the repository, which can hold markup.
+    fileLabel_->setTextFormat(Qt::PlainText);
     toolbar_->addWidget(fileLabel_);   // styled by applyColors()
 
     layout->addWidget(toolbar_);

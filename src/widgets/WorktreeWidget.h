@@ -65,10 +65,13 @@ public:
 
 signals:
     void addRequested();
-    void removeRequested(const QString& name);
+    /// `path` is the worktree's folder, as the table shows it: what
+    /// the confirmation names, and what is deleted.
+    void removeRequested(const QString& name, const QString& path);
     void lockRequested(const QString& name);
     void unlockRequested(const QString& name);
     void openRequested(const QString& path);
+    void revealRequested(const QString& path);
 
 private slots:
     void onContextMenu(const QPoint& pos);

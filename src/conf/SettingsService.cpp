@@ -9,6 +9,10 @@
 #include <QShortcut>
 #include <QUuid>
 
+#ifdef Q_OS_WIN
+#include <filesystem>
+#endif
+
 namespace gitbolt::conf {
 
 SettingsService::SettingsService(QObject* parent)
@@ -60,13 +64,60 @@ static QString canonicalizeRepoPath(const QString& path)
 void SettingsService::addRecentRepository(const QString& path)
 {
     const QString canonical = canonicalizeRepoPath(path);
+    // The folder itself, symbolic links resolved: the same repository
+    // reached through two spellings (macOS's /tmp and /private/tmp, a
+    // linked folder) was listed twice. Only this path is looked at on
+    // disk, the one just opened; the others' resolved paths were kept
+    // when they were added, so a folder on a share that has gone away
+    // can't hold the window up.
+#ifdef Q_OS_WIN
+    // canonicalFilePath() there follows symbolic links alone: an 8.3
+    // short name (C:\Users\RUNNER~1, from %TEMP%), a subst or mapped
+    // drive and a junction stayed as they were spelled, each a second
+    // entry. The system's final path (std::filesystem::canonical) has
+    // them all resolved, as Repository's realPath() does.
+    std::error_code error;
+    const std::filesystem::path real =
+        std::filesystem::canonical(canonical.toStdWString(), error);
+    QString resolvedNow = error ? QString() : QString::fromStdWString(real.wstring());
+    if (resolvedNow.isEmpty())
+        resolvedNow = QFileInfo(canonical).canonicalFilePath();
+#else
+    const QString resolvedNow = QFileInfo(canonical).canonicalFilePath();
+#endif
+    const QString resolved =
+        resolvedNow.isEmpty() ? canonical : QDir::toNativeSeparators(resolvedNow);
+    QVariantMap resolvedMap = settings_
+        .value(QStringLiteral("recent/resolved")).toMap();
+    // Windows' file names are case-blind ("c:\src\repo", typed, and
+    // Explorer's "C:\src\Repo" are one folder), and an entry, or a
+    // resolved path kept from before, has the case it was opened by.
+    // macOS's canonicalFilePath() gives the case on disk, so a
+    // case-blind volume's spellings match already, and on a
+    // case-sensitive one they are two folders.
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity pathCase = Qt::CaseSensitive;
+#endif
     QStringList list = recentRepositories();
-    list.removeAll(canonical);
+    list.removeIf([&](const QString& entry) {
+        return entry.compare(canonical, pathCase) == 0
+               || resolvedMap.value(entry).toString().compare(resolved, pathCase) == 0;
+    });
     list.prepend(canonical);
     const int cap = maxRecentRepositories();
     while (list.size() > cap)
         list.removeLast();
     settings_.setValue(QStringLiteral("recent/repositories"), list);
+    resolvedMap[canonical] = resolved;
+    for (auto it = resolvedMap.begin(); it != resolvedMap.end();) {
+        if (!list.contains(it.key()))
+            it = resolvedMap.erase(it);
+        else
+            ++it;
+    }
+    settings_.setValue(QStringLiteral("recent/resolved"), resolvedMap);
 
     // Record the access timestamp alongside the path list. We persist
     // the map as a QVariantMap of ISO-8601 strings — QSettings writes
@@ -101,6 +152,10 @@ void SettingsService::removeRecentRepository(const QString& path)
             .value(QStringLiteral("recent/accessedAt")).toMap();
         if (accessMap.remove(canonical) > 0)
             settings_.setValue(QStringLiteral("recent/accessedAt"), accessMap);
+        QVariantMap resolvedMap = settings_
+            .value(QStringLiteral("recent/resolved")).toMap();
+        if (resolvedMap.remove(canonical) > 0)
+            settings_.setValue(QStringLiteral("recent/resolved"), resolvedMap);
         notifyChanged();
     }
 }
@@ -109,6 +164,7 @@ void SettingsService::clearRecentRepositories()
 {
     settings_.remove(QStringLiteral("recent/repositories"));
     settings_.remove(QStringLiteral("recent/accessedAt"));
+    settings_.remove(QStringLiteral("recent/resolved"));
     notifyChanged();
 }
 

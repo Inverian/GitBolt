@@ -1,5 +1,8 @@
 #include "widgets/InteractiveRebaseWidget.h"
 
+#include "util/ToolTip.h"
+#include "util/MessageText.h"
+
 #include <QApplication>
 #include <QDialogButtonBox>
 #include <QDrag>
@@ -36,10 +39,13 @@ QVariant RebaseListModel::data(const QModelIndex& index, int role) const {
 
     // row >= 0 checked above.
     const auto& op = ops_[static_cast<size_t>(row)];
-    // A reworded commit shows the subject it is getting.
+    // A reworded commit shows the subject it is getting. At most
+    // util::kMaxLineChars of it: the delegate measures the whole text
+    // to elide it, on every paint, and a subject of one line of
+    // megabytes stalled the list.
     const bool reworded = op.type == git::RebaseOperationType::Reword && !op.newMessage.empty();
-    const QString subject =
-        QString::fromStdString(reworded ? op.newMessage : op.message).section('\n', 0, 0);
+    const std::string_view message = reworded ? op.newMessage : op.message;
+    const QString subject = util::elided(message.substr(0, message.find('\n')));
 
     switch (role) {
     case Qt::DisplayRole:
@@ -52,8 +58,11 @@ QVariant RebaseListModel::data(const QModelIndex& index, int role) const {
         case git::RebaseOperationType::Pick:
             return tr("Keep this commit as it is.");
         case git::RebaseOperationType::Reword:
-            return tr("Keep the changes, with a new message:\n\n%1")
-                .arg(QString::fromStdString(op.newMessage).trimmed());
+            // The new message starts as the commit's own, anyone's to
+            // write: plain text, whichever line comes first. (The other
+            // tips are GitBolt's.)
+            return util::plainToolTip(tr("Keep the changes, with a new message:\n\n%1")
+                                          .arg(util::elidedText(op.newMessage).trimmed()));
         case git::RebaseOperationType::Edit:
             return tr("Stop the rebase after this commit, to amend it or add commits; "
                       "then Continue.");
@@ -468,7 +477,8 @@ QString InteractiveRebaseWidget::planProblem() const {
             if (!kept)
                 return tr("\"%1\" can't be squashed or fixed up: no commit below it is kept "
                           "for it to go into.")
-                    .arg(QString::fromStdString(op->message).section(QLatin1Char('\n'), 0, 0));
+                    .arg(util::elided(std::string_view(op->message).substr(
+                        0, op->message.find('\n'))));
             break;
         case git::RebaseOperationType::Pick:
         case git::RebaseOperationType::Reword:
@@ -498,14 +508,25 @@ void InteractiveRebaseWidget::applyToSelected(git::RebaseOperationType type) {
     const auto& op = model_->operations()[static_cast<size_t>(row)];
     const QString original = QString::fromStdString(op.message).trimmed();
     const bool reworded = op.type == git::RebaseOperationType::Reword;
+    const QString current = op.newMessage.empty()
+        ? original : QString::fromStdString(op.newMessage).trimmed();
+    // The editor gets at most util::elidedText of it: laying out a
+    // message of one line of megabytes froze the window. Such a one,
+    // handed back untouched, leaves the commit as it was.
+    const QString shown = util::elidedText(current);
 
     QInputDialog prompt(this);
     prompt.setWindowTitle(tr("Reword Commit"));
-    prompt.setLabelText(
-        tr("New message for %1:").arg(QString::fromStdString(op.commitId.toShortHex())));
+    QString label =
+        tr("New message for %1:").arg(QString::fromStdString(op.commitId.toShortHex()));
+    if (shown != current) {
+        label += QLatin1Char('\n')
+                 + tr("This message is %L1 characters long: only part of it is shown. "
+                      "Left as it is, it stays as it was.").arg(current.size());
+    }
+    prompt.setLabelText(label);
     prompt.setOption(QInputDialog::UsePlainTextEditForTextInput);
-    prompt.setTextValue(op.newMessage.empty() ? original
-                                              : QString::fromStdString(op.newMessage).trimmed());
+    prompt.setTextValue(shown);
     // git makes no commit with an empty message: it stops the rebase
     // instead. So OK waits for some text. (The prompt builds its
     // buttons when it is shown, before anyone can type.)
@@ -517,6 +538,8 @@ void InteractiveRebaseWidget::applyToSelected(git::RebaseOperationType type) {
         return;
     const QString text = prompt.textValue().trimmed();
     if (text.isEmpty())
+        return;
+    if (shown != current && text == shown.trimmed())
         return;
     if (text != original)
         model_->setNewMessage(row, text.toStdString() + "\n");

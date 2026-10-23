@@ -101,6 +101,11 @@ public:
 
     /// True until the child exits.
     bool isRunning() const;
+    /// Whether a process the child started still runs a console
+    /// program: one cmd runs and waits for, say. A program with windows
+    /// of its own (Notepad), which cmd starts and leaves to run, doesn't
+    /// count.
+    bool hasConsoleChild() const;
     unsigned long processId() const;
     const std::wstring& errorString() const { return error_; }
 

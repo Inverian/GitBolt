@@ -1,5 +1,7 @@
 #include "ui/InlineOpIndicator.h"
 
+#include "util/ToolTip.h"
+
 #include <QApplication>
 #include <QEvent>
 #include <QPalette>
@@ -22,8 +24,16 @@ constexpr int kMaxTextWidth = 360;
 InlineOpIndicator::InlineOpIndicator(QLabel* label, QObject* parent)
     : QObject(parent), label_(label)
 {
-    if (label_)
+    if (label_) {
         label_->installEventFilter(this);
+        // What it says is mostly git's: a failure's first line of
+        // stderr, which a server can write ("remote: …"), or a branch
+        // name. A QLabel renders a first line with a tag in it as rich
+        // text, so a server's "<font color=…>" coloured a failure
+        // green. (Plain, the eliding in setText() is exact too: it cut
+        // through the markup, and a cut tag showed or vanished.)
+        label_->setTextFormat(Qt::PlainText);
+    }
 }
 
 void InlineOpIndicator::start(const QString& msg)
@@ -118,9 +128,10 @@ void InlineOpIndicator::setText(const QString& text, const QString& tooltip)
     const QString shown = label_->fontMetrics().elidedText(
         text, Qt::ElideRight, kMaxTextWidth);
     label_->setText(shown);
-    label_->setToolTip(!tooltip.isEmpty() ? tooltip
-                       : shown != text   ? text
-                                         : QString());
+    // The tooltip is git's whole message: plain text too.
+    label_->setToolTip(util::plainToolTip(!tooltip.isEmpty() ? tooltip
+                                          : shown != text   ? text
+                                                            : QString()));
 }
 
 void InlineOpIndicator::cancelPendingClear()

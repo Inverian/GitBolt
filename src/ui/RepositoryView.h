@@ -8,6 +8,8 @@
 #include <QSet>
 #include <QString>
 #include <QWidget>
+#include <atomic>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -19,8 +21,10 @@ class QSplitter;
 class QStandardItemModel;
 class QTabWidget;
 class QTextBrowser;
+class QTimer;
 class QTreeView;
 class QShowEvent;
+class QUrl;
 
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
@@ -75,9 +79,10 @@ public:
     widgets::RepoOperationBar*    operationBar()  const;
 
     /// Tell the embedded terminal which directory to start in
-    /// (or `cd` to if it's already running). Called by MainWindow
+    /// (or `cd` to if it's already running), and a bare repository's
+    /// GIT_DIR (TerminalWidget::changeRepository). Called by MainWindow
     /// whenever a repository is opened.
-    void setRepositoryPath(const QString& path);
+    void setRepositoryPath(const QString& path, const QString& bareGitDir = {});
 
     /// Clear all inspector-tab content and reset to the Commit tab.
     /// Called by MainWindow when switching repositories so stale
@@ -115,6 +120,11 @@ private slots:
     void showFileHistory(const QString& path);
     void showBlameForFile(const QString& path);
 
+    /// A link clicked in the Commit tab: a Parent / Child hash selects
+    /// that commit, an email opens the mail app; nothing else is
+    /// followed.
+    void openCommitLink(const QUrl& url);
+
 protected:
     void showEvent(QShowEvent* e) override;
     void changeEvent(QEvent* e) override;
@@ -124,6 +134,53 @@ private:
     // a reply older than the latest request is dropped instead of
     // overwriting the newer commit's details.
     quint64 containsQueryToken_ = 0;
+
+    // The selected commit's diff is read on a worker (GitService::
+    // readAsync): Repository::diffCommit walks the whole tree of a root
+    // commit, and here on the GUI thread a commit with a huge or deeply
+    // nested tree froze the window, for minutes. It fills the Stats row
+    // and the Diff tab when it lands. Monotonic like the token above,
+    // and shared with the worker: a reply for an earlier selection is
+    // dropped, and a read the selection has left behind stops where it
+    // is, or doesn't run at all if its turn hadn't come.
+    std::shared_ptr<std::atomic<quint64>> diffQueryToken_ =
+        std::make_shared<std::atomic<quint64>>(0);
+
+    // A commit's Stats row, once its diff is in (ok false: it couldn't
+    // be read, and the row says why, `error`, in place of the numbers).
+    struct DiffStats {
+        git::ObjectId commit;
+        bool ok = false;
+        QString error;
+        size_t files = 0;
+        size_t additions = 0;
+        size_t deletions = 0;
+    };
+    // The Stats of the latest diff in, to render the commit again with
+    // (a theme switch) without asking for it again.
+    std::optional<DiffStats> shownStats_;
+    // Until the selected commit's diff is in, the Diff tab keeps the
+    // previous commit's files and the Stats row is blank, so a diff in
+    // within milliseconds, as most are, shows in one change. Emptied at
+    // once, the tab and the row painted an empty or "(counting…)" state
+    // on every selection, and flickered as the user arrowed through the
+    // log. (The row doesn't keep the previous commit's numbers: beside
+    // this one's details they would read as its own.) That lasts
+    // kDiffLoadingDelayMs at most, counted from the first selection
+    // whose diff is still out, so arrowing on through slow ones can't
+    // keep one commit's files up for another: then the tab is emptied
+    // and the row says "(counting…)" (showDiffLoading), and diffLoading_
+    // stays set, for the commits selected meanwhile too, until a diff
+    // comes in.
+    QTimer* diffLoadingTimer_ = nullptr;
+    bool diffLoading_ = false;
+
+    // The avatar's colour for the commit on show (showCommitDetails),
+    // from the author's email as shown: util::kMaxLineChars of it at
+    // most. fitCommitInfoTopRow, which runs on every re-wrap, hashed
+    // the whole email, and an email of tens of MB (git takes one) cost
+    // a decode and a hash of all of it each time the window resized.
+    QString avatarColor_;
 
     // The files whose history showFileHistory is loading.
     QSet<QString> historyLoading_;
@@ -143,7 +200,22 @@ private:
     QWidget* buildGpgTab();
     QWidget* buildConsoleTab();
     void showCommitDetails(const git::CommitData& commit);
+    /// Sizes the Commit tab's top row and avatar to the metadata as
+    /// laid out; again whenever its laid-out size changes.
+    void fitCommitInfoTopRow();
     void showCommitDiff(const git::ObjectId& commitId);
+    /// The diff of `commitId` is in (null: it couldn't be read, `error`
+    /// says why): its Stats row.
+    void showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff,
+                       const QString& error = {});
+    void showDiffFiles(std::shared_ptr<git::DiffResult> diff);
+    void clearDiffFiles();
+    /// The selected commit's diff isn't in after kDiffLoadingDelayMs.
+    void showDiffLoading();
+    /// Writes the Commit tab's Stats value over in place, in the colours
+    /// of the theme in effect: `stats`'s numbers, or why its diff
+    /// couldn't be read, or "(counting…)" without.
+    void setStatsRow(const DiffStats* stats);
 
     // Services
     services::GitService*    gitService_  = nullptr;
@@ -167,6 +239,7 @@ private:
 
     // Diff tab
     QLineEdit*                    diffFilterInput_   = nullptr;
+    QLabel*                       diffFailure_       = nullptr;
     QTreeView*                    changedFilesTree_  = nullptr;
     QStandardItemModel*           changedFilesModel_ = nullptr;
     QSortFilterProxyModel*        changedFilesProxy_ = nullptr;

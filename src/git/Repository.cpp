@@ -6,7 +6,12 @@
 #include <QString>
 #include <git2.h>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <initializer_list>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -40,6 +45,31 @@ std::string libgit2Features() {
 
 
 namespace {
+
+// merge.conflictstyle or merge.default given as a name with no value
+// (`conflictstyle` alone, which git reads as "true"): libgit2 used the
+// missing value as a string, and every checkout (conflictstyle) or
+// cherry-pick (default) crashed. The bundled libgit2 now fails there as
+// git does, but only after stash save has written the stash, or
+// worktree add the worktree's folder, and a system libgit2 still
+// crashes. Refused here first, before anything is written.
+Result<void> refuseValueless(git_repository* repo, std::initializer_list<const char*> names) {
+    git_config* cfg = nullptr;
+    if (git_repository_config_snapshot(&cfg, repo) < 0)
+        return Result<void>::success();   // the operation itself says what is wrong
+    const auto release = qScopeGuard([cfg] { git_config_free(cfg); });
+    for (const char* name : names) {
+        git_config_entry* entry = nullptr;
+        if (git_config_get_entry(&entry, cfg, name) < 0)
+            continue;
+        const bool missing = entry->value == nullptr;
+        git_config_entry_free(entry);
+        if (missing)
+            return GitError(GitErrorCode::GenericError,
+                            std::string("missing value for '") + name + "'");
+    }
+    return Result<void>::success();
+}
 // libgit2 lifecycle owner.
 //
 // The GitBolt application ALSO calls git_libgit2_init/shutdown from
@@ -102,17 +132,52 @@ constexpr Qt::CaseSensitivity kPathCase = Qt::CaseInsensitive;
 constexpr Qt::CaseSensitivity kPathCase = Qt::CaseSensitive;
 #endif
 
+// `path` with every link on the way resolved, as git resolves it, or
+// empty if it isn't there. On Windows canonicalFilePath() follows
+// symbolic links alone, and keeps a subst or mapped drive and a
+// junction as they are spelled; git for Windows asks the system for
+// the file's final path, which takes a subst drive to its folder, a
+// mapped one to //server/share and a junction to its target, and so
+// does std::filesystem::canonical there. A worktree git made names its
+// repository by that path, however the repository was opened.
+QString realPath(const QString& path) {
+#ifdef Q_OS_WIN
+    std::error_code error;
+    const std::filesystem::path real = std::filesystem::canonical(path.toStdWString(), error);
+    return error ? QString() : QString::fromStdWString(real.generic_wstring());
+#else
+    return QFileInfo(path).canonicalFilePath();
+#endif
+}
+
 // `path` is `ceiling`, or a folder above it. libgit2 applies a ceiling
 // only to a search that starts below it: from $HOME itself it would
-// search on up, past the ceiling.
+// search on up, past the ceiling. On Windows it is enough that either
+// spelling says so: as written, as libgit2 compares them there (it
+// follows no junction or subst drive) and as Remove deletes a folder,
+// or as the system resolves them (realPath()). As written, C:\Users
+// holds a home folder that is a junction to D:\Users\me, and libgit2
+// searched on from C:\Users to C:\; resolved, S:\me is the home folder
+// itself where S: is a subst drive of C:\Users, and libgit2 searched
+// S:\, which is C:\Users.
 bool atOrAbove(const std::string& path, const std::string& ceiling) {
-    const QString p = QFileInfo(QString::fromStdString(path)).canonicalFilePath();
-    const QString c = QFileInfo(QString::fromStdString(ceiling)).canonicalFilePath();
-    if (p.isEmpty() || c.isEmpty())
-        return false;
-    if (c.compare(p, kPathCase) == 0)
+    const auto holds = [](const QString& p, const QString& c) {
+        if (p.isEmpty() || c.isEmpty())
+            return false;
+        if (c.compare(p, kPathCase) == 0)
+            return true;
+        return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+    };
+    const QString p = QString::fromStdString(path);
+    const QString c = QString::fromStdString(ceiling);
+#ifdef Q_OS_WIN
+    const auto asWritten = [](const QString& x) {
+        return QDir::cleanPath(QFileInfo(x).absoluteFilePath());
+    };
+    if (holds(asWritten(p), asWritten(c)))
         return true;
-    return c.startsWith(p.endsWith(QLatin1Char('/')) ? p : p + QLatin1Char('/'), kPathCase);
+#endif
+    return holds(realPath(p), realPath(c));
 }
 
 // The folder `found`, as `path` spells it: the nearest of `path`'s own
@@ -328,13 +393,31 @@ static DiffStatus convertDeltaStatus(git_delta_t status) {
     }
 }
 
-// Helper to load hunks and lines from a diff
-static DiffResult loadDiffResult(git_diff* diff) {
+// What a read that `cancelled` stopped fails with (diffCommit,
+// walkTreeAtCommit), as a git command cancelled does (GitProcess).
+static GitError cancelledRead() {
+    return GitError(GitErrorCode::User, "Cancelled");
+}
+
+// libgit2's progress callback for a diff (diffCommit): asked at each
+// entry of the trees, and a non-zero answer stops the diff.
+static int diffCancelCheck(const git_diff*, const char*, const char*, void* payload) {
+    const auto& cancelled = *static_cast<const std::function<bool()>*>(payload);
+    return cancelled() ? GIT_EUSER : 0;
+}
+
+// Helper to load hunks and lines from a diff. Each file's patch is read
+// and diffed here, the costly part of a big diff: `cancelled`, when
+// given, is asked before each.
+static Result<DiffResult> loadDiffResult(git_diff* diff,
+                                         const std::function<bool()>& cancelled = {}) {
     DiffResult result;
     size_t numDeltas = git_diff_num_deltas(diff);
     result.files.reserve(numDeltas);
 
     for (size_t i = 0; i < numDeltas; ++i) {
+        if (cancelled && cancelled())
+            return cancelledRead();
         const git_diff_delta* delta = git_diff_get_delta(diff, i);
         DiffFileEntry entry;
         entry.oldPath = delta->old_file.path ? delta->old_file.path : "";
@@ -446,7 +529,8 @@ Result<DiffResult> Repository::diffTreeToTree(const ObjectId& oldTreeId, const O
     return result;
 }
 
-Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
+Result<DiffResult> Repository::diffCommit(const ObjectId& commitId,
+                                          const std::function<bool()>& cancelled) const {
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
 
@@ -472,14 +556,24 @@ Result<DiffResult> Repository::diffCommit(const ObjectId& commitId) const {
         }
     }
 
+    git_diff_options opts;
+    git_diff_options_init(&opts, GIT_DIFF_OPTIONS_VERSION);
+    if (cancelled) {
+        opts.progress_cb = diffCancelCheck;
+        opts.payload = const_cast<std::function<bool()>*>(&cancelled);
+    }
     git_diff* diff = nullptr;
-    err = git_diff_tree_to_tree(&diff, repo_, parentTree, commitTree, nullptr);
+    err = git_diff_tree_to_tree(&diff, repo_, parentTree, commitTree, &opts);
     if (parentTree) git_tree_free(parentTree);
     git_tree_free(commitTree);
     git_commit_free(commit);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        if (cancelled && cancelled())
+            return cancelledRead();
+        return GitError::fromLibgit2(err);
+    }
 
-    auto result = loadDiffResult(diff);
+    auto result = loadDiffResult(diff, cancelled);
     git_diff_free(diff);
     return result;
 }
@@ -504,11 +598,14 @@ namespace {
 struct TreeWalkPayload {
     git_repository*        repo;
     std::vector<TreeEntry>* out;
+    const std::function<bool()>* cancelled;
 };
 
 int treeWalkCallback(const char* root, const git_tree_entry* entry, void* payload)
 {
     auto* ctx = static_cast<TreeWalkPayload*>(payload);
+    if (*ctx->cancelled && (*ctx->cancelled)())
+        return GIT_EUSER;  // a negative answer stops the walk
 
     TreeEntry e;
     e.name   = git_tree_entry_name(entry);
@@ -533,7 +630,8 @@ int treeWalkCallback(const char* root, const git_tree_entry* entry, void* payloa
 
 } // namespace
 
-Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(const ObjectId& commitId) const
+Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(
+    const ObjectId& commitId, const std::function<bool()>& cancelled) const
 {
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
@@ -548,10 +646,14 @@ Result<std::vector<TreeEntry>> Repository::walkTreeAtCommit(const ObjectId& comm
     if (err < 0) return GitError::fromLibgit2(err);
 
     std::vector<TreeEntry> entries;
-    TreeWalkPayload payload{ repo_, &entries };
+    TreeWalkPayload payload{ repo_, &entries, &cancelled };
     err = git_tree_walk(tree, GIT_TREEWALK_PRE, treeWalkCallback, &payload);
     git_tree_free(tree);
-    if (err < 0) return GitError::fromLibgit2(err);
+    if (err < 0) {
+        if (cancelled && cancelled())
+            return cancelledRead();
+        return GitError::fromLibgit2(err);
+    }
 
     return entries;
 }
@@ -622,6 +724,111 @@ RepoState sequenceState(git_repository* repo) {
         return RepoState::Revert;
     return RepoState::None;
 }
+
+// `path` as a checkout's pathspec that matches it alone. libgit2 reads
+// a checkout's paths as patterns, GIT_CHECKOUT_DISABLE_PATHSPEC_MATCH
+// or not: a backslash escapes the character after it (so x\y.txt was
+// looked for as xy.txt, and never written), a trailing space or
+// carriage return comes off, a line feed ends the pattern and a
+// leading # makes it a comment, which matches every path. Those, the
+// wildcards and a leading ! (a negation) are escaped here, and matched
+// as fnmatch patterns. A carriage return at the end comes off escaped
+// too, so it goes in as a bracket expression. So do backslashes right
+// before it: libgit2 walks only the paths that begin with the text
+// before the first wildcard, and takes a [ after an escaped backslash
+// for an escaped one. Nothing else goes in brackets: where case is
+// ignored, libgit2 lowercases the path's letter and not a bracket's.
+std::string literalPathspec(const std::string& path) {
+    size_t bracketed = path.size();
+    if (!path.empty() && path.back() == '\r') {
+        bracketed = path.size() - 1;
+        while (bracketed > 0 && path[bracketed - 1] == '\\')
+            --bracketed;
+    }
+    std::string spec;
+    spec.reserve(path.size() * 4);
+    for (size_t i = 0; i < path.size(); ++i) {
+        const char c = path[i];
+        if (i >= bracketed) {
+            spec += "[\\";
+            spec += c;
+            spec += ']';
+            continue;
+        }
+        if (std::string_view("\\*?[ \t\n\v\f\r").find(c) != std::string_view::npos
+            || (i == 0 && (c == '!' || c == '#')))
+            spec += '\\';
+        spec += c;
+    }
+    return spec;
+}
+
+// Another path a checkout of one path would write. libgit2 compares a
+// pattern with each path as plain text before it matches it as one, so
+// the escaped spelling of a\ (a\\) is also the name of a file a\\. The
+// checkout overwrote that file's changes, or, were it conflicted too,
+// deleted it from the work tree and the index. It stops at the first
+// such file now, before it writes anything.
+struct OnePathCheckout {
+    const char* path;
+    std::string other;
+
+    // Has the checkout `opts` set up tell notify() of each file it
+    // would write, before it writes any.
+    void watch(git_checkout_options& opts) {
+        opts.notify_flags = GIT_CHECKOUT_NOTIFY_CONFLICT | GIT_CHECKOUT_NOTIFY_DIRTY
+                            | GIT_CHECKOUT_NOTIFY_UPDATED;
+        opts.notify_cb = &OnePathCheckout::notify;
+        opts.notify_payload = this;
+    }
+
+    // A conflict on another path that a checkout of `spec` would end,
+    // looked for before it runs: a checkout takes every conflict its
+    // paths match out of the index, and tells notify() only of those
+    // whose file it writes too. One whose work tree file was missing
+    // (or, checking out HEAD, was HEAD's) went without a word. Found,
+    // it is `other`, and GIT_EUSER comes back.
+    int findOtherConflict(git_index* index, const std::string& spec) {
+        if (!git_index_has_conflicts(index))
+            return 0;
+        const char* specs[] = {spec.c_str()};
+        const git_strarray paths = {const_cast<char**>(specs), 1};
+        git_pathspec* pathspec = nullptr;
+        int err = git_pathspec_new(&pathspec, &paths);
+        if (err < 0)
+            return err;
+        // As the checkout matches them: ignoring case where the index does.
+        const uint32_t flags = (git_index_caps(index) & GIT_INDEX_CAPABILITY_IGNORE_CASE) != 0
+                                   ? GIT_PATHSPEC_IGNORE_CASE
+                                   : GIT_PATHSPEC_USE_CASE;
+        git_index_conflict_iterator* conflicts = nullptr;
+        err = git_index_conflict_iterator_new(&conflicts, index);
+        const git_index_entry* sides[3] = {};
+        while (err >= 0
+               && (err = git_index_conflict_next(&sides[0], &sides[1], &sides[2], conflicts)) == 0) {
+            for (const git_index_entry* side : sides) {
+                if (side && std::strcmp(side->path, path) != 0
+                    && git_pathspec_matches_path(pathspec, flags, side->path)) {
+                    other = side->path;
+                    err = GIT_EUSER;
+                    break;
+                }
+            }
+        }
+        git_index_conflict_iterator_free(conflicts);
+        git_pathspec_free(pathspec);
+        return err == GIT_ITEROVER ? 0 : err;
+    }
+
+    static int notify(git_checkout_notify_t, const char* notified, const git_diff_file*,
+                      const git_diff_file*, const git_diff_file*, void* payload) {
+        auto* self = static_cast<OnePathCheckout*>(payload);
+        if (std::strcmp(notified, self->path) == 0)
+            return 0;
+        self->other = notified;
+        return GIT_EUSER;
+    }
+};
 } // namespace
 
 Result<void> Repository::stageFile(const std::string& path) {
@@ -630,26 +837,94 @@ Result<void> Repository::stageFile(const std::string& path) {
 }
 
 Result<void> Repository::unstageFile(const std::string& path) {
-    git_reference* headRef = nullptr;
-    git_object* headCommit = nullptr;
-    if (git_repository_head(&headRef, repo_) == 0) {
-        git_reference_peel(&headCommit, headRef, GIT_OBJECT_COMMIT);
-        git_reference_free(headRef);
+    // The index's entries for `path`, and for what is below it as a
+    // directory, go back to HEAD's, or go where HEAD has none (or there
+    // is no HEAD yet), conflicts and all, as `git reset -- <path>` has
+    // it. git_reset_default did this, but took the path as a pattern
+    // (see literalPathspec): unstaging a file named * unstaged every
+    // file, and a partly staged one lost its staged hunks.
+    git_index* index = nullptr;
+    int err = freshIndex(&index, repo_);
+    if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeIndex = qScopeGuard([index] { git_index_free(index); });
+
+    // HEAD's files at the path, or below it where HEAD has a directory
+    // there. What is below the path matters too: a file that is a
+    // directory now has d/x in the index, and HEAD's d, put back alone,
+    // stayed beside it (libgit2 drops d/x for d only where nothing sorts
+    // before d/x), an index git makes no tree from; and a directory that
+    // is a file now got none of its files back.
+    struct HeadFiles {
+        std::string below;
+        std::map<std::string, std::pair<git_oid, uint32_t>> files;
+    } head{path + '/', {}};
+    git_object* tree = nullptr;
+    if (git_revparse_single(&tree, repo_, "HEAD^{tree}") == 0) {
+        git_tree_entry* entry = nullptr;
+        err = git_tree_entry_bypath(&entry, reinterpret_cast<git_tree*>(tree), path.c_str());
+        git_object_free(tree);
+        if (err < 0 && err != GIT_ENOTFOUND)
+            return GitError::fromLibgit2(err);
+        const auto freeEntry = qScopeGuard([entry] { git_tree_entry_free(entry); });
+        if (entry && git_tree_entry_type(entry) == GIT_OBJECT_TREE) {
+            git_tree* dir = nullptr;
+            err = git_tree_lookup(&dir, repo_, git_tree_entry_id(entry));
+            if (err >= 0) {
+                err = git_tree_walk(
+                    dir, GIT_TREEWALK_PRE,
+                    [](const char* root, const git_tree_entry* file, void* payload) -> int {
+                        auto* walked = static_cast<HeadFiles*>(payload);
+                        if (git_tree_entry_type(file) != GIT_OBJECT_TREE)
+                            walked->files[walked->below + root + git_tree_entry_name(file)] = {
+                                *git_tree_entry_id(file), git_tree_entry_filemode(file)};
+                        return 0;
+                    },
+                    &head);
+                git_tree_free(dir);
+            }
+            if (err < 0)
+                return GitError::fromLibgit2(err);
+        } else if (entry) {
+            head.files[path] = {*git_tree_entry_id(entry), git_tree_entry_filemode(entry)};
+        }
     }
-    // git_reset_default works on libgit2's copy of the index; bring
-    // it up to date first (see freshIndex).
-    reloadIndex(repo_);
-    const char* paths[] = {path.c_str()};
-    git_strarray arr = {const_cast<char**>(paths), 1};
-    int err = git_reset_default(repo_, headCommit, &arr);
-    if (headCommit) git_object_free(headCommit);
+
+    // The index's entries at the path and below it go, all but those
+    // that are HEAD's already; HEAD's others go in after, with nothing
+    // left in their way.
+    std::vector<std::pair<std::string, int>> gone;
+    for (size_t i = 0, count = git_index_entrycount(index); i < count; ++i) {
+        const git_index_entry* entry = git_index_get_byindex(index, i);
+        if (entry->path != path
+            && std::strncmp(entry->path, head.below.c_str(), head.below.size()) != 0)
+            continue;
+        const int stage = git_index_entry_stage(entry);
+        const auto it = head.files.find(entry->path);
+        if (stage == 0 && it != head.files.end() && git_oid_equal(&it->second.first, &entry->id)
+            && it->second.second == entry->mode)
+            head.files.erase(it);
+        else
+            gone.emplace_back(entry->path, stage);
+    }
+    err = 0;
+    for (size_t i = 0; err >= 0 && i < gone.size(); ++i)
+        err = git_index_remove(index, gone[i].first.c_str(), gone[i].second);
+    for (auto it = head.files.begin(); err >= 0 && it != head.files.end(); ++it) {
+        git_index_entry entry{};
+        entry.path = it->first.c_str();
+        entry.id = it->second.first;
+        entry.mode = it->second.second;
+        err = git_index_add(index, &entry);
+    }
+    if (err >= 0)
+        err = git_index_write(index);
     if (err < 0) {
-        // The reset is made in the copy, then written. When the write
-        // failed (another git holds index.lock), the copy kept the
-        // file unstaged while the index file didn't, and status read
-        // the copy (see Index.cpp).
+        // The change is made in libgit2's copy of the index, then
+        // written. When the write failed (another git holds
+        // index.lock), the copy kept the file unstaged while the index
+        // file didn't, and status read the copy (see Index.cpp).
         const GitError error = GitError::fromLibgit2(err);
-        reloadIndex(repo_);
+        git_index_read(index, /*force=*/1);
         return error;
     }
     return Result<void>::success();
@@ -661,15 +936,37 @@ Result<void> Repository::stageAll() {
 }
 
 Result<void> Repository::discardWorkdirChanges(const std::string& path) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_checkout_options opts;
     git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
     opts.checkout_strategy = GIT_CHECKOUT_FORCE;
-    const char* paths[] = {path.c_str()};
+    // The path as a pattern that matches it alone, and a stop at any
+    // other file the checkout would write, or conflict it would end,
+    // all the same (see literalPathspec and OnePathCheckout). Given as
+    // it was, discarding a file named * checked out every file from
+    // HEAD, their staged and unstaged changes gone, after a question
+    // that named the one file.
+    const std::string spec = literalPathspec(path);
+    const char* paths[] = {spec.c_str()};
     opts.paths.strings = const_cast<char**>(paths);
     opts.paths.count = 1;
-    int err = git_checkout_head(repo_, &opts);
+    OnePathCheckout checkout{path.c_str(), {}};
+    checkout.watch(opts);
+    git_index* index = nullptr;
+    int err = freshIndex(&index, repo_);
+    if (err >= 0) {
+        err = checkout.findOtherConflict(index, spec);
+        git_index_free(index);
+    }
+    if (err >= 0)
+        err = git_checkout_head(repo_, &opts);
     if (err < 0) {
-        const GitError error = GitError::fromLibgit2(err);
+        const GitError error = checkout.other.empty()
+            ? GitError::fromLibgit2(err)
+            : GitError(GitErrorCode::GenericError,
+                       path + " was not discarded: that would also have discarded the "
+                              "changes to " + checkout.other + ".");
         reloadIndex(repo_);
         return error;
     }
@@ -1111,6 +1408,8 @@ std::string worktreeOnBranch(git_repository* repo, const char* branchRef) {
 } // namespace
 
 Result<void> Repository::checkout(const std::string& branchOrRef) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     // git's rule for `git checkout <name>`: a LOCAL BRANCH name means
     // that branch, even when a tag (or anything else) has the same
     // name. The tree used to come from git_revparse_single, where
@@ -1365,9 +1664,10 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
     // has only one side) and yields empty content so the three-way
     // panes can render "nothing on this side".
     auto readSide = [this](const git_index_entry* e,
-                           std::string& content, ObjectId& id) {
+                           std::string& content, ObjectId& id, uint32_t& mode) {
         if (!e) return;
         id = ObjectId(&e->id);
+        mode = e->mode;
         git_blob* blob = nullptr;
         if (git_blob_lookup(&blob, repo_, &e->id) == 0) {
             const auto* data =
@@ -1394,9 +1694,9 @@ Result<std::vector<MergeConflictEntry>> Repository::conflictEntries() const {
         if (ours && ours->path)            entry.path = ours->path;
         else if (theirs && theirs->path)   entry.path = theirs->path;
         else if (ancestor && ancestor->path) entry.path = ancestor->path;
-        readSide(ancestor, entry.ancestorContent, entry.ancestorId);
-        readSide(ours, entry.oursContent, entry.oursId);
-        readSide(theirs, entry.theirsContent, entry.theirsId);
+        readSide(ancestor, entry.ancestorContent, entry.ancestorId, entry.ancestorMode);
+        readSide(ours, entry.oursContent, entry.oursId, entry.oursMode);
+        readSide(theirs, entry.theirsContent, entry.theirsId, entry.theirsMode);
         result.push_back(std::move(entry));
     }
     git_index_conflict_iterator_free(it);
@@ -1426,6 +1726,228 @@ Result<int> Repository::conflictCount() const {
     git_index_conflict_iterator_free(it);
     git_index_free(index);
     return count;
+}
+
+uint32_t Repository::indexMode(const std::string& path) const {
+    git_index* index = nullptr;
+    if (freshIndex(&index, repo_) < 0)
+        return 0;
+    const git_index_entry* entry = git_index_get_bypath(index, path.c_str(), 0);
+    const uint32_t mode = entry ? entry->mode : 0;
+    git_index_free(index);
+    return mode;
+}
+
+namespace {
+// A symbolic link, or on Windows a junction (a folder's link), and not
+// what it points to.
+bool isLink(const QFileInfo& info) {
+    return info.isSymbolicLink() || info.isJunction();
+}
+
+// Why the work tree's `path` (repository-relative, '/'-separated) is
+// no place to write a file, or "" when it is one. A checkout goes into
+// the directories on the way as it finds them, and through a link
+// among them it wrote wherever that pointed: outside the work tree as
+// likely as not. git never leaves a tracked path below a link, but the
+// work tree is anybody's to change. A "." or ".." step is no path git
+// tracks either, nor on Windows a drive or a backslash.
+std::string workTreePathProblem(const QString& workdir, const std::string& path) {
+    const QStringList steps = QString::fromStdString(path).split(QLatin1Char('/'));
+    for (const QString& step : steps) {
+        bool valid = !step.isEmpty() && step != QLatin1String(".") && step != QLatin1String("..");
+#ifdef Q_OS_WIN
+        valid = valid && !step.contains(QLatin1Char('\\')) && !step.contains(QLatin1Char(':'));
+#endif
+        if (!valid)
+            return "'" + path + "' is not a path in the work tree.";
+    }
+    QString dir = workdir;
+    for (qsizetype i = 0; i + 1 < steps.size(); ++i) {
+        dir = QDir(dir).filePath(steps[i]);
+        const QFileInfo info(dir);
+        if (isLink(info))
+            return path + " is below " + QDir(workdir).relativeFilePath(dir).toStdString()
+                   + ", a symbolic link: the resolution would be written wherever it points.";
+        if (!info.exists())
+            break;   // the checkout makes it, and what's below it
+    }
+    return {};
+}
+} // namespace
+
+Result<void> Repository::resolveConflict(const std::string& path, const std::string& content,
+                                         std::optional<AcceptedSide> accepted) {
+    const QString workdir = QString::fromStdString(this->workdir());
+    if (workdir.isEmpty())
+        return GitError(GitErrorCode::BareRepo, "A bare repository has no work tree to resolve in.");
+    // The file is written by a checkout: refused before a link in the
+    // way goes, or anything is staged.
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
+
+    git_index* index = nullptr;
+    int err = freshIndex(&index, repo_);
+    if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeIndex = qScopeGuard([index] { git_index_free(index); });
+
+    const git_index_entry* ancestor = nullptr;
+    const git_index_entry* ours = nullptr;
+    const git_index_entry* theirs = nullptr;
+    err = git_index_conflict_get(&ancestor, &ours, &theirs, index, path.c_str());
+    if (err == GIT_ENOTFOUND) {
+        // Staged since the resolver listed it (from the file list, say):
+        // the resolver's content replaces what was staged, as `git add`
+        // of the file edited once more would.
+        ancestor = theirs = nullptr;
+        ours = git_index_get_bypath(index, path.c_str(), 0);
+        if (!ours)
+            return GitError(GitErrorCode::NotFound, path + " is no longer in the index.");
+    } else if (err < 0) {
+        return GitError::fromLibgit2(err);
+    }
+
+    for (const git_index_entry* side : {ancestor, ours, theirs}) {
+        if (side && side->mode == GIT_FILEMODE_COMMIT)
+            return GitError(GitErrorCode::GenericError,
+                            path + " is a submodule: check out the commit it should be at "
+                                   "in it, then stage it.");
+    }
+
+    // The content goes in with the mode git's merge gives the file, as
+    // it left it in the work tree: one side's change of the executable
+    // bit wins over the side that kept the ancestor's, and ours' where
+    // both changed it or there is no ancestor. With ours' alone, a
+    // chmod +x on theirs was dropped, in a rebase the user's own. A
+    // delete/modify conflict has one side, whose mode it keeps.
+    std::string staged = content;
+    uint32_t mode = GIT_FILEMODE_BLOB;
+    if (ours && theirs)
+        mode = ancestor && ours->mode == ancestor->mode ? theirs->mode : ours->mode;
+    else if (const git_index_entry* side = ours ? ours : theirs ? theirs : ancestor)
+        mode = side->mode;
+    const auto isLinkEntry = [](const git_index_entry* e) {
+        return e && e->mode == GIT_FILEMODE_LINK;
+    };
+    if (accepted) {
+        // The side as it is, whatever its bytes. The resolver's editor
+        // gives a link's target back changed (a no-break space as a
+        // space, a line separator as a line feed), and that text was
+        // neither side below: the link could not be resolved. Nor does
+        // text tell apart sides that differ only in their mode, or in
+        // bytes that aren't UTF-8. And the side as the resolver listed
+        // it, not the index's now: staged since (above), the conflict
+        // has no theirs, and its ours is what was staged. Accept Theirs
+        // was refused there, and Accept Ours kept that, theirs or not.
+        if (accepted->mode == 0)
+            return GitError(GitErrorCode::NotFound,
+                            path + " has no "
+                                + (accepted->side == ConflictSide::Ours ? "Ours" : "Theirs")
+                                + " to accept.");
+        auto bytes = readBlob(accepted->id);
+        if (!bytes)
+            return bytes.error();
+        staged.assign(bytes->begin(), bytes->end());
+        mode = accepted->mode;
+    } else if (isLinkEntry(ours) || isLinkEntry(theirs)) {
+        // A link's content is the path it points to. The resolver shows
+        // it as text, but the only resolutions are the sides themselves,
+        // staged as they are: a link, or the file the other side has
+        // instead. Written to the work tree as text, a resolution went
+        // into whatever the link pointed to, in the work tree or not,
+        // and staging the path then kept the link. The resolver's
+        // content is compared as the resolver got the sides, as UTF-8.
+        bool picked = false;
+        for (const git_index_entry* side : {ours, theirs}) {
+            if (!side)
+                continue;
+            auto bytes = readBlob(ObjectId(&side->id));
+            if (!bytes)
+                return bytes.error();
+            const QByteArray raw(bytes->data(), static_cast<qsizetype>(bytes->size()));
+            if (QString::fromUtf8(raw).toUtf8() == QByteArray::fromStdString(content)) {
+                staged.assign(bytes->begin(), bytes->end());
+                mode = side->mode;
+                picked = true;
+                break;
+            }
+        }
+        if (!picked)
+            return GitError(GitErrorCode::GenericError,
+                            path + " is a symbolic link: accept Ours or Theirs for it, "
+                                   "as they are.");
+    }
+
+    const std::string problem = workTreePathProblem(workdir, path);
+    if (!problem.empty())
+        return GitError(GitErrorCode::GenericError, problem);
+    const QString file = QDir(workdir).filePath(QString::fromStdString(path));
+    const QFileInfo existing(file);
+    const bool link = isLink(existing);
+    if (!link && existing.isDir())
+        return GitError(GitErrorCode::Directory, path + " is a directory in the work tree.");
+
+    // The work tree's file is written from the index, by a checkout of
+    // that one path, and never opened for writing here: opening a link
+    // follows it. libgit2 writes a link as a link (or as a file holding
+    // its target with core.symlinks off), with the smudge filters and
+    // the mode. A link there now goes first, the link and not what it
+    // points to: libgit2 replaces one only where the path becomes a
+    // link again, or on a case-insensitive file system, and elsewhere
+    // wrote a file's content through it.
+    if (link && !QFile::remove(file) && !QDir(workdir).rmdir(QString::fromStdString(path)))
+        return GitError(GitErrorCode::GenericError,
+                        "Could not remove the symbolic link " + path + " to replace it.");
+
+    git_index_entry entry{};
+    entry.path = path.c_str();
+    // A file's mode as git canonicalizes it: 100644 or 100755, the only
+    // ones libgit2 stages from a buffer.
+    entry.mode = mode == GIT_FILEMODE_LINK ? mode
+               : (mode & 0111) != 0     ? GIT_FILEMODE_BLOB_EXECUTABLE
+                                        : GIT_FILEMODE_BLOB;
+    // Stages it and moves the conflict's entries to resolve-undo, as
+    // `git add` does.
+    err = git_index_add_from_buffer(index, &entry, staged.data(), staged.size());
+    OnePathCheckout checkout{path.c_str(), {}};
+    if (err >= 0) {
+        git_checkout_options opts;
+        git_checkout_options_init(&opts, GIT_CHECKOUT_OPTIONS_VERSION);
+        // SKIP_UNMERGED: the path is resolved by now, and the others'
+        // conflicts are none of this checkout's business. Reading them,
+        // it checked the NAME entries libgit2's cherry-pick leaves for a
+        // rename against them, and failed on one naming a path resolved
+        // since or out of its paths: nothing in such a pick resolved.
+        opts.checkout_strategy = GIT_CHECKOUT_FORCE | GIT_CHECKOUT_SKIP_UNMERGED
+                                 | GIT_CHECKOUT_DONT_WRITE_INDEX;
+        // Against the index itself, as `git checkout-index -f` does: the
+        // file is written wherever it differs from the index, or is
+        // missing. Against HEAD, a path that had been a link there and
+        // is a file now was left out once the link was gone.
+        opts.baseline_index = index;
+        const std::string spec = literalPathspec(path);
+        const char* paths[] = {spec.c_str()};
+        opts.paths.strings = const_cast<char**>(paths);
+        opts.paths.count = 1;
+        checkout.watch(opts);
+        err = checkout.findOtherConflict(index, spec);
+        if (err >= 0)
+            err = git_checkout_index(repo_, index, &opts);
+    }
+    if (err >= 0)
+        err = git_index_write(index);
+    if (err < 0) {
+        // The conflict stays: libgit2's copy of the index goes back to
+        // the file's (see Index.cpp).
+        const GitError error = checkout.other.empty()
+            ? GitError::fromLibgit2(err)
+            : GitError(GitErrorCode::GenericError,
+                       path + " was not resolved: writing it would also have written "
+                           + checkout.other + ".");
+        git_index_read(index, /*force=*/1);
+        return error;
+    }
+    return Result<void>::success();
 }
 
 Result<std::vector<RemoteInfo>> Repository::remotes() const {
@@ -1822,6 +2344,8 @@ Result<std::vector<StashEntry>> Repository::stashes() const {
 
 Result<ObjectId> Repository::stashSave(const std::string& message, bool includeUntracked,
                                        bool keepIndex) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_signature* sig = nullptr;
     int err = git_signature_default(&sig, repo_);
     if (err < 0) return GitError::fromLibgit2(err);
@@ -1843,6 +2367,8 @@ Result<ObjectId> Repository::stashSave(const std::string& message, bool includeU
 }
 
 Result<void> Repository::stashApply(size_t index) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     int err = git_stash_apply(repo_, index, nullptr);
     if (err < 0) {
         // libgit2 writes the stash's files, stages the ones the stash
@@ -1859,6 +2385,8 @@ Result<void> Repository::stashApply(size_t index) {
 }
 
 Result<void> Repository::stashPop(size_t index) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     int err = git_stash_pop(repo_, index, nullptr);
     if (err < 0) {
         // As in stashApply(); a stash that wasn't applied isn't dropped.
@@ -1897,6 +2425,8 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     if (operation)
         return GitError(GitErrorCode::Unmerged,
                         std::string("A ") + operation + " is in progress. Finish or abort it first.");
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle", "merge.default"}); !refused)
+        return refused.error();
 
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
@@ -1953,7 +2483,13 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
 
 Result<std::vector<SubmoduleInfo>> Repository::submodules() const {
     std::vector<SubmoduleInfo> result;
-    git_submodule_foreach(repo_, [](git_submodule* sm, const char* name, void* payload) -> int {
+    // A bare repository has none checked out, and libgit2 turns it down.
+    if (git_repository_is_bare(repo_))
+        return result;
+    // libgit2 reads HEAD's tree, all of it, and fails on one nested too
+    // deep: that failure went unseen, and the list was empty, as if the
+    // repository had no submodules.
+    const int err = git_submodule_foreach(repo_, [](git_submodule* sm, const char* name, void* payload) -> int {
         auto* subs = static_cast<std::vector<SubmoduleInfo>*>(payload);
         SubmoduleInfo info;
         info.name = name ? name : "";
@@ -1967,6 +2503,7 @@ Result<std::vector<SubmoduleInfo>> Repository::submodules() const {
         subs->push_back(std::move(info));
         return 0;
     }, &result);
+    if (err < 0) return GitError::fromLibgit2(err);
     return result;
 }
 
@@ -2015,6 +2552,8 @@ Result<std::vector<WorktreeInfo>> Repository::worktrees() const {
 
 Result<void> Repository::addWorktree(const std::string& name, const std::string& path,
                                      const std::string& branch, bool createBranch) {
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle"}); !refused)
+        return refused.error();
     git_worktree_add_options opts;
     git_worktree_add_options_init(&opts, GIT_WORKTREE_ADD_OPTIONS_VERSION);
     git_reference* ref = nullptr;
@@ -2054,10 +2593,139 @@ Result<void> Repository::addWorktree(const std::string& name, const std::string&
     return Result<void>::success();
 }
 
-Result<void> Repository::removeWorktree(const std::string& name) {
+namespace {
+
+// `bytes`, a path libgit2 has, as a QString that Qt names the same
+// file by. None if there is no such QString: bytes that aren't UTF-8
+// are U+FFFD to Qt (on a file system that keeps such a name, the two
+// are different files), and libgit2's path ends at a NUL.
+std::optional<QString> exactPath(const QByteArray& bytes) {
+    QString path = QString::fromUtf8(bytes);
+    if (bytes.contains('\0') || path.toUtf8() != bytes)
+        return std::nullopt;
+    return path;
+}
+
+// The path in one of the files of a linked worktree's folder in
+// .git/worktrees ("gitdir", "commondir"), as libgit2 reads it for the
+// prune that deletes what it names (git_worktree__read_link): white
+// space taken off the end; then a path starting with "./" or "../"
+// taken from that folder, "." and ".." resolved as text, and any other
+// as written, even a relative one ("l" is in the folder GitBolt runs
+// in). None if the file can't be read, or if libgit2 might have
+// another path from it than this:
+// - libgit2 takes off whatever isspace() calls white space, a byte at
+//   a time: on Windows the six ASCII ones, elsewhere, in some locales,
+//   also the last byte of a longer character (A0, U+00A0's last, in
+//   UTF-8 on macOS). Qt's white space includes U+3000 and others that
+//   libgit2 keeps. So the ASCII six come off here, and a path ending
+//   in another byte that isspace() takes is none.
+// - On Windows, libgit2 resolves ".." between slashes, and Qt between
+//   backslashes too.
+std::optional<QString> worktreeAdminLink(const QString& adminDir, const QString& file) {
+    QFile f(adminDir + QLatin1Char('/') + file);
+    if (!f.open(QIODevice::ReadOnly))
+        return std::nullopt;
+    QByteArray link = f.readAll();
+    const auto asciiSpace = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+    };
+    while (!link.isEmpty() && asciiSpace(link.back()))
+        link.chop(1);
+    if (!link.isEmpty() && std::isspace(static_cast<unsigned char>(link.back())))
+        return std::nullopt;
+    const std::optional<QString> path = exactPath(link);
+    if (!path || !(link.startsWith("./") || link.startsWith("../")))
+        return path;
+#ifdef Q_OS_WIN
+    if (link.contains('\\'))
+        return std::nullopt;
+#endif
+    return QDir::cleanPath(adminDir + QLatin1Char('/') + *path);
+}
+
+// The path in a linked worktree's .git file ("gitdir: <path>"), read
+// as git reads it: line ends taken off the end and nothing else (a
+// worktree's name can end in U+3000, and so does this path then), and
+// against the worktree's folder when relative. Empty if it is no such
+// file.
+QString gitFileLink(const QString& dotGit) {
+    QFile f(dotGit);
+    if (!f.open(QIODevice::ReadOnly))
+        return {};
+    QByteArray text = f.readAll();
+    while (text.endsWith('\n') || text.endsWith('\r'))
+        text.chop(1);
+    if (!text.startsWith("gitdir: "))
+        return {};
+    const QString link = QString::fromUtf8(text.mid(8));
+    if (link.isEmpty() || QDir::isAbsolutePath(link))
+        return link;
+    return QFileInfo(dotGit).dir().filePath(link);
+}
+
+// Both name the same folder, once links are resolved as git resolves
+// them (realPath()). False if either is missing.
+bool sameFolder(const QString& a, const QString& b) {
+    const QString ca = realPath(a);
+    const QString cb = realPath(b);
+    return !ca.isEmpty() && ca.compare(cb, kPathCase) == 0;
+}
+
+} // namespace
+
+Result<void> Repository::removeWorktree(const std::string& name,
+                                        const std::string& folder) {
+    const auto refuse = [&name](const std::string& why) {
+        return GitError(GitErrorCode::GenericError,
+                        "Worktree '" + name + "' was not removed: " + why
+                            + ". Nothing was deleted.");
+    };
+    // The worktree's files are in .git/worktrees/<name>, which libgit2
+    // takes as given: "." or ".." would be .git/worktrees or .git.
+    if (name.empty() || name == "." || name == ".."
+        || name.find_first_of("/\\") != std::string::npos)
+        return refuse("that is not the name of a worktree");
+
     git_worktree* wt = nullptr;
     int err = git_worktree_lookup(&wt, repo_, name.c_str());
     if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeWorktree = qScopeGuard([wt] { git_worktree_free(wt); });
+
+    // libgit2's prune deletes the folder holding the file that
+    // .git/worktrees/<name>/gitdir names (the worktree's .git file,
+    // unless someone wrote another path there), and <commondir>/
+    // worktrees/<name>, commondir read from the file of that name
+    // beside it. It checks neither: a gitdir naming any file elsewhere,
+    // by an absolute path or a relative one climbing out of .git, made
+    // Remove delete the folder holding that file and everything in it,
+    // while the worktree stayed. So both are checked first, by the
+    // very paths libgit2 goes on to delete: a check of a path read
+    // another way (a ".." taken off as text, or U+3000 as white space)
+    // passed a folder that libgit2 then read as another.
+    const std::optional<QString> admin =
+        exactPath(QByteArray::fromStdString(commonDir() + "/worktrees/" + name));
+    if (!admin)
+        return refuse("the path of its files in .git/worktrees is not UTF-8");
+    const QString common = QString::fromStdString(commonDir());
+    const QString adminDir = QDir::cleanPath(*admin);
+    const char* wtPath = git_worktree_path(wt);
+    const QString workTree = QString::fromUtf8(wtPath ? wtPath : "");
+    const std::string where = workTree.toStdString();
+
+    // The folder the user agreed to lose: a worktree moved since (`git
+    // worktree move`) is another.
+    if (!folder.empty()
+        && QDir::cleanPath(QString::fromStdString(folder)) != QDir::cleanPath(workTree))
+        return refuse("it is at '" + where + "' now, not at '" + folder + "'");
+
+    const std::optional<QString> commondir =
+        worktreeAdminLink(adminDir, QStringLiteral("commondir"));
+    if (!commondir)
+        return refuse("its commondir file holds no path that can be checked");
+    if (!sameFolder(*commondir, common))
+        return refuse("its commondir file names '" + commondir->toStdString()
+                      + "', not this repository's .git");
 
     // Default prune options refuse to touch a valid (i.e. normal,
     // still-on-disk) worktree — they only clean up already-broken
@@ -2067,10 +2735,49 @@ Result<void> Repository::removeWorktree(const std::string& name) {
     // A LOCKED worktree is still refused — unlock first, which is
     // the same protection `git worktree remove` gives.
     git_worktree_prune_options opts = GIT_WORKTREE_PRUNE_OPTIONS_INIT;
-    opts.flags = GIT_WORKTREE_PRUNE_VALID
-               | GIT_WORKTREE_PRUNE_WORKING_TREE;
+    opts.flags = GIT_WORKTREE_PRUNE_VALID;
+
+    // A worktree whose .git file is gone, with its folder or not, loses
+    // its files in .git/worktrees alone, as `git worktree prune` takes
+    // them out: they name a file that isn't there. One whose .git file
+    // is there has its folder deleted only if git would delete it: the
+    // gitdir file names the .git file in the folder, a file (no folder,
+    // no link) that points back to .git/worktrees/<name>. git refuses
+    // a worktree that fails ("validation failed, cannot remove working
+    // tree"), and so does this, its files in .git/worktrees kept.
+    const std::optional<QString> gitLink =
+        worktreeAdminLink(adminDir, QStringLiteral("gitdir"));
+    if (!gitLink)
+        return refuse("its gitdir file holds no path that can be checked");
+    const QFileInfo gitLinkInfo(*gitLink);
+    if (gitLinkInfo.exists() || gitLinkInfo.isSymLink()) {
+        // The folder as libgit2 spells it, ".." and all: the system
+        // takes "a/../b" through a when a is a link, to another b than
+        // the one beside a.
+        const QString dotGit = workTree + QStringLiteral("/.git");
+        if (*gitLink != dotGit)
+            return refuse("its gitdir file names '" + gitLink->toStdString()
+                          + "', not the .git file of a worktree");
+        // Nor a folder that no worktree is, whatever its .git file
+        // says: the repository open, its .git, the home folder, or a
+        // folder holding any of them. (One inside a bare repository's
+        // folder is a worktree, as some put them there.)
+        for (const std::string& kept : {commonDir(), path(), workdir()}) {
+            if (!kept.empty() && atOrAbove(where, kept))
+                return refuse("'" + where + "' is the repository open, or holds it");
+        }
+        if (atOrAbove(where, QDir::homePath().toStdString()))
+            return refuse("'" + where + "' is the home folder, or holds it");
+        const QFileInfo dotGitInfo(dotGit);
+        if (dotGitInfo.isSymLink() || !dotGitInfo.isFile())
+            return refuse("'" + dotGit.toStdString() + "' is not a .git file");
+        if (!sameFolder(gitFileLink(dotGit), adminDir))
+            return refuse("'" + dotGit.toStdString() + "' does not point back to '"
+                          + adminDir.toStdString() + "'");
+        opts.flags |= GIT_WORKTREE_PRUNE_WORKING_TREE;
+    }
+
     err = git_worktree_prune(wt, &opts);
-    git_worktree_free(wt);
     if (err < 0) return GitError::fromLibgit2(err);
     return Result<void>::success();
 }

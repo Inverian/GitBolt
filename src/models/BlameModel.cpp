@@ -1,4 +1,5 @@
 #include "models/BlameModel.h"
+#include "util/MessageText.h"
 
 #include <QColor>
 #include <QDateTime>
@@ -146,6 +147,15 @@ void BlameModel::flattenHunks() {
         }
     }
 
+    // Each hunk's author once, at most util::kMaxLineChars of it, which
+    // its lines share: git takes an ident of any length, and a name of
+    // megabytes, decoded again for every line of its hunk, took that
+    // much memory per line, and the view laid it out on every paint.
+    std::vector<QString> hunkAuthors;
+    hunkAuthors.reserve(hunks.size());
+    for (const auto& hunk : hunks)
+        hunkAuthors.push_back(util::elided(hunk.signature.name));
+
     lines_.reserve(fileLines.size());
     for (size_t i = 0; i < fileLines.size(); ++i) {
         int lineNum = static_cast<int>(i + 1);
@@ -161,7 +171,7 @@ void BlameModel::flattenHunks() {
         if (hIdx >= 0 && hIdx < static_cast<int>(hunks.size())) {
             const auto& hunk = hunks[static_cast<size_t>(hIdx)];
             bl.commitId = hunk.commitId;
-            bl.author = QString::fromStdString(hunk.signature.name);
+            bl.author = hunkAuthors[static_cast<size_t>(hIdx)];
 
             // Format date as relative
             auto now = std::chrono::system_clock::now();

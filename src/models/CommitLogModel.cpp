@@ -1,4 +1,5 @@
 #include "models/CommitLogModel.h"
+#include "util/MessageText.h"
 #include "util/PerformanceTimer.h"
 #include <QDateTime>
 #include <algorithm>
@@ -25,23 +26,45 @@ QVariant CommitLogModel::data(const QModelIndex& index, int role) const {
     if (role == GRAPH_DATA_ROLE || role == COMMIT_DATA_ROLE)
         return QVariant::fromValue(static_cast<quintptr>(index.row()));
 
+    // What the Message and Author cells cut, whole (see below).
+    if (role == FULL_TEXT_ROLE) {
+        switch (static_cast<CommitLogColumn>(index.column())) {
+            case CommitLogColumn::Message: {
+                if (showMessageBody_) {
+                    const QString full = QString::fromStdString(commit.message).trimmed();
+                    if (!full.isEmpty()) return full;
+                }
+                return QString::fromStdString(commit.summary);
+            }
+            case CommitLogColumn::Author: return QString::fromStdString(commit.author.name);
+            default: return data(index, Qt::DisplayRole);
+        }
+    }
+
     if (role == Qt::DisplayRole) {
         switch (static_cast<CommitLogColumn>(index.column())) {
             case CommitLogColumn::Graph: return {};
             case CommitLogColumn::Message: {
+                // At most util::kMaxLineChars of it, more than a cell
+                // shows: the view lays the whole text out on every
+                // paint before eliding it, and a subject of one line
+                // of megabytes stalled the log each time. Copy takes
+                // the whole of it (FULL_TEXT_ROLE).
                 if (showMessageBody_) {
                     // Full message includes the summary as its
                     // first line. If there's a body (anything past
                     // the first blank line) keep the cell as-is;
                     // otherwise fall back to summary-only so the
                     // toggle doesn't add a redundant copy.
-                    const QString full = QString::fromStdString(commit.message)
-                        .trimmed();
+                    const QString full = util::elidedText(
+                        commit.message, util::kMaxLineChars, util::kMaxLineChars).trimmed();
                     if (!full.isEmpty()) return full;
                 }
-                return QString::fromStdString(commit.summary);
+                return util::elided(commit.summary);
             }
-            case CommitLogColumn::Author: return QString::fromStdString(commit.author.name);
+            // The same for the author's name: git takes an ident of
+            // any length.
+            case CommitLogColumn::Author: return util::elided(commit.author.name);
             case CommitLogColumn::Date: {
                 const auto& sig = useAuthorDate_ ? commit.author
                                                  : commit.committer;

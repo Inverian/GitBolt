@@ -3,8 +3,11 @@
 #include "widgets/CommitFilterProxy.h"
 
 #include <QAbstractProxyModel>
+#include <QClipboard>
 #include <QEvent>
+#include <QGuiApplication>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QScrollBar>
 #include <QMouseEvent>
 #include <QTableView>
@@ -56,6 +59,8 @@ RevisionGraphWidget::RevisionGraphWidget(QWidget* parent)
     // surprising when the user wants to back out and see no
     // commit-detail panel; eventFilter() below handles the toggle.
     tableView_->viewport()->installEventFilter(this);
+    // And the table's Copy (eventFilter() again).
+    tableView_->installEventFilter(this);
 
     layout->addWidget(tableView_);
 }
@@ -316,7 +321,23 @@ void RevisionGraphWidget::onSelectionChanged()
 
 bool RevisionGraphWidget::eventFilter(QObject* watched, QEvent* event)
 {
-    // We only filter the table viewport's mouse press to implement
+    // Copy: the table's own puts the current cell's DisplayRole on the
+    // clipboard, which has only the start of a long message (the model
+    // cuts what the view lays out on every paint). The cell's whole
+    // text instead; a cell with no text (the graph) leaves the
+    // clipboard as it is, as the table's own does.
+    if (watched == tableView_ && event->type() == QEvent::KeyPress
+        && static_cast<QKeyEvent*>(event)->matches(QKeySequence::Copy)) {
+        const QModelIndex current = tableView_->currentIndex();
+        QVariant text = current.data(models::CommitLogModel::FULL_TEXT_ROLE);
+        if (!text.isValid())
+            text = current.data();
+        if (text.canConvert<QString>())
+            QGuiApplication::clipboard()->setText(text.toString());
+        return true;
+    }
+
+    // Otherwise only the table viewport's mouse press, to implement
     // modifier-click-to-deselect. Anything else falls through to
     // QWidget::eventFilter which is a no-op pass-through.
     if (watched == tableView_->viewport() &&

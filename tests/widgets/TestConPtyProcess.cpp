@@ -6,6 +6,8 @@
 //     as output, then stop() tears everything down in time, the shell
 //     included, and no handler runs after it;
 //   - a shell that exits by itself is noticed, with its exit code;
+//   - a program the shell runs is seen as its console child while it
+//     runs, and no longer once it has ended;
 //   - lines written in one go each run, in turn: what a multi-line
 //     paste becomes once TerminalWidget has made its line breaks CRs;
 //   - flow control: output nobody takes is held back at
@@ -275,6 +277,35 @@ private slots:
         QCOMPARE(*capture.exitCode(), 3ul);
         QVERIFY(!pty.isRunning());
         QVERIFY(pty.stop(0));  // everything was already released
+#endif
+    }
+
+    // A program cmd runs, and waits for, is a console child of cmd's
+    // until it ends: what TerminalWidget waits for before it types a
+    // repository's GIT_DIR into cmd. cmd at its prompt has none.
+    void seesTheProgramTheShellRuns()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        Capture capture;
+        ConPtyProcess pty;
+        QVERIFY2(pty.start(cmdExe(), capture.outputHandler(), capture.exitHandler()),
+                 qPrintable(QString::fromStdWString(pty.errorString())));
+        QTRY_VERIFY2_WITH_TIMEOUT(promptShown(capture, pty), qPrintable(capture.text(pty)),
+                                  kTimeoutMs);
+        QVERIFY(!pty.hasConsoleChild());
+
+        // About three seconds.
+        QVERIFY(pty.write("ping -n 4 127.0.0.1 >nul& echo gitbolt-ping-done\r"));
+        QTRY_VERIFY2_WITH_TIMEOUT(pty.hasConsoleChild(), qPrintable(capture.text(pty)),
+                                  kTimeoutMs);
+        static const QRegularExpression done(QStringLiteral("(?<!echo )gitbolt-ping-done"));
+        QTRY_VERIFY2_WITH_TIMEOUT(capture.text(pty).contains(done), qPrintable(capture.text(pty)),
+                                  kTimeoutMs);
+        QTRY_VERIFY2_WITH_TIMEOUT(!pty.hasConsoleChild(), qPrintable(capture.text(pty)),
+                                  kTimeoutMs);
+        QVERIFY(pty.stop(10000));
 #endif
     }
 

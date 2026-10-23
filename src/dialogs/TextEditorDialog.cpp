@@ -44,6 +44,8 @@ void TextEditorDialog::setupUi() {
 
     pathLabel_ = new QLabel(this);
     pathLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    // A path, whose folder names can be anything.
+    pathLabel_->setTextFormat(Qt::PlainText);
     layout->addWidget(pathLabel_);
 
     editor_ = new QPlainTextEdit(this);
