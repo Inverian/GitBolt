@@ -79,7 +79,7 @@ gitbolt::util::EnvLookup envFrom(const EnvMap& env) {
 Config testConfig(const HttpStub& stub, const QString& dir) {
     Config config = Config::fromEndpoints(stub.origin(), QStringLiteral("test-client"),
                                           QStringLiteral("test-key-value"), kGlitchTipKey,
-                                          QStringLiteral("42"), QStringLiteral("1.2.3"),
+                                          QStringLiteral("42"), QStringLiteral("0.1.0"),
                                           dir + QStringLiteral("/telemetry"));
     config.paceMs = 50;
     config.transferTimeoutMs = 300;
@@ -128,7 +128,7 @@ QSet<QString> keySet(const QJsonObject& object) {
 
 ClientInfo clientFor(const QString& os, const QString& osVersion, const QString& arch) {
     ClientInfo client;
-    client.appVersion = QStringLiteral("0.9.5");
+    client.appVersion = QStringLiteral("0.1.5");
     client.env.os = os;
     client.env.osVersion = osVersion;
     client.env.arch = arch;
@@ -148,7 +148,7 @@ int closedPort() {
 // A crash.log the parser accepts. A macOS report wherever this runs:
 // the parser's frame rules follow the OS line (CrashHeader.h).
 QString crashReport() {
-    return QString::fromUtf8(gitbolt::test::crashHeader("0.9.1", true, false, false))
+    return QString::fromUtf8(gitbolt::test::crashHeader("0.1.1", true, false, false))
            + QStringLiteral("Signal: SIGSEGV (11)\nEpoch: 1760000000\n\n"
                             "--- Stack Trace ---\n"
                             "#0 GitBolt +0x10 ?\n"
@@ -401,18 +401,18 @@ private slots:
     void userAgentCarriesOsTokenOnly() {
         QCOMPARE(userAgent(clientFor(QStringLiteral("macOS"), QStringLiteral("15.6"),
                                      QStringLiteral("arm64"))),
-                 QStringLiteral("GitBolt/0.9.5 (Macintosh; Mac OS X 15_6)"));
+                 QStringLiteral("GitBolt/0.1.5 (Macintosh; Mac OS X 15_6)"));
         QCOMPARE(userAgent(clientFor(QStringLiteral("Windows"), QStringLiteral("11"),
                                      QStringLiteral("x86_64"))),
-                 QStringLiteral("GitBolt/0.9.5 (Windows NT 10.0; Win64; x64)"));
+                 QStringLiteral("GitBolt/0.1.5 (Windows NT 10.0; Win64; x64)"));
         QCOMPARE(userAgent(clientFor(QStringLiteral("Linux"), QStringLiteral("ubuntu 24.04"),
                                      QStringLiteral("x86_64"))),
-                 QStringLiteral("GitBolt/0.9.5 (X11; Linux x86_64)"));
+                 QStringLiteral("GitBolt/0.1.5 (X11; Linux x86_64)"));
 
         // This machine's: the OS token and nothing else, whatever it is.
-        const ClientInfo here{QStringLiteral("1.2.3"), Environment::current()};
+        const ClientInfo here{QStringLiteral("0.1.0"), Environment::current()};
         const QRegularExpression shape(QStringLiteral(
-            "^GitBolt/1\\.2\\.3 \\((Macintosh(; Mac OS X \\d+(_\\d+)*)?"
+            "^GitBolt/0\\.1\\.0 \\((Macintosh(; Mac OS X \\d+(_\\d+)*)?"
             "|Windows NT 10\\.0; (Win64; x64|ARM64)|X11; Linux [a-z0-9_]+)\\)$"));
         QVERIFY2(shape.match(userAgent(here)).hasMatch(), qPrintable(userAgent(here)));
     }
@@ -540,7 +540,7 @@ private slots:
         auto config = [](const QString& host) {
             return Config::fromEndpoints(host, QStringLiteral("id"), QStringLiteral("secret"),
                                          kGlitchTipKey, QStringLiteral("7"),
-                                         QStringLiteral("0.9.5"), QStringLiteral("/tmp/q"));
+                                         QStringLiteral("0.1.5"), QStringLiteral("/tmp/q"));
         };
         QVERIFY(config(QStringLiteral("https://telemetry.example.com")).isComplete());
         QVERIFY(config(QStringLiteral("http://127.0.0.1:8080")).isComplete());
@@ -557,7 +557,7 @@ private slots:
         QVERIFY(!missing.isComplete());
         Config badProject = Config::fromEndpoints(
             QStringLiteral("https://example.com"), QStringLiteral("id"), QStringLiteral("s"),
-            kGlitchTipKey, QStringLiteral("abc"), QStringLiteral("0.9.5"), QStringLiteral("/q"));
+            kGlitchTipKey, QStringLiteral("abc"), QStringLiteral("0.1.5"), QStringLiteral("/q"));
         QVERIFY(!badProject.isComplete());
         Config badVersion = config(QStringLiteral("https://example.com"));
         badVersion.appVersion = QStringLiteral("unknown");
@@ -643,7 +643,7 @@ private slots:
         QCOMPARE(request.header("accept-language"), QByteArray("*"));
         QCOMPARE(request.header("accept-encoding"), QByteArray("identity"));
         const QString agent = QString::fromLatin1(request.header("user-agent"));
-        QVERIFY2(QRegularExpression(QStringLiteral("^GitBolt/1\\.2\\.3 \\((Macintosh|Windows NT|X11)"
+        QVERIFY2(QRegularExpression(QStringLiteral("^GitBolt/0\\.1\\.0 \\((Macintosh|Windows NT|X11)"
                                                    "[^)]*\\)$"))
                      .match(agent)
                      .hasMatch(),
@@ -672,7 +672,7 @@ private slots:
                              QStringLiteral("Linux")})
                     .contains(props.value(QStringLiteral("__os")).toString()));
         QCOMPARE(props.value(QStringLiteral("__device")).toString(), QStringLiteral("desktop"));
-        QCOMPARE(props.value(QStringLiteral("app_version")).toString(), QStringLiteral("1.2.3"));
+        QCOMPARE(props.value(QStringLiteral("app_version")).toString(), QStringLiteral("0.1.0"));
         QVERIFY(QRegularExpression(QStringLiteral("^[a-z]{2,3}$|^und$"))
                     .match(props.value(QStringLiteral("locale")).toString())
                     .hasMatch());
@@ -694,7 +694,7 @@ private slots:
             QueuedRecord record;
             record.queued = queued;
             record.payload = *appLaunchedEvent(
-                ClientInfo{QStringLiteral("1.2.3"), Environment::current()}, kInstallId);
+                ClientInfo{QStringLiteral("0.1.0"), Environment::current()}, kInstallId);
             queue.append(record);
         }
         auto service = makeService(config, provider);
@@ -1552,7 +1552,7 @@ private slots:
             if (tags.contains(QStringLiteral("code")))
                 QCOMPARE(tags.value(QStringLiteral("code")).toString(), QStringLiteral("other"));
             QByteArray all = request.everything();
-            all.replace("gitbolt@1.2.3", "");   // the release names the app, not a person
+            all.replace("gitbolt@0.1.0", "");   // the release names the app, not a person
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com",
                                          "feature/"})
                 QVERIFY2(!all.contains(sentinel), sentinel);
@@ -1594,7 +1594,7 @@ private slots:
         QVERIFY(auth.startsWith("Sentry "));
         QVERIFY(auth.contains("sentry_version=7"));
         QVERIFY(auth.contains("sentry_key=" + kGlitchTipKey.toLatin1()));
-        QVERIFY(auth.contains("sentry_client=gitbolt/1.2.3"));
+        QVERIFY(auth.contains("sentry_client=gitbolt/0.1.0"));
 
         const QJsonObject event = request.json();
         QVERIFY(QRegularExpression(QStringLiteral("^[0-9a-f]{32}$"))
@@ -1602,7 +1602,7 @@ private slots:
                     .hasMatch());
         QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("error"));
         QCOMPARE(event.value(QStringLiteral("platform")).toString(), QStringLiteral("native"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@1.2.3"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.0"));
         QCOMPARE(event.value(QStringLiteral("environment")).toString(),
                  QStringLiteral("production"));
         QCOMPARE(event.value(QStringLiteral("message")).toString(),
@@ -1666,7 +1666,7 @@ private slots:
 
         const QJsonObject event = stub_->requests().first().json();
         QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.9.1"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.1"));
         QCOMPARE(event.value(QStringLiteral("timestamp")).toString(),
                  QDateTime::fromSecsSinceEpoch(1760000000, QTimeZone::UTC)
                      .toString(Qt::ISODateWithMs));
