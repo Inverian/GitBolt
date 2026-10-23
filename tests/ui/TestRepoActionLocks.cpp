@@ -40,7 +40,31 @@
 //     landed; the in-progress bar shows no merge while a merge's
 //     post-merge hook runs; the Commit tab's "contained in" reply of
 //     a repository no longer open is dropped; a revealed auto-fetch
-//     outlives its repository opened again by a path in another case.
+//     outlives its repository opened again by a path in another case;
+//   - Manage Submodules' and Manage Worktrees' Open opens the submodule
+//     or worktree in the window, and Open in File Explorer shows its
+//     folder (a submodule's path is relative to the work tree), as
+//     Repository › File Explorer shows the work tree's, and the folder
+//     a bundle is in rather than launch it (a folder named Tool.app,
+//     on macOS); a submodule's path that names a file shows the folder
+//     it is in, not the file (an executable CHANGELOG runs), a link
+//     the folder it leads to, and one out of the work tree nothing;
+//     both judge a submodule's path as written before they look on
+//     disk (on Windows //host/share is another computer), and Open
+//     opens no repository out of the work tree either;
+//     Manage Worktrees' Remove names the folder it deletes; the Console
+//     gets a bare repository's GIT_DIR;
+//   - a branch whose name begins with '-' never reaches git from the
+//     sidebar's Merge, Set Upstream, Checkout as local branch (of one to
+//     be made) and Push, where git read it as an option: each says so
+//     instead, and nothing changes; Rename renames such a branch away
+//     and Delete from remote deletes it on the server, after "--", and
+//     an existing local one is checked out;
+//   - Format Patch takes a count ("-2") as git does;
+//   - status that can't be read (a tree nested too deep for libgit2) is
+//     said on the status bar, once rather than at every refresh, and
+//     the Commit button says no count is known, why on hover; Manage
+//     Submodules says why the submodules can't be listed.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // git's global configuration is a file there with an identity and
@@ -52,9 +76,11 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QLabel>
@@ -70,13 +96,16 @@
 #include <QSignalSpy>
 #include <QStatusBar>
 #include <QStandardPaths>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
 #include <QTimer>
 #include <QTreeView>
+#include <QUrl>
 
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "../TestProcessHelper.h"
@@ -92,6 +121,7 @@
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/RepoOperationBar.h"
 #include "widgets/SubmoduleWidget.h"
+#include "widgets/TerminalWidget.h"
 #include "widgets/WorktreeWidget.h"
 
 using gitbolt::services::GitService;
@@ -278,6 +308,27 @@ bool pickFromContextMenu(QAbstractItemView* view, const QModelIndex& index,
     return picked;
 }
 
+// Takes the file URLs QDesktopServices would hand the desktop.
+class UrlCatcher : public QObject {
+    Q_OBJECT
+public:
+    UrlCatcher() { QDesktopServices::setUrlHandler(QStringLiteral("file"), this, "open"); }
+    ~UrlCatcher() override { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); }
+    QList<QUrl> urls;
+
+public slots:
+    void open(const QUrl& url) { urls << url; }
+};
+
+// The folder of the repository `svc` has open, symlinks resolved.
+QString openFolder(GitService* svc) {
+    if (!svc->isOpen() || svc->openPending())
+        return {};
+    return QFileInfo(QString::fromStdString(svc->withRepository(
+                         [](gitbolt::git::Repository& r) { return r.workdir(); })))
+        .canonicalFilePath();
+}
+
 } // namespace
 
 class TestRepoActionLocks : public QObject {
@@ -457,6 +508,413 @@ private slots:
         QVERIFY(QFileInfo::exists(super + QStringLiteral("/sub/.git")));
         if (auto* dialog = qobject_cast<QDialog*>(widget->window()))
             dialog->close();
+    }
+
+    // Manage Submodules' "Open in New Window" handed the desktop the
+    // submodule's path as git has it, relative to the work tree, so it
+    // resolved against GitBolt's own folder and nothing opened; Manage
+    // Worktrees' showed the worktree in the file manager. "Open in
+    // GitBolt" opens it in the window, and "Open in File Explorer"
+    // shows it; a submodule not checked out is said so. A submodule's
+    // path is the repository's to choose, and one named Tool.app is a
+    // bundle to macOS, which launches it when asked to open it: the
+    // superproject's folder, with it in, is shown instead.
+    void submoduleOpensInGitBolt() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString subUp = scratch.filePath(QStringLiteral("sub-upstream"));
+        const QString super = scratch.filePath(QStringLiteral("super"));
+        const auto git = [](const QString& dir, std::vector<std::string> args) {
+            return succeeded(gitbolt::git::GitProcess(dir.toStdString()).run(args));
+        };
+        QVERIFY(QDir().mkpath(subUp) && QDir().mkpath(super));
+        QVERIFY(git(subUp, {"init", "-q"}));
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s1"}));
+        QVERIFY(git(super, {"init", "-q"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "gone"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "Tool.app"}));
+        QVERIFY(git(super, {"commit", "-q", "-m", "with subs"}));
+        QVERIFY(git(super, {"submodule", "deinit", "-q", "-f", "gone"}));
+        const QString superFolder = QFileInfo(super).canonicalFilePath();
+        const QString subFolder = QFileInfo(super + QStringLiteral("/sub")).canonicalFilePath();
+        const QString bundleFolder =
+            QFileInfo(super + QStringLiteral("/Tool.app")).canonicalFilePath();
+        QVERIFY(!bundleFolder.isEmpty());
+
+        MainWindow window;
+        auto* svc = openIn(window, super);
+        QVERIFY(svc);
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(QStringLiteral("sub"));
+            QCOMPARE(desktop.urls.size(), 1);
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     subFolder);
+        }
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(QStringLiteral("Tool.app"));
+            QCOMPARE(desktop.urls.size(), 1);
+#ifdef Q_OS_MACOS
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     superFolder);
+#else
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     bundleFolder);
+#endif
+        }
+
+        {
+            BoxAnswerer answer(QMessageBox::Ok);
+            emit widget->openRequested(QStringLiteral("gone"));
+            QVERIFY2(answer.text.contains(QStringLiteral("not checked out")),
+                     qPrintable(answer.text));
+            QVERIFY(dialog && dialog->isVisible());
+            QCOMPARE(openFolder(svc), superFolder);
+        }
+
+        emit widget->openRequested(QStringLiteral("sub"));
+        QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), subFolder, 15000);
+        QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    // Manage Submodules lists what .gitmodules names, a path with no
+    // submodule at it included, so a row's path is the repository's to
+    // choose. Open in File Explorer handed the desktop whatever was
+    // there: an executable CHANGELOG (which Terminal runs), a .command
+    // file, a link to one, a link to Tool.app (launched as an app), or
+    // a path out of the work tree. Only a folder in the work tree is
+    // shown now: a file's is the folder it is in, a link's is where it
+    // leads, and a path out of the work tree is said so.
+    void submoduleRevealShowsAFolderInTheWorkTree_data() {
+        QTest::addColumn<QString>("path");   // the submodule's, in .gitmodules
+        QTest::addColumn<QString>("shown");  // in the superproject; empty: nothing
+        QTest::newRow("CHANGELOG at 755") << QStringLiteral("CHANGELOG") << QStringLiteral(".");
+        QTest::newRow("run.command") << QStringLiteral("run.command") << QStringLiteral(".");
+        // Not on Windows: QFile::link makes a shortcut there, not a link.
+#ifndef Q_OS_WIN
+        QTest::newRow("a link to a script")
+            << QStringLiteral("linked") << QStringLiteral("tools");
+#ifdef Q_OS_MACOS
+        QTest::newRow("a link to Tool.app") << QStringLiteral("applink") << QStringLiteral("x");
+#else
+        QTest::newRow("a link to Tool.app")
+            << QStringLiteral("applink") << QStringLiteral("x/Tool.app");
+#endif
+#endif
+        QTest::newRow("up and out") << QStringLiteral("../victim/CHANGELOG") << QString();
+        // The absolute path, filled in below: the scratch folder's.
+        QTest::newRow("absolute") << QStringLiteral("<victim>/CHANGELOG") << QString();
+    }
+
+    void submoduleRevealShowsAFolderInTheWorkTree() {
+        QFETCH(QString, path);
+        QFETCH(QString, shown);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString super = QFileInfo(scratch.path()).canonicalFilePath()
+                              + QStringLiteral("/super");
+        const QString victim = QFileInfo(scratch.path()).canonicalFilePath()
+                               + QStringLiteral("/victim");
+        path.replace(QStringLiteral("<victim>"), victim);
+        const QByteArray script = "#!/bin/sh\necho marker >/dev/null\n";
+        const auto executable = [](const QString& file) {
+            return QFile::setPermissions(file, QFile::ReadOwner | QFile::WriteOwner
+                                                   | QFile::ExeOwner | QFile::ReadGroup
+                                                   | QFile::ExeGroup);
+        };
+        for (const QString& file : {super + QStringLiteral("/CHANGELOG"),
+                                    super + QStringLiteral("/tools/CHANGELOG"),
+                                    super + QStringLiteral("/x/Tool.app/Contents/MacOS/Tool"),
+                                    victim + QStringLiteral("/CHANGELOG")})
+            QVERIFY(writeFile(file, script) && executable(file));
+        QVERIFY(writeFile(super + QStringLiteral("/run.command"), script));
+#ifndef Q_OS_WIN
+        QVERIFY(QFile::link(super + QStringLiteral("/tools/CHANGELOG"),
+                            super + QStringLiteral("/linked")));
+        QVERIFY(QFile::link(super + QStringLiteral("/x/Tool.app"),
+                            super + QStringLiteral("/applink")));
+#endif
+        const QStringList paths{QStringLiteral("CHANGELOG"), QStringLiteral("run.command"),
+#ifndef Q_OS_WIN
+                                QStringLiteral("linked"), QStringLiteral("applink"),
+#endif
+                                QStringLiteral("../victim/CHANGELOG"),
+                                victim + QStringLiteral("/CHANGELOG")};
+        QByteArray modules;
+        for (int i = 0; i < paths.size(); ++i)
+            modules += "[submodule \"s" + QByteArray::number(i) + "\"]\n\tpath = "
+                       + paths[i].toUtf8() + "\n\turl = ../elsewhere.git\n";
+        QVERIFY(writeFile(super + QStringLiteral("/.gitmodules"), modules));
+        gitbolt::git::GitProcess git(super.toStdString());
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"add", "-A"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "files named as submodules"})));
+
+        MainWindow window;
+        QVERIFY(openIn(window, super));
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        // The list has the file as a submodule's path, to pick.
+        auto* model = widget->findChild<gitbolt::widgets::SubmoduleTableModel*>();
+        QVERIFY(model);
+        QStringList listed;
+        for (int row = 0; row < model->rowCount(); ++row)
+            listed << model->pathAtRow(row);
+        QVERIFY2(listed.contains(QStringLiteral("CHANGELOG")), qPrintable(listed.join(", ")));
+
+        UrlCatcher desktop;
+        BoxAnswerer answer(QMessageBox::Ok);
+        emit widget->revealRequested(path);
+        if (shown.isEmpty()) {
+            QVERIFY2(answer.text.contains(QStringLiteral("not a path in the working tree")),
+                     qPrintable(answer.text));
+            QCOMPARE(desktop.urls.size(), 0);
+            return;
+        }
+        QCOMPARE(answer.text, QString());
+        QCOMPARE(desktop.urls.size(), 1);
+        const QFileInfo handed(desktop.urls.first().toLocalFile());
+        QVERIFY2(handed.isDir() && !handed.isSymLink(), qPrintable(handed.filePath()));
+        QCOMPARE(handed.filePath(), QDir::cleanPath(super + QLatin1Char('/') + shown));
+    }
+
+    // A submodule's path is judged as written, before anything looks on
+    // disk. On Windows //host/share/x (or \\host\share\x) is another
+    // computer's folder: Open in File Explorer looked at it for a folder
+    // to show, which connected to that host with the user's credentials
+    // (or held the window up while one that doesn't answer timed out),
+    // and only then found it out of the work tree; Open in GitBolt
+    // looked for its .git and opened it, in the work tree or not. Both
+    // refuse a path with a root, a drive, a UNC host or a ".." step now,
+    // even one leading back into the work tree, and Open in GitBolt one
+    // that leads out through a link too.
+    void submodulePathIsJudgedAsWritten_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QString>("said");   // by both
+        const QString asWritten = QStringLiteral("is not a path in the working tree");
+        QTest::newRow("UNC") << QStringLiteral("//gitbolt.invalid/share/sub") << asWritten;
+        QTest::newRow("UNC, backslashes")
+            << QStringLiteral("\\\\gitbolt.invalid\\share\\sub") << asWritten;
+        QTest::newRow("a drive") << QStringLiteral("C:/sub") << asWritten;
+        // Filled in below: the superproject's folder.
+        QTest::newRow("absolute, into the work tree") << QStringLiteral("<super>/sub") << asWritten;
+        QTest::newRow("up and back in") << QStringLiteral("sub/../sub") << asWritten;
+#ifndef Q_OS_WIN
+        // QFile::link makes a shortcut on Windows, not a link.
+        QTest::newRow("a link to another repository")
+            << QStringLiteral("elsewhere") << QStringLiteral("outside the working tree");
+#endif
+    }
+
+    void submodulePathIsJudgedAsWritten() {
+        QFETCH(QString, path);
+        QFETCH(QString, said);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString root = QFileInfo(scratch.path()).canonicalFilePath();
+        const QString subUp = root + QStringLiteral("/sub-upstream");
+        const QString super = root + QStringLiteral("/super");
+        const auto git = [](const QString& dir, std::vector<std::string> args) {
+            return succeeded(gitbolt::git::GitProcess(dir.toStdString()).run(args));
+        };
+        QVERIFY(QDir().mkpath(subUp) && QDir().mkpath(super));
+        QVERIFY(git(subUp, {"init", "-q"}));
+        QVERIFY(git(subUp, {"commit", "-q", "--allow-empty", "-m", "s1"}));
+        QVERIFY(git(super, {"init", "-q"}));
+        QVERIFY(git(super, {"submodule", "add", "-q", subUp.toStdString(), "sub"}));
+        QVERIFY(git(super, {"commit", "-q", "-m", "with sub"}));
+#ifndef Q_OS_WIN
+        QVERIFY(QFile::link(subUp, super + QStringLiteral("/elsewhere")));
+#endif
+        path.replace(QStringLiteral("<super>"), super);
+
+        MainWindow window;
+        auto* svc = openIn(window, super);
+        QVERIFY(svc);
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            BoxAnswerer answer(QMessageBox::Ok);
+            emit widget->revealRequested(path);
+            QVERIFY2(answer.text.contains(said), qPrintable(answer.text));
+            QCOMPARE(desktop.urls.size(), 0);
+        }
+        BoxAnswerer answer(QMessageBox::Ok);
+        emit widget->openRequested(path);
+        QVERIFY2(answer.text.contains(said), qPrintable(answer.text));
+        QVERIFY(dialog && dialog->isVisible());
+        QCOMPARE(openFolder(svc), super);
+    }
+
+    void worktreeOpensInGitBolt() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        const QString linked = repo.path() + QStringLiteral("-linked");
+        // macOS launches a folder named like an app when asked to open
+        // it: the folder it is in is shown instead.
+        const QString bundle = repo.path() + QStringLiteral("-linked.app");
+        const auto cleanup = qScopeGuard([&] {
+            QDir(linked).removeRecursively();
+            QDir(bundle).removeRecursively();
+        });
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "side", linked.toStdString()})));
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "app", bundle.toStdString()})));
+        const QString linkedFolder = QFileInfo(linked).canonicalFilePath();
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        action(window, "repository.manage-worktrees")->trigger();
+        gitbolt::widgets::WorktreeWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::WorktreeWidget*>()) != nullptr);
+        QPointer<QWidget> dialog = widget->window();
+
+        {
+            UrlCatcher desktop;
+            emit widget->revealRequested(linked);
+            QCOMPARE(desktop.urls.size(), 1);
+            QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                     linkedFolder);
+            QCOMPARE(openFolder(svc), QFileInfo(repo.path()).canonicalFilePath());
+
+            emit widget->revealRequested(bundle);
+            QCOMPARE(desktop.urls.size(), 2);
+#ifdef Q_OS_MACOS
+            QCOMPARE(QFileInfo(desktop.urls.last().toLocalFile()).canonicalFilePath(),
+                     QFileInfo(QFileInfo(bundle).absolutePath()).canonicalFilePath());
+#else
+            QCOMPARE(QFileInfo(desktop.urls.last().toLocalFile()).canonicalFilePath(),
+                     QFileInfo(bundle).canonicalFilePath());
+#endif
+        }
+
+        emit widget->openRequested(linked);
+        QTRY_COMPARE_WITH_TIMEOUT(openFolder(svc), linkedFolder, 15000);
+        QVERIFY(!dialog || !dialog->isVisible());
+    }
+
+    // Repository › File Explorer shows the work tree's folder. A clone
+    // named after its URL can be called Tool.app, which macOS takes for
+    // an app and launches when asked to open it: the folder it is in is
+    // shown instead.
+    void fileExplorerShowsTheWorkTree_data() {
+        QTest::addColumn<QString>("name");
+        QTest::addColumn<bool>("bundle");
+        QTest::newRow("plain") << QStringLiteral("plain") << false;
+#ifdef Q_OS_MACOS
+        QTest::newRow("Tool.app") << QStringLiteral("Tool.app") << true;
+#else
+        QTest::newRow("Tool.app") << QStringLiteral("Tool.app") << false;
+#endif
+    }
+
+    void fileExplorerShowsTheWorkTree() {
+        QFETCH(QString, name);
+        QFETCH(bool, bundle);
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString folder = scratch.filePath(name);
+        QVERIFY(QDir().mkpath(folder));
+        gitbolt::git::GitProcess git(folder.toStdString());
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, folder);
+        QVERIFY(svc);
+        QCOMPARE(openFolder(svc), QFileInfo(folder).canonicalFilePath());
+
+        UrlCatcher desktop;
+        action(window, "repository.file-explorer")->trigger();
+        QCOMPARE(desktop.urls.size(), 1);
+        QCOMPARE(QFileInfo(desktop.urls.first().toLocalFile()).canonicalFilePath(),
+                 QFileInfo(bundle ? scratch.path() : folder).canonicalFilePath());
+    }
+
+    // Manage Worktrees' Remove asks with the folder it deletes, the
+    // worktree's path as the table shows it, from a row's menu and from
+    // the toolbar. It named the worktree alone, and the folder deleted
+    // was whatever folder its files in .git named.
+    void worktreeRemoveNamesItsFolder() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        const QString linked = repo.path() + QStringLiteral("-linked");
+        const auto cleanup = qScopeGuard([&] { QDir(linked).removeRecursively(); });
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"worktree", "add", "-q", "-b", "side", linked.toStdString()})));
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        action(window, "repository.manage-worktrees")->trigger();
+        gitbolt::widgets::WorktreeWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::WorktreeWidget*>()) != nullptr);
+        auto* rows = widget->findChild<QTableView*>();
+        QVERIFY(rows);
+        QTRY_VERIFY_WITH_TIMEOUT(rows->model()->rowCount() == 1, 10000);
+        const QModelIndex row = rows->model()->index(0, 0);
+        const QString shown =
+            row.data(gitbolt::widgets::WorktreeTableModel::WorktreePathRole).toString();
+        QCOMPARE(QFileInfo(shown).canonicalFilePath(), QFileInfo(linked).canonicalFilePath());
+        const QString named = QDir::toNativeSeparators(shown);
+
+        {
+            BoxAnswerer answer(QMessageBox::No);
+            QVERIFY(pickFromContextMenu(rows, row, QStringLiteral("Remove")));
+            QVERIFY2(answer.text.contains(named), qPrintable(answer.text));
+        }
+        QVERIFY(QFileInfo::exists(linked + QStringLiteral("/a.txt")));
+
+        rows->selectionModel()->select(row, QItemSelectionModel::ClearAndSelect
+                                                | QItemSelectionModel::Rows);
+        auto* remove = widget->findChild<QAction*>(QStringLiteral("worktree.remove"));
+        QVERIFY(remove);
+        {
+            BoxAnswerer answer(QMessageBox::Yes);
+            remove->trigger();
+            QVERIFY2(answer.text.contains(named), qPrintable(answer.text));
+        }
+        QTRY_VERIFY_WITH_TIMEOUT(!QFileInfo::exists(linked), 10000);
+    }
+
+    // The Console's shell gets a bare repository's GIT_DIR, as Git bash
+    // does, and loses it with the next repository: it was only told to
+    // `cd`, and git there failed where safe.bareRepository is
+    // "explicit".
+    void consoleGetsABareRepositorysGitDir() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString bare = scratch.filePath(QStringLiteral("bare.git"));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", bare.toStdString()})));
+        const auto canonical = [](const QString& p) { return QFileInfo(p).canonicalFilePath(); };
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        auto* view = window.findChild<gitbolt::ui::RepositoryView*>();
+        QVERIFY(view && view->terminal());
+        QCOMPARE(view->terminal()->gitDir(), QString());
+
+        window.openRepositoryAtPath(bare);
+        QTRY_COMPARE_WITH_TIMEOUT(canonical(view->terminal()->gitDir()), canonical(bare), 15000);
+
+        QVERIFY(openIn(window, repo.path()));
+        QTRY_COMPARE(view->terminal()->gitDir(), QString());
     }
 
     // `git cherry-pick A B` stopped at A on a conflict, and A was then
@@ -819,7 +1277,8 @@ private slots:
             action(window, "repository.manage-worktrees")->trigger();
             auto* worktrees = window.findChild<gitbolt::widgets::WorktreeWidget*>();
             QVERIFY(worktrees);
-            emit worktrees->removeRequested(QStringLiteral("review"));
+            emit worktrees->removeRequested(QStringLiteral("review"),
+                                            a + QStringLiteral("-wt/review"));
         } else if (flow == QLatin1String("bar.skip")) {
             QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && !bar->isBusy(), 10000);
             emit bar->skipRequested();
@@ -963,6 +1422,275 @@ private slots:
         QCOMPARE(asked, QStringLiteral("Rename Branch"));
         QTRY_COMPARE_WITH_TIMEOUT(branches(), QStringLiteral("from-feature\nmade-here\nmain\nrenamed"),
                                   10000);
+    }
+
+    // Branches whose names begin with '-': git allows them, and a fetch
+    // keeps one a remote advertises ("origin/-y"). The sidebar's Merge,
+    // Set Upstream, Checkout as local branch and Push gave them to git,
+    // which read them as options. Each says so now, as its failure
+    // would, before it asks anything, and runs nothing: the repository
+    // and the server are as they were.
+    void sidebarRefusesBranchNamesGitWouldReadAsOptions() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString server = scratch.filePath(QStringLiteral("server.git"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        gitbolt::git::GitProcess git(work.toStdString());
+        gitbolt::git::GitProcess serverGit(server.toStdString());
+        serverGit.setGitDir(server.toStdString());
+        QVERIFY(QDir().mkpath(work));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "main"})));
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        QVERIFY(succeeded(serverGit.run({"update-ref", "--", "refs/heads/-y", "main"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+        QCOMPARE(output(git.run({"rev-parse", "--verify", "refs/remotes/origin/-y"})),
+                 output(git.run({"rev-parse", "HEAD"})));
+        const QString before = fingerprint(work);
+        const QString serverBefore = output(serverGit.run({"for-each-ref"}));
+
+        MainWindow window;
+        auto* svc = openIn(window, work);
+        QVERIFY(svc);
+        auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
+        QVERIFY(tree);
+        // What the window asks or says: a message box is noted and
+        // closed, a text question noted and cancelled.
+        QStringList asked;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->reject();
+            }
+        });
+        answer.start();
+        // All that is to be said: that `name` would be read as an option.
+        const auto refusalOf = [](const QString& name) {
+            return QStringList{QLatin1Char('"') + name + QStringLiteral(
+                "\" begins with '-', which git would read as an option, not a name, so "
+                "GitBolt doesn't pass it to git.")};
+        };
+
+        emit tree->mergeRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
+        emit tree->setUpstreamRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-x")));
+        emit tree->checkoutRemoteRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), refusalOf(QStringLiteral("-y")));
+        // Push is a remote op: refused by the service, on the status bar.
+        emit tree->pushRequested(QStringLiteral("origin"), QStringLiteral("-x"),
+                                 tree->repositoryKey());
+        QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().startsWith(
+                                     QStringLiteral("push failed: \"-x\" begins with '-'")),
+                                 10000);
+        QVERIFY2(asked.isEmpty(), qPrintable(asked.join(QStringLiteral(" | "))));
+
+        // Whatever a local op or a remote op would have run, it has had
+        // time to.
+        QTest::qWait(500);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+        QCOMPARE(fingerprint(work), before);
+        QCOMPARE(output(serverGit.run({"for-each-ref"})), serverBefore);
+    }
+
+    // What the sidebar can do with such branches, as git can. Rename
+    // gives git the old name after "--", and Delete from remote the
+    // branch (push's refspec, nothing else), so neither is read as an
+    // option, a name with a command in it included; both used to be
+    // refused, which left the branch in the repository or on the
+    // server for the shell to clear away. A new name that begins with
+    // '-' is still refused, and Checkout as local branch checks out a
+    // local "-y" that is there already (through libgit2, no git).
+    void sidebarClearsAwayBranchesNamedLikeOptions() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        const QString server = scratch.filePath(QStringLiteral("server.git"));
+        const QString work = scratch.filePath(QStringLiteral("work"));
+        gitbolt::git::GitProcess git(work.toStdString());
+        gitbolt::git::GitProcess serverGit(server.toStdString());
+        serverGit.setGitDir(server.toStdString());
+        QVERIFY(QDir().mkpath(work));
+        QVERIFY(succeeded(gitbolt::git::GitProcess(scratch.path().toStdString())
+                              .run({"init", "-q", "--bare", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"init", "-q"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "base"})));
+        QVERIFY(succeeded(git.run({"remote", "add", "origin", server.toStdString()})));
+        QVERIFY(succeeded(git.run({"push", "-q", "origin", "main"})));
+        // Run, it would leave "ran" at the top of the work tree.
+        const QString command = QStringLiteral("--receive-pack=touch${IFS}ran;true");
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-x", "HEAD"})));
+        QVERIFY(succeeded(git.run({"update-ref", "--", "refs/heads/-y", "HEAD"})));
+        for (const QString& name : {QStringLiteral("-y"), command})
+            QVERIFY(succeeded(serverGit.run({"update-ref", "--",
+                                             "refs/heads/" + name.toStdString(), "main"})));
+        QVERIFY(succeeded(git.run({"fetch", "-q", "origin"})));
+        const QString base = output(git.run({"rev-parse", "HEAD"}));
+
+        MainWindow window;
+        auto* svc = openIn(window, work);
+        QVERIFY(svc);
+        auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
+        QVERIFY(tree);
+        // What the window asks or says: a message box is noted and said
+        // yes to, a text question noted and answered with `typed`.
+        QStringList asked;
+        QString typed;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked, &typed] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                if (QAbstractButton* yes = box->button(QMessageBox::Yes))
+                    yes->click();
+                else
+                    box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->setTextValue(typed);
+                input->accept();
+            }
+        });
+        answer.start();
+        const auto localBranches = [&git] {
+            return output(git.run({"for-each-ref", "--format=%(refname)", "refs/heads"}))
+                .split(QLatin1Char('\n'));
+        };
+        const auto idle = [&window] {
+            return QTest::qWaitFor([&window] { return action(window, "act.commit")->isEnabled(); },
+                                   15000);
+        };
+
+        typed = QStringLiteral("fixed");
+        emit tree->renameBranchRequested(QStringLiteral("-x"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}), QStringList{QStringLiteral("asked: Rename Branch")});
+        QTRY_COMPARE_WITH_TIMEOUT(localBranches(),
+                                  (QStringList{QStringLiteral("refs/heads/-y"),
+                                               QStringLiteral("refs/heads/fixed"),
+                                               QStringLiteral("refs/heads/main")}),
+                                  10000);
+        QCOMPARE(output(git.run({"rev-parse", "fixed"})), base);
+        QVERIFY(idle());
+
+        typed = QStringLiteral("-z");
+        emit tree->renameBranchRequested(QStringLiteral("fixed"), tree->repositoryKey());
+        QCOMPARE(std::exchange(asked, {}),
+                 (QStringList{QStringLiteral("asked: Rename Branch"),
+                              QStringLiteral("\"-z\" begins with '-', which git would read as "
+                                             "an option, not a name, so GitBolt doesn't pass "
+                                             "it to git.")}));
+
+        emit tree->checkoutRemoteRequested(QStringLiteral("origin/-y"), tree->repositoryKey());
+        QVERIFY2(asked.isEmpty(), qPrintable(asked.join(QStringLiteral(" | "))));
+        QTRY_COMPARE_WITH_TIMEOUT(output(git.run({"symbolic-ref", "HEAD"})),
+                                  QStringLiteral("refs/heads/-y"), 10000);
+        QVERIFY(idle());
+
+        for (const QString& name : {QStringLiteral("-y"), command}) {
+            emit tree->deleteRemoteBranchRequested(QStringLiteral("origin/") + name,
+                                                   tree->repositoryKey());
+            QCOMPARE(asked.size(), 1);
+            QVERIFY2(std::exchange(asked, {}).constFirst().startsWith(
+                         QStringLiteral("Delete branch \"%1\" from remote \"origin\"?").arg(name)),
+                     qPrintable(name));
+            // Shown once the op is done, its failure otherwise.
+            QTRY_COMPARE_WITH_TIMEOUT(window.statusBar()->currentMessage(),
+                                      QStringLiteral("Deleted %1 from origin.").arg(name), 15000);
+        }
+        QCOMPARE(output(serverGit.run({"for-each-ref", "--format=%(refname)"})),
+                 QStringLiteral("refs/heads/main"));
+        QVERIFY(!QFileInfo::exists(work + QStringLiteral("/ran")));
+        QCOMPARE(localBranches(), (QStringList{QStringLiteral("refs/heads/-y"),
+                                               QStringLiteral("refs/heads/fixed"),
+                                               QStringLiteral("refs/heads/main")}));
+    }
+
+    // Commands > Format patch… with a count, "-2" (the last two commits),
+    // which `git format-patch -2` takes. It was refused as an option,
+    // and after --end-of-options git turns it down too. A range is
+    // written as before, and an option ("--stdout") is refused.
+    void formatPatchTakesACount() {
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        // The folder the directory question starts in.
+        const gitbolt::test::ScopedEnv home("HOME", QFile::encodeName(scratch.path()));
+        gitbolt::test::TestRepo repo;
+        for (const char* subject : {"one", "two", "three"})
+            QVERIFY(repo.writeAndCommit(QString::fromLatin1(subject) + QStringLiteral(".txt"),
+                                        "x\n", QString::fromLatin1(subject)).ok());
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        // The range question answered with `typed`, the directory one
+        // with `outDir`, a message box noted and closed.
+        QStringList asked;
+        QString typed;
+        QString outDir;
+        QTimer answer;
+        answer.setInterval(20);
+        QObject::connect(&answer, &QTimer::timeout, [&asked, &typed, &outDir] {
+            QWidget* modal = QApplication::activeModalWidget();
+            if (auto* box = qobject_cast<QMessageBox*>(modal)) {
+                asked << box->text();
+                box->reject();
+            } else if (auto* input = qobject_cast<QInputDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + input->windowTitle();
+                input->setTextValue(typed);
+                input->accept();
+            } else if (auto* folder = qobject_cast<QFileDialog*>(modal)) {
+                asked << QStringLiteral("asked: ") + folder->windowTitle();
+                folder->setDirectory(outDir);
+                static_cast<QDialog*>(folder)->accept();    // QFileDialog's own is protected
+            }
+        });
+        answer.start();
+        const auto patchesIn = [](const QString& dir) {
+            return QDir(dir).entryList({QStringLiteral("*.patch")}, QDir::Files, QDir::Name);
+        };
+        const QStringList bothQuestions = {QStringLiteral("asked: Format Patch"),
+                                           QStringLiteral("asked: Choose output directory for patches")};
+
+        typed = QStringLiteral("-2");
+        outDir = scratch.filePath(QStringLiteral("count"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}), bothQuestions);
+        QTRY_COMPARE_WITH_TIMEOUT(patchesIn(outDir),
+                                  (QStringList{QStringLiteral("0001-two.patch"),
+                                               QStringLiteral("0002-three.patch")}),
+                                  10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+
+        typed = QStringLiteral("HEAD~1..HEAD");
+        outDir = scratch.filePath(QStringLiteral("range"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}), bothQuestions);
+        QTRY_COMPARE_WITH_TIMEOUT(patchesIn(outDir),
+                                  QStringList{QStringLiteral("0001-three.patch")}, 10000);
+        QTRY_VERIFY_WITH_TIMEOUT(action(window, "act.commit")->isEnabled(), 15000);
+
+        typed = QStringLiteral("--stdout");
+        outDir = scratch.filePath(QStringLiteral("option"));
+        QVERIFY(QDir().mkpath(outDir));
+        action(window, "commands.format-patch")->trigger();
+        QCOMPARE(std::exchange(asked, {}),
+                 (QStringList{QStringLiteral("asked: Format Patch"),
+                              QStringLiteral("\"--stdout\" begins with '-', which git would "
+                                             "read as an option, not a name, so GitBolt "
+                                             "doesn't pass it to git.")}));
+        QVERIFY(patchesIn(outDir).isEmpty());
     }
 
     // A branch's context menu in the sidebar, up when a second launch
@@ -1615,6 +2343,94 @@ private slots:
         QCOMPARE(label->text(), QString());
         QVERIFY(newBranch->isEnabled());
         QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("topic"));
+    }
+
+    // Status that can't be read (HEAD's tree nested deeper than the
+    // bundled libgit2 goes): the status bar says so, and why, and the
+    // Commit button that no count is known, why on hover. It stayed at
+    // the count of the last status read, and the failure was said
+    // nowhere; then "Commit..." alone, a clean work tree's. Said on the
+    // status bar once: the watcher asks for status at every change in
+    // the work tree, and each failure would go over whatever the status
+    // bar said since. Once status has read again, a failure is said
+    // again.
+    void aStatusThatCantBeReadIsSaidOnce() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        auto base = repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base"));
+        QVERIFY(base.ok());
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        QAction* commit = action(window, "act.commit");
+        QTRY_COMPARE(commit->text(), QStringLiteral("Co&mmit (1)..."));
+        int failures = 0;
+        connect(svc, &GitService::operationFailed, &window, [&failures] { ++failures; });
+
+        const QString said = QStringLiteral("status failed: tree too deep: more than 2048 levels");
+        const QString why =
+            QStringLiteral("Status couldn't be read: tree too deep: more than 2048 levels");
+        QCOMPARE(commit->toolTip(), QStringLiteral("Commit (1)"));
+        const auto deep = repo.commitDeepTree(2350);
+        svc->refreshStatus();
+        QTRY_COMPARE(window.statusBar()->currentMessage(), said);
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit (?)..."));
+        QCOMPARE(commit->toolTip(), why);
+
+        // Failing again, as at the next change in the work tree.
+        window.statusBar()->showMessage(QStringLiteral("Something else"));
+        const int before = failures;
+        svc->refreshStatus();
+        QTRY_VERIFY(failures > before);
+        QTest::qWait(100);
+        QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Something else"));
+
+        // Read again, and then not.
+        QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", base->toHex()})));
+        svc->refreshStatus();
+        QTRY_COMPARE(commit->text(), QStringLiteral("Co&mmit (1)..."));
+        QCOMPARE(commit->toolTip(), QStringLiteral("Commit (1)"));
+        QVERIFY(succeeded(git.run({"update-ref", "--no-deref", "HEAD", deep.toHex()})));
+        svc->refreshStatus();
+        QTRY_COMPARE(window.statusBar()->currentMessage(), said);
+        QCOMPARE(commit->text(), QStringLiteral("Co&mmit (?)..."));
+        QCOMPARE(commit->toolTip(), why);
+#endif
+    }
+
+    // Repository > Manage submodules… where HEAD's tree is nested deeper
+    // than the bundled libgit2 goes (it reads all of it for the
+    // submodules, with a .gitmodules): the dialog says the submodules
+    // can't be listed, and why. Its list was just empty, as if the
+    // repository had none.
+    void submodulesThatCantBeListedSayWhy() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral(".gitmodules"),
+                                    "[submodule \"s\"]\n\tpath = s\n\turl = ./\n",
+                                    QStringLiteral("base")).ok());
+        repo.commitDeepTree(2350);
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        action(window, "repository.manage-submodules")->trigger();
+        gitbolt::widgets::SubmoduleWidget* widget = nullptr;
+        QTRY_VERIFY((widget = window.findChild<gitbolt::widgets::SubmoduleWidget*>()) != nullptr);
+        auto* failure = widget->window()->findChild<QLabel*>(QStringLiteral("submodules.failure"));
+        QVERIFY(failure);
+        QVERIFY(failure->isVisible());
+        QCOMPARE(failure->text(), QStringLiteral("The submodules can't be listed: "
+                                                 "tree too deep: more than 2048 levels"));
+        if (auto* dialog = qobject_cast<QDialog*>(widget->window()))
+            dialog->close();
+#endif
     }
 
 private:

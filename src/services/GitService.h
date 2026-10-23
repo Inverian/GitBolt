@@ -3,8 +3,10 @@
 #include "util/AsyncRunner.h"
 #include "watcher/FileWatcher.h"
 #include <QObject>
+#include <QPointer>
 #include <QStringList>
 #include <QThread>
+#include <QThreadPool>
 #include <atomic>
 #include <functional>
 #include <map>
@@ -28,6 +30,16 @@ struct StopFacts {
     bool trackedChanges = false;
     bool stagedWithoutPick = false;
     QString unpickedSequenceStop;
+};
+
+/// A conflict as the resolver resolved it: the text of its result, or,
+/// for a conflict on a symbolic link, the side accepted as it listed
+/// it, which is staged as it is and not as the text
+/// (Repository::resolveConflict).
+struct ConflictResolution {
+    QString path;
+    QString content;
+    std::optional<git::AcceptedSide> accepted = std::nullopt;
 };
 
 /// Threading rule. A GitService's state belongs to the thread it lives
@@ -147,9 +159,62 @@ public:
         return std::forward<Fn>(fn)(*repo_);
     }
 
+    /// withRepository() off the GUI thread, for a read that can take
+    /// long: a commit's diff or its file tree walks the whole tree, and
+    /// on the GUI thread a commit with a huge or deeply nested one froze
+    /// the window. `read(repo)` runs on the service's read thread, under
+    /// repoMutex_ (the rules of withRepository() apply to it), and what
+    /// it returns goes to `done` on the service's thread, if that
+    /// repository is still the open one (deliverFor) and `context` still
+    /// exists; otherwise it is dropped. Nothing runs when no repository
+    /// is open. Service thread only. A caller that asks again before the
+    /// answer comes tells its replies apart itself.
+    ///
+    /// A read can be stopped. `read(repo, cancelled)` gets a check, for
+    /// Repository::diffCommit and walkTreeAtCommit, that turns true from
+    /// any thread once the read is for nothing: `superseded`, if given,
+    /// says so (its asker has moved on, to a newer selection), or the
+    /// service closed or switched the repository (closeRepository, an
+    /// open), or is going (cancelGitOps(), which ~GitService calls). A
+    /// read let run to its end held up the next one, the refreshes
+    /// waiting on repoMutex_, and quitting, for as long as a huge tree
+    /// took. A read already for nothing when its turn comes doesn't
+    /// run, and what one returns once it is for nothing goes nowhere:
+    /// `done` isn't called, so a stopped read says nothing.
+    template <typename Read, typename Done>
+    void readAsync(QObject* context, Read read, Done done,
+                   std::function<bool()> superseded = {})
+    {
+        if (!repo_)
+            return;
+        std::shared_ptr<git::Repository> r = repo_;
+        readRunner_.run([this, r, generation = readGeneration_.load(),
+                         context = QPointer<QObject>(context), read = std::move(read),
+                         done = std::move(done), superseded = std::move(superseded)]() mutable {
+            const std::function<bool()> cancelled = [this, generation, &superseded] {
+                return readGeneration_.load() != generation || opsCancelled_->load()
+                       || (superseded && superseded());
+            };
+            if (cancelled())
+                return;   // for nothing before its turn came
+            std::lock_guard<std::mutex> lock(repoMutex_);
+            if (r != repo_ || cancelled())
+                return;   // superseded by a repo switch, or while it waited
+            auto result = read(*r, cancelled);
+            if (cancelled())
+                return;   // stopped, or for nothing by now
+            deliverFor(r, [context, result = std::move(result), done = std::move(done)]() mutable {
+                if (context)
+                    done(std::move(result));
+            });
+        });
+    }
+
     /// Thread-safe construction of a GitProcess for the open repository.
     /// Locks repoMutex_ briefly while libgit2 reports the workdir, then
-    /// returns by value. Once you have the GitProcess object you can
+    /// returns by value; on the service's thread it doesn't wait for the
+    /// lock, which a long read may hold, and copies the one made as the
+    /// repository opened. Once you have the GitProcess object you can
     /// run shell commands on it without holding the lock — QProcess is
     /// independent of libgit2 state. Its commands stop on
     /// cancelGitOps(), so a command run on a pool thread can't hold up
@@ -157,9 +222,9 @@ public:
     git::GitProcess process() const;
 
     /// Whether a job the service runs (a refresh, a rebase step, a
-    /// checkout, Git Flow, maintenance) is still running. MainWindow
-    /// hides itself while quitting waits for them.
-    bool workRunning() const { return runner_.busy(); }
+    /// checkout, Git Flow, maintenance, a readAsync) is still running.
+    /// MainWindow hides itself while quitting waits for them.
+    bool workRunning() const { return runner_.busy() || readRunner_.busy(); }
 
     void refreshStatus();
     /// Commits per history page (CommitLogModel pages by the same).
@@ -181,9 +246,12 @@ public:
     /// source: merge, cherry-pick, rebase, revert.
     void refreshConflicts();
 
-    /// Write each (repo-relative path, resolved content) pair to
-    /// the working tree and stage it, collapsing the conflict
-    /// entries. Synchronous (file writes + index adds are fast);
+    /// Stage each resolution (a repo-relative path and its content, or
+    /// the side accepted), collapsing the conflict entries, and write
+    /// the file from the index (Repository::resolveConflict): never
+    /// through a symbolic link, and a link's conflict only to one side
+    /// as it is.
+    /// Synchronous (index adds + one-file checkouts are fast);
     /// failures surface per-file via operationFailed. Ends with a
     /// status refresh. The caller then concludes the merge with a
     /// normal commit — git commit (commitChanges) picks up MERGE_HEAD
@@ -191,8 +259,7 @@ public:
     /// Returns false, having written nothing, while a rebase step runs
     /// on the repository (see rebaseStepRunning()), reported as an
     /// operationFailed.
-    bool resolveConflicts(
-        const std::vector<std::pair<QString, QString>>& resolutions);
+    bool resolveConflicts(const std::vector<ConflictResolution>& resolutions);
 
     /// Abort whatever conflicted operation is in progress, using
     /// the command that matches the repository state: merge /
@@ -286,12 +353,16 @@ public:
 
     /// Pushes `branch` (empty = the checked-out branch). A branch with
     /// no upstream yet is published with --set-upstream instead of
-    /// failing. Safe off the GUI thread, like pull/fetch.
+    /// failing. Safe off the GUI thread, like pull/fetch. A remote or
+    /// branch name git would read as an option is refused before any
+    /// git runs (git::GitProcess::checkOperand), as operationFailed.
     bool push(const QString& remote, const QString& branch);
-    /// `git push <remote> --delete <branch>`: removes the branch on the
-    /// server and, on success, the local remote-tracking ref. Failures
-    /// surface as operationFailed("delete remote branch", …). Safe off
-    /// the GUI thread.
+    /// `git push --delete -- <remote> <branch>`: removes the branch on
+    /// the server and, on success, the local remote-tracking ref, a
+    /// branch whose name begins with '-' too. Failures, and a remote
+    /// name git would read as an option, surface as
+    /// operationFailed("delete remote branch", …). Safe off the GUI
+    /// thread.
     bool deleteRemoteBranch(const QString& remote, const QString& branch);
     bool pull(const QString& remote, const QString& branch);
     /// Prunes the remote-tracking refs of branches deleted on the
@@ -323,7 +394,8 @@ public:
     /// their console on Windows; see GitProcess::run), so git rolls its
     /// lockfiles back, a hook finishes cleaning up (pre-commit puts the
     /// unstaged changes back), and a rebase stopped mid-step stays in
-    /// progress, to be carried on later. For shutdown: MainWindow calls it before
+    /// progress, to be carried on later. A readAsync's read stops too, and
+    /// later ones don't run. For shutdown: MainWindow calls it before
     /// waiting for its pool threads, and the destructor before waiting
     /// for the service's own. Thread-safe.
     void cancelGitOps();
@@ -413,7 +485,8 @@ public:
     void deleteTag(const QString& name);
 
     // Submodules. Init and update are MainWindow's local ops (an update
-    // clones and checks out), as sync and deinit are.
+    // clones and checks out), as sync and deinit are. A list that can't
+    // be read is an operationFailed("submodules", why).
     void refreshSubmodules();
 
     // Worktrees
@@ -423,7 +496,11 @@ public:
     /// requiring an existing branch.
     void addWorktree(const QString& name, const QString& path, const QString& branch,
                      bool createBranch = false);
-    void removeWorktree(const QString& name);
+    /// Deletes the worktree's folder, `folder`: the one the user was
+    /// asked about. A worktree that is elsewhere by now, or whose
+    /// folder isn't its own (Repository::removeWorktree), is refused
+    /// with an operationFailed, nothing deleted.
+    void removeWorktree(const QString& name, const QString& folder);
     void lockWorktree(const QString& name);
     void unlockWorktree(const QString& name);
 
@@ -461,6 +538,10 @@ signals:
     /// repo_open_failed, which never sends the message.
     void repositoryOpenFailed(const QString& path, const QString& error, int errorCode);
     void repositoryClosed();
+    /// When status can't be read (libgit2 turns down a tree nested too
+    /// deep), operationFailed("status", why) comes in its place: dropped,
+    /// the failure left the Commit dialog's lists and the Commit count as
+    /// they were, as if nothing had changed.
     void statusReady(std::vector<gitbolt::git::StatusEntry> entries);
     /// Right after each statusReady (and in its place when status
     /// couldn't be read): the operation the repository is in the
@@ -646,6 +727,9 @@ private:
     // (service thread only): a rebase step's outcome is delivered only
     // while it matches the step's.
     std::string openKey_;
+    // The open repository's GitProcess, made as it opened, for process()
+    // on the service's thread (service thread only).
+    std::optional<git::GitProcess> openProcess_;
 
     // DESTRUCTION ORDER MATTERS in this section. ~AsyncRunner blocks
     // until every worker finishes, and those workers lock repoMutex_
@@ -691,12 +775,29 @@ private:
     // signals.
     quint64 openGeneration_ = 0;
 
+    // Bumped (service thread) when the repository is closed, or an open
+    // starts or lands: a readAsync's read started before is for nothing
+    // then, and stops (its `cancelled` compares). Atomic, as the read
+    // thread reads it as the read goes.
+    std::atomic<quint64> readGeneration_{0};
+
     // Cancellation flag for the in-flight watch-directory walk.
     // Replaced (not just toggled) per enumeration so each walk has
     // its own flag; the old walk sees its flag flip and bails.
     std::shared_ptr<std::atomic<bool>> watchEnumCancel_;
 
     watcher::FileWatcher watcher_;
+
+    // The thread readAsync's reads run on. libgit2's git_tree_walk
+    // (Repository::walkTreeAtCommit) recurses once per directory level:
+    // on a pool thread's default stack (512 KB on macOS) a tree some
+    // 4,500 levels deep overflowed it, where the GUI thread's 8 MB, which
+    // the walk ran on before, took over 60,000. So it gets as much. One
+    // thread is enough, as the reads take repoMutex_ in turn anyway.
+    QThreadPool readPool_;
+    // Drains the reads before readPool_ and the repository go (see
+    // runner_ below).
+    util::AsyncRunner readRunner_;
 
     // Declared last on purpose: ~AsyncRunner drains every in-flight
     // worker, and it must do so while repoMutex_ / repo_ above are

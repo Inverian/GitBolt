@@ -102,6 +102,13 @@ gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
 gitbolt_add_test(test_english_plurals util/TestEnglishPlurals.cpp)
 target_compile_definitions(test_english_plurals PRIVATE
     GITBOLT_PLURALS_TS="${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts")
+# What GitBolt checks before it hands the desktop a path in a work tree
+# (util/DesktopOpen.h): a file that may run as a program when opened,
+# and the folder to show for a bundle (macOS launches one it opens).
+gitbolt_add_test(test_desktop_open util/TestDesktopOpen.cpp)
+# How much of a commit message the views lay out (util/MessageText.h):
+# a message that fits as it is, a longer one cut with "…".
+gitbolt_add_test(test_message_text util/TestMessageText.cpp)
 
 # telemetry/ — the client against a loopback HTTP stub (HttpStub.h).
 # Never a real endpoint: test binaries don't link src/app, where the
@@ -189,6 +196,11 @@ set_property(TEST test_rebase_widgets APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 gitbolt_add_test(test_diff_colors widgets/TestDiffColors.cpp)
 target_link_libraries(test_diff_colors PRIVATE gitbolt_dialogs gitbolt_conf gitbolt_ui)
 set_property(TEST test_diff_colors APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The conflict resolver's panes: a conflict on a symbolic link says so,
+# and is resolved by accepting a side. Off screen.
+gitbolt_add_test(test_merge_conflict_widget widgets/TestMergeConflictWidget.cpp)
+target_link_libraries(test_merge_conflict_widget PRIVATE gitbolt_widgets)
+set_property(TEST test_merge_conflict_widget APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # dialogs/ — Settings › General › Usage statistics and the
 # SettingsService keys behind it. Off screen like test_rebase_widgets:
@@ -232,6 +244,12 @@ set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Repository > Edit .gitignore, .gitattributes and .mailmap: a symbolic
+# link there (one a repository committed) is neither read nor written
+# through. Off screen; it answers the editor and the message boxes.
+gitbolt_add_test(test_edit_config_file ui/TestEditConfigFile.cpp)
+target_link_libraries(test_edit_config_file PRIVATE gitbolt_ui)
+set_property(TEST test_edit_config_file APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # A real MainWindow while git works on its repository: the actions,
 # the toolbar's branch switch and the sidebar off during a commit's
 # hooks; Checkout as local branch and a submodule's Update as local ops;
@@ -246,11 +264,40 @@ set_property(TEST test_repo_action_locks APPEND PROPERTY ENVIRONMENT "QT_QPA_PLA
 # to do what they mustn't: about a minute here, so more room than the
 # 180 s the others get, for a slow runner.
 set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
+# Text a repository, a remote or git wrote, shown as written: message
+# boxes, prompts, labels and tooltips render none of its markup, and a
+# link in a message box's text opens nothing (its URLs go to a handler
+# of the test's). Off screen.
+gitbolt_add_test(test_plain_text ui/TestPlainText.cpp)
+target_sources(test_plain_text PRIVATE ShownText.h
+    ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
+target_link_libraries(test_plain_text PRIVATE gitbolt_ui)
+set_property(TEST test_plain_text APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File History: one load per file at a time, with a busy cursor and a
 # status-bar note until its dialog comes up.
 gitbolt_add_test(test_file_history ui/TestFileHistory.cpp)
 target_link_libraries(test_file_history PRIVATE gitbolt_ui)
 set_property(TEST test_file_history APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The Commit tab's links: an email is one mailto: link and adds nothing
+# to it, a Parent / Child hash selects that commit, nothing else is
+# followed. Off screen, as it clicks them; it catches the URLs that
+# would go to the desktop.
+gitbolt_add_test(test_commit_links ui/TestCommitLinks.cpp)
+target_link_libraries(test_commit_links PRIVATE gitbolt_ui)
+set_property(TEST test_commit_links APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# File Tree's Open Externally: a file that may run as a program (an
+# executable CHANGELOG, a .command file) is opened only once the user
+# says so, a link out of the work tree not at all, a text file as
+# before. Every file URL is caught (QDesktopServices::setUrlHandler).
+gitbolt_add_test(test_open_externally ui/TestOpenExternally.cpp)
+target_link_libraries(test_open_externally PRIVATE gitbolt_ui)
+set_property(TEST test_open_externally APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Selecting a commit: nothing waits for the repository (its diff and
+# file tree come from the service's read thread), and a subject of one
+# line of megabytes shows cut, there and in the other views. Off screen.
+gitbolt_add_test(test_commit_details ui/TestCommitDetails.cpp)
+target_link_libraries(test_commit_details PRIVATE gitbolt_ui)
+set_property(TEST test_commit_details APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # app/ tests — CHANGELOG.md as Help → Changelog shows it. Built with the
 # app's own .qrc so it reads the embedded text, not just the source file.
@@ -272,6 +319,11 @@ gitbolt_set_warnings(gitbolt_instance_helper)
 add_dependencies(test_single_instance gitbolt_instance_helper)
 target_compile_definitions(test_single_instance PRIVATE
     GITBOLT_INSTANCE_HELPER="$<TARGET_FILE:gitbolt_instance_helper>")
+
+# File › Recent and the home screen's list: one entry per repository,
+# whatever spelling of its folder it was opened by.
+gitbolt_add_test(test_recent_repositories conf/TestRecentRepositories.cpp)
+target_link_libraries(test_recent_repositories PRIVATE gitbolt_conf)
 
 # The folders macOS asks a running GitBolt to open (Dock drops, `open -a`,
 # Finder's service): held, coalesced and emitted queued, on every

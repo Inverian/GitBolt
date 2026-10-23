@@ -8,15 +8,19 @@
 #include "git/Diff.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
+#include "util/DesktopOpen.h"
+#include "util/MessageText.h"
 #include "widgets/BlameWidget.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/DiffViewerWidget.h"
 #include "widgets/FileTreeWidget.h"
 #include "widgets/LoadingOverlayWidget.h"
+#include "widgets/PlainTextDialogs.h"
 #include "widgets/RepoOperationBar.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/TerminalWidget.h"
 
+#include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QColor>
 #include <QDateTime>
@@ -44,11 +48,18 @@
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QTabWidget>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextCursor>
+#include <QTextDocument>
+#include <QTextTable>
+#include <QTimer>
 #include <QTreeView>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <set>
@@ -72,12 +83,81 @@ constexpr const char* kDiffSplitterKey  = "diffSplitter/v2";
 constexpr int kPathRole      = Qt::UserRole + 1;
 constexpr int kIsDirRole     = Qt::UserRole + 2;
 constexpr int kFileIndexRole = Qt::UserRole + 3;
+
+// The Commit tab's link to an author's or committer's email. The
+// address is whatever the commit says: libgit2 takes everything
+// between the last '<' and '>', so quotes, '=', ';' and spaces all
+// get through. It used to go into href='mailto:%1' escaped with
+// toHtmlEscaped(), which leaves ' alone, so an address such as
+// x@y' style='…' href='file:…' closed the href and added attributes
+// of its own: its styling, its tooltip, a second href that won.
+// Now QUrl builds the href from the raw address (a path set in
+// DecodedMode, so a '?' or '#' in it is encoded too, rather than
+// starting mail headers or a fragment), and it goes into a
+// double-quoted attribute, which toHtmlEscaped() does escape for. An
+// address QUrl can't make a URL of is shown as plain text. `address`
+// is the one shown, cut to util::kMaxLineChars already.
+QString emailLink(const QString& address)
+{
+    QUrl url;
+    url.setScheme(QStringLiteral("mailto"));
+    url.setPath(address, QUrl::DecodedMode);
+    if (address.isEmpty() || !url.isValid())
+        return address.toHtmlEscaped();
+    return QStringLiteral("<a href=\"%1\">%2</a>")
+        .arg(url.toString(QUrl::FullyEncoded).toHtmlEscaped(), address.toHtmlEscaped());
+}
+
+// The Commit tab avatar's colour: deterministic from a hash of the
+// author's email, so the same author always gets the same colour
+// across commits. `key` is the address as shown, cut to
+// util::kMaxLineChars already.
+QString avatarColor(const QString& key)
+{
+    if (key.isEmpty())
+        return QStringLiteral("#888");
+    // Deliberately the low 32 bits of the size_t hash; widening h
+    // would change every author's hue.
+    const auto h = static_cast<uint>(qHash(key));
+    const int hue = static_cast<int>(h % 360u);
+    return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
+}
+
+// How long the Diff tab and the Stats row wait on the selected commit's
+// diff before they say it's on its way (diffLoadingTimer_), and so the
+// longest the previous commit's files stay up: long enough for an
+// ordinary diff, which takes milliseconds, and short enough that they
+// are hardly seen. The File Tree waits as long for its walk.
+constexpr int kDiffLoadingDelayMs = 150;
+
+// The Commit tab's Stats value: the cell beside the "Stats:" label.
+// Only the label column is looked in, as the value cells hold what the
+// commit says, and an author could be named "Stats:".
+QTextTableCell statsCell(QTextDocument* document)
+{
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        if (block.text() != QLatin1String("Stats:"))
+            continue;
+        const QTextCursor at(block);
+        QTextTable* table = at.currentTable();
+        if (!table || table->columns() < 2)
+            continue;
+        const QTextTableCell label = table->cellAt(at);
+        if (label.column() == 0)
+            return table->cellAt(label.row(), 1);
+    }
+    return {};
+}
 } // namespace
 
 RepositoryView::RepositoryView(QWidget* parent)
     : QWidget(parent)
 {
     setupUi();
+    diffLoadingTimer_ = new QTimer(this);
+    diffLoadingTimer_->setSingleShot(true);
+    diffLoadingTimer_->setInterval(kDiffLoadingDelayMs);
+    connect(diffLoadingTimer_, &QTimer::timeout, this, &RepositoryView::showDiffLoading);
 }
 
 // ---------------------------------------------------------------------------
@@ -171,21 +251,23 @@ QWidget* RepositoryView::buildCommitInfoTab()
     v->setSpacing(8);
 
     // ----- Top: avatar + metadata --------------------------------
-    // The top row's height is set DYNAMICALLY in showCommitDetails
-    // based on the QTextDocument's natural laid-out height — that
-    // way the metadata block is always exactly tall enough to fit
-    // its content with no scrolling regardless of how many parent,
-    // child, or committer rows the commit has. The avatar's
-    // square size is updated in lockstep so it always exactly
-    // fills its allocated square.
+    // The top row's height is set DYNAMICALLY (fitCommitInfoTopRow)
+    // from the QTextDocument's laid-out height — that way the
+    // metadata block is always exactly tall enough to fit its
+    // content with no scrolling regardless of how many parent,
+    // child, or committer rows the commit has, or how many lines a
+    // long value wraps over, up to a ceiling past which it scrolls.
+    // The avatar's square size is updated in lockstep so it always
+    // exactly fills its allocated square.
     commitInfoTopRow_ = new QWidget(page);
     auto* h = new QHBoxLayout(commitInfoTopRow_);
     h->setContentsMargins(0, 0, 0, 0);
     h->setSpacing(12);
 
     avatarLabel_ = new QLabel(commitInfoTopRow_);
+    avatarLabel_->setObjectName(QStringLiteral("commit.avatar"));
     // Initial size — overridden on first commit selection by
-    // showCommitDetails to match the actual metadata height.
+    // fitCommitInfoTopRow to match the actual metadata height.
     avatarLabel_->setFixedSize(120, 120);
     avatarLabel_->setAlignment(Qt::AlignCenter);
     avatarLabel_->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
@@ -195,10 +277,27 @@ QWidget* RepositoryView::buildCommitInfoTab()
     h->addWidget(avatarLabel_, 0, Qt::AlignTop);
 
     detailBrowser_ = new QTextBrowser(commitInfoTopRow_);
+    detailBrowser_->setObjectName(QStringLiteral("commit.detailsBrowser"));
+    // Links are ours to follow (openCommitLink). Left to QTextBrowser,
+    // a click called setSource() with the link: the gitbolt:// and
+    // mailto: links had no document to load and blanked the pane, and
+    // a file: link would have loaded that file into it.
     detailBrowser_->setOpenExternalLinks(false);
+    detailBrowser_->setOpenLinks(false);
+    connect(detailBrowser_, &QTextBrowser::anchorClicked,
+            this, &RepositoryView::openCommitLink);
     detailBrowser_->setFrameShape(QFrame::NoFrame);
+    // No scroll bar while the row fits the metadata, as it does up to
+    // its ceiling (fitCommitInfoTopRow turns it on past that).
     detailBrowser_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     detailBrowser_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // The metadata re-wraps when the browser's width changes, and its
+    // height with it: fit the row to it again. Queued, as the fit
+    // resizes the avatar and so this browser, which lays the document
+    // out again from inside the resize.
+    connect(detailBrowser_->document()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged,
+            this, &RepositoryView::fitCommitInfoTopRow, Qt::QueuedConnection);
     // Match the panel chrome instead of QTextBrowser's default
     // white. The HTML body's background is also set transparent
     // in the metadata HTML so the document doesn't paint over
@@ -227,7 +326,12 @@ QWidget* RepositoryView::buildCommitInfoTab()
 
     // ----- Bottom: full-width message body -----------------------
     messageBrowser_ = new QTextBrowser(page);
+    messageBrowser_->setObjectName(QStringLiteral("commit.messageBrowser"));
+    // The same as the metadata browser's links.
     messageBrowser_->setOpenExternalLinks(false);
+    messageBrowser_->setOpenLinks(false);
+    connect(messageBrowser_, &QTextBrowser::anchorClicked,
+            this, &RepositoryView::openCommitLink);
     messageBrowser_->setPlaceholderText(tr("Select a commit to view details"));
     messageBrowser_->setFrameShape(QFrame::NoFrame);
     // Same transparency trick as the metadata browser — blend
@@ -237,6 +341,35 @@ QWidget* RepositoryView::buildCommitInfoTab()
     v->addWidget(messageBrowser_, 1);
 
     return page;
+}
+
+// The Commit tab's links. gitbolt://commit/<hex> is a Parent or Child
+// row: select that commit in the graph, as Navigate › Go to parent
+// commit does (the selection change shows it here and goes on the
+// back / forward history). mailto: is an author's or committer's
+// email, handed to the mail app. Anything else is ignored: the
+// browsers show nothing else as a link, so it could only have come
+// from a commit's own text.
+void RepositoryView::openCommitLink(const QUrl& url)
+{
+    if (url.scheme() == QLatin1String("gitbolt") && url.host() == QLatin1String("commit")) {
+        static const QRegularExpression kHex(
+            QStringLiteral("^(?:[0-9a-f]{40}|[0-9a-f]{64})$"));
+        const QString hex = url.path().mid(1);
+        if (!graphWidget_ || !kHex.match(hex).hasMatch())
+            return;
+        // The paged log may not have loaded it yet.
+        if (!graphWidget_->selectCommit(hex)) {
+            if (auto* window = qobject_cast<QMainWindow*>(this->window()))
+                window->statusBar()->showMessage(
+                    tr("Commit %1 isn't in the currently-loaded commit window.")
+                        .arg(hex.left(8)),
+                    4000);
+        }
+        return;
+    }
+    if (url.scheme() == QLatin1String("mailto"))
+        QDesktopServices::openUrl(url);
 }
 
 // File tree tab — interactive browser of the repo at the selected
@@ -279,19 +412,110 @@ void RepositoryView::openFileExternally(const QString& path)
     // Bare: no working tree, and an empty one would be GitBolt's own
     // working folder, maybe another repository with that file in it.
     if (workdir.isEmpty()) {
-        QMessageBox::information(this, tr("Open Externally"),
+        widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("This repository is bare: it has no working tree to open "
                "%1 from.").arg(path));
         return;
     }
     const QString full = QDir(workdir).filePath(path);
     if (!QFileInfo::exists(full)) {
-        QMessageBox::information(this, tr("Open Externally"),
+        widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("%1 does not exist in the working tree (it may only "
                "exist at an older commit).").arg(path));
         return;
     }
-    QDesktopServices::openUrl(QUrl::fromLocalFile(full));
+
+    // The desktop opens what a symbolic link leads to, and a tracked
+    // link (or a folder on the way that is one) can lead anywhere: to
+    // an app, or a script elsewhere on the disk. Only a file in the
+    // working tree is opened, and it is opened by its real path, so
+    // what opens is what was looked at below. What a link leads to out
+    // of it is not the repository's to hand over, a document included:
+    // the folder it is in can be shown, to open it from there.
+    const QFileInfo target(QFileInfo(full).canonicalFilePath());
+    if (!util::isWithinFolder(target.filePath(), workdir)) {
+        QMessageBox box(QMessageBox::Information, tr("Open Externally"),
+                        tr("%1 leads to %2, outside the working tree, so it was not opened.")
+                            .arg(QDir::toNativeSeparators(path),
+                                 QDir::toNativeSeparators(target.filePath())),
+                        QMessageBox::Ok, this);
+        box.setObjectName(QStringLiteral("dlg.openExternallyOutside"));
+        box.setTextFormat(Qt::PlainText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+        box.setInformativeText(
+            tr("Open Containing Folder shows the folder it is in, to open it from there "
+               "if you trust it."));
+        QAbstractButton* folder = box.addButton(tr("Open Containing Folder"),
+                                                QMessageBox::ActionRole);
+        box.setDefaultButton(QMessageBox::Ok);
+        box.setEscapeButton(QMessageBox::Ok);
+        box.exec();
+        if (box.clickedButton() == folder)
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(util::folderToShow(target.absolutePath())));
+        return;
+    }
+    // A link to a folder: the folder is shown, and a bundle (a link to
+    // Tool.app) never launched, the folder it is in shown instead.
+    if (target.isDir()) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(target.filePath())));
+        return;
+    }
+
+    // The default app of some files runs them: on macOS Terminal opens
+    // an executable file with no extension, CHANGELOG at mode 755 say,
+    // and runs it, and a .command file too. Nothing in the tree tells
+    // such a file from a text file, so ask first, with Cancel the
+    // default, and offer its folder instead. Where the work tree keeps
+    // no modes (an exFAT drive, WSL's /mnt/c), every file is marked
+    // executable, and the index has the mode git committed it with.
+    // Only a marked file needs the index read: Windows keeps no modes,
+    // and marks only its programs.
+    bool modesKept = true;
+    uint32_t indexMode = 0;
+    const QString relative =
+        QDir(QFileInfo(workdir).canonicalFilePath()).relativeFilePath(target.filePath());
+    gitService_->withRepository([&](git::Repository& r) {
+        const auto fileMode = r.config().getBool("core.fileMode");
+        modesKept = !fileMode.ok() || *fileMode;
+        if (!modesKept && target.isExecutable())
+            indexMode = r.indexMode(relative.toStdString());
+    });
+    if (util::mayRunWhenOpened(target, modesKept, indexMode)) {
+        QMessageBox box(QMessageBox::Warning, tr("Open Externally"),
+                        tr("%1 may run as a program if it is opened.")
+                            .arg(QDir::toNativeSeparators(path)),
+                        QMessageBox::NoButton, this);
+        box.setObjectName(QStringLiteral("dlg.openExternallyRuns"));
+        box.setTextFormat(Qt::PlainText);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+        // Qt's own box, not the platform's (an NSAlert on macOS): it
+        // keeps Cancel the default, and the name as it is written.
+        box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+        box.setInformativeText(
+            tr("The system may run it instead of showing it: it is marked executable, "
+               "or it is a type of file that runs, or opens what it points to. Open it "
+               "only if you trust what it contains. Open Containing Folder shows the "
+               "folder it is in instead."));
+        QAbstractButton* open = box.addButton(tr("Open Anyway"), QMessageBox::DestructiveRole);
+        QAbstractButton* folder = box.addButton(tr("Open Containing Folder"),
+                                                QMessageBox::ActionRole);
+        box.addButton(QMessageBox::Cancel);
+        box.setDefaultButton(QMessageBox::Cancel);
+        box.setEscapeButton(QMessageBox::Cancel);
+        box.exec();
+        if (box.clickedButton() == folder) {
+            QDesktopServices::openUrl(
+                QUrl::fromLocalFile(util::folderToShow(target.absolutePath())));
+            return;
+        }
+        if (box.clickedButton() != open)
+            return;
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(target.filePath()));
 }
 
 // Compact file-history popup: every commit that touched the path
@@ -337,7 +561,7 @@ void RepositoryView::showFileHistory(const QString& path)
             return;
         const Log log = watcher->result();
         if (!log) {
-            QMessageBox::warning(this, tr("File History"),
+            widgets::PlainMessageBox::warning(this, tr("File History"),
                 tr("Could not load history for %1").arg(path));
             return;
         }
@@ -381,8 +605,11 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
         const QStringList cols = line.split(QLatin1Char('\t'));
         if (cols.size() < 5)
             continue;
+        // The author and subject at most util::kMaxLineChars long: the
+        // view lays a cell's text out whole, on every paint, before
+        // eliding it.
         auto* item = new QTreeWidgetItem(
-            {cols[1], cols[2], cols[3], cols[4]});
+            {cols[1], cols[2], util::elided(cols[3]), util::elided(cols[4])});
         item->setData(0, Qt::UserRole, cols[0]); // full sha
         tree->addTopLevelItem(item);
     }
@@ -408,7 +635,7 @@ void RepositoryView::showFileHistoryDialog(const QString& path,
             dlg->close();
         } else {
             // Paged log: the commit may simply not be loaded yet.
-            QMessageBox::information(dlg, tr("File History"),
+            widgets::PlainMessageBox::information(dlg, tr("File History"),
                 tr("Commit %1 isn't in the loaded portion of the "
                    "log — scroll the revision list further back "
                    "and try again.").arg(sha.left(7)));
@@ -557,7 +784,19 @@ QWidget* RepositoryView::buildDiffTab()
             });
     leftLayout->addWidget(diffFilterInput_);
 
+    // Why the commit's changes can't be shown, when its diff couldn't be
+    // read (a tree nested deeper than libgit2 goes): the list was just
+    // empty, as for a commit that changed nothing. libgit2's words, with
+    // a path of the repository's in them: plain text.
+    diffFailure_ = new QLabel(leftPane);
+    diffFailure_->setObjectName(QStringLiteral("diff.failure"));
+    diffFailure_->setWordWrap(true);
+    diffFailure_->setTextFormat(Qt::PlainText);
+    diffFailure_->hide();
+    leftLayout->addWidget(diffFailure_);
+
     changedFilesTree_ = new QTreeView(leftPane);
+    changedFilesTree_->setObjectName(QStringLiteral("diff.files"));
     changedFilesTree_->setHeaderHidden(true);
     changedFilesTree_->setUniformRowHeights(true);
     changedFilesTree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -679,11 +918,11 @@ widgets::RepoOperationBar* RepositoryView::operationBar() const
 // (stash cwd if not yet running, send `cd <path>` if already
 // running) so we can route both "first open" and "switched repo"
 // events through the same entry point.
-void RepositoryView::setRepositoryPath(const QString& path)
+void RepositoryView::setRepositoryPath(const QString& path, const QString& bareGitDir)
 {
     if (!terminalWidget_ || path.isEmpty())
         return;
-    terminalWidget_->changeDirectory(path);
+    terminalWidget_->changeRepository(path, bareGitDir);
 }
 
 void RepositoryView::resetInspectorTabs()
@@ -696,7 +935,12 @@ void RepositoryView::resetInspectorTabs()
     // Commit tab — clear metadata and message. A "contained in" query
     // still out for the previous repository's commit is dropped: its
     // reply wrote that commit's message into this one's Commit tab.
+    // Its diff, the same.
     ++containsQueryToken_;
+    ++*diffQueryToken_;
+    diffLoadingTimer_->stop();
+    diffLoading_ = false;
+    shownStats_.reset();
     shownCommit_.reset();
     if (avatarLabel_) {
         avatarLabel_->clear();
@@ -715,6 +959,8 @@ void RepositoryView::resetInspectorTabs()
         diffFilterInput_->clear();
     if (changedFilesModel_)
         changedFilesModel_->clear();
+    if (diffFailure_)
+        diffFailure_->hide();
     if (diffWidget_)
         diffWidget_->clear();
 
@@ -860,6 +1106,9 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
     // details, diff, and file-tree views get blanked.
     if (commitHash.isEmpty()) {
         ++containsQueryToken_;      // a query out for it is stale now
+        ++*diffQueryToken_;         // and its diff
+        diffLoadingTimer_->stop();
+        diffLoading_ = false;
         shownCommit_.reset();
         if (avatarLabel_) {
             avatarLabel_->clear();
@@ -877,6 +1126,8 @@ void RepositoryView::onCommitSelected(const QString& commitHash)
             diffFilterInput_->clear();
         if (changedFilesModel_)
             changedFilesModel_->clear();
+        if (diffFailure_)
+            diffFailure_->hide();
         if (diffWidget_)
             diffWidget_->clear();
         if (fileTreeWidget_)
@@ -935,12 +1186,19 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const QString sepColor      = dark ? QStringLiteral("#3c3c3c") : QStringLiteral("#ddd");
     const QString containsColor = dark ? QStringLiteral("#b4b4b4") : QStringLiteral("#444");
     const QString mutedColor    = dark ? QStringLiteral("#9e9e9e") : QStringLiteral("#6a6a6a");
-    const QString addedColor    = dark ? QStringLiteral("#3fb950") : QStringLiteral("#1e7b34");
-    const QString deletedColor  = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#cf222e");
 
-    const QString summary = QString::fromStdString(commit.summary).toHtmlEscaped();
-    const QString name    = QString::fromStdString(commit.author.name).toHtmlEscaped();
-    const QString email   = QString::fromStdString(commit.author.email).toHtmlEscaped();
+    // At most util::kMaxParagraphChars of the subject: a subject of one
+    // line of megabytes froze the window while the browser laid it out.
+    const QString fullSummary = QString::fromStdString(commit.summary);
+    const QString shownSummary = util::elided(fullSummary, util::kMaxParagraphChars);
+    const QString summary = shownSummary.toHtmlEscaped();
+    // The names and addresses at most util::kMaxLineChars long, for the
+    // same reason: git takes an ident of any length, and an author name
+    // of one line of megabytes froze the window just as long.
+    const QString authorName = util::elided(commit.author.name);
+    const QString authorEmail = util::elided(commit.author.email);
+    const QString name    = authorName.toHtmlEscaped();
+    const QString email   = emailLink(authorEmail);  // the mailto: link
     const QString fullHex = QString::fromStdString(commit.id.toHex()).toHtmlEscaped();
 
     // Committer is shown as a separate row only if it differs from
@@ -950,8 +1208,8 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     const bool committerDiffers =
         (commit.author.name  != commit.committer.name) ||
         (commit.author.email != commit.committer.email);
-    const QString committerName  = QString::fromStdString(commit.committer.name).toHtmlEscaped();
-    const QString committerEmail = QString::fromStdString(commit.committer.email).toHtmlEscaped();
+    const QString committerName  = util::elided(commit.committer.name).toHtmlEscaped();
+    const QString committerEmail = emailLink(util::elided(commit.committer.email));
 
     // Author initials for the avatar (first letter of first and
     // last whitespace-separated tokens; "?" if the name is empty).
@@ -965,25 +1223,13 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             return first;
         return first + parts.last().left(1).toUpper();
     };
-    const QString initials = initialsFor(QString::fromStdString(commit.author.name));
-
-    // Deterministic color from a hash of the email so the same
-    // author always gets the same avatar color across commits.
-    auto colorFor = [](const QString& key) -> QString {
-        if (key.isEmpty())
-            return QStringLiteral("#888");
-        // Deliberately the low 32 bits of the size_t hash; widening h
-        // would change every author's hue.
-        const auto h = static_cast<uint>(qHash(key));
-        const int hue = static_cast<int>(h % 360u);
-        return QString::fromLatin1("hsl(%1,55%,45%)").arg(hue);
-    };
-    const QString avatarBg = colorFor(QString::fromStdString(commit.author.email));
+    const QString initials = initialsFor(authorName);
+    avatarColor_ = avatarColor(authorEmail);
 
     // Avatar text is set up-front; the size + stylesheet are
     // applied AFTER the metadata HTML is laid out so we can
     // match the avatar height to the actual content height
-    // (see the dynamic resize block at the bottom of this fn).
+    // (fitCommitInfoTopRow, at the bottom of this fn).
     if (avatarLabel_)
         avatarLabel_->setText(initials);
 
@@ -1006,6 +1252,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // No `text-decoration` here — leave it unset so QTextDocument's
     // default link underline applies, matching the mailto links in
     // the left column. The two link kinds should look identical.
+    // Their attributes are double-quoted, like the email links'
+    // (emailLink): a hash is only hex, but toHtmlEscaped() escapes "
+    // and not ', so a single-quoted value is one quote from breaking
+    // out. Clicks on either go to openCommitLink.
     const QString kHashLinkStyle = QStringLiteral(
         "font-family:Menlo,Consolas,monospace;font-size:11px;"
         "color:%1;").arg(linkColor);
@@ -1020,7 +1270,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             const QString hex = QString::fromStdString(pid.toHex()).toHtmlEscaped();
             parentRows += QStringLiteral(
                 "<tr><td class='lbl'>Parent:</td>"
-                "<td class='val'><a href='gitbolt://commit/%1' style='%3'>%2</a></td></tr>")
+                "<td class='val'><a href=\"gitbolt://commit/%1\" style=\"%3\">%2</a></td></tr>")
                 .arg(hex, hex, kHashLinkStyle);
         }
     }
@@ -1043,7 +1293,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
                     const QString hex = QString::fromStdString(other->id.toHex()).toHtmlEscaped();
                     childRows += QStringLiteral(
                         "<tr><td class='lbl'>Child:</td>"
-                        "<td class='val'><a href='gitbolt://commit/%1' style='%3'>%2</a></td></tr>")
+                        "<td class='val'><a href=\"gitbolt://commit/%1\" style=\"%3\">%2</a></td></tr>")
                         .arg(hex, hex, kHashLinkStyle);
                     break;
                 }
@@ -1065,42 +1315,48 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
             static_cast<qint64>(committerTimeT)).toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
         committerRow = QStringLiteral(
             "<tr><td class='lbl'>Committer:</td>"
-            "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
+            "<td class='val'>%1 &lt;%2&gt; &nbsp; <span style='color:%4;'>%3</span></td></tr>")
             .arg(committerName, committerEmail, committerDate, mutedColor);
     }
 
-    // Diff stats — files-changed count + total +N/-M lines. Pulled
-    // straight from libgit2's diff result so we don't have to
-    // re-walk anything. The lookup is fast (libgit2 caches the
-    // tree pair) but only run when we actually have a repository.
+    // Diff stats — files-changed count + total +N/-M lines, from the
+    // commit's diff. That comes from a worker (showCommitDiff asks for
+    // it, for the Diff tab too), so the row goes in with its value
+    // blank, a no-break space whose font the value takes (setStatsRow).
+    // The value is written in below for a commit shown again (a theme
+    // switch) whose diff is in already, else as the diff comes in, or
+    // as "(counting…)" if it is slow to (diffLoadingTimer_). In place:
+    // setting the whole HTML again for it put the pane back at its top
+    // and dropped any text selected in it, which the user had had the
+    // time to do by the time a slow diff came in.
+    const bool statsKnown = shownStats_ && shownStats_->commit == commit.id;
     QString statsRow;
-    if (gitService_ && gitService_->isOpen()) {
-        auto diffResult = gitService_->withRepository(
-            [&](git::Repository& r) { return r.diffCommit(commit.id); });
-        if (diffResult) {
-            const auto& d = *diffResult;
-            statsRow = QStringLiteral(
-                "<tr><td class='lbl'>Stats:</td>"
-                "<td class='val'>%1 file%2 changed, "
-                "<span style='color:%5;'>+%3</span> "
-                "<span style='color:%6;'>−%4</span></td></tr>")
-                .arg(d.files.size())
-                .arg(d.files.size() == 1 ? QString{} : QStringLiteral("s"))
-                .arg(d.totalAdditions)
-                .arg(d.totalDeletions)
-                .arg(addedColor, deletedColor);
-        }
-    }
+    if (statsKnown || (gitService_ && gitService_->isOpen()))
+        statsRow = QStringLiteral("<tr><td class='lbl'>Stats:</td><td class='val'>&nbsp;</td></tr>");
 
-    // Commit message body (everything after the summary line).
+    // Commit message body (everything after the summary line), cut
+    // where a line or the whole of it is too long to lay out
+    // (util::elidedText), with a note under it that says so. The
+    // subject's note goes first.
     QString bodyHtml;
+    if (shownSummary != fullSummary) {
+        bodyHtml = QStringLiteral("<p><span class='muted'>%1</span></p>")
+            .arg(tr("This subject is %L1 characters long: only its start is shown.")
+                     .arg(fullSummary.size()));
+    }
     if (commit.message.size() > commit.summary.size()) {
         QString body = QString::fromStdString(commit.message).mid(
             static_cast<int>(commit.summary.size())).trimmed();
         if (!body.isEmpty()) {
-            bodyHtml = QStringLiteral(
+            const QString shown = util::elidedText(body);
+            bodyHtml += QStringLiteral(
                 "<div class='msgbody'><pre>%1</pre></div>")
-                .arg(body.toHtmlEscaped());
+                .arg(shown.toHtmlEscaped());
+            if (shown != body) {
+                bodyHtml += QStringLiteral("<p><span class='muted'>%1</span></p>")
+                    .arg(tr("This message is %L1 characters long: only part of it is shown.")
+                             .arg(body.size()));
+            }
         }
     }
 
@@ -1153,7 +1409,7 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     // padding-right. Per-row height ends up around 16 px.
     const QString leftRows = QStringLiteral(
         "<tr><td class='lbl'>Author:</td>"
-        "<td class='val'>%1 &lt;<a href='mailto:%2'>%2</a>&gt;</td></tr>"
+        "<td class='val'>%1 &lt;%2&gt;</td></tr>"
         "<tr><td class='lbl'>Date:</td>"
         "<td class='val'>%3</td></tr>"
         "%4"   // committerRow (optional)
@@ -1170,11 +1426,6 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         "%2"   // parentRows (always; multiple on merges)
         "%3"   // childRows  (always; multiple at fork points)
     ).arg(fullHex, parentRows, childRows);
-
-    // Tallest column drives the dynamic top-row height below.
-    const int leftRowCount  = static_cast<int>(leftRows.count(QStringLiteral("<tr>")));
-    const int rightRowCount = static_cast<int>(rightRows.count(QStringLiteral("<tr>")));
-    const int maxRows       = std::max(leftRowCount, rightRowCount);
 
     const QString metadataHtml = QStringLiteral(R"HTML(
 <style>
@@ -1204,6 +1455,10 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
         .arg(leftRows, rightRows, labelColor, linkColor);
 
     detailBrowser_->setHtml(metadataHtml);
+    if (statsKnown)
+        setStatsRow(&*shownStats_);
+    else if (!statsRow.isEmpty() && diffLoading_)
+        setStatsRow(nullptr);
 
     // ----- Bottom browser: summary, message body, contained-in --
     const QString messageHtml = QStringLiteral(R"HTML(
@@ -1239,9 +1494,11 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     messageBrowser_->setHtml(messageHtml);
 
     // Kick the contained-in query on a worker and patch the browser
-    // when it lands. The GitProcess is snapshotted HERE (on the GUI
-    // thread, under the service's lock) and used freely on the pool
-    // thread — QProcess execution is independent of libgit2 state.
+    // when it lands. The GitProcess is a copy of the one the service
+    // made as the repository opened (process() on the GUI thread
+    // doesn't wait for the service's lock, which a long read may hold),
+    // and is used freely on the pool thread — QProcess execution is
+    // independent of libgit2 state.
     if (gitService_ && gitService_->isOpen()) {
         const quint64 token = ++containsQueryToken_;
         const std::string sha = commit.id.toHex();
@@ -1307,43 +1564,116 @@ void RepositoryView::showCommitDetails(const git::CommitData& commit)
     }
 
     // ----- Dynamic resize: top row + avatar fit content exactly -
-    // Sizing matches the GitExtensions Commit tab. Each row at
-    // our 11px body font is ~18 px tall in practice (13 px line
-    // height + 1 px top/bottom cell padding + ~3 px from QTextDoc
-    // line spacing). The 16 px estimate from the original pass was
-    // too tight — verified against a real commit with 4 rows of
-    // metadata where the bottom row (Stats) was being clipped. The
-    // +16 fudge accounts for the QTextBrowser document and viewport
-    // margins. The driver is the TALLER of the two columns (people
-    // vs hashes) — not the total <tr> count — since the two columns
-    // top-align inside the outer 2-cell table. Clamped to:
+    fitCommitInfoTopRow();
+}
+
+// The Commit tab's top row is as tall as the metadata in it, laid out
+// at the browser's width, and the avatar is a square of that height.
+// The height used to be worked out from the number of rows (18 px
+// each), and the browser has no scroll bar, so a value that wrapped
+// (a long author name or email, which may hold spaces) pushed the
+// rows under it out of sight with nothing to show they were there:
+// the Committer row among them, which is how the tab says someone
+// other than the author committed it.
+//
+// Run again whenever the metadata's laid-out size changes
+// (buildCommitInfoTab): a resized window or splitter re-wraps it. A
+// new height resizes the avatar, which narrows or widens the browser
+// beside it and so re-wraps it too; a taller row only ever makes for
+// a narrower browser, so this settles in a pass or two.
+void RepositoryView::fitCommitInfoTopRow()
+{
+    // Nothing on show: a cleared tab keeps its height, and its
+    // transparent avatar.
+    if (!commitInfoTopRow_ || !detailBrowser_ || !avatarLabel_ || !shownCommit_)
+        return;
+    // Clamped to:
     //   -  80 floor: even sparse root commits get a usable avatar
-    //   - 180 ceiling: an octopus merge with many parents/children
-    //     can't dominate the inspector
-    if (commitInfoTopRow_) {
-        const int needed = maxRows * 18 + 16;
-        const int finalH = std::max(80, std::min(needed, 180));
-        commitInfoTopRow_->setFixedHeight(finalH);
-        if (avatarLabel_) {
-            avatarLabel_->setFixedSize(finalH, finalH);
-            // Font size scales with the avatar — ~45% of the
-            // square's edge gives readable initials at every
-            // height in the clamped range.
-            const int fontPx = std::max(16, finalH * 9 / 20);
-            avatarLabel_->setStyleSheet(QStringLiteral(
-                "QLabel {"
-                "  background: %1;"
-                "  color: white;"
-                "  font-size: %2px;"
-                "  font-weight: bold;"
-                "}").arg(avatarBg).arg(fontPx));
-        }
-    }
+    //   - 180 ceiling: an octopus merge with many parents/children,
+    //     or a value that wraps over many lines, can't dominate the
+    //     inspector. Past it the browser scrolls, and shows a scroll
+    //     bar to say there is more.
+    constexpr int kMinHeight = 80;
+    constexpr int kMaxHeight = 180;
+
+    // The document's height at the browser's width: the browser only
+    // scrolls when it is taller than the viewport.
+    const int needed =
+        static_cast<int>(std::ceil(detailBrowser_->document()->size().height()));
+    const int finalH = std::clamp(needed, kMinHeight, kMaxHeight);
+
+    const Qt::ScrollBarPolicy scrolling =
+        needed > kMaxHeight ? Qt::ScrollBarAsNeeded : Qt::ScrollBarAlwaysOff;
+    if (detailBrowser_->verticalScrollBarPolicy() != scrolling)
+        detailBrowser_->setVerticalScrollBarPolicy(scrolling);
+    commitInfoTopRow_->setFixedHeight(finalH);
+    avatarLabel_->setFixedSize(finalH, finalH);
+    // Font size scales with the avatar — ~45% of the
+    // square's edge gives readable initials at every
+    // height in the clamped range.
+    const int fontPx = std::max(16, finalH * 9 / 20);
+    const QString avatarStyle = QStringLiteral(
+        "QLabel {"
+        "  background: %1;"
+        "  color: white;"
+        "  font-size: %2px;"
+        "  font-weight: bold;"
+        "}").arg(avatarColor_).arg(fontPx);
+    // Only when it changes: this runs on every re-wrap, and setting a
+    // style sheet re-polishes the label.
+    if (avatarLabel_->styleSheet() != avatarStyle)
+        avatarLabel_->setStyleSheet(avatarStyle);
 }
 
 void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
 {
-    // Drop any previous click handler — each call to showCommitDiff
+    // A reply still out for the commit selected before is stale now.
+    const quint64 token = ++*diffQueryToken_;
+    if (!gitService_ || !gitService_->isOpen()) {
+        diffLoadingTimer_->stop();
+        diffLoading_ = false;
+        clearDiffFiles();
+        return;
+    }
+
+    // The previous commit's files stay until this one's are in, or the
+    // timer runs out: see diffLoadingTimer_.
+    if (!diffLoading_ && !diffLoadingTimer_->isActive())
+        diffLoadingTimer_->start();
+
+    // On the service's read thread: see diffQueryToken_. The Stats row
+    // waits for the same diff, so it's read once for both.
+    gitService_->readAsync(
+        this,
+        [commitId](git::Repository& r, const std::function<bool()>& cancelled) {
+            return r.diffCommit(commitId, cancelled);
+        },
+        [this, commitId, token](git::Result<git::DiffResult> diff) {
+            if (token != diffQueryToken_->load())
+                return;           // for a commit no longer selected
+            diffLoadingTimer_->stop();
+            diffLoading_ = false;
+            clearDiffFiles();
+            if (!diff) {
+                // Said where the changes would be, so that the commit
+                // doesn't look as if it changed nothing.
+                const QString why = util::elided(diff.error().message());
+                showDiffStats(commitId, nullptr, why);
+                diffFailure_->setText(tr("The changes can't be shown: %1").arg(why));
+                diffFailure_->show();
+                return;
+            }
+            auto shown = std::make_shared<git::DiffResult>(std::move(*diff));
+            showDiffStats(commitId, shown.get());
+            showDiffFiles(std::move(shown));
+        },
+        // Once the selection moves on, the diff stops where it is.
+        [token, latest = diffQueryToken_] { return latest->load() != token; });
+}
+
+void RepositoryView::clearDiffFiles()
+{
+    // Drop any previous click handler — each call to showDiffFiles
     // captures a fresh DiffResult shared_ptr in its lambda, and we
     // don't want stale captures firing after the model is cleared.
     if (changedFilesTree_ && changedFilesTree_->selectionModel()) {
@@ -1354,18 +1684,81 @@ void RepositoryView::showCommitDiff(const git::ObjectId& commitId)
 
     if (changedFilesModel_)
         changedFilesModel_->clear();
+    diffFailure_->hide();
     diffWidget_->clear();
+}
 
-    if (!gitService_ || !gitService_->isOpen())
+void RepositoryView::showDiffLoading()
+{
+    diffLoading_ = true;
+    clearDiffFiles();
+    if (shownCommit_ && !(shownStats_ && shownStats_->commit == shownCommit_->id))
+        setStatsRow(nullptr);
+}
+
+void RepositoryView::showDiffStats(const git::ObjectId& commitId, const git::DiffResult* diff,
+                                   const QString& error)
+{
+    DiffStats stats;
+    stats.commit = commitId;
+    stats.error = error;
+    if (diff) {
+        stats.ok = true;
+        stats.files = diff->files.size();
+        stats.additions = diff->totalAdditions;
+        stats.deletions = diff->totalDeletions;
+    }
+    shownStats_ = stats;
+    if (!shownCommit_ || shownCommit_->id != commitId || !detailBrowser_)
         return;
+    setStatsRow(&stats);
+}
 
-    auto diffResult = gitService_->withRepository(
-        [&](git::Repository& r) { return r.diffCommit(commitId); });
-    if (!diffResult)
+void RepositoryView::setStatsRow(const DiffStats* stats)
+{
+    const QTextTableCell cell = statsCell(detailBrowser_->document());
+    if (!cell.isValid())
         return;
+    QTextCursor value = cell.firstCursorPosition();
+    value.setPosition(cell.lastCursorPosition().position(), QTextCursor::KeepAnchor);
+    // In the font the HTML gave the cell: that of the character in it,
+    // without the italics and colour of "(counting…)".
+    QTextCharFormat plain = cell.firstCursorPosition().charFormat();
+    plain.setFontItalic(false);
+    plain.clearForeground();
+    // As showCommitDetails picks its colours (readable on either theme).
+    const QPalette app = QApplication::palette();
+    const bool dark = app.color(QPalette::WindowText).lightness()
+                      > app.color(QPalette::Window).lightness();
+    value.beginEditBlock();
+    value.removeSelectedText();
+    if (!stats || !stats->ok) {
+        QTextCharFormat muted = plain;
+        muted.setFontItalic(true);
+        muted.setForeground(dark ? QColor(0x9e, 0x9e, 0x9e) : QColor(0x6a, 0x6a, 0x6a));
+        // A diff that couldn't be read says why. The row was taken out,
+        // and the commit looked as if it changed nothing.
+        value.insertText(stats ? tr("(can't be read: %1)").arg(stats->error)
+                               : QStringLiteral("(counting…)"),
+                         muted);
+    } else {
+        QTextCharFormat added = plain;
+        added.setForeground(dark ? QColor(0x3f, 0xb9, 0x50) : QColor(0x1e, 0x7b, 0x34));
+        QTextCharFormat deleted = plain;
+        deleted.setForeground(dark ? QColor(0xff, 0x7b, 0x72) : QColor(0xcf, 0x22, 0x2e));
+        value.insertText(QStringLiteral("%1 file%2 changed, ")
+                             .arg(stats->files)
+                             .arg(stats->files == 1 ? QString{} : QStringLiteral("s")),
+                         plain);
+        value.insertText(QStringLiteral("+%1").arg(stats->additions), added);
+        value.insertText(QStringLiteral(" "), plain);
+        value.insertText(QStringLiteral("−%1").arg(stats->deletions), deleted);
+    }
+    value.endEditBlock();
+}
 
-    auto diff = std::make_shared<git::DiffResult>(std::move(*diffResult));
-
+void RepositoryView::showDiffFiles(std::shared_ptr<git::DiffResult> diff)
+{
     // Build the changed-files tree. Two passes so directory rows
     // come before file rows at every level: pass 1 collects each
     // unique ancestor path into a sorted std::set and creates a

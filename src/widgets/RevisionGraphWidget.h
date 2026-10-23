@@ -93,6 +93,8 @@ protected:
     /// QAbstractItemView in SingleSelection mode would otherwise
     /// keep exactly one row selected forever once anything is picked,
     /// so users couldn't get back to a "nothing selected" state.
+    /// And the table's Copy, which copies the current cell's whole
+    /// text (CommitLogModel::FULL_TEXT_ROLE), not the start it shows.
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:

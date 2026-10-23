@@ -33,9 +33,13 @@
 #include "conf/ThemeService.h"
 #include "telemetry/EventSchema.h"
 #include "telemetry/TelemetryService.h"
+#include "util/DesktopOpen.h"
+#include "util/ToolTip.h"
+#include "util/MessageText.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/ConsoleOutputWidget.h"
 #include "widgets/MergeConflictWidget.h"
+#include "widgets/PlainTextDialogs.h"
 #include "widgets/RepoOperationBar.h"
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
@@ -109,7 +113,7 @@ static bool handleProcessResult(QWidget* parent,
                                 const gitbolt::git::Result<gitbolt::git::ProcessOutput>& out)
 {
     if (!out.ok()) {
-        QMessageBox::warning(parent, title,
+        gitbolt::widgets::PlainMessageBox::warning(parent, title,
             QString::fromStdString(out.error().message()));
         return false;
     }
@@ -120,7 +124,7 @@ static bool handleProcessResult(QWidget* parent,
         if (detail.isEmpty())
             detail = QObject::tr("git exited with code %1")
                         .arg(out.value().exitCode);
-        QMessageBox::warning(parent, title, detail);
+        gitbolt::widgets::PlainMessageBox::warning(parent, title, detail);
         return false;
     }
     return true;
@@ -491,11 +495,13 @@ void MainWindow::buildRepositoryMenu()
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen())
                 return;
-            // A bare repository's git dir: it has no work tree.
+            // A bare repository's git dir: it has no work tree. A folder
+            // macOS takes for a bundle (a clone named Tool.app) isn't
+            // shown but launched, so the folder it is in is shown.
             const QString path = QString::fromStdString(
                 gitService_->withRepository(
                     [](git::Repository& r) { return r.commandDir(); }));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(path)));
         });
         repoMenu->addAction(a);
     }
@@ -537,7 +543,7 @@ void MainWindow::buildRepositoryMenu()
                                            url.toStdString());
                     });
                 if (!res.ok()) {
-                    QMessageBox::warning(dlg, tr("Add Remote Failed"),
+                    widgets::PlainMessageBox::warning(dlg, tr("Add Remote Failed"),
                         QString::fromStdString(res.error().message()));
                 }
                 refresh();
@@ -558,14 +564,14 @@ void MainWindow::buildRepositoryMenu()
                                                  newUrl.toStdString());
                     });
                 if (!res.ok()) {
-                    QMessageBox::warning(dlg, tr("Edit URL Failed"),
+                    widgets::PlainMessageBox::warning(dlg, tr("Edit URL Failed"),
                         QString::fromStdString(res.error().message()));
                 }
                 refresh();
             });
             connect(dlg, &dialogs::RemotesDialog::removeRequested,
                     this, [this, dlg, refresh, key](const QString& name) {
-                const auto confirm = QMessageBox::question(
+                const auto confirm = widgets::PlainMessageBox::question(
                     dlg, tr("Remove Remote"),
                     tr("Remove remote \"%1\"? Local branches "
                        "tracking this remote will lose their "
@@ -580,7 +586,7 @@ void MainWindow::buildRepositoryMenu()
                         return r.removeRemote(name.toStdString());
                     });
                 if (!res.ok()) {
-                    QMessageBox::warning(dlg, tr("Remove Failed"),
+                    widgets::PlainMessageBox::warning(dlg, tr("Remove Failed"),
                         QString::fromStdString(res.error().message()));
                 }
                 refresh();
@@ -610,23 +616,43 @@ void MainWindow::buildRepositoryMenu()
             dlg->resize(720, 420);
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
+            // Why the list is empty when it can't be read (libgit2 reads
+            // HEAD's tree for it, and turns down one nested too deep):
+            // empty alone, it said there were no submodules. libgit2's
+            // words, with a path of the repository's in them: plain text.
+            auto* failure = new QLabel(dlg);
+            failure->setObjectName(QStringLiteral("submodules.failure"));
+            failure->setWordWrap(true);
+            failure->setTextFormat(Qt::PlainText);
+            failure->setMargin(8);
+            failure->hide();
+            layout->addWidget(failure);
             auto* widget = new widgets::SubmoduleWidget(dlg);
             layout->addWidget(widget);
+            const auto showFailure = [widget, failure](const QString& why) {
+                widget->clear();
+                failure->setText(tr("The submodules can't be listed: %1")
+                                     .arg(util::elided(why)));
+                failure->show();
+            };
 
             // Prime the widget with the current submodule list and
             // keep it in sync as GitService re-emits after mutations.
-            auto populate = [widget, this]() {
-                auto res = gitService_->withRepository(
-                    [](git::Repository& r) { return r.submodules(); });
-                if (res.ok())
-                    widget->setSubmodules(res.value());
-                else
-                    widget->clear();
-            };
-            populate();
+            auto res = gitService_->withRepository(
+                [](git::Repository& r) { return r.submodules(); });
+            if (res.ok())
+                widget->setSubmodules(res.value());
+            else
+                showFailure(QString::fromStdString(res.error().message()));
             connect(gitService_, &services::GitService::submodulesReady,
-                    widget, [widget](std::vector<git::SubmoduleInfo> s) {
+                    widget, [widget, failure](std::vector<git::SubmoduleInfo> s) {
+                        failure->hide();
                         widget->setSubmodules(std::move(s));
+                    });
+            connect(gitService_, &services::GitService::operationFailed,
+                    widget, [showFailure](const QString& op, const QString& err) {
+                        if (op == QLatin1String("submodules"))
+                            showFailure(err);
                     });
 
             // Row actions: local ops through the git CLI (libgit2 has
@@ -671,7 +697,7 @@ void MainWindow::buildRepositoryMenu()
                         // tree — confirm before running, and pass
                         // -f so local modifications don't make git
                         // refuse after the user already said yes.
-                        const auto answer = QMessageBox::question(
+                        const auto answer = widgets::PlainMessageBox::question(
                             dlg, tr("Deinit Submodule"),
                             tr("Deinit '%1'?\n\nThis clears the "
                                "submodule's working tree (its "
@@ -690,9 +716,83 @@ void MainWindow::buildRepositoryMenu()
                                            RepoCommandController::RefreshSubmodules,
                                            tr("Deinitializing submodule %1…").arg(n));
                     });
+            // A submodule's path is relative to the work tree; it used
+            // to go to the desktop as it was, which resolved it against
+            // GitBolt's own working folder, and nothing opened. Of the
+            // repository the dialog came up for: another one may be
+            // open by now (Recent, a second launch).
+            const std::string openedKey = gitService_->openKey();
+            const QString workdir = QString::fromStdString(
+                gitService_->withRepository([](git::Repository& r) { return r.workdir(); }));
+            // A submodule's path is the repository's choice, and the list
+            // has the ones .gitmodules alone names too, so both actions
+            // judge it as written first, before anything looks on disk:
+            // on Windows //host/share/x (or \\host\share\x) is another
+            // computer's folder, and a look at it connected to that host
+            // with the user's credentials, or held the window up while
+            // one that doesn't answer timed out.
             connect(widget, &widgets::SubmoduleWidget::openRequested,
-                    this, [](const QString& p) {
-                        QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+                    this, [this, dlg, openedKey, workdir](const QString& p) {
+                        if (repositoryChangedSince(openedKey, tr("the submodule was not opened.")))
+                            return;
+                        if (!util::isRelativeInside(p)) {
+                            widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule path %1 is not a path in the working tree, "
+                                   "so it was not opened.").arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
+                        const QString folder = QDir(workdir).absoluteFilePath(p);
+                        // Not checked out: the folder (if any) is in no
+                        // repository of its own, and opening it opened
+                        // the superproject.
+                        if (!QFileInfo::exists(QDir(folder).filePath(QStringLiteral(".git")))) {
+                            widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule %1 is not checked out. Initialize and "
+                                   "update it first.").arg(p));
+                            return;
+                        }
+                        // A link to another repository is no submodule
+                        // of this one.
+                        if (!util::isWithinFolder(folder, workdir)) {
+                            widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
+                                tr("The submodule path %1 leads outside the working tree, so "
+                                   "it was not opened.").arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
+                        dlg->close();
+                        openRepositoryAtPath(folder);
+                    });
+            // Nor need it be a submodule's folder at all: a file in the
+            // work tree (an executable CHANGELOG, which the desktop runs
+            // when it opens it), a link, a folder named Tool.app
+            // (launched as an app), or a path out of the work tree. Only
+            // a folder is handed to the desktop, a file's own for a file,
+            // and only one in the work tree.
+            connect(widget, &widgets::SubmoduleWidget::revealRequested,
+                    this, [dlg, workdir](const QString& p) {
+                        const auto refuse = [dlg](const QString& why) {
+                            QMessageBox box(QMessageBox::Information, tr("Open in File Explorer"),
+                                            why, QMessageBox::Ok, dlg);
+                            box.setObjectName(QStringLiteral("dlg.submoduleRevealOutside"));
+                            box.setTextFormat(Qt::PlainText);
+                            box.exec();
+                        };
+                        if (!util::isRelativeInside(p)) {
+                            refuse(tr("The submodule path %1 is not a path in the working "
+                                      "tree, so it was not shown.")
+                                       .arg(QDir::toNativeSeparators(p)));
+                            return;
+                        }
+                        const QString folder =
+                            util::folderToShow(QDir(workdir).absoluteFilePath(p));
+                        if (!util::isWithinFolder(folder, workdir)) {
+                            refuse(tr("The submodule path %1 leads to %2, outside the "
+                                      "working tree, so it was not shown.")
+                                       .arg(QDir::toNativeSeparators(p),
+                                            QDir::toNativeSeparators(folder)));
+                            return;
+                        }
+                        QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
                     });
 
             // Its row actions are local ops: off while one runs (or a
@@ -801,17 +901,22 @@ void MainWindow::buildRepositoryMenu()
                                              addDlg.createNewBranch());
                 }
             });
+            // The question names the folder that is deleted: it named
+            // the worktree alone, and the folder its files in .git
+            // named was deleted whatever it was. GitService deletes
+            // that folder or nothing.
             connect(widget, &widgets::WorktreeWidget::removeRequested,
-                    this, [this, dlg, key](const QString& name) {
-                const auto answer = QMessageBox::question(
+                    this, [this, dlg, key](const QString& name, const QString& path) {
+                const auto answer = widgets::PlainMessageBox::question(
                     dlg, tr("Remove Worktree"),
-                    tr("Remove worktree '%1'?\n\nIts working "
-                       "directory is deleted from disk. Commits "
+                    tr("Remove worktree '%1'?\n\nThis folder is deleted "
+                       "from disk, with everything in it:\n%2\n\nCommits "
                        "made there stay in the repository, but "
-                       "uncommitted changes are lost.").arg(name));
+                       "uncommitted changes are lost.")
+                        .arg(name, QDir::toNativeSeparators(path)));
                 if (answer == QMessageBox::Yes
                     && !repositoryChangedSince(key, tr("no worktree was removed.")))
-                    gitService_->removeWorktree(name);
+                    gitService_->removeWorktree(name, path);
             });
             connect(widget, &widgets::WorktreeWidget::lockRequested,
                     this, [this, key](const QString& name) {
@@ -824,8 +929,13 @@ void MainWindow::buildRepositoryMenu()
                     gitService_->unlockWorktree(name);
             });
             connect(widget, &widgets::WorktreeWidget::openRequested,
+                    this, [this, dlg](const QString& p) {
+                dlg->close();
+                openRepositoryAtPath(p);
+            });
+            connect(widget, &widgets::WorktreeWidget::revealRequested,
                     this, [](const QString& p) {
-                QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+                QDesktopServices::openUrl(QUrl::fromLocalFile(util::folderToShow(p)));
             });
 
             dlg->show();
@@ -856,7 +966,7 @@ void MainWindow::buildRepositoryMenu()
                                      QString::fromStdString(r.commonDir())};
                 });
             if (!inGitDir && workdir.isEmpty()) {
-                QMessageBox::information(this, title,
+                widgets::PlainMessageBox::information(this, title,
                     tr("This repository is bare: it has no working tree "
                        "for %1.").arg(relativePath));
                 return;
@@ -864,12 +974,29 @@ void MainWindow::buildRepositoryMenu()
             QString fullPath = inGitDir ? gitDir : workdir;
             if (!fullPath.endsWith('/')) fullPath += '/';
             fullPath += relativePath;
+            // A work tree's .gitignore, .gitattributes and .mailmap are
+            // the repository's own content, and a repository can commit
+            // any of them as a symbolic link. Reading went through it,
+            // and saving wrote the text wherever it pointed, outside the
+            // work tree too. A link isn't edited here: not when the
+            // editor opens, nor when it is saved (a checkout meanwhile
+            // can put one there).
+            const auto refuseLink = [&] {
+                const QFileInfo info(fullPath);
+                if (inGitDir || !(info.isSymbolicLink() || info.isJunction()))
+                    return false;
+                widgets::PlainMessageBox::warning(this, title,
+                    tr("%1 is a symbolic link: edit the file it points to "
+                       "instead.").arg(relativePath));
+                return true;
+            };
+            if (refuseLink()) return;
 
             QFile f(fullPath);
             QString original;
             if (f.exists()) {
                 if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                    QMessageBox::warning(this, title,
+                    widgets::PlainMessageBox::warning(this, title,
                         tr("Could not open %1 for reading.").arg(fullPath));
                     return;
                 }
@@ -885,6 +1012,7 @@ void MainWindow::buildRepositoryMenu()
 
             const QString updated = dlg.contents();
             if (updated == original) return;  // nothing changed
+            if (refuseLink()) return;
 
             // Ensure the parent directory exists — .git/info/ usually
             // does, but a brand-new repo may not yet have it. Saving
@@ -892,7 +1020,7 @@ void MainWindow::buildRepositoryMenu()
             QDir().mkpath(QFileInfo(fullPath).absolutePath());
             if (!f.open(QIODevice::WriteOnly | QIODevice::Text |
                         QIODevice::Truncate)) {
-                QMessageBox::warning(this, title,
+                widgets::PlainMessageBox::warning(this, title,
                     tr("Could not write %1.").arg(fullPath));
                 return;
             }
@@ -1027,7 +1155,7 @@ void MainWindow::buildRepositoryMenu()
         connect(disableA, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const std::string key = gitService_->openKey();
-            const auto confirm = QMessageBox::question(this,
+            const auto confirm = widgets::PlainMessageBox::question(this,
                 tr("Disable Sparse Checkout"),
                 tr("Restore the full working tree? All ignored "
                    "files come back."),
@@ -1101,8 +1229,10 @@ void MainWindow::buildRepositoryMenu()
         cancelRevealedAutoFetch();
         // Clear the dynamic Commit (N) suffix back to plain "Commit"
         // — no count is meaningful when no repo is open.
-        if (commitAction_)
+        if (commitAction_) {
             commitAction_->setText(tr("Co&mmit..."));
+            commitAction_->setToolTip(QString());
+        }
     });
     repoMenu->addAction(closeAction);
 }
@@ -1173,7 +1303,7 @@ void MainWindow::buildNavigateMenu()
                     return r.resolveRef(trimmed.toStdString());
                 });
             if (!resolved.ok()) {
-                QMessageBox::information(this, tr("Not Found"),
+                widgets::PlainMessageBox::information(this, tr("Not Found"),
                     tr("Couldn't resolve \"%1\": %2").arg(
                         trimmed,
                         QString::fromStdString(
@@ -1183,7 +1313,7 @@ void MainWindow::buildNavigateMenu()
             const QString fullHex = QString::fromStdString(
                 resolved.value().toHex());
             if (!graph->selectCommit(fullHex)) {
-                QMessageBox::information(this, tr("Not Found"),
+                widgets::PlainMessageBox::information(this, tr("Not Found"),
                     tr("That commit (%1) isn't in the currently-"
                        "loaded commit window.").arg(fullHex.left(8)));
             }
@@ -1625,7 +1755,7 @@ void MainWindow::buildViewMenu()
                     this, [this, dlg, key](const QString& sha) {
                 if (refuseWhileLocalOpRuns())
                     return;
-                const auto answer = QMessageBox::question(
+                const auto answer = widgets::PlainMessageBox::question(
                     dlg, tr("Checkout Commit"),
                     tr("Checkout %1?\n\nHEAD will be detached — "
                        "create a branch afterwards if you want to "
@@ -1658,7 +1788,7 @@ void MainWindow::buildViewMenu()
                               .arg(sha.left(8))
                         : tr("Reset --%1 the current branch to %2?")
                               .arg(mode, sha.left(8));
-                const auto answer = QMessageBox::question(
+                const auto answer = widgets::PlainMessageBox::question(
                     dlg, tr("Reset Branch"), warning);
                 if (answer != QMessageBox::Yes
                     || repositoryChangedSince(key, tr("nothing was reset.")))
@@ -1960,7 +2090,7 @@ void MainWindow::buildCommandsMenu()
             // The question turns the event loop: a repository a second
             // launch handed over meanwhile lost its last commit.
             const std::string key = gitService_->openKey();
-            const auto ret = QMessageBox::question(
+            const auto ret = widgets::PlainMessageBox::question(
                 this, tr("Undo Last Commit"),
                 tr("This will move HEAD back one commit, leaving its "
                    "changes staged. Continue?"),
@@ -2120,7 +2250,10 @@ void MainWindow::buildCommandsMenu()
                     res.ok()) {
                     for (const auto& s : res.value()) {
                         if (s.index == i) {
-                            message = QString::fromStdString(s.message);
+                            // HEAD's subject is in it (git's "WIP on
+                            // main: …"), maybe a line of megabytes the
+                            // box would lay out whole.
+                            message = util::elided(s.message);
                             break;
                         }
                     }
@@ -2131,7 +2264,7 @@ void MainWindow::buildCommandsMenu()
                     : tr("Discard stash@{%1}:\n\n  %2\n\n"
                          "This cannot be undone.")
                           .arg(i).arg(message);
-                const auto confirm = QMessageBox::question(
+                const auto confirm = widgets::PlainMessageBox::question(
                     dlg, tr("Drop Stash"), detail,
                     QMessageBox::Yes | QMessageBox::Cancel,
                     QMessageBox::Cancel);
@@ -2191,7 +2324,7 @@ void MainWindow::buildCommandsMenu()
             if (picked.startsWith("soft"))  flag = "--soft";
             if (picked.startsWith("hard"))  flag = "--hard";
             if (flag == "--hard") {
-                const auto ret = QMessageBox::warning(
+                const auto ret = widgets::PlainMessageBox::warning(
                     this, tr("Hard Reset"),
                     tr("This will permanently discard every uncommitted "
                        "change in the working tree. Continue?"),
@@ -2218,7 +2351,7 @@ void MainWindow::buildCommandsMenu()
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
             const std::string key = gitService_->openKey();
-            const auto ret = QMessageBox::warning(
+            const auto ret = widgets::PlainMessageBox::warning(
                 this, tr("Clean Working Directory"),
                 tr("This will permanently remove every untracked file "
                    "and empty directory from the working tree. "
@@ -2319,7 +2452,7 @@ void MainWindow::buildCommandsMenu()
                     names << QString::fromStdString(b.name);
             }
             if (names.isEmpty()) {
-                QMessageBox::information(this, tr("Delete Branch"),
+                widgets::PlainMessageBox::information(this, tr("Delete Branch"),
                     tr("No deletable branches. You can't delete the "
                        "currently-checked-out branch."));
                 return;
@@ -2330,7 +2463,7 @@ void MainWindow::buildCommandsMenu()
                 tr("Select a branch to delete:"),
                 names, 0, /*editable=*/false, &ok);
             if (!ok || picked.isEmpty()) return;
-            const auto confirm = QMessageBox::question(
+            const auto confirm = widgets::PlainMessageBox::question(
                 this, tr("Delete Branch"),
                 tr("Delete branch \"%1\"? This cannot be undone from "
                    "the UI.").arg(picked),
@@ -2357,7 +2490,7 @@ void MainWindow::buildCommandsMenu()
             const std::string key = gitService_->openKey();
             const QStringList names = remoteBranchNames();
             if (names.isEmpty()) {
-                QMessageBox::information(this, tr("Delete Remote Branch"),
+                widgets::PlainMessageBox::information(this, tr("Delete Remote Branch"),
                     tr("There are no remote branches. Fetch first if you "
                        "expect some."));
                 return;
@@ -2654,7 +2787,7 @@ void MainWindow::buildCommandsMenu()
                 for (const auto& t : res.value())
                     tagNames << QString::fromStdString(t.name);
                 if (tagNames.isEmpty()) {
-                    QMessageBox::information(this, tr("Delete Tag"),
+                    widgets::PlainMessageBox::information(this, tr("Delete Tag"),
                         tr("This repository has no tags."));
                     return;
                 }
@@ -2674,7 +2807,7 @@ void MainWindow::buildCommandsMenu()
                     QLineEdit::Normal, QString(), &ok);
             }
             if (!ok || picked.isEmpty()) return;
-            const auto confirm = QMessageBox::question(
+            const auto confirm = widgets::PlainMessageBox::question(
                 this, tr("Delete Tag"),
                 tr("Delete tag \"%1\"?").arg(picked),
                 QMessageBox::Yes | QMessageBox::Cancel,
@@ -2750,7 +2883,7 @@ void MainWindow::buildCommandsMenu()
                     [this, dlg, resolve]() {
                 auto oid = resolve(dlg->commitHash());
                 if (!oid) {
-                    QMessageBox::information(this, tr("Cherry Pick"),
+                    widgets::PlainMessageBox::information(this, tr("Cherry Pick"),
                         tr("Couldn't resolve that revision. Try a "
                            "full or short SHA, branch name, or tag."));
                     return;
@@ -2763,7 +2896,8 @@ void MainWindow::buildCommandsMenu()
         cmdMenu->addAction(a);
     }
     {
-        // Archive revision → `git archive --format=zip <ref> -o <file>`.
+        // Archive revision → `git archive --format=zip -o <file>
+        // --end-of-options <ref>`.
         // Prompt for the revision (default HEAD) and the output file;
         // format is picked from the output extension (.zip or .tar).
         auto* a = new QAction(menuIcon(QStringLiteral("archive")),
@@ -2780,6 +2914,8 @@ void MainWindow::buildCommandsMenu()
             if (!ok) return;
             const QString ref = revision.trimmed().isEmpty()
                 ? QStringLiteral("HEAD") : revision.trimmed();
+            if (refuseOptionLikeNames(tr("Archive Failed"), {ref}))
+                return;
             const QString outFile = QFileDialog::getSaveFileName(
                 this, tr("Save Archive As"), QDir::homePath(),
                 tr("Zip archive (*.zip);;Tar archive (*.tar)"));
@@ -2788,9 +2924,11 @@ void MainWindow::buildCommandsMenu()
                 return;
             const std::string format = outFile.endsWith(".tar")
                 ? "tar" : "zip";
+            // The revision typed is the tree-ish, never an option of
+            // archive's (--remote, --exec).
             repoCmd_->runAsync({"archive", "--format=" + format,
                                 "-o", outFile.toStdString(),
-                                ref.toStdString()},
+                                "--end-of-options", ref.toStdString()},
                                tr("Archive Failed"),
                                RepoCommandController::RefreshNone,
                                tr("Archiving %1…").arg(ref));
@@ -2814,7 +2952,7 @@ void MainWindow::buildCommandsMenu()
                 tr("Revision to check out (ref, tag, or sha):"),
                 QLineEdit::Normal, QString(), &ok);
             if (!ok || ref.trimmed().isEmpty()) return;
-            const auto confirm = QMessageBox::question(
+            const auto confirm = widgets::PlainMessageBox::question(
                 this, tr("Checkout Revision"),
                 tr("Check out %1?\n\nIf this isn't a branch name "
                    "you'll be in detached-HEAD state.")
@@ -2829,7 +2967,7 @@ void MainWindow::buildCommandsMenu()
                     return r.checkout(ref.trimmed().toStdString());
                 });
             if (!res.ok()) {
-                QMessageBox::warning(this, tr("Checkout Failed"),
+                widgets::PlainMessageBox::warning(this, tr("Checkout Failed"),
                     QString::fromStdString(res.error().message()));
             }
             gitService_->refreshStatus();
@@ -2883,13 +3021,16 @@ void MainWindow::buildCommandsMenu()
                 this, tr("Bisect Start"),
                 tr("Good commit (where the bug doesn't exist):"),
                 QLineEdit::Normal, QString(), &ok);
+            const QString bad = badRev.trimmed().isEmpty() ? QStringLiteral("HEAD")
+                                                           : badRev.trimmed();
+            // bisect start takes options of its own (--no-checkout,
+            // --term-good=…) among the revisions, and has no
+            // --end-of-options: one that begins with '-' is refused.
             if (!ok || goodRev.trimmed().isEmpty()
-                || repositoryChangedSince(key, tr("no bisect was started.")))
+                || repositoryChangedSince(key, tr("no bisect was started."))
+                || refuseOptionLikeNames(tr("Bisect Start Failed"), {bad, goodRev.trimmed()}))
                 return;
-            runBisect({"start",
-                       badRev.trimmed().isEmpty() ? "HEAD"
-                                                  : badRev.trimmed(),
-                       goodRev.trimmed()},
+            runBisect({"start", bad, goodRev.trimmed()},
                       tr("Bisect Start Failed"));
         });
         sub->addAction(startA);
@@ -2926,7 +3067,8 @@ void MainWindow::buildCommandsMenu()
 
     cmdMenu->addSeparator();
     {
-        // Format patch → `git format-patch <range> -o <dir>`. We
+        // Format patch → `git format-patch -o <dir> --end-of-options
+        // <range>`, or `git format-patch -o <dir> -<n>` for a count. We
         // prompt for the revision range (default `origin/main..HEAD`
         // — what most users want when they're prepping a series for
         // mailing-list review) and the output directory. Files end
@@ -2944,16 +3086,30 @@ void MainWindow::buildCommandsMenu()
                    "HEAD~5..HEAD):"),
                 QLineEdit::Normal,
                 QStringLiteral("origin/main..HEAD"), &ok);
-            if (!ok || range.trimmed().isEmpty()) return;
+            // "-3", the last three commits, is format-patch's own count,
+            // which git takes as it always did: it is no revision, and
+            // after --end-of-options git turns it down. Anything else
+            // that begins with '-' is refused.
+            static const QRegularExpression countOnly(QStringLiteral("^-[0-9]+$"));
+            const bool count = countOnly.match(range.trimmed()).hasMatch();
+            if (!ok || range.trimmed().isEmpty()
+                || (!count
+                    && refuseOptionLikeNames(tr("Format Patch Failed"), {range.trimmed()})))
+                return;
             const QString outDir = QFileDialog::getExistingDirectory(
                 this, tr("Choose output directory for patches"),
                 QDir::homePath());
             if (outDir.isEmpty()
                 || repositoryChangedSince(key, tr("no patches were written.")))
                 return;
+            // The range last, after --end-of-options: the revisions typed
+            // are revisions, never options of format-patch's.
+            std::vector<std::string> args = {"format-patch", "-o", outDir.toStdString()};
+            if (!count)
+                args.emplace_back("--end-of-options");
+            args.push_back(range.trimmed().toStdString());
             repoCmd_->runAsync(
-                {"format-patch", range.trimmed().toStdString(),
-                 "-o", outDir.toStdString()},
+                args,
                 tr("Format Patch Failed"),
                 RepoCommandController::RefreshNone,
                 tr("Writing patches…"),
@@ -2966,7 +3122,7 @@ void MainWindow::buildCommandsMenu()
         cmdMenu->addAction(a);
     }
     {
-        // Apply patch → `git am <files>` or `git apply <files>`.
+        // Apply patch → `git am -- <files>` or `git apply -- <files>`.
         // We use `git am` so the commit metadata in the patch is
         // preserved (author / date / subject / message). For raw
         // diffs without commit metadata the user wants `git apply`,
@@ -2994,7 +3150,7 @@ void MainWindow::buildCommandsMenu()
                     break;
                 }
             }
-            const auto picked = QMessageBox::question(this,
+            const auto picked = widgets::PlainMessageBox::question(this,
                 tr("Apply Patch"),
                 tr("Apply with `git am` (preserves commit metadata) "
                    "or `git apply` (raw diff, no commit)?\n\n"
@@ -3010,6 +3166,7 @@ void MainWindow::buildCommandsMenu()
 
             std::vector<std::string> args;
             args.push_back(useAm ? "am" : "apply");
+            args.emplace_back("--");    // the files are files, whatever they're called
             for (const auto& f : files) args.push_back(f.toStdString());
             repoCmd_->runAsync(args, tr("Apply Patch Failed"),
                                RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog,
@@ -3073,7 +3230,7 @@ void MainWindow::buildPluginsMenu()
                         if (!line.isEmpty()) merged << line;
                     }
                     if (merged.isEmpty()) {
-                        QMessageBox::information(this,
+                        widgets::PlainMessageBox::information(this,
                             tr("Delete Obsolete Branches"),
                             tr("No merged branches to clean up."));
                         return;
@@ -3108,7 +3265,7 @@ void MainWindow::buildPluginsMenu()
                         picked << it->text();
                     if (picked.isEmpty()) return;
 
-                    const auto confirm = QMessageBox::question(this,
+                    const auto confirm = widgets::PlainMessageBox::question(this,
                         tr("Delete Obsolete Branches"),
                         tr("Delete %n merged branch(es)? This cannot be "
                            "undone from the UI.", nullptr,
@@ -3409,8 +3566,10 @@ void MainWindow::buildPluginsMenu()
                     walk.pushHead();
                     walk.walk([&](const git::CommitData& c) {
                         ++s.commitCount;
-                        s.commitsByAuthor[QString::fromStdString(
-                            c.author.name)]++;
+                        // At most util::kMaxLineChars of a name: git
+                        // takes one of any length, and the box below
+                        // lays the top ones out.
+                        s.commitsByAuthor[util::elided(c.author.name)]++;
                         return true;
                     });
                     if (auto br = repo.branches(git::BranchType::Local);
@@ -3430,7 +3589,7 @@ void MainWindow::buildPluginsMenu()
                     return s;
                 });
             if (!stats.ok) {
-                QMessageBox::warning(this, tr("Statistics"),
+                widgets::PlainMessageBox::warning(this, tr("Statistics"),
                     tr("Could not create revwalk: %1").arg(stats.error));
                 return;
             }
@@ -3584,7 +3743,7 @@ void MainWindow::buildToolsMenu()
             gitk.setProcessEnvironment(env);
             const bool ok = gitk.startDetached();
             if (!ok) {
-                QMessageBox::warning(this, tr("Launch Failed"),
+                widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
                     tr("Could not launch gitk. Is it installed and on "
                        "your PATH?"));
             }
@@ -3806,6 +3965,18 @@ bool MainWindow::refuseWhileLocalOpRuns()
         return false;
     statusBar()->showMessage(tr("Another operation is still running…"), 3000);
     return true;
+}
+
+bool MainWindow::refuseOptionLikeNames(const QString& failTitle, const QStringList& names)
+{
+    for (const QString& name : names) {
+        if (auto refused = git::GitProcess::checkOperand(name.toStdString()); !refused) {
+            widgets::PlainMessageBox::warning(this, failTitle,
+                                              QString::fromStdString(refused.error().message()));
+            return true;
+        }
+    }
+    return false;
 }
 
 bool MainWindow::gitStepRunning() const
@@ -4250,6 +4421,12 @@ void MainWindow::createStatusBar()
 {
     branchLabel_ = new QLabel(this);
     repoPathLabel_ = new QLabel(this);
+    // A branch's name and the repository's path are the repository's
+    // to choose ("<b>main</b>" is a valid branch name): plain text,
+    // like the auto-fetch note below and its tooltip, which carry what
+    // the server said.
+    branchLabel_->setTextFormat(Qt::PlainText);
+    repoPathLabel_->setTextFormat(Qt::PlainText);
 
     statusBar()->addWidget(branchLabel_);
     statusBar()->addWidget(repoPathLabel_, 1);
@@ -4261,6 +4438,7 @@ void MainWindow::createStatusBar()
     // by transient status updates.
     periodicFetchStatus_ = new QLabel(this);
     periodicFetchStatus_->setContentsMargins(8, 0, 8, 0);
+    periodicFetchStatus_->setTextFormat(Qt::PlainText);
     statusBar()->addPermanentWidget(periodicFetchStatus_);
 
     statusBar()->showMessage(tr("Ready"));
@@ -4280,7 +4458,7 @@ void MainWindow::updatePeriodicFetchStatus()
             periodicFetchStatus_->setText(
                 tr("Auto-fetch: every %1 min (last one failed)").arg(mins));
         }
-        periodicFetchStatus_->setToolTip(autoFetchError_);
+        periodicFetchStatus_->setToolTip(util::plainToolTip(autoFetchError_));
     } else {
         periodicFetchStatus_->clear();
         periodicFetchStatus_->setToolTip(QString());
@@ -4430,7 +4608,7 @@ void MainWindow::setupConnections()
                 inspectStopThen(bar, [this, bar, revert](const services::StopFacts& facts,
                                                          const std::string& key) {
                     if (!facts.unpickedSequenceStop.isEmpty()) {
-                        const auto answer = QMessageBox::question(
+                        const auto answer = widgets::PlainMessageBox::question(
                             this, tr("Continue"),
                             (revert
                                  ? tr("Continue without reverting %1?\n\nThe revert "
@@ -4493,7 +4671,7 @@ void MainWindow::setupConnections()
                 // unstaged, went for good. The step refuses it too
                 // (GitProcess::rebaseSkip()).
                 if (!committed.isEmpty() && facts.trackedChanges) {
-                    QMessageBox::warning(
+                    widgets::PlainMessageBox::warning(
                         this, tr("Skip Commit"),
                         tr("Skipping would discard your uncommitted changes.\n\nThe commit "
                            "the rebase stopped at is already made, and git resets the "
@@ -4507,14 +4685,14 @@ void MainWindow::setupConnections()
                 // went with "Cherry-pick complete.". The step refuses it
                 // too (GitProcess::sequenceSkip()).
                 if (sequence && facts.stagedWithoutPick) {
-                    QMessageBox::warning(
+                    widgets::PlainMessageBox::warning(
                         this, tr("Skip Commit"),
                         tr("Skipping would discard your staged changes.\n\ngit stopped "
                            "before it picked the commit, and skipping resets the index to "
                            "HEAD. Commit them or stash them first."));
                     return;
                 }
-                const auto answer = QMessageBox::question(
+                const auto answer = widgets::PlainMessageBox::question(
                     this, tr("Skip Commit"),
                     committed == QLatin1String("reword")
                         ? tr("Skip the rest of this commit's reword?\n\nThe commit stays in "
@@ -4595,7 +4773,7 @@ void MainWindow::setupConnections()
                 if (discardsStaged)
                     question += QStringLiteral("\n\n")
                         + tr("Your staged changes are discarded too.");
-                const auto answer = QMessageBox::question(
+                const auto answer = widgets::PlainMessageBox::question(
                     this, tr("Abort"), question,
                     QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
                 // A repository a second launch handed over while the
@@ -4668,7 +4846,9 @@ void MainWindow::setupConnections()
     // Commit dialog can stage them too).
     connect(gitService_, &services::GitService::statusReady,
             this, [this](std::vector<git::StatusEntry> entries) {
+        statusFailure_.clear();
         if (!commitAction_) return;
+        commitAction_->setToolTip(QString());   // its text again
         int n = 0;
         for (const auto& e : entries) {
             if (git::hasFlag(e.status, git::FileStatus::Ignored))
@@ -4721,6 +4901,24 @@ void MainWindow::setupConnections()
                         tr("Auto-fetch failed: %1").arg(firstLine), 10000);
                     updatePeriodicFetchStatus();
                     return;
+                }
+                // Status that can't be read (a tree nested too deep for
+                // libgit2) fails again at every refresh, and the watcher
+                // asks for one at each change in the work tree: no count
+                // of changes is known, and why is said once, not over
+                // every message that comes after it, until status reads
+                // again or fails otherwise. The Commit button says it
+                // for as long, and why on hover: "Commit..." alone is a
+                // clean work tree's.
+                if (op == QLatin1String("status")) {
+                    if (commitAction_) {
+                        commitAction_->setText(tr("Co&mmit (?)..."));
+                        commitAction_->setToolTip(util::plainToolTip(
+                            tr("Status couldn't be read: %1").arg(util::elided(err))));
+                    }
+                    if (err == statusFailure_)
+                        return;
+                    statusFailure_ = err;
                 }
                 // Usage statistics: the error's KIND only. `op` is one
                 // of GitService's fixed literals (operationName() maps
@@ -4895,7 +5093,9 @@ void MainWindow::setupConnections()
                 || refuseWhileLocalOpRuns())
                 return;
             bool ok = false;
-            const QString name = QInputDialog::getText(
+            // The prompt names a branch: plain text, as those of Rename
+            // and Set Upstream below.
+            const QString name = widgets::PlainInputDialog::getText(
                 this, tr("New Branch"),
                 startPoint.isEmpty() ? tr("Branch name:")
                                      : tr("Name of the new branch from '%1':").arg(startPoint),
@@ -4914,7 +5114,7 @@ void MainWindow::setupConnections()
             if (!gitService_ || !gitService_->isOpen()
                 || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
                 return;
-            const auto answer = QMessageBox::question(
+            const auto answer = widgets::PlainMessageBox::question(
                 this, tr("Delete Branch"),
                 tr("Are you sure you want to delete branch '%1'?").arg(name),
                 QMessageBox::Yes | QMessageBox::No);
@@ -4955,13 +5155,18 @@ void MainWindow::setupConnections()
                 || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
                 return;
             bool ok = false;
-            const QString newName = QInputDialog::getText(
+            const QString newName = widgets::PlainInputDialog::getText(
                 this, tr("Rename Branch"), tr("New name for '%1':").arg(oldName),
                 QLineEdit::Normal, oldName, &ok).trimmed();
             if (!ok || newName.isEmpty() || newName == oldName
-                || repositoryChangedSince(key, notDone))
+                || repositoryChangedSince(key, notDone)
+                || refuseOptionLikeNames(tr("Rename Branch Failed"), {newName}))
                 return;
-            repoCmd_->runAsync({"branch", "-m", oldName.toStdString(),
+            // "--": a branch the repository named "-x" (git allows it)
+            // went to git as an option. Only the new name is checked
+            // above (git would turn it down too): the old one may begin
+            // with '-', as renaming such a branch away clears it up.
+            repoCmd_->runAsync({"branch", "-m", "--", oldName.toStdString(),
                                 newName.toStdString()},
                                tr("Rename Branch Failed"),
                                RepoCommandController::RefreshBranches,
@@ -4981,18 +5186,22 @@ void MainWindow::setupConnections()
                 this, [this](const QString& branch, const std::string& key) {
             const QString notDone = tr("the upstream of %1 was not set.").arg(branch);
             if (!gitService_ || !gitService_->isOpen()
-                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns())
+                || repositoryChangedSince(key, notDone) || refuseWhileLocalOpRuns()
+                || refuseOptionLikeNames(tr("Set Upstream Failed"), {branch}))
                 return;
             bool ok = false;
-            const QString upstream = QInputDialog::getText(
+            const QString upstream = widgets::PlainInputDialog::getText(
                 this, tr("Set Upstream"),
                 tr("Upstream for '%1' (e.g., origin/%1):").arg(branch),
                 QLineEdit::Normal, QStringLiteral("origin/") + branch, &ok).trimmed();
-            if (!ok || upstream.isEmpty() || repositoryChangedSince(key, notDone))
+            if (!ok || upstream.isEmpty() || repositoryChangedSince(key, notDone)
+                || refuseOptionLikeNames(tr("Set Upstream Failed"), {upstream}))
                 return;
+            // The upstream is part of its option; the branch comes after
+            // "--", as in Rename above.
             repoCmd_->runAsync({"branch",
                                 "--set-upstream-to=" + upstream.toStdString(),
-                                branch.toStdString()},
+                                "--", branch.toStdString()},
                                tr("Set Upstream Failed"),
                                RepoCommandController::RefreshBranches,
                                tr("Setting the upstream of %1…").arg(branch));
@@ -5148,6 +5357,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // Clear stale state from the previous repo before loading the new one.
     if (filterInput_)
         filterInput_->clear();
+    statusFailure_.clear();     // its status failing says so again
     if (repoView_) {
         // Busy only while a rebase step runs on this repository. The
         // same one opened again (Recent, the dashboard, a second
@@ -5162,7 +5372,12 @@ void MainWindow::onRepositoryOpened(const QString& path)
         inspectingStop_ = false;
         repoView_->operationBar()->setBusy(gitService_->rebaseStepRunning() || localOpRunning_);
         repoView_->resetInspectorTabs();
-        repoView_->setRepositoryPath(path);
+        // A bare repository named outright, as for Git bash: git in the
+        // Console otherwise fails where safe.bareRepository is
+        // "explicit".
+        repoView_->setRepositoryPath(path, gitService_->withRepository([](git::Repository& r) {
+            return r.isBare() ? QString::fromStdString(r.path()) : QString();
+        }));
 
         // Re-apply persisted View → column visibility toggles.
         // The actions were restored from QSettings at construction
@@ -5516,7 +5731,7 @@ void MainWindow::createNewRepository()
     if (dir.isEmpty()) return;
     auto res = git::Repository::init(dir.toStdString(), false);
     if (!res.ok()) {
-        QMessageBox::warning(this, tr("Init Failed"),
+        widgets::PlainMessageBox::warning(this, tr("Init Failed"),
             tr("Could not initialize a repository at:\n%1\n\n%2")
                 .arg(dir, QString::fromStdString(res.error().message())));
         return;
@@ -5646,7 +5861,7 @@ void MainWindow::showConflictResolver()
                  std::vector<git::MergeConflictEntry> conflicts) {
             QObject::disconnect(*conn);
             if (conflicts.empty()) {
-                QMessageBox::information(
+                widgets::PlainMessageBox::information(
                     this, tr("Resolve Conflicts"),
                     tr("No conflicted files — nothing to resolve."));
                 dlg->close();
@@ -5670,13 +5885,13 @@ void MainWindow::showConflictResolver()
             return;
         const auto& conflicts = widget->conflicts();
         const auto contents = widget->allResolvedContents();
-        std::vector<std::pair<QString, QString>> resolutions;
+        const auto sides = widget->allAcceptedSides();
+        std::vector<services::ConflictResolution> resolutions;
         resolutions.reserve(conflicts.size());
         for (size_t i = 0;
-             i < conflicts.size() && i < contents.size(); ++i) {
-            resolutions.emplace_back(
-                QString::fromStdString(conflicts[i].path),
-                contents[i]);
+             i < conflicts.size() && i < contents.size() && i < sides.size(); ++i) {
+            resolutions.push_back({QString::fromStdString(conflicts[i].path),
+                                   contents[i], sides[i]});
         }
         // Turned down while a rebase step runs (git is at the index):
         // the dialog stays, resolutions and all.
@@ -5735,7 +5950,7 @@ void MainWindow::offerConflictResolution(const QString& operation)
     // repository over while it is up. A Yes then opened the resolver on
     // that one, which had no conflicts, and left these as they were.
     const std::string asked = gitService_->openKey();
-    const auto answer = QMessageBox::question(
+    const auto answer = widgets::PlainMessageBox::question(
         this, tr("Conflicts"),
         tr("The %1 stopped on conflicts.\n\nOpen the conflict "
            "resolver now?").arg(operation));
@@ -5748,9 +5963,15 @@ void MainWindow::offerConflictResolution(const QString& operation)
 // post-merge hook froze the window until git's 30 s timeout, which then
 // killed git (and orphaned the hook) and reported the merge, done by
 // then, as failed, with an offer to resolve conflicts it never had.
+//
+// The branch comes after "--", and one git would read as an option is
+// refused first: `git merge -x`, a branch the repository named so, went
+// to git as an option.
 void MainWindow::mergeBranch(const QString& branch)
 {
-    repoCmd_->runAsync({"merge", branch.toStdString()},
+    if (refuseOptionLikeNames(tr("Merge Failed"), {branch}))
+        return;
+    repoCmd_->runAsync({"merge", "--", branch.toStdString()},
                        tr("Merge Failed"),
                        RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
                            | RepoCommandController::RefreshBranches,
@@ -5786,15 +6007,21 @@ void MainWindow::checkoutAsLocalBranch(const QString& remoteBranch)
         gitService_->checkoutBranch(local);
         return;
     }
+    // Only a branch git is to make is checked: the one there already
+    // goes through libgit2, which takes no options. The start point as
+    // a full ref, which can't begin with '-' as a remote's name can:
+    // checkout has no "--" for it (one means that paths follow).
+    if (refuseOptionLikeNames(tr("Checkout Failed"), {remoteBranch, local}))
+        return;
     repoCmd_->runAsync({"checkout", "-b", local.toStdString(), "--track",
-                        remoteBranch.toStdString()},
+                        "refs/remotes/" + remoteBranch.toStdString()},
                        tr("Checkout Failed"),
                        RepoCommandController::RefreshStatus | RepoCommandController::RefreshLog
                            | RepoCommandController::RefreshBranches,
                        tr("Checking out %1…").arg(remoteBranch));
 }
 
-// Confirm, then `git push <remote> --delete <branch>` via runRemoteOp.
+// Confirm, then `git push --delete -- <remote> <branch>` via runRemoteOp.
 // `remoteBranch` is the remote-tracking name ("origin/feature/x"); the
 // remote is everything before the first '/', the same assumption the
 // sidebar's "Checkout as local branch" makes.
@@ -5807,8 +6034,15 @@ void MainWindow::confirmAndDeleteRemoteBranch(const QString& remoteBranch,
     if (slash <= 0 || slash == remoteBranch.size() - 1) return;
     const QString remote = remoteBranch.left(slash);
     const QString branch = remoteBranch.mid(slash + 1);
+    // Before the question: GitService refuses it too, but only once the
+    // user has said yes to deleting it. Not the branch: after "--" it is
+    // push's refspec, and a branch named "-x" on the server (a remote's
+    // "origin/-x") is deleted here as any other, rather than left for
+    // the shell to clear away.
+    if (refuseOptionLikeNames(tr("Delete Remote Branch"), {remote}))
+        return;
 
-    const auto confirm = QMessageBox::question(
+    const auto confirm = widgets::PlainMessageBox::question(
         this, tr("Delete Remote Branch"),
         tr("Delete branch \"%1\" from remote \"%2\"?\n\nThis removes it "
            "on the server for everyone who uses that remote. Local "

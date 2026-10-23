@@ -8,8 +8,10 @@
 #include "git/Repository.h"
 #include "models/FileStatusModel.h"
 #include "services/GitService.h"
+#include "util/MessageText.h"
 #include "widgets/CommitMessageEdit.h"
 #include "widgets/DiffViewerWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QAction>
 #include <QCheckBox>
@@ -321,6 +323,9 @@ void CommitDialog::setupUi()
     errorLabel_ = new QLabel(this);
     errorLabel_->setObjectName(QStringLiteral("commit.error"));
     errorLabel_->setWordWrap(true);
+    // git's words, a hook's output among them: plain text, as with
+    // every label here that shows what git or the repository says.
+    errorLabel_->setTextFormat(Qt::PlainText);
     errorLabel_->setStyleSheet(QStringLiteral(
         "QLabel { background:#5a1f1f; color:#ffdada; padding:6px 10px; }"));
     errorLabel_->hide();
@@ -345,6 +350,10 @@ void CommitDialog::setupUi()
     committerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     branchStatusLabel_ = new QLabel(statusStrip);
     stagedCountLabel_  = new QLabel(statusStrip);
+    // The branch's name (a clone's comes from the server) and the
+    // configured "name <email>".
+    committerLabel_->setTextFormat(Qt::PlainText);
+    branchStatusLabel_->setTextFormat(Qt::PlainText);
 
     statusLayout->addWidget(committerLabel_, 1);
     statusLayout->addWidget(branchStatusLabel_, 0, Qt::AlignCenter);
@@ -439,7 +448,7 @@ void CommitDialog::wireConnections()
             diffView_->currentFile(), static_cast<size_t>(hunkIdx),
             lines);
         if (patch.empty()) {
-            QMessageBox::information(this, tr("Stage Lines"),
+            widgets::PlainMessageBox::information(this, tr("Stage Lines"),
                 tr("The selection doesn't produce a stageable "
                    "change — select at least one added or removed "
                    "line (hunks that end without a newline only "
@@ -666,6 +675,9 @@ void CommitDialog::readCommitterFromConfig()
 
 void CommitDialog::onStatusReady(std::vector<gitbolt::git::StatusEntry> entries)
 {
+    if (!statusFailure_.isEmpty() && errorLabel_->text() == statusFailure_)
+        errorLabel_->hide();
+    statusFailure_.clear();
     unstagedModel_->setEntries(entries);
     stagedModel_->setEntries(std::move(entries));
 
@@ -882,7 +894,7 @@ void CommitDialog::onDiscardSelected()
         : tr("Discard all uncommitted changes to %1 files?\n\nThis cannot be undone.")
             .arg(paths.size());
 
-    const auto answer = QMessageBox::question(this,
+    const auto answer = widgets::PlainMessageBox::question(this,
         tr("Discard changes?"), detail,
         QMessageBox::Discard | QMessageBox::Cancel,
         QMessageBox::Cancel);
@@ -912,12 +924,19 @@ void CommitDialog::onCommitClicked()
     // and the first one's outcome was taken for the second's.
     if (pendingCommit_ || localOpBusy_ || stepRunning())
         return;
-    const QString msg = messageEdit_->toPlainText().trimmed();
+    QString msg = messageEdit_->toPlainText().trimmed();
     if (msg.isEmpty()) {
         errorLabel_->setText(tr("Commit message cannot be empty."));
         errorLabel_->show();
         return;
     }
+    // The editor still holds git's message as startFromPreparedMessage()
+    // cut it, untouched: the commit takes git's message whole. The cut
+    // text went in, "…" and all, and a message with one long line (a
+    // data URL, a generated trailer) lost the rest of it.
+    if (!prefilled_.isEmpty() && messageEdit_->toPlainText() == prefilled_
+        && util::elidedText(preparedRead_) != preparedRead_)
+        msg = preparedRead_.trimmed();
     errorLabel_->hide();
     pendingCommit_ = true;
     pendingKey_ = svc_->openKey();
@@ -971,6 +990,18 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
 
 void CommitDialog::onOperationFailed(const QString& op, const QString& err)
 {
+    // Status that couldn't be read (a tree nested too deep for libgit2):
+    // the lists can't say what changed, and empty they looked as if
+    // nothing had. Said until status reads again (onStatusReady). Nor
+    // do the lists keep what the last status that read had in them: an
+    // entry of it clicked showed no diff, which can't be read either.
+    if (op == QLatin1String("status")) {
+        onStatusReady({});
+        statusFailure_ = op + tr(" failed: ") + err;
+        errorLabel_->setText(statusFailure_);
+        errorLabel_->show();
+        return;
+    }
     const bool commit = op.startsWith(QLatin1String("commit"), Qt::CaseInsensitive);
     if (commit ||
         op.startsWith(QLatin1String("stage"),   Qt::CaseInsensitive) ||
@@ -1012,12 +1043,33 @@ void CommitDialog::startFromPreparedMessage(bool onlyIfChanged)
         [](git::Repository& r) { return r.preparedMessage(); }));
     if (onlyIfChanged && prepared == preparedRead_)
         return;
+    // A pick's message is the picked commit's, which can be one line of
+    // megabytes: laid out in the editor, it froze the window. The editor
+    // gets at most util::elidedText of it, and the note under it says
+    // so. Left as it is, the commit takes git's message whole
+    // (onCommitClicked); edited, what the editor holds. A note for the
+    // message read before goes with it.
+    const auto cutNote = [](const QString& message) {
+        return util::elidedText(message) == message
+            ? QString()
+            : tr("git's message for this commit is %L1 characters long: only part of it "
+                 "is in the editor. Left as it is, the commit takes the whole of it.")
+                  .arg(message.size());
+    };
+    if (const QString stale = cutNote(preparedRead_);
+        !stale.isEmpty() && errorLabel_->text() == stale)
+        errorLabel_->hide();
     preparedRead_ = prepared;
     const QString current = messageEdit_->toPlainText();
     if (!current.trimmed().isEmpty() && (prefilled_.isEmpty() || current != prefilled_))
         return;     // the user's own words
-    if (current != prepared)
-        messageEdit_->setPlainText(prepared);
+    const QString shown = util::elidedText(prepared);
+    if (const QString note = cutNote(prepared); !note.isEmpty()) {
+        errorLabel_->setText(note);
+        errorLabel_->show();
+    }
+    if (current != shown)
+        messageEdit_->setPlainText(shown);
     // As the editor gives it back: it holds a non-breaking space as a
     // space (and CRLF as "\n"), and the message filled in never
     // matched again, so it passed for the user's words and stayed for

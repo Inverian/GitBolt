@@ -1,5 +1,7 @@
 #include "models/FileStatusModel.h"
 
+#include "util/ToolTip.h"
+
 #include <QGuiApplication>
 #include <QPalette>
 
@@ -85,7 +87,8 @@ QVariant FileStatusModel::data(const QModelIndex& index, int role) const
         break;
     }
     case Qt::ToolTipRole: {
-        return QString::fromStdString(entry.path);
+        // The path is the repository's, and can hold markup.
+        return util::plainToolTip(QString::fromStdString(entry.path));
     }
     default:
         break;

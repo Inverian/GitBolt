@@ -19,6 +19,11 @@
 // would. Each repository is on a branch of its own, so any Branch value
 // written into another repository's row shows.
 //
+// And a repository whose status can't be read (a tree nested too deep
+// for libgit2) has a Status of "—", with why on hover, not a blank one,
+// which reads as clean. A bare one's is blank: it has no work tree, and
+// libgit2's turning its status down is no failure.
+//
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -123,6 +128,62 @@ private slots:
             }
         }
         QVERIFY2(crossed.isEmpty(), qPrintable(crossed.join(QLatin1Char('\n'))));
+    }
+
+    // A repository whose status libgit2 turns down (HEAD's tree nested
+    // deeper than the bundled one goes): its Status is "—", not known,
+    // and says why on hover. It was blank, which reads as clean.
+    void aStatusThatCantBeReadIsNotShownClean() {
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's limits");
+#else
+        TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        repo.commitDeepTree(2350);
+        const QString path = QDir::toNativeSeparators(repo.path());
+        SettingsService settings;
+        settings.addRecentRepository(path);
+
+        gitbolt::ui::DashboardView view(&settings);
+        auto* list = view.findChild<QTreeWidget*>();
+        QVERIFY(list);
+        QTRY_VERIFY_WITH_TIMEOUT(view.findChildren<QFutureWatcherBase*>().isEmpty(), 30000);
+        const QTreeWidgetItem* item = nullptr;
+        for (int i = 0; i < list->topLevelItemCount() && !item; ++i) {
+            if (list->topLevelItem(i)->data(0, Qt::UserRole).toString() == path)
+                item = list->topLevelItem(i);
+        }
+        QVERIFY(item);
+        QCOMPARE(item->text(2), QStringLiteral("—"));
+        QCOMPARE(item->toolTip(2),
+                 QStringLiteral("Status couldn't be read: tree too deep: more than 2048 levels"));
+#endif
+    }
+
+    // A bare repository has no work tree, and libgit2 turns its status
+    // down: nothing to commit, so a blank Status, as ever, not "—" and
+    // a status that couldn't be read.
+    void aBareRepositorysStatusIsBlank() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(gitbolt::git::Repository::init(dir.path().toStdString(), /*bare=*/true).ok());
+        const QString path = QDir::toNativeSeparators(dir.path());
+        SettingsService settings;
+        settings.addRecentRepository(path);
+
+        gitbolt::ui::DashboardView view(&settings);
+        auto* list = view.findChild<QTreeWidget*>();
+        QVERIFY(list);
+        QTRY_VERIFY_WITH_TIMEOUT(view.findChildren<QFutureWatcherBase*>().isEmpty(), 30000);
+        const QTreeWidgetItem* item = nullptr;
+        for (int i = 0; i < list->topLevelItemCount() && !item; ++i) {
+            if (list->topLevelItem(i)->data(0, Qt::UserRole).toString() == path)
+                item = list->topLevelItem(i);
+        }
+        QVERIFY(item);
+        QCOMPARE(item->text(2), QString());
+        QCOMPARE(item->toolTip(2), item->toolTip(0));   // the row's path
     }
 
 private:

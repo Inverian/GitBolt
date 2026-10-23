@@ -23,6 +23,8 @@
 #include "git/Worktree.h"
 
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -103,7 +105,14 @@ public:
     Result<DiffResult> diffIndexToWorkdir() const;
     Result<DiffResult> diffHeadToIndex() const;
     Result<DiffResult> diffTreeToTree(const ObjectId& oldTree, const ObjectId& newTree) const;
-    Result<DiffResult> diffCommit(const ObjectId& commitId) const;
+    /// `cancelled`, when given, is asked as the diff goes, on the thread
+    /// it runs on (at each entry of the two trees, and before each
+    /// file's patch): once it says true, the diff stops there and fails
+    /// with GitErrorCode::User "Cancelled". The diff of a commit with a
+    /// huge tree takes minutes, and one the user had moved on from held
+    /// up the next selection's until it was done.
+    Result<DiffResult> diffCommit(const ObjectId& commitId,
+                                  const std::function<bool()>& cancelled = {}) const;
 
     // Tree browsing — flat depth-first walk from a commit's root
     // tree, plus blob content reads. Used by the File tree tab.
@@ -112,13 +121,22 @@ public:
     // the raw bytes (binary-safe) and is bounded by libgit2's own
     // size limits — call sites should still impose a sensible
     // upper bound before showing untrusted blobs in the UI.
-    Result<std::vector<TreeEntry>> walkTreeAtCommit(const ObjectId& commitId) const;
+    // walkTreeAtCommit asks `cancelled` at each entry, as diffCommit
+    // does.
+    Result<std::vector<TreeEntry>> walkTreeAtCommit(
+        const ObjectId& commitId, const std::function<bool()>& cancelled = {}) const;
     Result<std::vector<char>>      readBlob(const ObjectId& blobId) const;
 
     // Staging
     Result<void> stageFile(const std::string& path);
+    /// The file `path`, whatever its name, and what is below it as a
+    /// directory, as HEAD has them in the index again (out of it where
+    /// HEAD has none), as `git reset -- <path>`.
     Result<void> unstageFile(const std::string& path);
     Result<void> stageAll();
+    /// The file `path`, whatever its name, as HEAD has it in the work
+    /// tree and the index again. Refuses, changing nothing, a path whose
+    /// checkout would also write another file, or end another's conflict.
     Result<void> discardWorkdirChanges(const std::string& path);
 
     // Commits
@@ -200,6 +218,38 @@ public:
     /// alone: no blob is read.
     Result<int> conflictCount() const;
 
+    /// The mode the index has for `path`, relative to the work tree's
+    /// top (0100755 for a file committed executable), or 0 where it has
+    /// none: an untracked path, or one in conflict.
+    uint32_t indexMode(const std::string& path) const;
+
+    /// Resolves the conflict on `path` with `content`, the resolver's
+    /// result, as `git add` would after the file was edited: the
+    /// content is staged with the mode git's merge gives it (a side's
+    /// change of the executable bit wins over the side that kept the
+    /// ancestor's, ours' wins where both changed it, and a side alone
+    /// keeps its own), the conflict entries go to resolve-undo, and the
+    /// work tree's file, that one alone, is written from the index,
+    /// never through a symbolic link. A path staged since the resolver
+    /// listed it gets the content all the same. Where ours or theirs
+    /// is a symbolic link, `content` must be one side's, and that side
+    /// is staged as it is: a link stays a link. Refuses, changing
+    /// nothing, a submodule's conflict, an edited link, a path no
+    /// longer in the index, a path that is a directory in the work
+    /// tree, one below a symbolic link there, and a valueless
+    /// merge.conflictstyle. Refuses as well, keeping the conflict, a
+    /// path whose checkout would also write another file, or end
+    /// another's conflict.
+    /// With `accepted`, that side as the resolver listed it is staged as
+    /// it is, its content and its mode, and `content` isn't looked at:
+    /// how the resolver resolves a conflict on a link. Its editor
+    /// doesn't give a side's content back byte for byte (a no-break
+    /// space comes back as a space), and two sides can have the same
+    /// content (a link, and a file holding its target). Refused,
+    /// changing nothing, where there is no such side (a deleted one).
+    Result<void> resolveConflict(const std::string& path, const std::string& content,
+                                 std::optional<AcceptedSide> accepted = std::nullopt);
+
     // Remotes
     Result<std::vector<RemoteInfo>> remotes() const;
     Result<void> addRemote(const std::string& name, const std::string& url);
@@ -263,8 +313,16 @@ public:
                              const std::string& branch, bool createBranch = false);
     /// Prunes the worktree's administrative files AND deletes its
     /// working directory from disk. Refuses locked worktrees —
-    /// unlock first. Caller is expected to confirm with the user.
-    Result<void> removeWorktree(const std::string& name);
+    /// unlock first. Caller is expected to confirm with the user,
+    /// and passes the folder it named as `folder`: a worktree that
+    /// is elsewhere by now is refused. Deletes a folder only if it
+    /// is that worktree's, as `git worktree remove` checks: its .git
+    /// file points back to .git/worktrees/<name>, and it holds
+    /// neither this repository nor the home folder. One that fails
+    /// is refused, with nothing deleted; one whose .git file is gone
+    /// (its folder too, often) loses its administrative files alone.
+    Result<void> removeWorktree(const std::string& name,
+                                const std::string& folder = {});
     Result<void> lockWorktree(const std::string& name,
                               const std::string& reason = "");
     Result<void> unlockWorktree(const std::string& name);

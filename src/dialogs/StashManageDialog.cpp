@@ -1,5 +1,6 @@
 #include "dialogs/StashManageDialog.h"
 #include "conf/SettingsService.h"
+#include "util/MessageText.h"
 
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -23,9 +24,12 @@ void StashManageDialog::setStashes(
         // The index is what `git stash apply N` takes, so we keep
         // it as the QListWidgetItem's data role for the buttons to
         // resolve back to a number.
+        // git puts HEAD's subject in the message ("WIP on main: …"):
+        // at most util::kMaxLineChars of it, as the list lays an item's
+        // text out whole.
         const QString label = QStringLiteral("stash@{%1}: %2")
             .arg(s.index)
-            .arg(QString::fromStdString(s.message));
+            .arg(util::elided(s.message));
         auto* item = new QListWidgetItem(label, list_);
         item->setData(Qt::UserRole, static_cast<qulonglong>(s.index));
     }

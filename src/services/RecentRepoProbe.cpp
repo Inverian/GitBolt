@@ -40,8 +40,9 @@ RecentRepoInfo probeRecentRepo(const QString& path)
     // working tree, or untracked. Conflicts count too — they're a
     // strong signal the repo has pending work. Ignored files are not
     // counted (that's the expected behavior; ignored noise isn't
-    // "dirty" to the user).
-    {
+    // "dirty" to the user). A bare repository has no work tree, and
+    // libgit2 turns its status down: nothing to count, and no failure.
+    if (!repo.isBare()) {
         auto statusRes = repo.status();
         if (statusRes.ok()) {
             for (const auto& entry : statusRes.value()) {
@@ -49,6 +50,10 @@ RecentRepoInfo probeRecentRepo(const QString& path)
                     entry.isUntracked() || entry.isConflicted())
                     ++out.dirtyCount;
             }
+        } else {
+            // A count of 0 read as clean: a status libgit2 turns down
+            // (a tree nested too deep) says so, and why.
+            out.statusError = QString::fromStdString(statusRes.error().message());
         }
     }
 

@@ -1,8 +1,13 @@
 #pragma once
 
 #include "git/ObjectId.h"
+#include "git/Tree.h"
 
 #include <QWidget>
+
+#include <atomic>
+#include <memory>
+#include <vector>
 
 class QEvent;
 class QLabel;
@@ -12,6 +17,7 @@ class QSortFilterProxyModel;
 class QSplitter;
 class QStandardItem;
 class QStandardItemModel;
+class QTimer;
 class QTreeView;
 class QModelIndex;
 
@@ -34,11 +40,13 @@ namespace gitbolt::widgets {
 ///     mirrors the GitExtensions one).
 ///   - Sizes shown alongside file names; directories are bold.
 ///
-/// All loads are synchronous and bounded by the size of the tree
-/// at the selected commit — for a libgit2-cached tree this is in
-/// the few-millisecond range even for the linux kernel. We don't
-/// background-thread the walk yet; that's a follow-up if a user
-/// hits the latency on a giant repo.
+/// The tree walk (and the sort of what it finds) runs on the service's
+/// read thread (GitService::readAsync): on the GUI thread, a commit
+/// with a huge tree froze the window for the walk. That thread has the
+/// GUI thread's 8 MB stack, so the walk (libgit2's git_tree_walk
+/// recurses once per level) takes a tree as deep as it did; what bounds
+/// the depth is a limit in libgit2, not the thread. A blob preview
+/// reads one blob, at most kMaxPreviewBytes of it, synchronously.
 class FileTreeWidget : public QWidget {
     Q_OBJECT
 public:
@@ -87,6 +95,10 @@ private:
     void setupUi();
     void applyColors();
     void rebuildTree();
+    /// Empties the tree and says it's loading.
+    void showLoading();
+    /// The walk of currentCommit_ is in, sorted: fills the tree.
+    void showTree(const std::vector<git::TreeEntry>& entries);
     void showBlobPreview(const git::ObjectId& blobId, const QString& path,
                          quint64 size);
     static bool looksBinary(const QByteArray& data);
@@ -94,6 +106,21 @@ private:
 
     services::GitService* svc_     = nullptr;
     git::ObjectId    currentCommit_;
+    // Bumped by every walk asked for and by clear(), and shared with the
+    // worker: a walk's reply for an earlier commit is dropped, and a walk
+    // superseded stops where it is, or doesn't run if its turn hadn't
+    // come.
+    std::shared_ptr<std::atomic<quint64>> walkToken_ =
+        std::make_shared<std::atomic<quint64>>(0);
+    // Until a walk is in, the tree on show (the previous commit's) stays,
+    // so a walk in within milliseconds, as most are, shows in one change.
+    // Emptied at once, the tree painted empty, under "Loading file tree…",
+    // on every selection, and flickered as the user arrowed through the
+    // log. That lasts kLoadingDelayMs at most, counted from the first
+    // walk asked for that is still out, so arrowing on through slow ones
+    // can't keep a commit's tree up for another: then it is emptied and
+    // says it's loading.
+    QTimer* loadingTimer_ = nullptr;
 
     QSplitter*             splitter_     = nullptr;
     QLineEdit*             filterInput_  = nullptr;

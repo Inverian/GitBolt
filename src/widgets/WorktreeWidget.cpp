@@ -1,5 +1,7 @@
 #include "widgets/WorktreeWidget.h"
 
+#include "util/ToolTip.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QFont>
@@ -51,11 +53,14 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
     }
 
     if (role == Qt::ToolTipRole) {
-        return QStringLiteral("%1\nPath: %2\nBranch: %3\n%4")
-            .arg(QString::fromStdString(wt.name))
-            .arg(QString::fromStdString(wt.path))
-            .arg(QString::fromStdString(wt.branch))
-            .arg(wt.isLocked ? tr("Locked") : tr("Unlocked"));
+        // The worktree's name, path and branch: plain text, as markup
+        // in them was rendered. In one arg(), so a "%2" in the name
+        // stays.
+        return util::plainToolTip(QStringLiteral("%1\nPath: %2\nBranch: %3\n%4")
+                                      .arg(QString::fromStdString(wt.name),
+                                           QString::fromStdString(wt.path),
+                                           QString::fromStdString(wt.branch),
+                                           wt.isLocked ? tr("Locked") : tr("Unlocked")));
     }
 
     if (role == Qt::DecorationRole && index.column() == ColLocked) {
@@ -189,7 +194,7 @@ bool WorktreeWidget::selectedWorktreeLocked() const {
 void WorktreeWidget::onRemoveClicked() {
     const QString name = selectedWorktreeName();
     if (!name.isEmpty())
-        emit removeRequested(name);
+        emit removeRequested(name, selectedWorktreePath());
 }
 
 void WorktreeWidget::onLockUnlockClicked() {
@@ -218,14 +223,19 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
 
     QMenu menu(this);
 
-    menu.addAction(tr("Open in New Window"), this, [this, path]() {
+    // GitBolt has one window: Open makes the worktree the repository
+    // it shows, as Recent does.
+    menu.addAction(tr("Open in GitBolt"), this, [this, path]() {
         emit openRequested(path);
+    });
+    menu.addAction(tr("Open in File Explorer"), this, [this, path]() {
+        emit revealRequested(path);
     });
 
     menu.addSeparator();
 
-    menu.addAction(tr("Remove"), this, [this, name]() {
-        emit removeRequested(name);
+    menu.addAction(tr("Remove"), this, [this, name, path]() {
+        emit removeRequested(name, path);
     });
 
     if (locked) {

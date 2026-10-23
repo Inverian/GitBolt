@@ -112,7 +112,135 @@ public:
         return commit(message);
     }
 
+    /// HEAD made again with other idents ("Name <email>"), its tree,
+    /// parents and message the same, and the branch moved to it. The
+    /// object is written as it is: git puts no limit on an ident's
+    /// length (an author name of megabytes passes fsck), and a clone
+    /// brings whatever one a commit has.
+    gitbolt::git::ObjectId rewriteHeadIdents(const std::string& author,
+                                              const std::string& committer) {
+        git_repository* raw = repo_->raw();
+        git_reference* head = nullptr;
+        git_commit* old = nullptr;
+        if (git_repository_head(&head, raw) != 0
+            || git_commit_lookup(&old, raw, git_reference_target(head)) != 0)
+            qFatal("TestRepo: no HEAD commit to rewrite");
+        const auto hex = [](const git_oid* oid) {
+            char buf[GIT_OID_MAX_HEXSIZE + 1];
+            return std::string(git_oid_tostr(buf, sizeof buf, oid));
+        };
+        std::string text = "tree " + hex(git_commit_tree_id(old)) + "\n";
+        for (unsigned i = 0; i < git_commit_parentcount(old); ++i)
+            text += "parent " + hex(git_commit_parent_id(old, i)) + "\n";
+        text += "author " + author + " 1700000000 +0000\n";
+        text += "committer " + committer + " 1700000000 +0000\n\n";
+        text += git_commit_message(old);
+        git_commit_free(old);
+
+        git_odb* odb = nullptr;
+        git_oid id;
+        git_reference* moved = nullptr;
+        if (git_repository_odb(&odb, raw) != 0
+            || git_odb_write(&id, odb, text.data(), text.size(), GIT_OBJECT_COMMIT) != 0
+            || git_reference_set_target(&moved, head, &id, "rewrite idents") != 0)
+            qFatal("TestRepo: cannot write the rewritten commit");
+        git_reference_free(moved);
+        git_odb_free(odb);
+        git_reference_free(head);
+        return gitbolt::git::ObjectId(&id);
+    }
+
+    /// A commit on HEAD, after the one there if any, whose tree is
+    /// `depth` nested folders named "d" with a blob "leaf.txt" at the
+    /// bottom: a few kilobytes whatever the depth. The bundled libgit2
+    /// turns down a tree nested deeper than 2048 levels ("tree too
+    /// deep"; cmake/PatchLibgit2.cmake).
+    gitbolt::git::ObjectId commitDeepTree(int depth) {
+        git_repository* raw = repo_->raw();
+        git_oid cur;
+        if (git_blob_create_from_buffer(&cur, raw, "leaf\n", 5) != 0)
+            qFatal("TestRepo: cannot write the deep tree's blob");
+        for (int level = 0; level <= depth; ++level) {
+            const bool leaf = level == 0;
+            git_treebuilder* builder = nullptr;
+            if (git_treebuilder_new(&builder, raw, nullptr) != 0
+                || git_treebuilder_insert(nullptr, builder, leaf ? "leaf.txt" : "d", &cur,
+                                          leaf ? GIT_FILEMODE_BLOB : GIT_FILEMODE_TREE) != 0
+                || git_treebuilder_write(&cur, builder) != 0)
+                qFatal("TestRepo: cannot write the deep tree");
+            git_treebuilder_free(builder);
+        }
+        return commitTree(cur, "HEAD", "deep");
+    }
+
+    /// A commit with no parent, on no branch, of `files` files in folders
+    /// of a hundred, each `content` (the same blob): written in a moment
+    /// however many, and as slow to read as wanted. Its diff has every
+    /// line of each added, and libgit2 caches no blob, so a walk of the
+    /// tree reads `content` again at each file (its size).
+    gitbolt::git::ObjectId commitWideTree(int files, const QByteArray& content) {
+        git_repository* raw = repo_->raw();
+        git_oid blob;
+        if (git_blob_create_from_buffer(&blob, raw, content.constData(),
+                                        static_cast<size_t>(content.size())) != 0)
+            qFatal("TestRepo: cannot write the wide tree's blob");
+        git_treebuilder* root = nullptr;
+        if (git_treebuilder_new(&root, raw, nullptr) != 0)
+            qFatal("TestRepo: cannot write the wide tree");
+        for (int first = 0; first < files; first += 100) {
+            git_treebuilder* folder = nullptr;
+            git_oid folderId;
+            if (git_treebuilder_new(&folder, raw, nullptr) != 0)
+                qFatal("TestRepo: cannot write the wide tree");
+            for (int file = first; file < files && file < first + 100; ++file) {
+                const QByteArray name = "f" + QByteArray::number(file) + ".txt";
+                if (git_treebuilder_insert(nullptr, folder, name.constData(), &blob,
+                                           GIT_FILEMODE_BLOB) != 0)
+                    qFatal("TestRepo: cannot write the wide tree");
+            }
+            const QByteArray name = "d" + QByteArray::number(first / 100);
+            if (git_treebuilder_write(&folderId, folder) != 0
+                || git_treebuilder_insert(nullptr, root, name.constData(), &folderId,
+                                          GIT_FILEMODE_TREE) != 0)
+                qFatal("TestRepo: cannot write the wide tree");
+            git_treebuilder_free(folder);
+        }
+        git_oid tree;
+        if (git_treebuilder_write(&tree, root) != 0)
+            qFatal("TestRepo: cannot write the wide tree");
+        git_treebuilder_free(root);
+        return commitTree(tree, nullptr, "wide");
+    }
+
 private:
+    /// Commits `treeId` with `message`: after HEAD's commit and moving
+    /// it when `ref` is "HEAD", with no parent and moving nothing when
+    /// it is null.
+    gitbolt::git::ObjectId commitTree(const git_oid& treeId, const char* ref,
+                                      const char* message) {
+        git_repository* raw = repo_->raw();
+        git_tree* tree = nullptr;
+        git_signature* sig = nullptr;
+        if (git_tree_lookup(&tree, raw, &treeId) != 0
+            || git_signature_new(&sig, "Test User", "test@gitbolt.local", 1700000000, 0) != 0)
+            qFatal("TestRepo: cannot commit the tree");
+        git_commit* parent = nullptr;
+        git_oid parentId;
+        if (ref && git_reference_name_to_id(&parentId, raw, "HEAD") == 0
+            && git_commit_lookup(&parent, raw, &parentId) != 0)
+            qFatal("TestRepo: cannot read HEAD's commit");
+        const git_commit* parents[] = {parent};
+        git_oid id;
+        const int made = git_commit_create(&id, raw, ref, sig, sig, nullptr, message, tree,
+                                           parent ? 1 : 0, parents);
+        git_commit_free(parent);
+        git_signature_free(sig);
+        git_tree_free(tree);
+        if (made != 0)
+            qFatal("TestRepo: cannot commit the tree");
+        return gitbolt::git::ObjectId(&id);
+    }
+
     /// Point libgit2's global/system/xdg config search paths at an
     /// empty directory ONCE per test process, so the developer's
     /// ~/.gitconfig (core.autocrlf, init.defaultBranch,

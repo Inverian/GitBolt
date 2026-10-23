@@ -1,4 +1,7 @@
 #include "models/BranchModel.h"
+#include "util/MessageText.h"
+
+#include "util/ToolTip.h"
 
 #include <QDateTime>
 #include <QString>
@@ -147,13 +150,17 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::DecorationRole:
             return b.isHead ? QIcon::fromTheme(QStringLiteral("vcs-branch"))
                             : QIcon::fromTheme(QStringLiteral("vcs-branch"));
+        // Every tooltip here is the repository's text: ref names (a
+        // clone's come from the server, and "<b>…</b>" is a valid one),
+        // a tag's message and tagger, a submodule's URL, a stash's
+        // message. Plain, or Qt rendered their markup.
         case Qt::ToolTipRole: {
             QString tip = QString::fromStdString(b.fullRefName);
             if (!b.upstream.empty())
                 tip += QStringLiteral("\nUpstream: ") + QString::fromStdString(b.upstream);
             if (b.isHead)
                 tip += QStringLiteral("\n(HEAD)");
-            return tip;
+            return util::plainToolTip(tip);
         }
         case FullRefNameRole:
             return QString::fromStdString(b.fullRefName);
@@ -179,7 +186,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         case Qt::DecorationRole:
             return QIcon::fromTheme(QStringLiteral("network-server"));
         case Qt::ToolTipRole:
-            return QString::fromStdString(b.fullRefName);
+            return util::plainToolTip(QString::fromStdString(b.fullRefName));
         case FullRefNameRole:
             return QString::fromStdString(b.fullRefName);
         case BranchTypeRole:
@@ -207,16 +214,20 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
             QString tip = QString::fromStdString(t.fullRefName);
             tip += QStringLiteral("\nTarget: ") + QString::fromStdString(t.targetId.toShortHex());
             if (t.type == git::TagType::Annotated) {
+                // The tagger's ident at most util::kMaxLineChars long:
+                // git takes one of any length.
                 if (!t.tagger.name.empty())
                     tip += QStringLiteral("\n") + tr("Tagger: %1 <%2>").arg(
-                        QString::fromStdString(t.tagger.name),
-                        QString::fromStdString(t.tagger.email));
-                // git ends a tag message with a newline.
-                const QString message = QString::fromStdString(t.message).trimmed();
+                        util::elided(t.tagger.name), util::elided(t.tagger.email));
+                // git ends a tag message with a newline. Cut where a
+                // line, or the whole of it, is too long for the tooltip
+                // to lay out without freezing the window
+                // (util::elidedText).
+                const QString message = util::elidedText(t.message).trimmed();
                 if (!message.isEmpty())
                     tip += QStringLiteral("\n") + message;
             }
-            return tip;
+            return util::plainToolTip(tip);
         }
         case FullRefNameRole:
             return QString::fromStdString(t.fullRefName);
@@ -243,7 +254,7 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
                 tip += QStringLiteral("\nURL: ") + QString::fromStdString(sm.url);
             if (!sm.branch.empty())
                 tip += QStringLiteral("\nBranch: ") + QString::fromStdString(sm.branch);
-            return tip;
+            return util::plainToolTip(tip);
         }
         default:
             return {};
@@ -256,14 +267,17 @@ QVariant BranchModel::data(const QModelIndex& index, int role) const {
         const auto& s = stashes_[static_cast<size_t>(row)];
 
         switch (role) {
+        // git puts HEAD's subject in a stash's message ("WIP on main:
+        // …"), and a subject can be one line of megabytes, which the
+        // tree laid out whole on every paint: util::kMaxLineChars of it.
         case Qt::DisplayRole:
-            return QString::fromStdString(s.message);
+            return util::elided(s.message);
         case Qt::DecorationRole:
             return QIcon::fromTheme(QStringLiteral("document-save"));
         case Qt::ToolTipRole: {
             QString tip = QStringLiteral("stash@{%1}").arg(s.index);
-            tip += QStringLiteral("\n") + QString::fromStdString(s.message);
-            return tip;
+            tip += QStringLiteral("\n") + util::elidedText(s.message);
+            return util::plainToolTip(tip);
         }
         default:
             return {};

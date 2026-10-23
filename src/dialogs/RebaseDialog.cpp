@@ -1,6 +1,8 @@
 #include "dialogs/RebaseDialog.h"
 #include "conf/SettingsService.h"
+#include "util/MessageText.h"
 #include "widgets/InteractiveRebaseWidget.h"
+#include "widgets/PlainTextDialogs.h"
 
 #include <QComboBox>
 #include <QDialogButtonBox>
@@ -110,10 +112,11 @@ void RebaseDialog::setCommitsToRebase(const std::vector<git::CommitData>& commit
     previewList_->clear();
     int replayed = 0;
     for (const auto& c : commits) {
+        // At most util::kMaxLineChars of the subject: one of megabytes
+        // stalled the list, which lays an item's text out whole.
         QString entry = QStringLiteral("%1  %2")
                             .arg(QString::fromStdString(c.id.toShortHex()))
-                            .arg(QString::fromStdString(
-                                c.summary.empty() ? c.message : c.summary));
+                            .arg(util::elided(c.summary.empty() ? c.message : c.summary));
         if (!c.isMerge()) {
             previewList_->addItem(entry);
             ++replayed;
@@ -168,7 +171,7 @@ void RebaseDialog::onAccepted() {
     // git would stop at once on this one; say why here, with the
     // plan still open to fix.
     if (const QString problem = rebaseWidget_->planProblem(); !problem.isEmpty()) {
-        QMessageBox::warning(this, tr("Interactive Rebase"), problem);
+        widgets::PlainMessageBox::warning(this, tr("Interactive Rebase"), problem);
         return;
     }
     // Turned down (a rebase step still running, HEAD moved since the
@@ -177,7 +180,7 @@ void RebaseDialog::onAccepted() {
     refusal_.clear();
     emit rebaseRequested(plan);
     if (!refusal_.isEmpty()) {
-        QMessageBox::warning(this, tr("Interactive Rebase"), refusal_);
+        widgets::PlainMessageBox::warning(this, tr("Interactive Rebase"), refusal_);
         return;
     }
     accept();
