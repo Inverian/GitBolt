@@ -59,7 +59,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure("action objectNames usage statistics would count "
                       "must match " + NAME.pattern + ": " + ", ".join(bad))
 
-    # Settings › GitBolt › Usage Statistics: there, and toggled off,
+    # Settings › GitBolt › Usage Statistics: there, and grey,
     # when the build has endpoints; absent when it doesn't. The page is
     # GitBolt's sixth (row 0/5); its row is hidden, and selecting it
     # shows nothing, in a build without endpoints.
@@ -73,7 +73,11 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure(f"Usage statistics switch shown={shown} with the "
                       f"gate {gate!r}")
     if shown:
-        app.ok("click settings.usage-statistics")
+        # Grey: it can't be turned off in this version.
+        switch = [b for b in app.cmd("list-widgets")["buttons"]
+                  if b.get("objectName") == "settings.usage-statistics"][0]
+        if switch.get("enabled", True):
+            raise Failure("the usage statistics switch can be changed")
     app.ok("click OK")
     app.wait_until(lambda s: "Settings" not in s.get("windows", []),
                    "Settings dialog closed")

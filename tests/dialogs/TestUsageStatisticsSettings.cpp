@@ -210,7 +210,7 @@ private slots:
         QVERIFY(check && id && copy && link && note);
 
         QVERIFY(check->isChecked());
-        QVERIFY(check->isEnabled());
+        QVERIFY(!check->isEnabled());   // grey: it can't be turned off
         QVERIFY(note->isHidden());
         QVERIFY(id->isReadOnly());
         QVERIFY(id->text().isEmpty());

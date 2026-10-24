@@ -956,7 +956,8 @@ void SettingsDialog::setUsageStatistics(bool available, const QString& lockedRea
     // sent), not the stored preference the environment overrides.
     usageStatsCheck_->setChecked(!usageLocked_ && settings_
                                  && settings_->usageStatisticsEnabled());
-    usageStatsCheck_->setEnabled(!usageLocked_);
+    // Grey in this version: it can't be turned off here.
+    usageStatsCheck_->setEnabled(false);
     usageLockedNote_->setText(lockedReason);
     if (auto* usageForm = qobject_cast<QFormLayout*>(usageGroup_->layout()))
         usageForm->setRowVisible(usageLockedNote_, usageLocked_);
