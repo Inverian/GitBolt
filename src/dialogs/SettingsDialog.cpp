@@ -34,7 +34,6 @@
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QTreeWidget>
-#include <QThreadPool>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
@@ -58,20 +57,6 @@ QString globalGitConfig(const QStringList& args)
     if (!result.ok() || !result->success())
         return {};
     return QString::fromStdString(result->stdoutData).trimmed();
-}
-
-// Where those run, one at a time and in the order asked: a save (Apply,
-// then OK) or a load after it otherwise ran side by side, each first
-// waiting for the login shell's PATH, and an older value could land
-// last.
-QThreadPool* gitConfigPool()
-{
-    static QThreadPool* pool = [] {
-        auto* p = new QThreadPool;
-        p->setMaxThreadCount(1);
-        return p;
-    }();
-    return pool;
 }
 
 
@@ -1242,7 +1227,7 @@ void SettingsDialog::loadGitConfig()
         }
         watcher->deleteLater();
     });
-    watcher->setFuture(QtConcurrent::run(gitConfigPool(), []() {
+    watcher->setFuture(QtConcurrent::run([]() {
         GitIdentity id;
         if (git::GitProcess::findGitExecutable().empty()) {
             id.noGit = true;
@@ -1260,16 +1245,15 @@ void SettingsDialog::saveGitConfig()
     // Not read (no git), so nothing to save.
     if (!userNameEdit_->isEnabled())
         return;
+    // Here and now, not on a worker: two saves (Apply, then OK) then run
+    // in order, and none outlives the application. Finding git may wait
+    // for the login shell's PATH, but only in GitBolt's first seconds.
     const QString name = userNameEdit_->text().trimmed();
     const QString email = userEmailEdit_->text().trimmed();
-    // On a worker, as loadGitConfig reads: finding git may wait for the
-    // login shell's PATH (util::pathForChildren).
-    (void)QtConcurrent::run(gitConfigPool(), [name, email]() {
-        if (!name.isEmpty())
-            globalGitConfig({QStringLiteral("user.name"), name});
-        if (!email.isEmpty())
-            globalGitConfig({QStringLiteral("user.email"), email});
-    });
+    if (!name.isEmpty())
+        globalGitConfig({QStringLiteral("user.name"), name});
+    if (!email.isEmpty())
+        globalGitConfig({QStringLiteral("user.email"), email});
 }
 
 void SettingsDialog::apply()
