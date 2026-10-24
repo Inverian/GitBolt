@@ -1,9 +1,11 @@
 #include "dialogs/AboutDialog.h"
 
-#include "git/Repository.h"  // libgit2Version(), libgit2Features()
+#include "git/GitVersion.h"  // lastGitProbe(), assessGitVersion()
+#include "git/Repository.h"  // libgit2VersionDescription(), libgit2Features()
 
 #include <QApplication>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -63,6 +65,53 @@ QString buildDateString() {
     // string like "Apr  6 2026 23:12:05" — good enough for "when was
     // this binary built" at a glance.
     return QStringLiteral(__DATE__ " " __TIME__);
+}
+
+// The git GitBolt runs, as the window's check at launch found it
+// (git::probeGit()): rows of the table, for a bug report: its version
+// and where it is, and what is known against it. Escaped: rich text,
+// and the path is the disk's. The table doesn't wrap, so a long path
+// loses its middle.
+QString gitRows() {
+    const auto row = [](const QString& name, const QString& value) {
+        return QStringLiteral("<tr><td valign='top'><b>%1</b></td><td>%2</td></tr>")
+            .arg(name, value);
+    };
+    const QString name = QStringLiteral("git:");
+    const std::optional<gitbolt::git::GitProbe> probe = gitbolt::git::lastGitProbe();
+    if (!probe)
+        return row(name, AboutDialog::tr("not checked yet"));
+    if (probe->path.isEmpty())
+        return row(name, AboutDialog::tr("not found"));
+    QString where = QDir::toNativeSeparators(probe->path);
+    if (where.size() > 64)
+        where = where.left(24) + QChar(0x2026) + where.right(39);
+    where = where.toHtmlEscaped();
+    if (probe->appleToolsMissing)
+        return row(name, AboutDialog::tr("%1 (the Command Line Tools aren't installed)").arg(where));
+    if (!probe->version)
+        return row(name, AboutDialog::tr("%1 (didn't say its version)").arg(where));
+    QString rows = row(name, AboutDialog::tr("%1 at %2")
+                                 .arg(probe->version->text.toHtmlEscaped(), where));
+    const gitbolt::git::GitPlatform platform = gitbolt::git::currentGitPlatform();
+    const gitbolt::git::GitAssessment assessment =
+        gitbolt::git::assessGitVersion(*probe->version, platform);
+    QStringList notes;
+    if (assessment.belowFloor)
+        notes << AboutDialog::tr("too old for GitBolt");
+    QStringList ids;
+    for (const gitbolt::git::GitAdvisory* advisory : assessment.advisories)
+        ids << advisory->ids.first();
+    if (!ids.isEmpty())
+        notes << AboutDialog::tr("known security flaws: %1").arg(ids.join(QStringLiteral(", ")));
+    // Someone else's build, such as Microsoft's fork: its version says
+    // nothing about the fixes in it.
+    if (platform != gitbolt::git::GitPlatform::Other
+        && probe->version->build == gitbolt::git::GitVersion::Build::Other)
+        notes << AboutDialog::tr("this build of git isn't checked for security flaws");
+    for (const QString& note : notes)
+        rows += row(QString(), note);
+    return rows;
 }
 
 } // namespace
@@ -143,17 +192,20 @@ void AboutDialog::setupUi()
         "<tr><td><b>Build date:</b></td><td>%7</td></tr>"
         "<tr><td><b>OS:</b></td><td>%8 (%9)</td></tr>"
         "<tr><td><b>Architecture:</b></td><td>%10</td></tr>"
+        "%11"
         "</table>")
         .arg(QStringLiteral(QT_VERSION_STR))
         .arg(qVersion())
-        .arg(QString::fromStdString(gitbolt::git::libgit2Version()))
+        .arg(QString::fromStdString(gitbolt::git::libgit2VersionDescription()))
         .arg(QString::fromStdString(gitbolt::git::libgit2Features()))
         .arg(compilerString())
         .arg(buildTypeString())
         .arg(buildDateString())
         .arg(QSysInfo::prettyProductName())
         .arg(QSysInfo::kernelVersion())
-        .arg(QSysInfo::currentCpuArchitecture()));
+        .arg(QSysInfo::currentCpuArchitecture())
+        // Last: no %N after it for a '%' in the path to be taken for.
+        .arg(gitRows()));
 
     // License notice + clickable links. Using a single QLabel with
     // openExternalLinks=true lets the user click straight through to

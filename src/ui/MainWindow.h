@@ -29,7 +29,8 @@ class QTimer;
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
 namespace gitbolt::services { struct StopFacts;     }
-namespace gitbolt::widgets  { class RepoOperationBar; }
+namespace gitbolt::widgets  { class RepoOperationBar; class GitNoticeBar; }
+namespace gitbolt::git      { struct GitProbe; }
 namespace gitbolt::conf     { class SettingsService;}
 namespace gitbolt::conf     { class ThemeService;   }
 namespace gitbolt::dialogs  { class CommitDialog;   }
@@ -76,6 +77,15 @@ public:
     /// reports it in dump-state.
     telemetry::Gate telemetryGate() const;
 
+    /// Finds the git GitBolt runs and asks it its version, on a worker
+    /// (git::probeGit()), then shows what there is to say about it
+    /// (showGitNotice). main() calls it once the window is up.
+    void checkGitVersion();
+
+    /// The note above the views about `probe` (widgets::GitNoticeBar),
+    /// unless there is nothing to say or the user dismissed that one.
+    void showGitNotice(const git::GitProbe& probe);
+
 protected:
     void closeEvent(QCloseEvent* e) override;
 
@@ -92,6 +102,9 @@ private slots:
     void createNewRepository();
 
 private:
+    /// Tools › GitK in the open repository, with `childPath` as its PATH
+    /// (util::pathForChildren()).
+    void launchGitk(const QString& childPath);
     /// Paints the inline toolbar label / status bar / clear-timer
     /// after a fetch-pull-push worker finishes.
     void finishRemoteOpFeedback(const QString& successMsg);
@@ -353,6 +366,7 @@ private:
     QStackedWidget* centralStack_  = nullptr;
     DashboardView*  dashboardView_ = nullptr;
     RepositoryView* repoView_      = nullptr;
+    widgets::GitNoticeBar* gitNotice_ = nullptr;
 
     // Modeless commit dialog — lazily constructed on first use and
     // then cached. Never deleted before the window closes.

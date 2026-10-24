@@ -13,6 +13,7 @@ set(SOURCES
     DiffViewerWidget.cpp
     FileTreeWidget.cpp
     GitFlowWidget.cpp
+    GitNoticeBar.cpp
     InteractiveRebaseWidget.cpp
     LoadingOverlayWidget.cpp
     MaintenanceWidget.cpp
@@ -34,6 +35,8 @@ set(SOURCES
     DiffViewerWidget.h
     FileTreeWidget.h
     GitFlowWidget.h
+    GitNoticeBar.h
+    NoteBarColors.h
     InteractiveRebaseWidget.h
     LoadingOverlayWidget.h
     MaintenanceWidget.h

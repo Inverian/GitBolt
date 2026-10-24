@@ -1,4 +1,7 @@
 #include "ui/MainWindow.h"
+#include "git/GitVersion.h"
+#include "util/LoginPath.h"
+#include "widgets/GitNoticeBar.h"
 
 #include "ui/InlineOpIndicator.h"
 #include "ui/RepoCommandController.h"
@@ -197,7 +200,19 @@ MainWindow::MainWindow(QWidget* parent)
 
     centralStack_->addWidget(dashboardView_);
     centralStack_->addWidget(repoView_);
-    setCentralWidget(centralStack_);
+
+    // The note about the git GitBolt runs (showGitNotice), above
+    // whichever view is up. Hidden until there is something to say.
+    gitNotice_ = new widgets::GitNoticeBar(this);
+    connect(gitNotice_, &widgets::GitNoticeBar::dismissed, this,
+            [this](const QString& key) { settingsService_->dismissGitNotice(key); });
+    auto* central = new QWidget(this);
+    auto* column = new QVBoxLayout(central);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(0);
+    column->addWidget(gitNotice_);
+    column->addWidget(centralStack_, 1);
+    setCentralWidget(central);
 
     createMenuBar();
     createToolBar();
@@ -238,6 +253,83 @@ MainWindow::~MainWindow()
     gitService_->cancelGitOps();
     remoteOp_.waitForFinished();
     repoCmd_->waitForFinished();
+}
+
+// ---------------------------------------------------------------------------
+// The git GitBolt runs
+// ---------------------------------------------------------------------------
+void MainWindow::checkGitVersion()
+{
+    // On a worker: finding git may wait for the login shell's PATH
+    // (util::pathForChildren), and asking it its version is a process.
+    // The answer is kept per git (git::probeGit), for About too.
+    auto* watcher = new QFutureWatcher<git::GitProbe>(this);
+    connect(watcher, &QFutureWatcher<git::GitProbe>::finished, this, [this, watcher]() {
+        showGitNotice(watcher->result());
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([] { return git::probeGit(); }));
+}
+
+void MainWindow::showGitNotice(const git::GitProbe& probe)
+{
+    const std::optional<widgets::GitNotice> notice =
+        widgets::GitNoticeBar::noticeFor(probe, git::currentGitPlatform());
+    // One the user dismissed stays away until its git, the git's
+    // version or what is wrong with it changes (GitNotice::key).
+    if (!notice || settingsService_->gitNoticeDismissed(notice->key)) {
+        gitNotice_->hide();
+        return;
+    }
+    gitNotice_->showNotice(*notice);
+}
+
+// Tools › GitK, once the PATH GitBolt's children get is known: gitk by
+// its full path, as the Console would find it. By name, Windows looked in
+// GitBolt's current folder before PATH, which Explorer's "Open in
+// GitBolt" made the repository: a gitk.exe committed there would have
+// run.
+void MainWindow::launchGitk(const QString& childPath)
+{
+    const QString program = util::findExecutableOnPath(QStringLiteral("gitk"), childPath);
+    if (program.isEmpty()) {
+        widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
+            tr("gitk was not found on your PATH. It comes with Git for Windows; on "
+               "macOS and Linux it is a package of its own (gitk, or Homebrew's "
+               "git-gui)."));
+        return;
+    }
+    const auto [workdir, bareGitDir] = gitService_->withRepository(
+        [](git::Repository& r) {
+            return std::pair{QString::fromStdString(r.commandDir()),
+                             r.isBare() ? QString::fromStdString(r.path())
+                                        : QString()};
+        });
+    QProcess gitk;
+    gitk.setProgram(program);
+    gitk.setWorkingDirectory(workdir);
+    // The open repository, never one GitBolt's own environment
+    // names (as for every git GitBolt runs), and a bare one
+    // named outright (safe.bareRepository).
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const auto& name : git::GitProcess::repositoryEnvVars())
+        env.remove(QString::fromStdString(name));
+    if (!bareGitDir.isEmpty())
+        env.insert(QStringLiteral("GIT_DIR"), bareGitDir);
+    // And the git gitk runs is GitBolt's: the same PATH.
+    env.insert(QStringLiteral("PATH"), childPath);
+#ifdef Q_OS_WIN
+    // gitk runs in the work tree: what it starts by name comes
+    // from PATH, not from there (see GitProcess::applyEnvironment).
+    env.insert(QStringLiteral("NoDefaultCurrentDirectoryInExePath"), QStringLiteral("1"));
+#endif
+    gitk.setProcessEnvironment(env);
+    const bool ok = gitk.startDetached();
+    if (!ok) {
+        widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
+            tr("Could not launch gitk. Is it installed and on "
+               "your PATH?"));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3714,39 +3806,25 @@ void MainWindow::buildToolsMenu()
         toolsMenu->addAction(a);
     }
     {
-        // GitK → launch the external gitk viewer on PATH, rooted in
-        // the current repo's workdir. QProcess::startDetached spawns
-        // the child without waiting for it; if gitk isn't installed
-        // the call returns false and we surface a friendly message.
+        // GitK → the external gitk viewer, rooted in the current repo's
+        // workdir and started detached; a friendly message when there
+        // is none, or it won't start.
         auto* a = new QAction(menuIcon(QStringLiteral("visibility")),
                               tr("Git&K"), this);
         a->setObjectName(QStringLiteral("tools.gitk"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            const auto [workdir, bareGitDir] = gitService_->withRepository(
-                [](git::Repository& r) {
-                    return std::pair{QString::fromStdString(r.commandDir()),
-                                     r.isBare() ? QString::fromStdString(r.path())
-                                                : QString()};
-                });
-            QProcess gitk;
-            gitk.setProgram(QStringLiteral("gitk"));
-            gitk.setWorkingDirectory(workdir);
-            // The open repository, never one GitBolt's own environment
-            // names (as for every git GitBolt runs), and a bare one
-            // named outright (safe.bareRepository).
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            for (const auto& name : git::GitProcess::repositoryEnvVars())
-                env.remove(QString::fromStdString(name));
-            if (!bareGitDir.isEmpty())
-                env.insert(QStringLiteral("GIT_DIR"), bareGitDir);
-            gitk.setProcessEnvironment(env);
-            const bool ok = gitk.startDetached();
-            if (!ok) {
-                widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
-                    tr("Could not launch gitk. Is it installed and on "
-                       "your PATH?"));
-            }
+            // The PATH GitBolt's children get, the login shell's first, on
+            // a worker: shortly after launch it may still wait for the
+            // login shell (util::pathForChildren).
+            auto* watcher = new QFutureWatcher<QString>(this);
+            connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher]() {
+                watcher->deleteLater();
+                if (!gitService_ || !gitService_->isOpen()) return;
+                launchGitk(watcher->result());
+            });
+            watcher->setFuture(QtConcurrent::run(
+                [] { return util::pathForChildren(qEnvironmentVariable("PATH")); }));
         });
         toolsMenu->addAction(a);
     }

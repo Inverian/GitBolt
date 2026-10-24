@@ -15,7 +15,7 @@ endif()
 
 # Oldest macOS the app runs on. Unset, the binary targets the build
 # machine's SDK (macOS 26 on CI), whatever Info.plist says. 13.0 is the
-# minos of the Qt 6.10 frameworks CI ships (aqt), so nothing in the
+# minos of the Qt 6.11 frameworks CI ships (aqt), so nothing in the
 # bundle needs more; LSMinimumSystemVersion is generated from this same
 # variable (src/app/platform/macos/Info.plist.in). Must precede
 # project(), whose compiler checks use it. CMAKE_HOST_APPLE because
@@ -72,9 +72,20 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Options
 option(GITBOLT_BUILD_TESTS "Build tests" ON)
 option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
+# The pinned libgit2, patched by cmake/PatchLibgit2.cmake against
+# repositories that crash or freeze GitBolt, as every installer has it.
+# OFF takes a system libgit2, for packagers whose policy is the
+# distribution's: it has none of those patches (configure lists them)
+# and must be 1.9.5 or later (cmake/Libgit2Floor.cmake). A build
+# directory configured before this default keeps its OFF until
+# configured with -DGITBOLT_BUNDLED_LIBGIT2=ON or afresh.
 option(GITBOLT_BUNDLED_LIBGIT2
-    "Build the pinned libgit2 from source and link it statically instead of using a system copy"
-    OFF)
+    "Build the pinned libgit2, with GitBolt's patches, from source and link it statically; OFF uses a system copy (1.9.5 or later) without them"
+    ON)
+include(CMakeDependentOption)
+cmake_dependent_option(GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2
+    "With GITBOLT_BUNDLED_LIBGIT2=OFF, accept a system libgit2 before 1.9.5 (1.8.6) whose distribution backported the fixes for CVE-2026-53584 and CVE-2026-53585"
+    OFF "NOT GITBOLT_BUNDLED_LIBGIT2" OFF)
 option(GITBOLT_REQUIRE_ENGLISH_PLURALS
     "Fail the configure when the English plural forms can't be built (no Qt LinguistTools, or Qt before 6.7)"
     OFF)
@@ -95,8 +106,8 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg Network)
 qt_standard_project_setup()
 
-# libgit2 -> the gitbolt_libgit2 target: a system copy, or the pinned
-# static build (GITBOLT_BUNDLED_LIBGIT2, or when there is no system one)
+# libgit2 -> the gitbolt_libgit2 target: the pinned, patched static
+# build (GITBOLT_BUNDLED_LIBGIT2, the default), or a system copy
 include(Libgit2)
 
 # Source modules

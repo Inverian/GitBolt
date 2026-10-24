@@ -10,7 +10,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QRegularExpression>
-#include <QStandardPaths>
+#include <QHash>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QThread>
@@ -81,6 +81,57 @@ constexpr int kRebaseTimeoutMs = 300000;
 // or test the whole tree: as long as a rebase step, not run()'s 30 s.
 constexpr int kCommitTimeoutMs = 300000;
 
+// Where git is when the PATH has none: the places git's packages put it
+// (Homebrew on Apple silicon has one of its own). After the PATH; none
+// on Windows, where these would be taken on the current drive.
+const std::vector<std::string>& gitFallbacks() {
+#ifdef Q_OS_WIN
+    static const std::vector<std::string> none;
+    return none;
+#else
+    static const std::vector<std::string> places{"/usr/bin/git", "/usr/local/bin/git",
+                                                 "/opt/homebrew/bin/git"};
+    return places;
+#endif
+}
+
+// What a git command fails with when there is no git to run: never a
+// bare "git" instead, which Windows looks for in the current folder
+// (GitBolt's, and after Explorer's "Open in GitBolt" a repository)
+// before PATH.
+constexpr char kNoGit[] =
+    "git was not found: install git, or add the folder it is in to your PATH";
+
+// findGitExecutable()'s answers, by the PATH they were found on: a test
+// that puts a git of its own first gets that one, and the user's is
+// looked up once. An answer counts while its file is there.
+struct GitByPath {
+    std::mutex mutex;
+    QHash<QString, QString> found;
+};
+
+GitByPath& gitByPath() {
+    static GitByPath instance;
+    return instance;
+}
+
+QString gitOnPath(const QString& pathList) {
+    GitByPath& cache = gitByPath();
+    {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        const auto known = cache.found.constFind(pathList);
+        if (known != cache.found.constEnd() && QFileInfo(*known).isExecutable())
+            return *known;
+    }
+    const QString program = QString::fromStdString(
+        GitProcess::findGitOnPath(pathList.toStdString(), gitFallbacks()));
+    if (!program.isEmpty()) {
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        cache.found.insert(pathList, program);
+    }
+    return program;
+}
+
 // git strips the lines that start with core.commentChar from every
 // message it has had edited: a reword's, which kEditor writes, and a
 // squash's, which git puts together from the messages it combines.
@@ -113,7 +164,7 @@ char commentCharFor(const std::vector<std::string>& messages) {
 } // namespace
 
 GitProcess::GitProcess(const std::string& workingDirectory)
-    : workDir_(workingDirectory), gitPath_(findGitExecutable()) {}
+    : workDir_(workingDirectory) {}
 
 const std::vector<std::string>& GitProcess::repositoryEnvVars() {
     // `git rev-parse --local-env-vars`, less GIT_CONFIG_PARAMETERS and
@@ -145,6 +196,14 @@ void GitProcess::applyEnvironment(QProcess& process, bool allowPrompts) {
     // turned every commit down ("node: command not found").
     env.insert(QStringLiteral("PATH"),
                util::pathForChildren(env.value(QStringLiteral("PATH"))));
+#ifdef Q_OS_WIN
+    // A program git, a hook or a credential helper starts by name comes
+    // from PATH, never first from the current folder, which for git is
+    // the work tree: CreateProcess and cmd.exe look there unless this is
+    // set (that it is set is what counts). Git for Windows' sh, which
+    // runs hooks and aliases, never looks there.
+    env.insert(QStringLiteral("NoDefaultCurrentDirectoryInExePath"), QStringLiteral("1"));
+#endif
     // The child has no tty, so a git that decides to prompt (HTTPS
     // remote with no cached credential, ssh host-key confirmation)
     // used to block until waitForFinished's timeout killed it —
@@ -804,11 +863,19 @@ Result<ProcessOutput> GitProcess::runImpl(const std::vector<std::string>& args, 
     }
     tree.prepare(process);
 
+    // The first git on the PATH its children get (applyEnvironment): the
+    // git a hook, an alias or the Console runs is this one too.
+    const QString gitPath =
+        gitOnPath(process.processEnvironment().value(QStringLiteral("PATH")));
+
     // Wall-clock timing the run so the command log can show per-
     // command latency.
     QElapsedTimer timer;
     timer.start();
-    const QString gitPath = QString::fromStdString(gitPath_);
+    if (gitPath.isEmpty()) {
+        GitProcessLog::instance().emitCommand(workDir, qargs, -1, timer.elapsed());
+        return GitError(GitErrorCode::ProcessFailed, kNoGit);
+    }
     process.start(gitPath, qargs);
     bool started = process.waitForStarted(kStartTimeoutMs);
     if (!started && tree.dropHook(process)) {
@@ -906,7 +973,6 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     QStringList logArgs = args;
     logArgs[3] = QString::fromStdString(redactUrl(url));
     const QString logDir = QDir::currentPath();
-    const QString gitPath = QString::fromStdString(findGitExecutable());
 
     // Declared before the process so it outlives it: the job handle
     // must stay open while git runs.
@@ -921,6 +987,12 @@ Result<void> GitProcess::clone(const std::string& url, const std::string& path,
     QProcessEnvironment env = process.processEnvironment();
     env.insert(QStringLiteral("LANGUAGE"), QStringLiteral("en"));
     process.setProcessEnvironment(env);
+    // As for run(): the first git on the PATH its children get.
+    const QString gitPath = gitOnPath(env.value(QStringLiteral("PATH")));
+    if (gitPath.isEmpty()) {
+        GitProcessLog::instance().emitCommand(logDir, logArgs, -1, 0);
+        return GitError(GitErrorCode::ProcessFailed, kNoGit);
+    }
     // Clone writes everything to stderr; merged, one channel carries it
     // all and no unread pipe can fill up and stall git.
     process.setProcessChannelMode(QProcess::MergedChannels);
@@ -1605,11 +1677,19 @@ Result<ProcessOutput> GitProcess::prune() const { return run({"prune"}, 120000);
 Result<ProcessOutput> GitProcess::fsck() const { return run({"fsck", "--full"}, 300000); }
 
 std::string GitProcess::findGitExecutable() {
-    QString path = QStandardPaths::findExecutable("git");
-    if (!path.isEmpty()) return path.toStdString();
-    for (const char* p : {"/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"})
-        if (QFile::exists(p)) return p;
-    return "git";
+    return gitOnPath(util::pathForChildren(qEnvironmentVariable("PATH"))).toStdString();
+}
+
+std::string GitProcess::findGitOnPath(const std::string& pathList,
+                                      const std::vector<std::string>& fallbacks) {
+    const QString found = util::findExecutableOnPath(QStringLiteral("git"),
+                                                     QString::fromStdString(pathList));
+    if (!found.isEmpty())
+        return found.toStdString();
+    for (const std::string& fallback : fallbacks)
+        if (QFileInfo(QString::fromStdString(fallback)).isExecutable())
+            return fallback;
+    return {};
 }
 
 } // namespace gitbolt::git

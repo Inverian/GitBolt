@@ -13,7 +13,7 @@
   <br>
   <a href="https://www.qt.io"><img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white"></a>
   <a href="docs/BUILDING.md"><img alt="C++20" src="https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus&logoColor=white"></a>
-  <a href="https://libgit2.org"><img alt="libgit2 1.7 or later" src="https://img.shields.io/badge/libgit2-1.7%2B-f34f29?logo=git&logoColor=white"></a>
+  <a href="https://libgit2.org"><img alt="libgit2 1.9.7, bundled" src="https://img.shields.io/badge/libgit2-1.9.7%20bundled-f34f29?logo=git&logoColor=white"></a>
   <a href="https://github.com/Inverian/GitBolt/commits/main"><img alt="Last commit" src="https://img.shields.io/github/last-commit/Inverian/GitBolt/main?color=5ac8ff"></a>
 </p>
 
@@ -63,6 +63,11 @@ Installers for every release are on the
 | Ubuntu / Debian | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 or later, Debian 13 and distributions based on them, such as Linux Mint 22 |
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
+
+GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
+or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
+runs the git your login shell finds first, and says so when that git
+has known security flaws.
 
 ---
 
@@ -236,16 +241,18 @@ Required tools at a glance:
 | C++ compiler | C++20 (Apple Clang 14+, GCC 11+, MSVC 19.30+) |
 | CMake | 3.21 |
 | Qt | 6.5 (6.9.2 on macOS) |
-| libgit2 | 1.7, or none: `-DGITBOLT_BUNDLED_LIBGIT2=ON` builds the pinned 1.9.7 |
+| libgit2 | none: the pinned 1.9.7 is built in, with GitBolt's patches (`-DGITBOLT_BUNDLED_LIBGIT2=OFF`: a system 1.9.5 or later, without them) |
 
 On macOS with a current Xcode SDK, Qt before 6.9.2 fails to link: its CMake
 package still requests the AGL framework, which the SDK no longer ships.
-CI builds with Qt 6.10 on all three platforms, and on all three it builds
-libgit2 1.9.7 from source and links it statically, so no installer
-depends on a libgit2 package. libgit2 only accesses local repositories:
+CI builds with Qt 6.11 on all three platforms, and on all three it builds
+libgit2 1.9.7 from source, with GitBolt's patches, and links it
+statically, as a build from source does by default, so no installer
+depends on a libgit2 package. The first configure of a build directory
+downloads it. libgit2 only accesses local repositories:
 network operations run the `git` CLI, with git's own SSH and credential
 configuration. The macOS app runs on macOS 13 (Ventura) or later, the
-oldest release Qt 6.10 supports.
+oldest release Qt 6.11 supports.
 
 See [docs/BUILDING.md](docs/BUILDING.md) for how to install each of these on your platform, configure CMake, run the tests, build installers, and troubleshoot common issues.
 

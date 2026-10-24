@@ -1,0 +1,59 @@
+# What CI installs Qt with (.github/workflows/ci.yml, Install Qt):
+# aqtinstall and every package it needs to build and run. CI installs
+# qt-requirements.txt, compiled from this file, with --require-hashes
+# and wheels only, then builds aqtinstall from the commit below without
+# an index. After changing this file, recompile it with uv (0.13.5 wrote
+# the current one: pip install uv==0.13.5):
+#
+#   uv pip compile --universal --generate-hashes --python-version 3.14 \
+#     --exclude-newer 2026-10-13T00:00:00Z \
+#     --exclude-newer-package brotli=2026-10-24T00:00:00Z \
+#     --exclude-newer-package brotlicffi=2026-10-24T00:00:00Z \
+#     --exclude-newer-package certifi=2026-10-24T00:00:00Z \
+#     --exclude-newer-package setuptools=2026-10-24T00:00:00Z \
+#     --no-emit-package aqtinstall \
+#     .github/qt-requirements.in -o .github/qt-requirements.txt
+#
+# --exclude-newer takes only releases that have been public for two
+# weeks, time for a bad upload to be noticed and pulled, and makes the
+# output reproducible; move it on with each refresh. A security fix
+# newer than that goes in as a floor below, with an
+# --exclude-newer-package for its package alone, not by moving the
+# cutoff for everything. Both files are in the Qt cache key, so any
+# change here installs Qt afresh.
+
+# No release reads Qt 6.11's Windows packages: from 6.11 on, Qt splits
+# windows_x86/desktop/qt6_<version>/ into a folder per toolchain, and
+# 3.3.0 (June 2025) stops with "Failed to locate XML data for Qt
+# version". miurahr/aqtinstall#1000 fixed that on 2026-03-24, unreleased
+# as of 2026-10-24; this is master after it. Once a release has it,
+# require aqtinstall==<that release> here, and drop --no-emit-package
+# above and the git fetch from ci.yml.
+aqtinstall @ git+https://github.com/miurahr/aqtinstall@076e1659807d0b362a3ed684d54c2e9c775eb9c7
+
+# Their own advisories, which GitHub's reviewed database has only once
+# GitHub has gone through them (py7zr's of 2026-10-12 weren't there on
+# 2026-10-24), are read by tools/check-ci-pins.py from these dates:
+# check-ci-pins: miurahr/aqtinstall advisories reviewed 2026-10-24
+# check-ci-pins: miurahr/py7zr advisories reviewed 2026-10-24
+
+# >= 1.1.4: path traversal and denial-of-service fixes (CVE-2026-23879,
+# GHSA-jwx8-hv8g-gjjq and others), and the fix for the Bad7zFile that
+# failed Windows extractions at random (miurahr/py7zr#743), the reason
+# install-qt-action held py7zr at 1.1.0
+py7zr>=1.1.4
+
+# Security floors, each a fix newer than the cutoff above:
+# brotli 1.2.1, an out-of-bounds write in the decoder that urllib3 runs
+# on a server's `Content-Encoding: br` reply before aqt checks a hash
+# (GHSA-9v8h-qqgm-4m35); certifi 2026.10.19, without the emSign roots
+# whose intermediates' keys leaked (GHSA-6q48-6c7w-9gw2); setuptools
+# 84.1.0 (GHSA-xmj3-9gf7-h52w).
+brotli>=1.2.1 ; platform_python_implementation == 'CPython'
+brotlicffi>=1.2.1.0 ; platform_python_implementation == 'PyPy'
+certifi>=2026.10.19
+
+# aqtinstall's build-system requires: CI builds it with
+# --no-build-isolation, so pip fetches nothing to build it
+setuptools>=84.1.0
+setuptools-scm>=9.2.0

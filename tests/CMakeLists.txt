@@ -63,6 +63,9 @@ gitbolt_add_test(test_status         git/TestStatus.cpp)
 # GitProcess::run(): a timeout stops git's whole process group (a job
 # object on Windows), gently first, so git rolls back its index.lock
 gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
+# What GitBolt makes of `git --version`, and the advisories it warns
+# about (git/GitVersion.h, git-advisories.json).
+gitbolt_add_test(test_git_version    git/TestGitVersion.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
 # that never answers — StallTransport, run by git via ext:: — whose
@@ -76,7 +79,8 @@ target_compile_definitions(test_clone PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
 # The linked libgit2 is thread-safe (and logs its version and backends);
-# the bundled build is also checked against its pin (cmake/Libgit2.cmake)
+# the bundled build is also checked against its pin and its patches
+# (cmake/Libgit2.cmake, cmake/PatchLibgit2.cmake)
 gitbolt_add_test(test_libgit2_features git/TestLibgit2Features.cpp)
 if(GITBOLT_LIBGIT2_PROVIDER STREQUAL "bundled")
     target_compile_definitions(test_libgit2_features PRIVATE
@@ -90,6 +94,10 @@ add_test(NAME test_patch_libgit2
         -DPATCH_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/PatchLibgit2.cmake
         -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/patch-libgit2
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestPatchLibgit2.cmake)
+# The oldest system libgit2 GitBolt takes (cmake/Libgit2Floor.cmake),
+# which no CI build exercises: they all bundle it.
+add_test(NAME test_libgit2_floor
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLibgit2Floor.cmake)
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
@@ -241,6 +249,11 @@ set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLAT
 gitbolt_add_test(test_recent_menu ui/TestRecentMenu.cpp)
 target_link_libraries(test_recent_menu PRIVATE gitbolt_ui)
 set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The note above the views about the git GitBolt runs: what it says for
+# each kind of git, plain text, and a dismissal the window remembers.
+gitbolt_add_test(test_git_notice ui/TestGitNotice.cpp)
+target_link_libraries(test_git_notice PRIVATE gitbolt_ui)
+set_property(TEST test_git_notice APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
@@ -358,6 +371,19 @@ if(NOT WIN32)
                     ${CMAKE_CURRENT_SOURCE_DIR}/app/test_nautilus_extension.py
                     ${PROJECT_SOURCE_DIR}/src/app/platform/linux/nautilus-gitbolt.py)
     endif()
+endif()
+
+# CI's Qt install stays pinned: .github/qt-requirements.txt holds every
+# package with its sha256, ci.yml installs nothing unhashed and pins the
+# actions that install Qt to commits, and tools/check-ci-pins.py (the
+# weekly dependency check) finds and follows every pin (a path inside an
+# action's repository, an older major's late release) and the advisories
+# since each was reviewed. Offline, and it only reads the source tree, so
+# the Python found above will do.
+if(NOT WIN32 AND Python3_FOUND)
+    add_test(NAME ci_pins
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ci_pins.py ${PROJECT_SOURCE_DIR})
 endif()
 
 # e2e/ tests — the real app binary driven through the test bridge.

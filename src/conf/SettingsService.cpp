@@ -515,6 +515,22 @@ QString SettingsService::ensureTelemetryInstallId()
     return id;
 }
 
+bool SettingsService::gitNoticeDismissed(const QString& key) const
+{
+    return settings_.value(QStringLiteral("notices/gitDismissed")).toStringList().contains(key);
+}
+
+void SettingsService::dismissGitNotice(const QString& key)
+{
+    QStringList dismissed =
+        settings_.value(QStringLiteral("notices/gitDismissed")).toStringList();
+    dismissed.removeAll(key);
+    dismissed.append(key);
+    while (dismissed.size() > kRememberedGitNotices)
+        dismissed.removeFirst();
+    settings_.setValue(QStringLiteral("notices/gitDismissed"), dismissed);
+}
+
 QString SettingsService::fileName() const
 {
     return settings_.fileName();
