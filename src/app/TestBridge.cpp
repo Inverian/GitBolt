@@ -322,6 +322,11 @@ QByteArray TestBridge::handleLine(const QString& line)
             if (!okParent)
                 return errLine(QStringLiteral("select-row: not an integer: ")
                                + rowSpec.left(slash));
+            // -1 is "no parent" below: a negative one selected among the
+            // top-level rows instead of failing.
+            if (parentRow < 0)
+                return errLine(QStringLiteral("select-row: parent row out of range: ")
+                               + rowSpec.left(slash));
             rowSpec = rowSpec.mid(slash + 1);
         }
         QList<int> rows;

@@ -66,6 +66,9 @@ def test(binary: str, scratch: str, apps: list) -> None:
     app.ok("trigger tools.settings")
     app.wait_until(lambda s: "Settings" in s.get("windows", []),
                    "Settings dialog visible", timeout=10)
+    # A negative parent is refused, not taken for "no parent".
+    if app.cmd("select-row settings.nav -1/0").get("ok"):
+        raise Failure("select-row took a negative parent row")
     app.ok("select-row settings.nav 0/5")
     buttons = {b.get("objectName") for b in app.cmd("list-widgets")["buttons"]}
     shown = "settings.usage-statistics" in buttons

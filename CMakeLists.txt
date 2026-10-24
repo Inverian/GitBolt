@@ -41,7 +41,7 @@ endif()
 # a cached OFF from before until it is configured fresh.
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
-project(GitBolt VERSION 0.9.7 LANGUAGES CXX)
+project(GitBolt VERSION 0.9.8 LANGUAGES CXX)
 # Objective-C++ for the few AppKit calls Qt has no API for
 # (src/app/platform/macos/MacServices.mm). It takes CXX_STANDARD.
 if(APPLE)

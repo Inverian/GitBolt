@@ -189,6 +189,21 @@ QString shellWord(const QString& text, const QString& shell)
 }
 #endif
 
+// Whether the shell can be sent `cd <path>` as typed text. A control
+// character in the path would act as a key (Tab completes, Enter runs
+// the line half typed), and git takes one in a submodule's path, which
+// a cloned repository chooses; the shell is started there instead.
+// Windows names can't hold one.
+bool cdTypeable(const QString& path)
+{
+#ifdef Q_OS_WIN
+    Q_UNUSED(path);
+    return true;
+#else
+    return typeable(path);
+#endif
+}
+
 // What appendOutput draws as text: everything but the C0 controls,
 // though a tab is text too.
 bool isText(QChar c)
@@ -555,6 +570,13 @@ void TerminalWidget::changeDirectory(const QString& path)
     if (!isRunning())
         return;  // start() will pick up pendingCwd_ when called
 
+    // Not typed: the shell starts again in the folder once no command
+    // runs (see cdTypeable and switchWhenIdle).
+    if (!cdTypeable(path)) {
+        switchWhenIdle();
+        return;
+    }
+
 #ifdef Q_OS_WIN
     // cmd.exe; /d switches the drive too. Windows paths can't contain
     // '"', so the double quotes need no escaping, but %NAME% still
@@ -602,7 +624,8 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 // note says so, below the command's output. A switch back meanwhile to
 // the GIT_DIR the shell has leaves only the `cd`, which waits all the
 // same. A shell gitDirCommand has no line for is still started again,
-// once the command has ended, and its jobs are hung up with it.
+// once the command has ended, and its jobs are hung up with it; so is
+// one whose folder a `cd` can't be typed for (cdTypeable).
 //
 // The prompt the change is typed at isn't always an empty one. A line
 // the user had partly typed there took the change on its end, and the
@@ -677,7 +700,7 @@ void TerminalWidget::switchWhenIdle()
             return;
         }
         const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
-        if (sameGitDir || !gitDirLine.isNull()) {
+        if ((sameGitDir || !gitDirLine.isNull()) && cdTypeable(pendingCwd_)) {
 #ifndef Q_OS_WIN
             if (!sameGitDir && !lineDropped_ && lineUnread()
                 && unreadWaits_ < kMaxUnreadWaits) {
