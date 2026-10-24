@@ -61,9 +61,23 @@ QProcessEnvironment gitEnvironment()
 constexpr int kNavWidth = 220;
 
 // What usage statistics collect, where they go, and how to have them
-// deleted (General › Usage statistics links here; so does About).
+// deleted (the Usage Statistics page links here; so does About).
 constexpr char kPrivacyPolicyUrl[] =
     "https://github.com/Inverian/GitBolt/blob/main/PRIVACY.md";
+
+// A field to read and copy from, not to type in: grey, so it doesn't
+// look like the white (on the dark theme, near-black) fields that
+// take input. The read-only flag alone left it looking editable.
+void showAsReadOnly(QLineEdit* edit)
+{
+    conf::ThemeService::keepThemedStyleSheet(edit, [](bool dark) {
+        return dark ? QStringLiteral("QLineEdit { background: #2d2d2d; color: #d4d4d4; "
+                                     "border: 1px solid #3c3c3c; padding: 2px 4px; }")
+                    : QStringLiteral("QLineEdit { background: #d9d9d9; "
+                                     "border: 1px solid #bdbdbd; border-radius: 3px; "
+                                     "padding: 2px 4px; }");
+    });
+}
 
 // Indent the category header slightly so sub-section rows sit
 // clearly under it without looking flat.
@@ -108,6 +122,7 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
 
     // --- Left: navigation tree ---
     nav_ = new QTreeWidget(this);
+    nav_->setObjectName(QStringLiteral("settings.nav"));
     nav_->setHeaderHidden(true);
     nav_->setRootIsDecorated(true);
     nav_->setFixedWidth(kNavWidth);
@@ -132,6 +147,8 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     //     UI Design            ← new: bottom-pane ratio setting
     //     Appearance
     //     Shortcuts
+    //     Recent Repositories
+    //     Usage Statistics     ← official builds only (setUsageStatistics)
     //   Git
     //     Git Config
     //   Plugins
@@ -147,6 +164,9 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     addSubsection(catGitBolt,  tr("Shortcuts"),  createShortcutsPage());
     addSubsection(catGitBolt,  tr("Recent Repositories"),
                   createRecentReposPage());
+    usageItem_ = addSubsection(catGitBolt, tr("Usage Statistics"),
+                               createUsageStatisticsPage());
+    usageItem_->setHidden(true);   // until setUsageStatistics
 
     auto* catGit      = makeCategoryItem(nav_, tr("Git"));
     addSubsection(catGit,      tr("Git Config"),    createGitConfigPage());
@@ -198,8 +218,10 @@ QTreeWidgetItem* SettingsDialog::addSubsection(QTreeWidgetItem* parent,
 
 void SettingsDialog::onTreeSelectionChanged()
 {
+    // A hidden row (Usage Statistics in a build without telemetry)
+    // shows nothing, even when something selects it.
     auto* item = nav_->currentItem();
-    if (!item)
+    if (!item || item->isHidden())
         return;
 
     // Category rows are un-selectable, so currentItem() will always
@@ -254,10 +276,25 @@ QWidget* SettingsDialog::createGeneralPage()
     showWhitespaceCheck_ = new QCheckBox(tr("Show whitespace characters"), page);
     form->addRow(QString(), showWhitespaceCheck_);
 
-    // Usage statistics: a row of its own, hidden until MainWindow says
-    // this build has telemetry (setUsageStatistics). Every control has
-    // an objectName: the test bridge's `click` falls back to matching
-    // button text by prefix, and "Copy" is no name to aim at.
+    form->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
+    return page;
+}
+
+// ---------------------------------------------------------------------------
+// Usage Statistics page
+// ---------------------------------------------------------------------------
+//
+// A page of its own under GitBolt, its row in the tree hidden until
+// MainWindow says this build has telemetry (setUsageStatistics).
+
+QWidget* SettingsDialog::createUsageStatisticsPage()
+{
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+
+    // Every control has an objectName: the test bridge's `click` falls
+    // back to matching button text by prefix, and "Copy" is no name to
+    // aim at.
     usageGroup_ = new QGroupBox(tr("Usage statistics"), page);
     usageGroup_->setObjectName(QStringLiteral("settings.usage-group"));
     auto* usageForm = new QFormLayout(usageGroup_);
@@ -298,6 +335,7 @@ QWidget* SettingsDialog::createGeneralPage()
     installIdEdit_ = new QLineEdit(usageGroup_);
     installIdEdit_->setObjectName(QStringLiteral("settings.install-id"));
     installIdEdit_->setReadOnly(true);
+    showAsReadOnly(installIdEdit_);
     installIdEdit_->setPlaceholderText(tr("(none yet)"));
     installIdEdit_->setToolTip(
         tr("Quote this ID to have the usage statistics sent under it deleted."));
@@ -325,11 +363,8 @@ QWidget* SettingsDialog::createGeneralPage()
     privacyLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
     usageForm->addRow(QString(), privacyLink);
 
-    form->addRow(usageGroup_);
-    form->setRowVisible(usageGroup_, false);
-    generalForm_ = form;
-
-    form->addItem(new QSpacerItem(0, 0, QSizePolicy::Minimum, QSizePolicy::Expanding));
+    layout->addWidget(usageGroup_);
+    layout->addStretch(1);
     return page;
 }
 
@@ -913,7 +948,7 @@ void SettingsDialog::setUsageStatistics(bool available, const QString& lockedRea
 {
     usageAvailable_ = available;
     usageLocked_ = available && !lockedReason.isEmpty();
-    generalForm_->setRowVisible(usageGroup_, available);
+    usageItem_->setHidden(!available);
     if (!available)
         return;
 

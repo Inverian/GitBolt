@@ -94,7 +94,7 @@ The **install ID** is a random identifier (a UUID) that GitBolt creates
 the first time it records usage statistics, and stores in its settings
 file. It lets the maintainers tell how many installations use a
 feature, without knowing who you are. You can see and copy it in
-**Tools › Settings › General › Usage statistics**.
+**Tools › Settings › Usage Statistics**.
 
 The **device ID** is derived from the install ID with a SHA-256 hash,
 so it identifies nothing the install ID doesn't. The analytics software
@@ -140,7 +140,7 @@ the servers do not store IP addresses.
 Either of these turns usage statistics, error reports and crash
 reports off:
 
-- In GitBolt, open **Tools › Settings › General** and clear **Send
+- In GitBolt, open **Tools › Settings › Usage Statistics** and clear **Send
   usage statistics and crash reports**. Sending stops at once, and any
   events still waiting on your computer are deleted.
 - Set the environment variable `GITBOLT_TELEMETRY=0` (or `false`,
@@ -152,8 +152,8 @@ GitBolt also sends nothing when it is run by automated tests or in CI.
 
 Only official builds send anything: GitBolt's releases, and the builds
 GitBolt's CI makes of its `main` branch. A build that can send shows a
-**Usage statistics** group in **Tools › Settings › General**; a build
-without that group sends nothing. A build from source, a fork, or a
+**Usage Statistics** page in **Tools › Settings**; a build without that
+page sends nothing. A build from source, a fork, or a
 build of a pull request contains no server addresses, so it cannot
 send, and a crash report it saves is never sent by an official build
 either.
@@ -162,7 +162,7 @@ either.
 
 To have your usage statistics deleted, email
 [support@gitbolt.com](mailto:support@gitbolt.com) and quote your
-install ID from **Tools › Settings › General**. Crash and error
+install ID from **Tools › Settings › Usage Statistics**. Crash and error
 reports carry no install ID; they are deleted after 90 days.
 
 ## Changes to this policy

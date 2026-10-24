@@ -647,7 +647,7 @@ int main(int argc, char* argv[]) {
             crashBox.setInformativeText(QObject::tr(
                 "A summary of the report, with no repository data, is being sent "
                 "with the usage statistics. You can turn them off for the future in "
-                "Tools › Settings › General."));
+                "Tools › Settings › Usage Statistics."));
         }
         crashBox.setDetailedText(crashReport);
         crashBox.setStandardButtons(QMessageBox::Ok);

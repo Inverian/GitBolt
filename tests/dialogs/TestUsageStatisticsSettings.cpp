@@ -1,5 +1,5 @@
 //
-// TestUsageStatisticsSettings — Settings › General › Usage statistics,
+// TestUsageStatisticsSettings — Settings › GitBolt › Usage Statistics,
 // and the SettingsService keys behind it:
 //
 //   - the switch defaults to on, persists, and an unchanged value
@@ -9,8 +9,9 @@
 //     UUID v4 the telemetry library accepts, and stays the same;
 //   - GitBolt.ini's path, which the telemetry queue sits next to,
 //     follows the settings location (so test isolation covers it);
-//   - the group is hidden unless MainWindow says the build has
-//     telemetry; shown, it reflects the setting, Apply writes it once,
+//   - the page's row in the tree is hidden unless MainWindow says the
+//     build has telemetry, and a hidden row shows nothing even when
+//     selected; shown, the page reflects the setting, Apply writes it once,
 //     Cancel writes nothing, an environment lock disables the switch
 //     and says why, and opening it never creates an install ID;
 //   - Copy puts the install ID on the clipboard.
@@ -34,8 +35,10 @@
 #include <QScopeGuard>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTreeWidget>
 
 #include "conf/SettingsService.h"
 #include "dialogs/SettingsDialog.h"
@@ -158,19 +161,40 @@ private slots:
     // ---- SettingsDialog -------------------------------------------------
 
     // Source builds and forks have no telemetry: nothing to show, and a
-    // dialog nobody told about it looks as it always did.
-    void groupHiddenUnlessAvailable() {
+    // dialog nobody told about it looks as it always did. The page is
+    // GitBolt's last, after Recent Repositories.
+    void pageHiddenUnlessAvailable() {
         SettingsService settings;
         SettingsDialog dialog(&settings, nullptr);
+        auto* nav = child<QTreeWidget>(dialog, "settings.nav");
+        auto* pages = dialog.findChild<QStackedWidget*>();
         auto* group = child<QGroupBox>(dialog, "settings.usage-group");
-        QVERIFY(group);
-        QVERIFY(group->isHidden());
+        QVERIFY(nav && pages && group);
+        QTreeWidgetItem* gitbolt = nav->topLevelItem(0);
+        QVERIFY(gitbolt);
+        QTreeWidgetItem* item = gitbolt->child(gitbolt->childCount() - 1);
+        QCOMPARE(item->text(0), QStringLiteral("Usage Statistics"));
+        QCOMPARE(gitbolt->child(gitbolt->childCount() - 2)->text(0),
+                 QStringLiteral("Recent Repositories"));
+        QVERIFY(item->isHidden());
 
         dialog.setUsageStatistics(false, QString());
-        QVERIFY(group->isHidden());
+        QVERIFY(item->isHidden());
+        // Selected all the same (as the test bridge can), it shows
+        // nothing: General stays.
+        QWidget* general = pages->currentWidget();
+        nav->setCurrentItem(item);
+        QCOMPARE(pages->currentWidget(), general);
+        QVERIFY(!pages->currentWidget()->isAncestorOf(group));
 
         dialog.setUsageStatistics(true, QString());
-        QVERIFY(!group->isHidden());
+        QVERIFY(!item->isHidden());
+        nav->setCurrentItem(gitbolt->child(0));
+        nav->setCurrentItem(item);
+        QVERIFY(pages->currentWidget()->isAncestorOf(group));
+        // Its own page: nothing of it on General.
+        nav->setCurrentItem(gitbolt->child(0));
+        QVERIFY(!pages->currentWidget()->isAncestorOf(group));
     }
 
     void showsSettingAndIdWithoutCreatingOne() {

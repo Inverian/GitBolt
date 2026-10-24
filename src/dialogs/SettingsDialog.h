@@ -53,7 +53,7 @@ public:
     void setShortcutActions(const QList<QAction*>& actions,
                             const QHash<QString, QKeySequence>& defaults);
 
-    /// Shows General › Usage statistics when this build has telemetry
+    /// Shows GitBolt › Usage Statistics when this build has telemetry
     /// (source builds and forks don't), with the switch, the install ID
     /// and a link to what is collected. A non-empty `lockedReason` (an
     /// environment variable turned statistics off for this session)
@@ -82,6 +82,7 @@ private:
     QWidget* createAppearancePage();
     QWidget* createShortcutsPage();
     QWidget* createRecentReposPage();
+    QWidget* createUsageStatisticsPage();
     QWidget* createGitConfigPage();
     QWidget* createPluginsPage();
 
@@ -112,9 +113,9 @@ private:
     QSpinBox* tabSizeSpin_ = nullptr;
     QCheckBox* showWhitespaceCheck_ = nullptr;
 
-    // General page — Usage statistics (setUsageStatistics). The group
-    // is a row of generalForm_, hidden unless the build has telemetry.
-    QFormLayout* generalForm_       = nullptr;
+    // Usage Statistics page (setUsageStatistics). Its row in the tree,
+    // usageItem_, is hidden unless the build has telemetry.
+    QTreeWidgetItem* usageItem_     = nullptr;
     QGroupBox*   usageGroup_        = nullptr;
     QCheckBox*   usageStatsCheck_   = nullptr;
     QLineEdit*   installIdEdit_     = nullptr;

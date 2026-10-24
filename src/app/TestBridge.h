@@ -31,7 +31,9 @@ namespace gitbolt::app {
 ///                                    combo boxes (with their items)
 ///   click <objectName-or-text>       queue a QAbstractButton::click
 ///   select-row <viewSpec> <rows>     drive a view's selection model;
-///                                    rows = "3" or comma list "0,2,5"
+///                                    rows = "3" or comma list "0,2,5",
+///                                    or "P/C" for child row C of
+///                                    top-level row P (a tree's)
 ///                                    (viewSpec = objectName or
 ///                                    ClassName[:index] among visible)
 ///   select-item <comboSpec> <item…>  pick a combo box entry by exact
@@ -87,7 +89,7 @@ private:
     QByteArray cmdListWidgets();
     QByteArray cmdClick(const QString& spec);
     QByteArray cmdSelectRow(const QString& viewSpec,
-                            const QList<int>& rows);
+                            const QList<int>& rows, int parentRow = -1);
     QByteArray cmdSelectItem(const QString& comboSpec, const QString& item);
     QByteArray cmdType(const QString& widgetSpec, const QString& text);
     QByteArray cmdFireTimer(const QString& name);

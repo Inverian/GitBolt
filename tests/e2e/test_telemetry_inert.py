@@ -59,11 +59,14 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure("action objectNames usage statistics would count "
                       "must match " + NAME.pattern + ": " + ", ".join(bad))
 
-    # Settings › General › Usage statistics: there, and toggled off,
-    # when the build has endpoints; absent when it doesn't.
+    # Settings › GitBolt › Usage Statistics: there, and toggled off,
+    # when the build has endpoints; absent when it doesn't. The page is
+    # GitBolt's sixth (row 0/5); its row is hidden, and selecting it
+    # shows nothing, in a build without endpoints.
     app.ok("trigger tools.settings")
     app.wait_until(lambda s: "Settings" in s.get("windows", []),
                    "Settings dialog visible", timeout=10)
+    app.ok("select-row settings.nav 0/5")
     buttons = {b.get("objectName") for b in app.cmd("list-widgets")["buttons"]}
     shown = "settings.usage-statistics" in buttons
     if shown != (gate != "compiled-out"):

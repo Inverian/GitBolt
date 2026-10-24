@@ -92,6 +92,7 @@ tools/bridge.py trigger commands/resolve-conflicts
 tools/bridge.py list-widgets          # windows (a message box's text too), buttons, views, editors (with classes)
 tools/bridge.py select-row QTableView:0 0     # the AX-impossible operation
 tools/bridge.py select-row commit.unstagedList 0,2,5   # multi-row (ExtendedSelection lists)
+tools/bridge.py select-row settings.nav 0/5    # child row 5 of top-level row 0 (Settings › GitBolt › Usage Statistics)
 tools/bridge.py click "Lock/Unlock"
 tools/bridge.py select-item toolbar.branchCombo feature/login   # exact text, or '#N'
 tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ decoded

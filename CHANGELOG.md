@@ -8,11 +8,10 @@ semver once 1.0 lands.
 
 ### Changed
 
-- **`DO_NOT_TRACK` no longer turns usage statistics off.** Turn them
-  off in **Tools › Settings › General**, or with the environment
-  variable `GITBOLT_TELEMETRY=0`. If you turned them off with
-  `DO_NOT_TRACK` alone, GitBolt sends them after this update until you
-  do one of those.
+- **Usage statistics have a Settings page of their own**, **Tools ›
+  Settings › Usage Statistics**, where they were part of General. Turn
+  them off there, or with the environment variable
+  `GITBOLT_TELEMETRY=0`; `DO_NOT_TRACK` no longer does.
 
 ### Fixed
 
