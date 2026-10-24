@@ -27,9 +27,10 @@ semver once 1.0 lands.
   running `tools/check-ci-pins.py`, fails (and so mails the owner) when
   libgit2's or Qt's pinned series, NSIS, aqtinstall or a pinned action
   or tool has a newer release, when the pinned Qt series' open-source
-  support has ended, when a locked Python package has a known
-  vulnerability, or when libgit2, git, Git for Windows or Git LFS
-  publishes a security advisory not yet reviewed. A source that
+  support has ended, when CI's Python has a newer patch release, when
+  GitHub's advisory database lists a vulnerability in a locked Python
+  package, or when libgit2, git, Git for Windows, Git LFS, py7zr or
+  aqtinstall publishes a security advisory not yet reviewed. A source that
   doesn't answer fails it too, instead of passing for all clear.
 
 ### Fixed
@@ -45,14 +46,16 @@ semver once 1.0 lands.
   in the shell, and clears the line at the prompt with a Ctrl+C first
   if anything has been typed into the Console since it started or
   since the last switch. Opening the repository the Console is already
-  in, or switching back to it while a switch waits, leaves it alone. A
+  in, or switching back to it while a switch waits, leaves it alone.
+  Only a shell of the sh, csh or fish families is typed the `cd`: a
   program your shell's startup files run in its place (tmux, screen,
-  ssh) gets no Ctrl+C, which it would pass on to what runs in it: with
-  something typed, it is started again in the new repository (a tmux
-  session is detached, not stopped). On Windows, once anything has been
-  typed into cmd, it is started again in the new repository too, and a
-  program cmd started with `start` keeps the Console where it is until
-  that program ends.
+  ssh), which would pass the line and the Ctrl+C on to what runs in it,
+  and any other shell (nushell, PowerShell), whose quoting the `cd`
+  can't be typed in, are started again in the new repository at each
+  switch (a tmux session is detached, not stopped). On Windows, once
+  anything has been typed into cmd, it is started again in the new
+  repository too, and a program cmd started with `start` keeps the
+  Console where it is until that program ends.
 - **No git installed**: every git command failed with "Failed to start
   git process". It now says git wasn't found, the Settings page for
   git's name and email says so instead of saving nothing, and a note at
@@ -85,8 +88,9 @@ semver once 1.0 lands.
   full path, leaves the folder it was started in for your home folder,
   loads no library from it, and has git, gitk and the Console look for
   the programs they start by name on PATH only. In the Console, a
-  program in the current folder runs when you type `.\name`, as in
-  PowerShell.
+  program in the current folder runs when you type `.\name`, and a
+  script run there finds its neighbours by a path too (`%~dp0name`),
+  not by name alone.
 - **Repositories that froze GitBolt.** An object cut short, a loose
   object whose file ends early (a disk or sync error, a write cut off)
   or a packed delta whose data does, made reading it run forever at

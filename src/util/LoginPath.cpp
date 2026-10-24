@@ -296,9 +296,4 @@ QString findExecutableOnPath(const QString& name, const QString& pathList)
     return {};
 }
 
-QString findExecutableForChildren(const QString& name)
-{
-    return findExecutableOnPath(name, pathForChildren(qEnvironmentVariable("PATH")));
-}
-
 } // namespace gitbolt::util

@@ -102,6 +102,9 @@ private slots:
     void createNewRepository();
 
 private:
+    /// Tools › GitK in the open repository, with `childPath` as its PATH
+    /// (util::pathForChildren()).
+    void launchGitk(const QString& childPath);
     /// Paints the inline toolbar label / status bar / clear-timer
     /// after a fetch-pull-push worker finishes.
     void finishRemoteOpFeedback(const QString& successMsg);

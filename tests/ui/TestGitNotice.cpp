@@ -88,7 +88,7 @@ private slots:
         const QString programFiles = QStringLiteral("C:/Program Files/Git/cmd/git.exe");
         QTest::newRow("apple, flawed")
             << probe(usrBin, "git version 2.39.5 (Apple Git-154)") << GitPlatform::MacOS
-            << QStringList{"git 2.39.5 (Apple Git-154)", "/usr/bin/git", "(CVE-A)",
+            << QStringList{"git 2.39.5 (Apple Git-154)", QDir::toNativeSeparators(usrBin), "(CVE-A)",
                            "could run programs", "Command Line Tools", "brew install git"}
             << "/usr/bin/git\n2.39.5 (Apple Git-154)\nCVE-A";
         QTest::newRow("apple, fixed by its build")

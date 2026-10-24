@@ -20,8 +20,13 @@ the owner):
                      (download.qt.io), and whether the series'
                      open-source support has ended (endoflife.date)
   NSIS               a newer NSIS release (SourceForge)
+  Python             a newer CPython release of the minor CI pins
+                     (actions/python-versions, where setup-python takes
+                     it from)
   Python packages    the locked versions in .github/*.txt (a file with
-                     --hash= lines): GitHub's advisories against each;
+                     --hash= lines): GitHub's reviewed advisories against
+                     each (a project's own, before GitHub reviews them,
+                     only for the repositories with a reviewed date);
                      not their newest release, as the lock is refreshed
                      on purpose (.github/qt-requirements.in). A package
                      pinned to a GitHub commit (in the .in file): a
@@ -30,9 +35,10 @@ the owner):
                      security advisories since src/git/git-advisories.json
                      was 'checked', that it lists nowhere
 
-libgit2's advisories count from the date in a comment in
-cmake/Libgit2.cmake:
-  # check-ci-pins: libgit2/libgit2 advisories reviewed <YYYY-MM-DD>
+A repository's advisories count from the date in a comment (libgit2's
+in cmake/Libgit2.cmake, py7zr's and aqtinstall's in
+.github/qt-requirements.in), published on or after it:
+  # check-ci-pins: <owner>/<repo> advisories reviewed <YYYY-MM-DD>
 A bump that has to wait is accepted until a date by a comment in any
 file read here, naming the key the report prints in brackets:
   # check-ci-pins: accept <key> until <YYYY-MM-DD>
@@ -92,6 +98,9 @@ USES = re.compile(
     r"uses: ([^/\s]+)/([^/@\s]+)(/[^@\s]*)?@([0-9a-f]{40}) # (\S+)")
 LIBGIT2_VERSION = re.compile(r"set\(GITBOLT_LIBGIT2_VERSION (\d+\.\d+\.\d+)\)")
 QT_VERSION = re.compile(r"\bCI_QT_VERSION: '?(\d+\.\d+\.\d+)\b")
+PYTHON_VERSION = re.compile(r"^\s+python-version: '?(\d+\.\d+\.\d+)'?\s*$", re.M)
+# actions/python-versions' release tags: <version>-<build id>
+PYTHON_RELEASE = re.compile(r"(\d+)\.(\d+)\.(\d+)-\d+")
 NSIS = re.compile(
     r"downloads\.sourceforge\.net/project/nsis/NSIS%20(\d+)/(\d+(?:\.\d+)+)/nsis-\2\.zip")
 # name==version, or name @ URL, as pip's requirement files have them
@@ -250,6 +259,9 @@ class Pins:
             self.missing.append(f"Qt version: found {', '.join(sorted(qt)) or 'none'} as "
                                 "CI_QT_VERSION in .github/workflows, expected one")
 
+        self.python_runtime = sorted({(m.group(1), rel) for rel in self.workflows
+                                      for m in self.matches(PYTHON_VERSION, rel)})
+
         nsis = {m.groups(): rel for rel in self.workflows for m in self.matches(NSIS, rel)}
         self.nsis = next(iter(nsis.items())) if len(nsis) == 1 else None
         if not self.nsis:
@@ -354,6 +366,7 @@ class Pins:
             lines.append(f"Qt {self.qt[0]} ({self.qt[1]})")
         if self.nsis:
             lines.append(f"NSIS {self.nsis[0][1]} ({self.nsis[1]})")
+        lines += [f"Python {version} ({rel})" for version, rel in self.python_runtime]
         lines += [f"{name} {version or url} ({rel})" for name, version, url, rel in self.python]
         lines += [f"{repo} advisories reviewed {date} ({where})"
                   for repo, (date, where) in sorted(self.reviewed.items())]
@@ -424,13 +437,13 @@ def repository_advisories(repo: str) -> list:
 
 def check_advisories(out: Report, repo: str, reviewed: str, where: str,
                      known: frozenset = frozenset()) -> None:
-    """Every advisory of `repo` published after `reviewed`, less those
-    `known` names."""
+    """Every advisory of `repo` published on or after `reviewed` (one
+    from later that day wasn't read), less those `known` names."""
     new = 0
     for a in repository_advisories(repo):
         published = (a.get("published_at") or "")[:10]
         # Newest first, but a page in another order mustn't stop it early.
-        if published <= reviewed or a.get("withdrawn_at") or a["ghsa_id"] in known:
+        if published < reviewed or a.get("withdrawn_at") or a["ghsa_id"] in known:
             continue
         new += 1
         about = ", ".join(x for x in (a.get("cve_id"), a.get("severity"), published) if x)
@@ -509,6 +522,23 @@ def check_nsis(out: Report, major: str, version: str) -> None:
         out.add("ok", f"NSIS {version}")
 
 
+def check_python_runtime(out: Report, version: str, where: str) -> None:
+    pin = version_key(version)
+    found = sorted({tuple(map(int, m.groups()))
+                    for r in api("repos/actions/python-versions/releases?per_page=100")
+                    if not (r["draft"] or r["prerelease"])
+                    for m in [PYTHON_RELEASE.fullmatch(r["tag_name"])] if m},
+                   reverse=True)
+    if not found:
+        raise ValueError("actions/python-versions: no release")
+    newer = [v for v in found if v[:2] == pin[:2] and v > pin]
+    if newer:
+        new = ".".join(map(str, newer[0]))
+        out.add("behind", f"Python {version} -> {new} ({where})", f"python-{new}")
+    else:
+        out.add("ok", f"Python {version}")
+
+
 def check_python(out: Report, name: str, version: str | None, url: str | None,
                  where: str) -> None:
     if url:
@@ -574,6 +604,8 @@ def main(argv: list | None = None, root: str = ROOT, today: str | None = None) -
         out.guard("Qt", check_qt, *pins.qt)
     if pins.nsis:
         out.guard("NSIS", check_nsis, *pins.nsis[0])
+    for version, rel in pins.python_runtime:
+        out.guard(f"Python {version}", check_python_runtime, version, rel)
     for pin in pins.python:
         out.guard(pin[0], check_python, *pin)
     for repo, (date, where) in sorted(pins.reviewed.items()):

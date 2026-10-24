@@ -31,6 +31,12 @@
 # above and the git fetch from ci.yml.
 aqtinstall @ git+https://github.com/miurahr/aqtinstall@076e1659807d0b362a3ed684d54c2e9c775eb9c7
 
+# Their own advisories, which GitHub's reviewed database has only once
+# GitHub has gone through them (py7zr's of 2026-10-12 weren't there on
+# 2026-10-24), are read by tools/check-ci-pins.py from these dates:
+# check-ci-pins: miurahr/aqtinstall advisories reviewed 2026-10-24
+# check-ci-pins: miurahr/py7zr advisories reviewed 2026-10-24
+
 # >= 1.1.4: path traversal and denial-of-service fixes (CVE-2026-23879,
 # GHSA-jwx8-hv8g-gjjq and others), and the fix for the Bad7zFile that
 # failed Windows extractions at random (miurahr/py7zr#743), the reason

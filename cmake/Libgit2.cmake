@@ -315,7 +315,15 @@ if(NOT GITBOLT_BUNDLED_LIBGIT2)
         # Asked again at every configure: pkg_check_modules keeps what it
         # found in the cache, and an upgraded libgit2 (its version, its
         # new paths) wasn't seen in a build directory that had the old.
+        # Its library too, which find_library keeps under
+        # pkgcfg_lib_LIBGIT2_<name> and never looks for again.
         unset(__pkg_config_checked_LIBGIT2 CACHE)
+        get_property(_cached DIRECTORY PROPERTY CACHE_VARIABLES)
+        foreach(_var IN LISTS _cached)
+            if(_var MATCHES "^pkgcfg_lib_LIBGIT2_")
+                unset(${_var} CACHE)
+            endif()
+        endforeach()
         pkg_check_modules(LIBGIT2 IMPORTED_TARGET libgit2)
     endif()
     if(TARGET PkgConfig::LIBGIT2)

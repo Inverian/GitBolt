@@ -51,11 +51,6 @@ QString mergePathLists(const QString& first, const QString& second);
 /// only, not as the .bat or .cmd PATHEXT allows (cmd.exe runs those).
 QString findExecutableOnPath(const QString& name, const QString& pathList);
 
-/// findExecutableOnPath() on the PATH GitBolt's children get
-/// (pathForChildren() of its own), so a program is the one a hook or
-/// the Console would run. May wait as pathForChildren() does.
-QString findExecutableForChildren(const QString& name);
-
 /// Runs `shell -ilc` in a session of its own, with no terminal and
 /// stdin and stderr on /dev/null, and returns the PATH it set up. Empty
 /// when it couldn't run, said nothing usable (an entry that isn't an

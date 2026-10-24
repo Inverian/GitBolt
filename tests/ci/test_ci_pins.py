@@ -197,6 +197,8 @@ class CheckCiPins(unittest.TestCase):
         self.assertNotIn("brotlicffi", names)
         self.assertIsNotNone(pins.git)
         self.assertIn("GHSA-vwqx-4fm8-6qc9", pins.git[1])
+        self.assertEqual(len(pins.python_runtime), 1)
+        self.assertLessEqual({"miurahr/py7zr", "miurahr/aqtinstall"}, set(pins.reviewed))
 
     def test_git_advisories_since_the_table_was_checked(self):
         def advisory(ghsa, published):
@@ -205,7 +207,7 @@ class CheckCiPins(unittest.TestCase):
                     "severity": "high", "cve_id": None, "withdrawn_at": None}
 
         answer = [advisory("GHSA-new", "2026-10-30"), advisory("GHSA-known", "2026-10-30"),
-                  advisory("GHSA-old", "2026-10-01")]
+                  advisory("GHSA-sameday", "2026-10-24"), advisory("GHSA-old", "2026-10-01")]
         out = self.report()
         with mock.patch.object(self.pins, "api", return_value=answer), \
              mock.patch("sys.stdout") as stdout:
@@ -214,6 +216,8 @@ class CheckCiPins(unittest.TestCase):
         printed = "".join(c.args[0] for c in stdout.write.call_args_list)
         self.assertEqual(out.status(), 1)
         self.assertIn("GHSA-new", printed)
+        # Published later on the day the table was checked: not read.
+        self.assertIn("GHSA-sameday", printed)
         self.assertNotIn("GHSA-known", printed)
         self.assertNotIn("GHSA-old", printed)
 

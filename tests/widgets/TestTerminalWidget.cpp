@@ -421,18 +421,34 @@ bool typed(TerminalWidget& terminal, const QString& line)
 // just for a prompt (prompted): a change of GIT_DIR has a Ctrl+C go
 // first, and the prompt after that comes before the change is typed.
 // Once the `cd` is shown it has gone to the shell, and anything typed
-// next is read after it.
+// next is read after it. And that prompt has to stay the last thing
+// shown for a moment: where a prompt hook runs a program (bash's
+// PROMPT_COMMAND), the terminal echoes the line while the hook runs, the
+// prompt comes after that echo, and only then does the line editor show
+// the line again and run it. Keys typed at that first prompt went in as
+// the editor gave the terminal back, which drops what it holds unread.
 template <typename Step>
 bool switched(const TerminalWidget& terminal, const Step& step)
 {
     const QString cd = QStringLiteral(" cd ");
     const qsizetype before = terminal.toPlainText().count(cd);
     step();
-    return QTest::qWaitFor([&] {
+    const auto landed = [&] {
         const QString text = terminal.toPlainText();
         return text.count(cd) > before && text.indexOf(kShPrompt, text.lastIndexOf(cd)) >= 0
                && lastRow(terminal).endsWith(kShPrompt);
-    }, kTimeoutMs);
+    };
+    QElapsedTimer waited;
+    waited.start();
+    while (waited.elapsed() < kTimeoutMs) {
+        if (QTest::qWaitFor(landed, kTimeoutMs - static_cast<int>(waited.elapsed()))) {
+            const qsizetype cds = terminal.toPlainText().count(cd);
+            QTest::qWait(400);
+            if (landed() && terminal.toPlainText().count(cd) == cds)
+                return true;
+        }
+    }
+    return false;
 }
 
 // A running terminal with the first prompt up. Not shown: nothing here
@@ -2677,14 +2693,14 @@ private slots:
 #endif
     }
 
-    // A program in the shell's place that a Ctrl+C would only be passed on
-    // through (tmux, screen or ssh `exec`ed by an rc file; a copy of bash
-    // under another name here, which the widget knows nothing of), with a
-    // line partly typed. A switch used to type its `cd` there, and the
-    // Ctrl+C now dropping the line elsewhere would reach what runs in
-    // tmux's pane. That one is started again in the folder instead. With
-    // nothing typed, it is typed its `cd`, as ever.
-    void ptyCdStartsAgainAProgramItCantDropTheLineOf()
+    // A program in the shell's place that a switch's line and Ctrl+C
+    // would only be passed on through (tmux, screen or ssh `exec`ed by an
+    // rc file; a copy of bash under another name here, which the widget
+    // knows nothing of). A switch used to type its `cd` there, which tmux
+    // handed to its active pane: vim, or a line half typed there, which
+    // then ran. It is started again in the folder instead, with nothing
+    // typed into it as much as with a line partly typed.
+    void ptyCdStartsAgainAProgramInTheShellsPlace()
     {
 #ifdef Q_OS_WIN
         QSKIP("The PTY is the Unix terminal backend");
@@ -2708,9 +2724,15 @@ private slots:
         startAtPrompt(terminal);
         if (QTest::currentTestFailed())
             return;
-        QVERIFY2(switched(terminal, [&] { terminal.changeRepository(one, {}); }),
+        const QString cd = QStringLiteral(" cd ");
+        QVERIFY2(prompted(terminal, [&] { terminal.changeRepository(one, {}); }),
                  qPrintable(terminal.toPlainText()));
+        QVERIFY2(!terminal.toPlainText().contains(cd), qPrintable(terminal.toPlainText()));
         QVERIFY2(typed(terminal, QStringLiteral("gbmark=kept")), qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbin[${PWD##*/}]\"")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbin[one]")),
+                 qPrintable(terminal.toPlainText()));
         QTest::keyClicks(&terminal, QStringLiteral("echo gbhalf"));
         QTRY_VERIFY2_WITH_TIMEOUT(lastRow(terminal).endsWith(QStringLiteral("echo gbhalf")),
                                   qPrintable(terminal.toPlainText()), kTimeoutMs);
@@ -2721,7 +2743,8 @@ private slots:
                  qPrintable(terminal.toPlainText()));
         QVERIFY2(rows(terminal).contains(QStringLiteral("gbafter[][two]")),
                  qPrintable(terminal.toPlainText()));
-        QVERIFY2(!rows(terminal).contains(QStringLiteral("gbhalf")),
+        QVERIFY2(!rows(terminal).contains(QStringLiteral("gbhalf"))
+                     && !terminal.toPlainText().contains(cd),
                  qPrintable(terminal.toPlainText()));
 #endif
     }

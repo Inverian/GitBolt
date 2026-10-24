@@ -101,6 +101,9 @@ jobs:
       # v7.0.0 rather than v7.1.0 (2026-10-22), which hasn't been out the
       # two weeks the Python lock waits for too.
       # check-ci-pins: accept setup-python-v7.1.0 until 2026-11-07
+      # Python 3.14.8, as the runner images have it: 3.14.9 (2026-10-21)
+      # waits too.
+      # check-ci-pins: accept python-3.14.9 until 2026-11-04
       - name: Set up Python
         id: python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

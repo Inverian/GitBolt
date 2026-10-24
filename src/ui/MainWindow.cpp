@@ -284,6 +284,54 @@ void MainWindow::showGitNotice(const git::GitProbe& probe)
     gitNotice_->showNotice(*notice);
 }
 
+// Tools › GitK, once the PATH GitBolt's children get is known: gitk by
+// its full path, as the Console would find it. By name, Windows looked in
+// GitBolt's current folder before PATH, which Explorer's "Open in
+// GitBolt" made the repository: a gitk.exe committed there would have
+// run.
+void MainWindow::launchGitk(const QString& childPath)
+{
+    const QString program = util::findExecutableOnPath(QStringLiteral("gitk"), childPath);
+    if (program.isEmpty()) {
+        widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
+            tr("gitk was not found on your PATH. It comes with Git for Windows; on "
+               "macOS and Linux it is a package of its own (gitk, or Homebrew's "
+               "git-gui)."));
+        return;
+    }
+    const auto [workdir, bareGitDir] = gitService_->withRepository(
+        [](git::Repository& r) {
+            return std::pair{QString::fromStdString(r.commandDir()),
+                             r.isBare() ? QString::fromStdString(r.path())
+                                        : QString()};
+        });
+    QProcess gitk;
+    gitk.setProgram(program);
+    gitk.setWorkingDirectory(workdir);
+    // The open repository, never one GitBolt's own environment
+    // names (as for every git GitBolt runs), and a bare one
+    // named outright (safe.bareRepository).
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    for (const auto& name : git::GitProcess::repositoryEnvVars())
+        env.remove(QString::fromStdString(name));
+    if (!bareGitDir.isEmpty())
+        env.insert(QStringLiteral("GIT_DIR"), bareGitDir);
+    // And the git gitk runs is GitBolt's: the same PATH.
+    env.insert(QStringLiteral("PATH"), childPath);
+#ifdef Q_OS_WIN
+    // gitk runs in the work tree: what it starts by name comes
+    // from PATH, not from there (see GitProcess::applyEnvironment).
+    env.insert(QStringLiteral("NoDefaultCurrentDirectoryInExePath"), QStringLiteral("1"));
+#endif
+    gitk.setProcessEnvironment(env);
+    const bool ok = gitk.startDetached();
+    if (!ok) {
+        widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
+            tr("Could not launch gitk. Is it installed and on "
+               "your PATH?"));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Persist splitter state on window close. We intentionally do NOT
 // save QMainWindow::saveState() anymore — the dock widgets it used
@@ -3766,51 +3814,17 @@ void MainWindow::buildToolsMenu()
         a->setObjectName(QStringLiteral("tools.gitk"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            // By its full path, as the Console would find it: on the PATH
-            // GitBolt's children get, the login shell's first. By name,
-            // Windows looked in GitBolt's current folder before PATH,
-            // which Explorer's "Open in GitBolt" made the repository: a
-            // gitk.exe committed there would have run.
-            const QString program = util::findExecutableForChildren(QStringLiteral("gitk"));
-            if (program.isEmpty()) {
-                widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
-                    tr("gitk was not found on your PATH. It comes with Git for Windows; on "
-                       "macOS and Linux it is a package of its own (gitk, or Homebrew's "
-                       "git-gui)."));
-                return;
-            }
-            const auto [workdir, bareGitDir] = gitService_->withRepository(
-                [](git::Repository& r) {
-                    return std::pair{QString::fromStdString(r.commandDir()),
-                                     r.isBare() ? QString::fromStdString(r.path())
-                                                : QString()};
-                });
-            QProcess gitk;
-            gitk.setProgram(program);
-            gitk.setWorkingDirectory(workdir);
-            // The open repository, never one GitBolt's own environment
-            // names (as for every git GitBolt runs), and a bare one
-            // named outright (safe.bareRepository).
-            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-            for (const auto& name : git::GitProcess::repositoryEnvVars())
-                env.remove(QString::fromStdString(name));
-            if (!bareGitDir.isEmpty())
-                env.insert(QStringLiteral("GIT_DIR"), bareGitDir);
-            // And the git gitk runs is GitBolt's: the same PATH.
-            env.insert(QStringLiteral("PATH"),
-                       util::pathForChildren(env.value(QStringLiteral("PATH"))));
-#ifdef Q_OS_WIN
-            // gitk runs in the work tree: what it starts by name comes
-            // from PATH, not from there (see GitProcess::applyEnvironment).
-            env.insert(QStringLiteral("NoDefaultCurrentDirectoryInExePath"), QStringLiteral("1"));
-#endif
-            gitk.setProcessEnvironment(env);
-            const bool ok = gitk.startDetached();
-            if (!ok) {
-                widgets::PlainMessageBox::warning(this, tr("Launch Failed"),
-                    tr("Could not launch gitk. Is it installed and on "
-                       "your PATH?"));
-            }
+            // The PATH GitBolt's children get, the login shell's first, on
+            // a worker: shortly after launch it may still wait for the
+            // login shell (util::pathForChildren).
+            auto* watcher = new QFutureWatcher<QString>(this);
+            connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher]() {
+                watcher->deleteLater();
+                if (!gitService_ || !gitService_->isOpen()) return;
+                launchGitk(watcher->result());
+            });
+            watcher->setFuture(QtConcurrent::run(
+                [] { return util::pathForChildren(qEnvironmentVariable("PATH")); }));
         });
         toolsMenu->addAction(a);
     }

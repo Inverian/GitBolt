@@ -34,6 +34,7 @@
 #include <QStackedWidget>
 #include <QTableWidget>
 #include <QTreeWidget>
+#include <QThreadPool>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
 
@@ -57,6 +58,20 @@ QString globalGitConfig(const QStringList& args)
     if (!result.ok() || !result->success())
         return {};
     return QString::fromStdString(result->stdoutData).trimmed();
+}
+
+// Where those run, one at a time and in the order asked: a save (Apply,
+// then OK) or a load after it otherwise ran side by side, each first
+// waiting for the login shell's PATH, and an older value could land
+// last.
+QThreadPool* gitConfigPool()
+{
+    static QThreadPool* pool = [] {
+        auto* p = new QThreadPool;
+        p->setMaxThreadCount(1);
+        return p;
+    }();
+    return pool;
 }
 
 
@@ -1227,7 +1242,7 @@ void SettingsDialog::loadGitConfig()
         }
         watcher->deleteLater();
     });
-    watcher->setFuture(QtConcurrent::run([]() {
+    watcher->setFuture(QtConcurrent::run(gitConfigPool(), []() {
         GitIdentity id;
         if (git::GitProcess::findGitExecutable().empty()) {
             id.noGit = true;
@@ -1249,7 +1264,7 @@ void SettingsDialog::saveGitConfig()
     const QString email = userEmailEdit_->text().trimmed();
     // On a worker, as loadGitConfig reads: finding git may wait for the
     // login shell's PATH (util::pathForChildren).
-    (void)QtConcurrent::run([name, email]() {
+    (void)QtConcurrent::run(gitConfigPool(), [name, email]() {
         if (!name.isEmpty())
             globalGitConfig({QStringLiteral("user.name"), name});
         if (!email.isEmpty())

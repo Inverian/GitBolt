@@ -146,11 +146,13 @@ bool isCshFamily(const QString& name)
     return name == QLatin1String("csh") || name == QLatin1String("tcsh");
 }
 
-// The shells a Ctrl+C at the prompt drops the line of. A program an rc
-// file `exec`s in the shell's place (tmux, screen, ssh) holds the
-// terminal without counting as a command (see commandRunning), and would
-// pass the Ctrl+C on to whatever runs in it: a dev server, a build.
-bool dropsLineOnCtrlC(const QString& name)
+// The shells a switch types its line into: they drop their line on a
+// Ctrl+C at the prompt, and take a `cd` quoted as shellWord quotes. A
+// program an rc file `exec`s in the shell's place (tmux, screen, ssh)
+// holds the terminal without counting as a command (see
+// commandRunning), and would pass the line, and a Ctrl+C, on to
+// whatever runs in it: vim, a half-typed line in another pane, a build.
+bool takesTypedSwitches(const QString& name)
 {
     return isShFamily(name) || isCshFamily(name) || name == QLatin1String("fish");
 }
@@ -443,7 +445,9 @@ void TerminalWidget::start(const QString& workingDirectory)
     // $SHELL only as a full path: execve() takes a relative one from
     // the current folder, which the child makes the repository first.
     QByteArray shellBytes;
-    if (const char* shellEnv = getenv("SHELL"); shellEnv && *shellEnv == '/') {
+    const char* shellEnv = getenv("SHELL");
+    const bool relativeShell = shellEnv && *shellEnv && *shellEnv != '/';
+    if (shellEnv && *shellEnv == '/') {
         shellBytes = shellEnv;
     } else {
         struct passwd* pw = getpwuid(getuid());
@@ -463,6 +467,11 @@ void TerminalWidget::start(const QString& workingDirectory)
     QList<QByteArray> dropped{QByteArrayLiteral("TERM="), QByteArrayLiteral("GITBOLT_TERM=")};
     for (const auto& name : git::GitProcess::repositoryEnvVars())
         dropped.append(QByteArray::fromStdString(name) + '=');
+    // A relative $SHELL goes too, for the shell started: a program run in
+    // the Console that runs $SHELL (script, an editor's :shell) would
+    // take it from the repository as well.
+    if (relativeShell)
+        dropped.append(QByteArrayLiteral("SHELL="));
     QList<QByteArray> envBytes;
     for (char** e = hostEnviron(); e && *e; ++e) {
         const QByteArray entry(*e);
@@ -473,6 +482,8 @@ void TerminalWidget::start(const QString& workingDirectory)
     }
     envBytes.append(QByteArrayLiteral("TERM=xterm-256color"));
     envBytes.append(QByteArrayLiteral("GITBOLT_TERM=1"));
+    if (relativeShell)
+        envBytes.append("SHELL=" + shellBytes);
     if (!gitDir_.isEmpty())
         envBytes.append("GIT_DIR=" + QFile::encodeName(gitDir_));
 
@@ -641,12 +652,14 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 // the Console looks as it always did, a `cd` at the prompt. Otherwise
 // the Ctrl+C shows, as a ^C (bash, sh) or the line left as it was
 // (zsh), and a new prompt for the switch's line.
-// The Ctrl+C goes only to a shell that drops its line on one: a program
-// an rc file `exec`ed in the shell's place (tmux, screen, ssh), which
-// commandRunning can't see into, would pass it on to what runs there,
-// so with something on its line that one is started again instead (a
-// tmux client detached, not what its session runs). A switch back to
-// where the shell is, while one away from it waits, is called off.
+// The line and its Ctrl+C go only to a shell of the sh, csh or fish
+// families (takesTypedSwitches): a program an rc file `exec`ed in the
+// shell's place (tmux, screen, ssh), which commandRunning can't see
+// into, would pass them on to what runs there, a pane's vim or its
+// half-typed line, so that one is started again instead (a tmux client
+// detached, not what its session runs), and so is any other shell,
+// whose quoting a `cd` can't be typed in. A switch back to where the
+// shell is, while one away from it waits, is called off.
 //
 // The line goes in at the timer's next tick rather than with the
 // Ctrl+C, which is a signal: on Linux a shell that reads a whole line
@@ -705,8 +718,9 @@ void TerminalWidget::switchWhenIdle()
 #ifdef Q_OS_WIN
         typeIt = typeIt && lineEmpty_;
 #else
-        // And a Ctrl+C only to a shell it drops the line of.
-        typeIt = typeIt && (lineEmpty_ || dropsLineOnCtrlC(shellProgram()));
+        // And only into a shell at its prompt, never into a program in
+        // its place, whatever has or hasn't been typed into it.
+        typeIt = typeIt && takesTypedSwitches(shellProgram());
 #endif
         if (commandRan_ && !(typeIt && lineEmpty_)) {
             commandRan_ = false;

@@ -90,17 +90,18 @@ public:
     QString gitDir() const { return gitDir_; }
 
     /// The repository the shell works in: `cd` there, with `gitDir` as
-    /// setGitDir has it. A running shell is typed the `cd` at its prompt
-    /// (cdCommand), and a change of GIT_DIR (a bare repository opened or
-    /// left) on its line, in its own syntax (sh's `export` and `unset`,
-    /// csh's `setenv` and `unsetenv`, fish's `set`): never while a command
-    /// runs in it, but a moment after that command ends, and after a
-    /// Ctrl+C has dropped its line if anything has been typed into it
-    /// since it started or since the last switch. A new GIT_DIR in a
-    /// shell that syntax isn't known for, and cmd on Windows once
-    /// anything has been typed into it, is started again there instead
-    /// (see switchWhenIdle). The repository the shell is in, or on its
-    /// way to, opened again changes nothing.
+    /// setGitDir has it. A running shell of the sh, csh or fish families
+    /// is typed the `cd` at its prompt (cdCommand), and a change of
+    /// GIT_DIR (a bare repository opened or left) on its line, in its own
+    /// syntax (sh's `export` and `unset`, csh's `setenv` and `unsetenv`,
+    /// fish's `set`): never while a command runs in it, but a moment
+    /// after that command ends, and after a Ctrl+C has dropped its line
+    /// if anything has been typed into it since it started or since the
+    /// last switch. Any other program in the shell's place (another
+    /// shell, tmux an rc file exec'd), and cmd on Windows once anything
+    /// has been typed into it, is started again there instead (see
+    /// switchWhenIdle). The repository the shell is in, or on its way
+    /// to, opened again changes nothing.
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
