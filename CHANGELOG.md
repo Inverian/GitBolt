@@ -4,7 +4,14 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [Unreleased]
+## [0.9.8] — 2026-10-23
+
+Mostly a security release: a repository you clone or open, or a server
+you fetch from, could turn several of GitBolt's features against you
+(see Security below). Also: submodules and worktrees open in GitBolt,
+the Console works in bare repositories, a commit whose files can't be
+read says why instead of looking unchanged, and usage statistics have
+a Settings page of their own.
 
 ### Changed
 
