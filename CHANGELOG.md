@@ -4,6 +4,104 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [Unreleased]
+
+### Changed
+
+- **Building from source builds GitBolt's own libgit2**, the pinned
+  release with GitBolt's fixes for repositories that crash or freeze
+  it, as every download has it. It used to take a libgit2 installed on
+  the system, which has none of them. `-DGITBOLT_BUNDLED_LIBGIT2=OFF`
+  still uses an installed one, which must now be 1.9.5 (or 1.8.6) or
+  later, and configure lists the fixes it lacks. A build directory
+  configured before keeps its OFF: configure it with
+  `-DGITBOLT_BUNDLED_LIBGIT2=ON` (`tools/run-dev.sh` does so once).
+  Help › About says when GitBolt runs on a libgit2 without its fixes.
+- Development: CI installs Qt with nothing installed by version range
+  or without a hash check: Python 3.14.8, every Python package
+  aqtinstall needs with its hash (`.github/qt-requirements.txt`,
+  installed with `--require-hashes`), and aqtinstall at a commit,
+  since no release of it reads Qt 6.11's Windows packages yet. None of
+  it runs when Qt comes from the cache.
+- Development: a weekly check, `.github/workflows/dependency-check.yml`
+  running `tools/check-ci-pins.py`, fails (and so mails the owner) when
+  libgit2's or Qt's pinned series, NSIS, aqtinstall or a pinned action
+  or tool has a newer release, when the pinned Qt series' open-source
+  support has ended, when a locked Python package has a known
+  vulnerability, or when libgit2, git, Git for Windows or Git LFS
+  publishes a security advisory not yet reviewed. A source that
+  doesn't answer fails it too, instead of passing for all clear.
+
+### Fixed
+
+- **Switching repositories typed into whatever ran in the Console.**
+  Opening a repository with a working tree typed its `cd` into the
+  Console's shell at once: into a command still running there (an
+  editor, a pager or a REPL took it as input), or onto the end of a
+  line you had partly typed, which then ran with the `cd` among its
+  arguments; a half-typed `rm -rf build` deleted the build folder, and
+  the repository you were opening with it. Every switch now waits, as
+  one to or from a bare repository already did, until no command runs
+  in the shell, and clears the line at the prompt with a Ctrl+C first
+  if anything has been typed into the Console since it started or
+  since the last switch. Opening the repository the Console is already
+  in, or switching back to it while a switch waits, leaves it alone. A
+  program your shell's startup files run in its place (tmux, screen,
+  ssh) gets no Ctrl+C, which it would pass on to what runs in it: with
+  something typed, it is started again in the new repository (a tmux
+  session is detached, not stopped). On Windows, once anything has been
+  typed into cmd, it is started again in the new repository too, and a
+  program cmd started with `start` keeps the Console where it is until
+  that program ends.
+- **No git installed**: every git command failed with "Failed to start
+  git process". It now says git wasn't found, the Settings page for
+  git's name and email says so instead of saving nothing, and a note at
+  launch says so too, with a link to git's downloads.
+
+### Security
+
+- **GitBolt ran Apple's old git instead of yours.** Started from the
+  Dock or Finder, GitBolt looked for git only on macOS's own short
+  PATH, so it ran Apple's `/usr/bin/git` (2.39.5 until the Command Line
+  Tools 26, open to CVE-2025-48384, which attackers exploit) even where
+  your shell runs a newer git, from Homebrew say. It now runs the git
+  your login shell finds first, as commit hooks and the Console already
+  did, and starts gitk the same way. A version manager's shim (asdf,
+  mise) on that PATH now picks git for GitBolt too.
+- **A note when your git has known security flaws.** Once GitBolt has
+  asked git its version, a note across the top of the window names the
+  flaws and the fix: on macOS git from Homebrew, or on macOS 15.6 and
+  later the Command Line Tools 26; on Windows a newer Git for Windows.
+  Dismissed, it stays away until that git or its version changes. On
+  Linux, whose distributions fix git without changing its version, the
+  note only says when git is older than 2.25, which GitBolt needs.
+  Help › About shows which git GitBolt runs, and where it is.
+- **Windows: a program in a repository could run in place of git.**
+  Explorer's "Open in GitBolt" on a folder's background starts GitBolt
+  in that folder, and Windows looks for a program named without its
+  folder in the current folder first. GitBolt named git (in Settings)
+  and gitk that way, so a `git.exe` or `gitk.exe` at the top of a
+  repository could run instead. GitBolt now starts every program by its
+  full path, leaves the folder it was started in for your home folder,
+  loads no library from it, and has git, gitk and the Console look for
+  the programs they start by name on PATH only. In the Console, a
+  program in the current folder runs when you type `.\name`, as in
+  PowerShell.
+- **Repositories that froze GitBolt.** An object cut short, a loose
+  object whose file ends early (a disk or sync error, a write cut off)
+  or a packed delta whose data does, made reading it run forever at
+  full CPU: whatever needed it, such as a commit's diff, never came.
+  It now fails with "premature end of zlib stream" or "truncated
+  packfile". These are libgit2's own fixes, not yet in a libgit2
+  release, built into every GitBolt download.
+- **Built with Qt 6.11.3**, up from Qt 6.10.3, which gets no more
+  fixes. Among the fixes since are crashes a server could cause with
+  an oversized Cache-Control header (CVE-2026-76151) or over HTTP/2
+  (CVE-2026-96432), which in GitBolt only the usage statistics
+  connection could meet, and crashes on crafted JSON (CVE-2026-101201)
+  and SVG (CVE-2026-8168, CVE-2026-6210), which GitBolt only reads from
+  its own files and the desktop's icon theme.
+
 ## [0.9.8] — 2026-10-23
 
 Mostly a security release: a repository you clone or open, or a server
