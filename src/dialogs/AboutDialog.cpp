@@ -1,6 +1,6 @@
 #include "dialogs/AboutDialog.h"
 
-#include "git/Repository.h"  // libgit2Version(), libgit2Features()
+#include "git/Repository.h"  // libgit2VersionDescription(), libgit2Features()
 
 #include <QApplication>
 #include <QDialogButtonBox>
@@ -146,7 +146,7 @@ void AboutDialog::setupUi()
         "</table>")
         .arg(QStringLiteral(QT_VERSION_STR))
         .arg(qVersion())
-        .arg(QString::fromStdString(gitbolt::git::libgit2Version()))
+        .arg(QString::fromStdString(gitbolt::git::libgit2VersionDescription()))
         .arg(QString::fromStdString(gitbolt::git::libgit2Features()))
         .arg(compilerString())
         .arg(buildTypeString())

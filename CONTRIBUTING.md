@@ -226,7 +226,7 @@ Quick reference:
 
 **macOS:**
 ```bash
-brew install cmake qt@6 libgit2
+brew install cmake qt@6
 cmake -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure

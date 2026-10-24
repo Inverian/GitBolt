@@ -4,6 +4,7 @@
 #include <QScopeGuard>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QtEndian>
 #include <QThread>
 #include "../TestRepoHelper.h"
 #include "git/GitProcess.h"
@@ -4474,6 +4475,213 @@ private slots:
             QVERIFY2(tooDeep(opened->submodules()), "submodules() did not stop at the depth limit");
         }
 #endif
+    }
+
+    // A loose object whose file ends inside its zlib stream (a disk or
+    // sync error, a write cut off): inflate() then says Z_BUF_ERROR,
+    // libgit2 took that for "more room, please" and asked again, with
+    // nothing left to give it, forever at full CPU. Reading the blob,
+    // or the diff of the commit that adds it, never returned. Cut after
+    // the zlib header or halfway through the data, both now fail at
+    // once ("premature end of zlib stream"). Without the fix QtTest's
+    // watchdog (QTEST_FUNCTION_TIMEOUT, tests/CMakeLists.txt) ends the
+    // run here, naming this function.
+    void truncatedLooseObjectFailsPromptly_data() {
+        QTest::addColumn<int>("kept");   // bytes of the object file kept; 0: half of them
+
+        QTest::newRow("zlib header only") << 2;
+        QTest::newRow("half") << 0;
+    }
+
+    void truncatedLooseObjectFailsPromptly() {
+#ifndef GITBOLT_LIBGIT2_TRUNCATION_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes for objects cut short");
+#else
+        QFETCH(int, kept);
+
+        gitbolt::test::TestRepo repo;
+        // Some 30 KB that deflate to several: half the file ends well
+        // inside the data, past the object's header.
+        QByteArray content;
+        for (int i = 0; i < 4000; ++i)
+            content += QByteArray::number(i * 7919) + '\n';
+        const auto commitId = repo.writeAndCommit(QStringLiteral("numbers.txt"), content,
+                                                  QStringLiteral("numbers"));
+        QVERIFY(commitId.ok());
+        git_oid oid;
+        QCOMPARE(git_odb_hash(&oid, content.constData(), static_cast<size_t>(content.size()),
+                              GIT_OBJECT_BLOB), 0);
+        const QString hex = QString::fromLatin1(git_oid_tostr_s(&oid));
+        const QString path = QString::fromUtf8(git_repository_path(repo.repo().raw()))
+                             + QStringLiteral("objects/%1/%2").arg(hex.left(2), hex.mid(2));
+        QFile file(path);
+        QVERIFY2(file.open(QIODevice::ReadOnly), qPrintable(path));
+        const QByteArray whole = file.readAll();
+        file.close();
+        QVERIFY(whole.size() > 1000);
+        const QByteArray cut = whole.left(kept ? kept : whole.size() / 2);
+        // Loose objects are written read-only.
+        QVERIFY(QFile::setPermissions(path, QFile::ReadOwner | QFile::WriteOwner));
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QCOMPARE(file.write(cut), qint64(cut.size()));
+        file.close();
+
+        // A handle of its own, with nothing of the object cached.
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        QElapsedTimer timer;
+        timer.start();
+        const auto blob = opened->readBlob(gitbolt::git::ObjectId::fromHex(hex.toStdString()));
+        QVERIFY(!blob.ok());
+        QVERIFY2(QString::fromStdString(blob.error().message())
+                     .contains(QLatin1String("premature end of zlib stream")),
+                 blob.error().message().c_str());
+        // What selecting the commit reads: whatever it makes of the
+        // file, it returns.
+        (void)opened->diffCommit(*commitId);
+        const qint64 elapsed = timer.elapsed();
+        QVERIFY2(elapsed < 5000, qPrintable(QStringLiteral("took %1 ms").arg(elapsed)));
+#endif
+    }
+
+    // A packed delta whose data runs out before its header does: the
+    // header's read (git_odb_read_header, as for a diff's file sizes)
+    // asked the pack for more, which had none, forever. git writes no
+    // such pack, and one cut short fails its checksum before any object
+    // is read; but libgit2 only compares the pack's last 20 bytes with
+    // the copy in its index, so this one is made by hand: a blob, then a
+    // delta of it whose zlib stream is empty stored blocks running into
+    // the pack's end (the "checksum" is four more of them). The blob in
+    // the same pack still reads. The fix for loose objects alone leaves
+    // this read spinning, so this test is the delta fix's.
+    void truncatedPackedDeltaFailsPromptly() {
+#ifndef GITBOLT_LIBGIT2_TRUNCATION_PATCHED
+        QSKIP("needs the bundled libgit2, with cmake/PatchLibgit2.cmake's fixes for objects cut short");
+#else
+        gitbolt::test::TestRepo repo;
+        const auto be32 = [](quint32 v) {
+            QByteArray out(4, '\0');
+            qToBigEndian(v, out.data());
+            return out;
+        };
+        const QByteArray emptyStored("\x00\x00\x00\xff\xff", 5);
+        const QByteArray trailer = emptyStored.repeated(4);
+
+        QByteArray pack = QByteArrayLiteral("PACK") + be32(2) + be32(2);
+        const qsizetype blobAt = pack.size();
+        const QByteArray hello("hello");
+        pack += char((3 << 4) | hello.size());       // a blob of 5 bytes
+        pack += qCompress(hello).mid(4);              // its zlib stream
+        const qsizetype deltaAt = pack.size();
+        pack += char((6 << 4) | 10);                  // an OFS_DELTA of 10 bytes
+        pack += char(deltaAt - blobAt);               // its base, < 128 back
+        pack += QByteArray("\x78\x01", 2);            // a zlib header, then nothing
+        pack += trailer;
+
+        git_oid blob;
+        QCOMPARE(git_odb_hash(&blob, hello.constData(), static_cast<size_t>(hello.size()),
+                              GIT_OBJECT_BLOB), 0);
+        git_oid delta;
+        std::fill(std::begin(delta.id), std::end(delta.id), static_cast<unsigned char>(0x11));
+        std::pair<const git_oid*, qsizetype> entries[2] = {{&blob, blobAt}, {&delta, deltaAt}};
+        if (git_oid_cmp(&delta, &blob) < 0)
+            std::swap(entries[0], entries[1]);
+        // A version 2 index: the fanout, the ids in order, their CRCs (not
+        // read), their offsets, the pack's checksum and its own (not
+        // checked either).
+        QByteArray idx = QByteArray("\xfftOc", 4) + be32(2);
+        for (int b = 0; b < 256; ++b) {
+            quint32 count = 0;
+            for (const auto& entry : entries)
+                count += entry.first->id[0] <= b ? 1 : 0;
+            idx += be32(count);
+        }
+        for (const auto& entry : entries)
+            idx += QByteArray(reinterpret_cast<const char*>(entry.first->id), GIT_OID_SHA1_SIZE);
+        idx += be32(0) + be32(0);
+        for (const auto& entry : entries)
+            idx += be32(static_cast<quint32>(entry.second));
+        idx += trailer + QByteArray(20, '\0');
+
+        const QString packs = QString::fromUtf8(git_repository_path(repo.repo().raw()))
+                              + QStringLiteral("objects/pack/");
+        for (const auto& [name, bytes] : {std::pair{QStringLiteral("pack-truncated.pack"), pack},
+                                          std::pair{QStringLiteral("pack-truncated.idx"), idx}}) {
+            QFile file(packs + name);
+            QVERIFY2(file.open(QIODevice::WriteOnly), qPrintable(file.fileName()));
+            QCOMPARE(file.write(bytes), qint64(bytes.size()));
+        }
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        git_odb* odb = nullptr;
+        QCOMPARE(git_repository_odb(&odb, opened->raw()), 0);
+        const auto release = qScopeGuard([odb] { git_odb_free(odb); });
+        size_t size = 0;
+        git_object_t type = GIT_OBJECT_INVALID;
+        QCOMPARE(git_odb_read_header(&size, &type, odb, &blob), 0);
+        QCOMPARE(size, size_t(5));
+        QElapsedTimer timer;
+        timer.start();
+        QVERIFY(git_odb_read_header(&size, &type, odb, &delta) < 0);
+        const git_error* error = git_error_last();
+        QVERIFY(error);
+        QVERIFY2(QString::fromUtf8(error->message).contains(QLatin1String("truncated packfile")),
+                 error->message);
+        const qint64 elapsed = timer.elapsed();
+        QVERIFY2(elapsed < 5000, qPrintable(QStringLiteral("took %1 ms").arg(elapsed)));
+#endif
+    }
+
+    // Ordinary packed deltas read as before through the patched loop
+    // that reads a delta's header (PatchLibgit2.cmake, "an object cut
+    // short"): a pack in which one version of a file is a delta of the
+    // other, its size and type read without inflating the object
+    // (git_odb_read_header, as a diff's file sizes are), and its
+    // content. Any libgit2 passes this.
+    void packedDeltaHeadersStillResolve() {
+        gitbolt::test::TestRepo repo;
+        QByteArray older;
+        for (int i = 0; i < 4000; ++i)
+            older += QByteArray::number(i * 7919) + '\n';
+        const QByteArray newer = older + "and one more line\n";
+        QVERIFY(repo.writeAndCommit(QStringLiteral("numbers.txt"), older, QStringLiteral("A")).ok());
+        QVERIFY(repo.writeAndCommit(QStringLiteral("numbers.txt"), newer, QStringLiteral("B")).ok());
+        git_oid ids[2];
+        const QByteArray contents[2] = {older, newer};
+        for (int i = 0; i < 2; ++i)
+            QCOMPARE(git_odb_hash(&ids[i], contents[i].constData(),
+                                  static_cast<size_t>(contents[i].size()), GIT_OBJECT_BLOB), 0);
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"repack", "-a", "-d", "-f", "-q"})));
+
+        // That git stored one of them as a delta of the other.
+        const QString objects = output(git.run({"cat-file", "--batch-all-objects",
+                                                "--batch-check=%(objectname) %(deltabase)"}));
+        int deltas = 0;
+        for (const QString& line : objects.split(QLatin1Char('\n'))) {
+            const QStringList fields = line.split(QLatin1Char(' '));
+            if (fields.size() == 2 && fields[1] != QString(40, QLatin1Char('0')))
+                ++deltas;
+        }
+        QVERIFY2(deltas > 0, qPrintable(objects));
+
+        auto opened = gitbolt::git::Repository::open(repo.path().toStdString());
+        QVERIFY(opened.ok());
+        git_odb* odb = nullptr;
+        QCOMPARE(git_repository_odb(&odb, opened->raw()), 0);
+        const auto release = qScopeGuard([odb] { git_odb_free(odb); });
+        for (int i = 0; i < 2; ++i) {
+            size_t size = 0;
+            git_object_t type = GIT_OBJECT_INVALID;
+            QCOMPARE(git_odb_read_header(&size, &type, odb, &ids[i]), 0);
+            QCOMPARE(size, static_cast<size_t>(contents[i].size()));
+            QCOMPARE(int(type), int(GIT_OBJECT_BLOB));
+            const auto blob = opened->readBlob(
+                gitbolt::git::ObjectId::fromHex(git_oid_tostr_s(&ids[i])));
+            QVERIFY(blob.ok());
+            QCOMPARE(QByteArray(blob->data(), static_cast<qsizetype>(blob->size())), contents[i]);
+        }
     }
 
     // diffCommit and walkTreeAtCommit ask `cancelled` as they go, at each

@@ -8,10 +8,12 @@
 # static library here; the third fixes a crash when a config file that
 # changed can't be read again, on every platform, and the fourth the
 # stale config that followed it. Then come crashes on config lines with
-# no value, and last, limits on what a repository's content can make
-# libgit2 do: a pattern that never finishes matching, a tree nested too
-# deep, attribute macros copied into every rule that names them. A
-# version bump that moves the patched text fails here, loudly.
+# no value, limits on what a repository's content can make libgit2 do (a
+# pattern that never finishes matching, a tree nested too deep,
+# attribute macros copied into every rule that names them), and last,
+# two of libgit2's own fixes from its main branch, for reads of an
+# object cut short that never ended. A version bump that moves the
+# patched text fails here, loudly.
 
 # Replaces <from> with <to> in <file>, then fails if <leftover> (a regex)
 # still matches: the upstream text changed and this patch needs updating.
@@ -352,3 +354,29 @@ gitbolt_patch(src/libgit2/attr_file.c
     "\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n}\n"
     "\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n\nskip:\n\t/* GitBolt: the rule took too many; it is skipped, as one with\n\t * none. What it took is the caller's to free with the rule. */\n\tgit_attr_assignment__free(assign);\n\t*base = git__next_line(scan);\n\treturn GIT_ENOTFOUND;\n}\n"
     "return \\(assigns->length == 0\\) \\? GIT_ENOTFOUND : 0;\n}")
+
+# An object cut short: a loose object whose file ends inside its zlib
+# stream, or a delta in a pack whose data runs out before its header
+# does. inflate() then says Z_BUF_ERROR, which libgit2 takes for "give
+# me more room" (zstream_seterr), and the loops reading on had no more
+# input to give it: they asked again, forever, at full CPU. Reading the
+# loose object (any lookup of it: a commit, a blob for a diff or the
+# File view) or the packed delta's header (a diff's file sizes, an
+# object's type check) never returned. A disk or sync error or an
+# interrupted write can leave a loose object so, and a repository can
+# be made so. Both reads now fail ("premature end of zlib stream",
+# "truncated packfile"). And an error from the delta's stream no longer
+# adds -1 to the header's length, which wrapped it and had the header
+# read past its 16-byte buffer: a corrupt pack, not only a short one. libgit2's own fixes, from its main branch
+# (5254f5dc, PR #7346; PR #7402), in v2.0.0-rc.1 but in no 1.9 release
+# as of 2026-10-24. Their code as it is, comments included: a release
+# that has them then finds these patches' result already there, and
+# they do nothing. Drop them then.
+gitbolt_patch(src/util/zstream.c
+    "\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\tout_remain -= out_written;"
+    "\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\t/*\n\t\t * with output space still available, a Z_BUF_ERROR that wrote\n\t\t * nothing could be the input is exhausted in the middle of the stream.\n\t\t * It is unlikely further input will arrive within this loop,\n\t\t * so we fail it.\n\t\t */\n\t\tif (!out_written && zstream->zerr == Z_BUF_ERROR) {\n\t\t\tgit_error_set(GIT_ERROR_ZLIB, \"premature end of zlib stream\");\n\t\t\treturn -1;\n\t\t}\n\n\t\tout_remain -= out_written;"
+    "&out_written, zstream\\) < 0\\)\n\t+return -1;\n\n\t+out_remain -= out_written;")
+gitbolt_patch(src/libgit2/delta.c
+    "\twhile (len < buffer_len) {\n\t\tread = git_packfile_stream_read(stream, &buffer[len], buffer_len - len);\n\n\t\tif (read == 0)\n\t\t\tbreak;\n\n\t\tif (read == GIT_EBUFS)\n\t\t\tcontinue;\n\n\t\tlen += read;\n\t}"
+    "\twhile (len < buffer_len) {\n\t\toff64_t curpos = stream->curpos;\n\n\t\tread = git_packfile_stream_read(stream, &buffer[len], buffer_len - len);\n\n\t\tif (read == 0)\n\t\t\tbreak;\n\n\t\tif (read == GIT_EBUFS) {\n\t\t\t/*\n\t\t\t * The stream made no progress at all: inflate()\n\t\t\t * stalled on truncated input (Z_BUF_ERROR) and the\n\t\t\t * pack has no more data to offer (curpos is stuck\n\t\t\t * past the end of the packfile).  Retrying would\n\t\t\t * loop forever, so fail instead of hanging.\n\t\t\t */\n\t\t\tif (stream->curpos == curpos) {\n\t\t\t\tgit_error_set(GIT_ERROR_ODB, \"truncated packfile\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (read < 0)\n\t\t\treturn -1;\n\n\t\tlen += read;\n\t}"
+    "if \\(read == GIT_EBUFS\\)\n\t+continue;")

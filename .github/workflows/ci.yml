@@ -139,7 +139,9 @@ jobs:
       # ------------------------------------------------------------------
       # Configure, build, test. Ninja on every platform, and
       # GITBOLT_BUNDLED_LIBGIT2 on every platform: the pinned libgit2
-      # release (cmake/Libgit2.cmake), linked statically. Homebrew's
+      # release (cmake/Libgit2.cmake), patched (cmake/PatchLibgit2.cmake)
+      # and linked statically. It is the default; set anyway, as every
+      # installer depends on it. Homebrew's
       # bottles need the runner's macOS (26), vcpkg's would add DLLs to
       # the installer, and Ubuntu's libgit2-dev made the DEB depend on
       # that release's libgit2 package (libgit2-1.7), which no other

@@ -30,9 +30,9 @@ tools/run-dev.sh ~/projects/linux       # Open an arbitrary repository
 
 ### What it does
 
-1. Makes sure Homebrew's `brew shellenv` is loaded, so `cmake`, `ninja`, Qt, and libgit2 are all on `PATH` even if you ran the script from a non-login shell.
+1. Makes sure Homebrew's `brew shellenv` is loaded, so `cmake`, `ninja` and Qt are all on `PATH` even if you ran the script from a non-login shell.
 2. Kills any running GitBolt instance with `pkill -9` (including orphaned ones that Launch Services may be keeping alive).
-3. Configures the build directory if it hasn't been configured yet (`cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`). Subsequent runs skip this step.
+3. Configures the build directory if it hasn't been configured yet (`cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGITBOLT_BUNDLED_LIBGIT2=ON`), and switches one configured with a system libgit2 back to the bundled one once. Subsequent runs skip this step.
 4. Incrementally builds with `cmake --build build --parallel`.
 5. Launches via `open -n ".../GitBolt.app" --args <repo>` so the app goes through Launch Services and gets a proper Dock icon, Cmd-Tab entry, and NSApplicationActivationPolicy.
 
@@ -42,7 +42,7 @@ During development, the cycle "make a code change → stop the running app → r
 
 ### Requirements
 
-- Homebrew with `cmake`, `qt`, `libgit2`, `pkg-config`, and `ninja` installed (see [`docs/BUILDING.md`](../docs/BUILDING.md))
+- Homebrew with `cmake`, `qt` and `ninja` installed (the first configure downloads and builds the pinned libgit2; see [`docs/BUILDING.md`](../docs/BUILDING.md))
 - macOS — the script uses `open`, `pkill`, and Homebrew paths that don't exist on Linux or Windows
 
 ---

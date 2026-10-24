@@ -76,7 +76,8 @@ target_compile_definitions(test_clone PRIVATE
     GITBOLT_TEST_STALL_TRANSPORT="$<TARGET_FILE:gitbolt_stall_transport>")
 
 # The linked libgit2 is thread-safe (and logs its version and backends);
-# the bundled build is also checked against its pin (cmake/Libgit2.cmake)
+# the bundled build is also checked against its pin and its patches
+# (cmake/Libgit2.cmake, cmake/PatchLibgit2.cmake)
 gitbolt_add_test(test_libgit2_features git/TestLibgit2Features.cpp)
 if(GITBOLT_LIBGIT2_PROVIDER STREQUAL "bundled")
     target_compile_definitions(test_libgit2_features PRIVATE
@@ -90,6 +91,10 @@ add_test(NAME test_patch_libgit2
         -DPATCH_SCRIPT=${CMAKE_SOURCE_DIR}/cmake/PatchLibgit2.cmake
         -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/patch-libgit2
         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestPatchLibgit2.cmake)
+# The oldest system libgit2 GitBolt takes (cmake/Libgit2Floor.cmake),
+# which no CI build exercises: they all bundle it.
+add_test(NAME test_libgit2_floor
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLibgit2Floor.cmake)
 
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)

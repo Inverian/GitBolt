@@ -4,18 +4,24 @@
 # Everything that needs libgit2 links gitbolt_libgit2 (src/git, src/app;
 # the tests through gitbolt_git), never a provider's own target.
 # GitBolt uses libgit2 only for local repository access; clone, fetch,
-# pull and push run the git CLI. So any libgit2 >= 1.7 will do, as long
-# as it is thread-safe (test_libgit2_features).
+# pull and push run the git CLI. It must be thread-safe
+# (test_libgit2_features).
 #
-# Default: the system copy, via pkg-config (Homebrew, distro packages,
-# vcpkg + pkgconf), then libgit2's own CMake package (libgit2 >= 1.8,
-# vcpkg). With GITBOLT_BUNDLED_LIBGIT2 -- or when neither is found --
-# the release pinned below is downloaded, built static and linked into
-# the executables. That is what every installer ships: Homebrew's
-# bottles target the build machine's macOS, vcpkg's libgit2 would put
-# git2, pcre and zlib DLLs into the installer, and a distribution's
-# libgit2 would make the DEB depend on the one release that packages
-# its soname.
+# Default (GITBOLT_BUNDLED_LIBGIT2): the release pinned below is
+# downloaded, patched by PatchLibgit2.cmake, built static and linked
+# into the executables. That is what every installer ships, and what a
+# build from source gets: the patches are GitBolt's fixes for
+# repositories that crash or freeze it, which no system libgit2 has.
+# Homebrew's bottles target the build machine's macOS, vcpkg's libgit2
+# would put git2, pcre and zlib DLLs into the installer, and a
+# distribution's libgit2 would make the DEB depend on the one release
+# that packages its soname.
+#
+# With GITBOLT_BUNDLED_LIBGIT2=OFF (a distribution's own packaging,
+# say): the system copy, via pkg-config (Homebrew, distro packages,
+# vcpkg + pkgconf), then libgit2's own CMake package (libgit2 >= 1.9,
+# vcpkg). It must be 1.9.5 or later (1.8.6 on 1.8; Libgit2Floor.cmake),
+# and configure lists the fixes it lacks (below).
 # ============================================================================
 
 # GitHub's source tarball for the tag; bump the version and the hash
@@ -36,10 +42,10 @@ function(gitbolt_add_bundled_libgit2)
     # (headers, libgit2.a, pkg-config and CMake files) out of our
     # install tree and so out of every package. Offline:
     # -DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<unpacked v1.9.7 source>, used
-    # as is: PatchLibgit2.cmake isn't run, so its MSVC changes and its
-    # config fixes are missing unless that tree has them (configure
-    # warns about the config fixes below; docs/BUILDING.md says how to
-    # patch the tree).
+    # as is: PatchLibgit2.cmake isn't run, so its changes are missing
+    # unless that tree has them (configure warns about each group of
+    # fixes below, and test_libgit2_features fails; docs/BUILDING.md
+    # says how to patch the tree).
     # The patch script's hash is part of the command, so editing the
     # script re-runs it in existing build directories too.
     set(_patch ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/PatchLibgit2.cmake)
@@ -188,6 +194,20 @@ function(gitbolt_add_bundled_libgit2)
             "macros copied into every rule); run cmake -P ${_patch} in that directory")
     endif()
 
+    # And the fixes for objects cut short, from libgit2's main branch,
+    # which were read forever: the tests of those skip without them.
+    file(READ ${libgit2_SOURCE_DIR}/src/util/zstream.c _zstream_c)
+    file(READ ${libgit2_SOURCE_DIR}/src/libgit2/delta.c _delta_c)
+    if(_zstream_c MATCHES "if \\(!out_written && zstream->zerr == Z_BUF_ERROR\\)"
+       AND _delta_c MATCHES "if \\(stream->curpos == curpos\\)")
+        target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_TRUNCATION_PATCHED)
+    else()
+        message(WARNING "bundled libgit2: ${libgit2_SOURCE_DIR} lacks "
+            "cmake/PatchLibgit2.cmake's fixes for objects cut short (a loose object or "
+            "a packed delta whose data ends early was read forever); run cmake -P "
+            "${_patch} in that directory")
+    endif()
+
     # Say so at configure time, not as an #error deep in the build: a
     # Unix libgit2 with nanosecond times needs one of these fields.
     if(NOT WIN32 AND USE_NSEC AND NOT (HAVE_STRUCT_STAT_ST_MTIM OR HAVE_STRUCT_STAT_ST_MTIMESPEC
@@ -230,27 +250,88 @@ function(gitbolt_add_bundled_libgit2)
     # crypt32, rpcrt4, ole32, secur32, ws2_32 on Windows) as its link
     # interface, but its headers only as an install-time interface.
     # SYSTEM, like any installed libgit2's headers.
+    # Help › About tells a build of this libgit2 from one of a system copy
+    # (gitbolt::git::libgit2VersionDescription()). The C++ side's name for
+    # what the GITBOLT_BUNDLED_LIBGIT2 option chose: an #ifdef of the
+    # option's own name would always be false there.
+    target_compile_definitions(gitbolt_libgit2 INTERFACE GITBOLT_LIBGIT2_BUNDLED)
     target_link_libraries(gitbolt_libgit2 INTERFACE libgit2package)
     target_include_directories(gitbolt_libgit2 SYSTEM INTERFACE
         ${libgit2_SOURCE_DIR}/include)
+endfunction()
+
+include(Libgit2Floor)
+
+# What a system libgit2 lacks: cmake/PatchLibgit2.cmake's fixes, each a
+# way a repository could crash or freeze GitBolt. Configure lists them.
+# (No item may hold a ';': list(JOIN) would split it.)
+set(_gitbolt_libgit2_unpatched
+    "a crash, and then a stale config, when .git/config changes and can't be read again"
+    "crashes on config lines with no value (in .gitmodules, a remote's or a branch's section, merge settings)"
+    "a submodule whose path leads back out of its superproject (a crash on opening)"
+    "a .gitattributes or .gitignore pattern that never finishes matching (a freeze)"
+    "a tree nested thousands of levels deep (all memory, or a crash in the File Tree)"
+    "attribute macros that take gigabytes of memory")
+
+function(gitbolt_check_system_libgit2 version)
+    set(_missing_list ${_gitbolt_libgit2_unpatched})
+    # libgit2 2.0 has the two fixes for objects cut short already.
+    if(NOT version OR version VERSION_LESS 2.0.0)
+        list(APPEND _missing_list "an object cut short, read forever (a freeze)")
+    endif()
+    if(NOT version)
+        set(version "of unknown version")
+    endif()
+    gitbolt_libgit2_version_ok("${version}" _ok)
+    if(NOT _ok)
+        if(NOT GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2)
+            message(FATAL_ERROR "libgit2: the system libgit2 (${GITBOLT_LIBGIT2_PROVIDER}) "
+                "is ${version}, without libgit2's fixes for CVE-2026-53584 (a submodule "
+                "path that leads out of the work tree) and CVE-2026-53585 (a delta that "
+                "allocates without bound), which came in 1.9.5 and 1.8.6. Configure with "
+                "-DGITBOLT_BUNDLED_LIBGIT2=ON, the default for a new build directory, to "
+                "build the pinned, patched ${GITBOLT_LIBGIT2_VERSION}; or upgrade that "
+                "libgit2 and configure again. One whose distribution backported those "
+                "fixes: -DGITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2=ON.")
+        endif()
+        message(WARNING "libgit2: system ${version} is older than 1.9.5; taken as having "
+            "the fixes for CVE-2026-53584 and CVE-2026-53585 backported "
+            "(GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2)")
+    endif()
+    list(JOIN _missing_list "\n  - " _missing)
+    message(WARNING "libgit2: system ${version} (${GITBOLT_LIBGIT2_PROVIDER}), without "
+        "cmake/PatchLibgit2.cmake's fixes for repositories that crash or freeze "
+        "GitBolt:\n  - ${_missing}\nBuilds you hand out should use the bundled "
+        "libgit2 (-DGITBOLT_BUNDLED_LIBGIT2=ON, the default).")
 endfunction()
 
 set(GITBOLT_LIBGIT2_PROVIDER "")
 if(NOT GITBOLT_BUNDLED_LIBGIT2)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
+        # Asked again at every configure: pkg_check_modules keeps what it
+        # found in the cache, and an upgraded libgit2 (its version, its
+        # new paths) wasn't seen in a build directory that had the old.
+        unset(__pkg_config_checked_LIBGIT2 CACHE)
         pkg_check_modules(LIBGIT2 IMPORTED_TARGET libgit2)
     endif()
     if(TARGET PkgConfig::LIBGIT2)
         target_link_libraries(gitbolt_libgit2 INTERFACE PkgConfig::LIBGIT2)
         set(GITBOLT_LIBGIT2_PROVIDER "pkg-config")
+        set(_gitbolt_system_libgit2 "${LIBGIT2_VERSION}")
     else()
         find_package(libgit2 CONFIG QUIET)
         if(TARGET libgit2::libgit2package)
             target_link_libraries(gitbolt_libgit2 INTERFACE libgit2::libgit2package)
             set(GITBOLT_LIBGIT2_PROVIDER "CMake package")
+            set(_gitbolt_system_libgit2 "${libgit2_VERSION}")
         else()
-            message(STATUS "No system libgit2 found; using the bundled one")
+            # OFF is asked for now (the default is ON), so no download in
+            # its place.
+            message(FATAL_ERROR "libgit2: GITBOLT_BUNDLED_LIBGIT2 is OFF, but neither "
+                "pkg-config nor libgit2's CMake package found a system libgit2. Install "
+                "one (1.9.5 or later), or configure with -DGITBOLT_BUNDLED_LIBGIT2=ON, "
+                "the default, to build the pinned, patched ${GITBOLT_LIBGIT2_VERSION}.")
         endif()
     endif()
 endif()
@@ -259,6 +340,5 @@ if(NOT GITBOLT_LIBGIT2_PROVIDER)
     set(GITBOLT_LIBGIT2_PROVIDER "bundled")
     message(STATUS "libgit2: bundled ${GITBOLT_LIBGIT2_VERSION} (static)")
 else()
-    message(STATUS "libgit2: system (${GITBOLT_LIBGIT2_PROVIDER}), "
-        "without cmake/PatchLibgit2.cmake's config fixes")
+    gitbolt_check_system_libgit2("${_gitbolt_system_libgit2}")
 endif()
