@@ -1931,6 +1931,53 @@ private slots:
 #endif
     }
 
+    // A folder whose path holds a control character, as a cloned
+    // repository's submodule path can (git takes a Tab in one), opened
+    // with GIT_DIR as it was. Typed in the `cd`, bash's Tab completed
+    // inside the quotes and left the next command in an open quote. The
+    // shell is started again in the folder instead, with a new GIT_DIR
+    // too.
+    void ptyCdOfAPathWithAControlCharacterStartsTheShellThere_data()
+    {
+        QTest::addColumn<bool>("bare");
+        QTest::newRow("GIT_DIR as it was") << false;
+        QTest::newRow("a new GIT_DIR") << true;
+    }
+
+    void ptyCdOfAPathWithAControlCharacterStartsTheShellThere()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        QFETCH(bool, bare);
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        const QString folder = dirs.filePath(QStringLiteral("sub\tdir"));
+        QVERIFY(QDir().mkpath(folder));
+        QFile marker(QDir(folder).filePath(QStringLiteral("gbmarker")));
+        QVERIFY(marker.open(QIODevice::WriteOnly));
+        marker.close();
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const QString gitDir = bare ? dirs.filePath(QStringLiteral("bare.git")) : QString();
+        QVERIFY2(prompted(terminal, [&] { terminal.changeRepository(folder, gitDir); }),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("test -f gbmarker && echo gb\"\"in || echo gb\"\"out")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(rows(terminal).contains(QStringLiteral("gbin")), qPrintable(terminal.toPlainText()));
+        QVERIFY2(typed(terminal, QStringLiteral("echo \"gbdir[${GIT_DIR-unset}]\"")),
+                 qPrintable(terminal.toPlainText()));
+        const QString expected = QStringLiteral("gbdir[%1]")
+                                     .arg(bare ? gitDir : QStringLiteral("unset"));
+        QVERIFY2(rows(terminal).contains(expected), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
     // A command typed ahead, with its Enter, while another runs, and a
     // bare repository opened meanwhile. Once the command ends, the line
     // typed ahead runs, and the change goes in after it. The Ctrl+C ahead
