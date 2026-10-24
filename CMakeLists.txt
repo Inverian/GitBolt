@@ -15,7 +15,7 @@ endif()
 
 # Oldest macOS the app runs on. Unset, the binary targets the build
 # machine's SDK (macOS 26 on CI), whatever Info.plist says. 13.0 is the
-# minos of the Qt 6.10 frameworks CI ships (aqt), so nothing in the
+# minos of the Qt 6.11 frameworks CI ships (aqt), so nothing in the
 # bundle needs more; LSMinimumSystemVersion is generated from this same
 # variable (src/app/platform/macos/Info.plist.in). Must precede
 # project(), whose compiler checks use it. CMAKE_HOST_APPLE because

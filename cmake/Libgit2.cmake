@@ -25,7 +25,10 @@
 # ============================================================================
 
 # GitHub's source tarball for the tag; bump the version and the hash
-# together (shasum -a 256 of the downloaded .tar.gz).
+# together (shasum -a 256 of the downloaded .tar.gz). The weekly
+# dependency check (tools/check-ci-pins.py) reports a newer release of
+# this series, and libgit2's security advisories published after:
+# check-ci-pins: libgit2/libgit2 advisories reviewed 2026-10-24
 set(GITBOLT_LIBGIT2_VERSION 1.9.7)
 set(GITBOLT_LIBGIT2_SHA256
     1a4fbe7589e814777ae76b64734ad80f4ecad22cd33a22682a2aaea4ae5375e7)

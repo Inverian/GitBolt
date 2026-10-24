@@ -48,31 +48,171 @@ jobs:
     # inherits this. The docker DEB smoke passes it on with -e.
     env:
       GITBOLT_TELEMETRY: '0'
+      # The Qt every leg builds, tests and ships (Install Qt below). An
+      # exact version, so a Qt patch release can't change what ships
+      # without a commit. >= 6.9.2: older FindWrapOpenGL.cmake falls
+      # back to a hard-coded `-framework AGL`, which current macOS SDKs
+      # no longer ship. 6.11: 6.10 gets no more fixes. 6.11's own
+      # open-source support ended 2026-09-30, but its 6.11.3 has the
+      # October QtNetwork and QJsonDocument fixes (CVE-2026-96432,
+      # CVE-2026-101201) that 6.12.0 doesn't; move on with 6.12.1.
+      # check-ci-pins: accept qt-eol-6.11 until 2026-12-15
+      CI_QT_VERSION: '6.11.3'
 
     steps:
       # v7 = node24. Its fork-PR guard only affects pull_request_target /
       # workflow_run, and it was already backported to the v4.4.0 we ran.
       - uses: actions/checkout@v7
 
-      # qtsvg/qtdeclarative/qttools ship in the default Qt 6 desktop
-      # install; the `modules:` input is only for ADDON modules
-      # (qtcharts, qtwebengine, ...) and rejects base-archive names
-      # like 'qtbase', so we don't pass it at all.
-      # Third-party action, so pinned to a commit: its v4 is a branch that
-      # moves with every release. (GitHub's own actions/* stay on major
-      # tags; the same vendor ships the runner image they run on.) Qt and
-      # aqtinstall are exact versions, so a Qt patch release can't change
-      # what ships without a commit. tools/check-ci-pins.py follows this
-      # pin too.
-      - name: Install Qt
-        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+      # ------------------------------------------------------------------
+      # Qt, by aqtinstall from Qt's online repository (download.qt.io,
+      # which the official installer reads), with nothing installed by
+      # version range or without a hash check. jurplel/install-qt-action did this
+      # through 0.9.8, and pip-installed aqtinstall and some 24 packages by
+      # version range, without hashes, on every run, cache hits too:
+      # py7zr 1.1.0 among them, with its path traversal (CVE-2026-23879).
+      #   Python: an exact version, one the runner images have. 3.14
+      #     also stops zipfile.is_zipfile from taking some Qt .7z
+      #     archives for zips (miurahr/aqtinstall#1042).
+      #   Packages: .github/qt-requirements.txt, each with its sha256,
+      #     wheels only, into a venv of their own (the .in file next to
+      #     it says how to refresh it).
+      #   aqtinstall: a commit, as no release reads Qt 6.11's Windows
+      #     packages yet (see the .in file). git checks what it fetches
+      #     against the commit's hash, and pip builds it with no index,
+      #     from the locked setuptools.
+      #   Qt's archives: aqt checks each against the SHA-256 that
+      #     download.qt.io publishes for it, never a mirror's.
+      # All of that only on a cache miss: a hit restores the Qt tree and
+      # runs no Python. The key covers what shapes that tree: the Qt
+      # version, both requirements files, and -aqt1 for Install Qt's
+      # command (bump it when that changes: other modules, another
+      # arch). The cache is saved once Qt environment has checked the
+      # tree, so a broken install is never kept, and before the build, so
+      # a later failure doesn't waste the download.
+      # A pull request can read main's cache but writes only its own, so
+      # pushes to main restore only what a push to main installed.
+      # GitHub's own actions are pinned to commits on this path too, as
+      # install-qt-action pinned the setup-python and cache code it ran.
+      # tools/check-ci-pins.py follows every commit pin in this file.
+      #
+      # setup-python is also the Python Configure finds (Python3_ROOT_DIR)
+      # for the e2e and Nautilus tests, as install-qt-action's was.
+      # v7.0.0 rather than v7.1.0 (2026-10-22), which hasn't been out the
+      # two weeks the Python lock waits for too.
+      # check-ci-pins: accept setup-python-v7.1.0 until 2026-11-07
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          # >= 6.9.2: older FindWrapOpenGL.cmake falls back to a hard-coded
-          # `-framework AGL`, which current macOS SDKs no longer ship.
-          # Not 6.11 yet: aqtinstall 3.3.0 can't read its Windows metadata.
-          version: '6.10.3'
-          aqtversion: '==3.3.0'
-          cache: true    # Cache Qt between runs (~1.5 GB save)
+          python-version: '3.14.8'
+
+      - name: Restore Qt
+        id: qt
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.workspace }}/Qt
+          key: qt-${{ env.CI_QT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-aqt1-${{ hashFiles('.github/qt-requirements.in', '.github/qt-requirements.txt') }}
+
+      # aqt's default desktop install: qtbase, qtsvg, qtdeclarative,
+      # qttools (LinguistTools, macdeployqt, windeployqt) and
+      # qttranslations, plus qtwayland and ICU on Linux. --modules is
+      # only for add-ons, so none are named.
+      - name: Install Qt
+        if: steps.qt.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        shell: bash
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          QT_DIR: ${{ runner.workspace }}/Qt
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)   host=linux   arch=linux_gcc_64 ;;
+            macOS)   host=mac     arch=clang_64 ;;
+            Windows) host=windows arch=win64_msvc2022_64 ;;
+            *)       echo "::error::unexpected RUNNER_OS '$RUNNER_OS'"; exit 1 ;;
+          esac
+          # The aqtinstall commit is named once, in the file the lock
+          # was compiled from. tr: a Windows checkout ends lines with
+          # CRLF, and Git Bash's sed keeps the CR.
+          commit=$(tr -d '\r' < .github/qt-requirements.in |
+                   sed -nE 's|^aqtinstall @ git\+https://github\.com/miurahr/aqtinstall@([0-9a-f]{40})$|\1|p')
+          [[ $commit =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "::error::need exactly one aqtinstall commit in .github/qt-requirements.in"; exit 1; }
+
+          # A venv of its own: the Python the tests use stays as it was.
+          "$PYTHON" -I -m venv "$RUNNER_TEMP/aqt-venv"
+          if [ "$RUNNER_OS" = Windows ]; then py=$RUNNER_TEMP/aqt-venv/Scripts/python.exe
+          else py=$RUNNER_TEMP/aqt-venv/bin/python; fi
+          pip=("$py" -I -m pip --isolated --disable-pip-version-check --no-input)
+          "${pip[@]}" install --require-hashes --only-binary :all: -r .github/qt-requirements.txt
+
+          # git checks every object it fetches against the commit's hash.
+          src=$RUNNER_TEMP/aqtinstall
+          git init -q "$src"
+          for i in 1 2 3; do
+            git -C "$src" fetch -q --depth 1 https://github.com/miurahr/aqtinstall "$commit" && break
+            [ "$i" = 3 ] && { echo "::error::could not fetch aqtinstall $commit"; exit 1; }
+            sleep $((i * 10))
+          done
+          git -C "$src" -c advice.detachedHead=false checkout -q FETCH_HEAD
+          [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] \
+            || { echo "::error::fetched aqtinstall is not $commit"; exit 1; }
+          # No index: its build requirements are the locked ones above.
+          # The version only shows in aqt's log; setuptools-scm would
+          # need tags, which a shallow fetch doesn't have.
+          SETUPTOOLS_SCM_PRETEND_VERSION=3.3.1.dev0+g${commit:0:12} \
+            "${pip[@]}" install --no-deps --no-build-isolation --no-index "$src"
+          "${pip[@]}" check
+
+          # -I: nothing in the checkout or the environment can stand in
+          # for aqt's modules. RUNNER_TEMP: aqt writes aqtinstall.log
+          # into the working directory.
+          cd "$RUNNER_TEMP"
+          "$py" -I -m aqt install-qt "$host" desktop "$CI_QT_VERSION" "$arch" --outputdir "$QT_DIR"
+
+      # What later steps take from the Qt install: its bin/ on PATH
+      # (CMake finds Qt6 through it, and the Windows tests load the Qt
+      # DLLs from it), QT_ROOT_DIR (Build AppImage's qmake) and, on
+      # Linux, LD_LIBRARY_PATH (linuxdeploy and the DEB's dpkg-shlibdeps
+      # resolve Qt's libraries through it). install-qt-action also
+      # exported QT_PLUGIN_PATH, QML2_IMPORT_PATH and PKG_CONFIG_PATH,
+      # which nothing here needs: Qt finds its plugins next to the
+      # QtCore it loads, and a package missing a plugin can no longer
+      # borrow this Qt's during its smoke test. qmake must report the
+      # version asked for, so a cache that holds another Qt fails here.
+      - name: Qt environment
+        shell: bash
+        env:
+          QT_DIR: ${{ runner.workspace }}/Qt
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Linux)   dir=gcc_64      qmake=qmake ;;
+            macOS)   dir=macos       qmake=qmake ;;
+            Windows) dir=msvc2022_64 qmake=qmake.exe ;;
+          esac
+          root=$QT_DIR/$CI_QT_VERSION/$dir
+          if [ "$RUNNER_OS" = Windows ]; then root=$(cygpath -u "$root"); fi
+          v=$("$root/bin/$qmake" -query QT_VERSION | tr -d '\r') || v=
+          [ "$v" = "$CI_QT_VERSION" ] \
+            || { echo "::error::$root/bin/$qmake reports Qt '$v', expected $CI_QT_VERSION"; exit 1; }
+          # Native paths on Windows, like Path's other entries
+          native() { if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+          native "$root/bin" >> "$GITHUB_PATH"
+          echo "QT_ROOT_DIR=$(native "$root")" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$root/lib" >> "$GITHUB_ENV"
+          fi
+          echo "Qt $v in $(native "$root")"
+
+      - name: Save Qt
+        if: steps.qt.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.workspace }}/Qt
+          key: ${{ steps.qt.outputs.cache-primary-key }}
 
       # Ninja is preinstalled on every GitHub-hosted image in the matrix
       # (ubuntu: /usr/local/bin, macOS: Homebrew, Windows: Chocolatey bin,
@@ -129,12 +269,22 @@ jobs:
       # Linux only. No libgit2-dev: libgit2 is built from source on every
       # platform (below). libgl1-mesa-dev: Qt6::Gui links OpenGL on
       # Linux, and the aqt Qt binaries expect the system GL headers/libs
-      # at link time.
+      # at link time. The rest is what install-qt-action installed for
+      # Qt 6.5 and later, all of it, as before: what the Qt plugins we
+      # ship link (libqxcb.so: xcb-cursor, xkbcommon-x11, ...), which
+      # the deploy script, linuxdeploy and the DEB's dpkg-shlibdeps must
+      # find on this runner (the DEB smoke test checks Depends for
+      # libxcb-cursor0).
       - name: Install build dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libgl1-mesa-dev
+          sudo apt-get install -y pkg-config libgl1-mesa-dev \
+            build-essential libgstreamer-gl1.0-0 libpulse-dev \
+            libxcb-glx0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-render0 libxcb-shape0 libxcb-shm0 \
+            libxcb-sync1 libxcb-util1 libxcb-xfixes0 libxcb-xinerama0 libxcb1 \
+            libxkbcommon-dev libxkbcommon-x11-0 libxcb-xkb-dev libxcb-cursor0
 
       # ------------------------------------------------------------------
       # Configure, build, test. Ninja on every platform, and
@@ -381,8 +531,9 @@ jobs:
       # macdeployqt (Qt into the bundle; libgit2 is linked statically),
       # then src/app/platform/macos/FinalizeBundle.cmake deletes LC_RPATHs
       # that point outside the bundle, fails on libraries that aren't in
-      # it, and re-signs ad hoc and verifies: Qt 6.10's macdeployqt strips
-      # and renames without re-signing, which Gatekeeper reports as
+      # it, and re-signs ad hoc and verifies: macdeployqt strips and
+      # renames, and the rpath edits change binaries it signed (ad-hoc
+      # signing is its default since 6.11), which Gatekeeper reports as
       # "damaged".
       # hdiutil fails intermittently with "Resource busy" on hosted macOS
       # runners (actions/runner-images#7522), so retry the whole cpack run,
@@ -675,11 +826,12 @@ jobs:
           }
 
           # 4) Launch the INSTALLED exe with PATH = System32 only and no Qt
-          #    env vars (install-qt-action put Qt\bin on PATH and exported
-          #    QT_PLUGIN_PATH/QML2_IMPORT_PATH). --version exits after
-          #    QApplication (loads qwindows.dll) and git_libgit2_init,
-          #    before the single-instance guard. Redirected handles + the
-          #    env var stop QCommandLineParser from using a MessageBox.
+          #    env vars (Qt environment put Qt\bin on PATH; the plugin
+          #    path variables go in case the image sets them). --version
+          #    exits after QApplication (loads qwindows.dll) and
+          #    git_libgit2_init, before the single-instance guard.
+          #    Redirected handles + the env var stop QCommandLineParser
+          #    from using a MessageBox.
           $psi = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'GitBolt.exe'), '--version')
           $psi.UseShellExecute = $false
           $psi.RedirectStandardOutput = $true
@@ -740,7 +892,7 @@ jobs:
           LDAI_NO_APPSTREAM: '1'
         run: |
           set -euo pipefail
-          # install-qt-action v4 exports QT_ROOT_DIR, never Qt6_DIR.
+          # QT_ROOT_DIR: from Qt environment, above.
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           [ -x "$QMAKE" ] || { echo "::error::qmake not found at $QMAKE"; exit 1; }
           export LINUXDEPLOY_OUTPUT_VERSION="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
@@ -894,7 +1046,8 @@ jobs:
                 grep -qx "GitBolt $VER" <<<"$out"'
           done
 
-          # 3) AppImage on the runner with install-qt-action's env removed
+          # 3) AppImage on the runner without the Qt install's
+          #    LD_LIBRARY_PATH (or any Qt plugin path the image might set)
           chmod +x "$appimage"
           out=$(env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
                   APPIMAGE_EXTRACT_AND_RUN=1 GITBOLT_INSTANCE_NAME=ci-smoke \

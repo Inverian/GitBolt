@@ -25,10 +25,11 @@
 #    i.e. than LSMinimumSystemVersion (Homebrew's Qt; CI's aqt Qt fits).
 # 4. Re-signs ad hoc and verifies. macdeployqt strips every framework
 #    and dylib it copies and rewrites their install names, which
-#    invalidates their signatures (as does step 1), and Qt 6.10's
-#    macdeployqt does not re-sign (ad-hoc signing became its default
-#    only in 6.11, QTBUG-138019). An invalid signature is what
-#    Gatekeeper shows as "GitBolt is damaged".
+#    invalidates their signatures (as does step 1). macdeployqt signs
+#    ad hoc by default since Qt 6.11 (QTBUG-138019), but step 1 still
+#    changes binaries after it, and a Qt before 6.11 doesn't sign at
+#    all. An invalid signature is what Gatekeeper shows as "GitBolt is
+#    damaged".
 
 # cmake_install.cmake sets no policy version. 3.21 is the project's:
 # IN_LIST (CMP0057), and GLOB_RECURSE not following symlinks (CMP0009),

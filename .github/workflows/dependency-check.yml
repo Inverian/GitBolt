@@ -1,0 +1,52 @@
+name: Dependency check
+
+# Weekly: is everything the builds pin still current (libgit2, Qt, NSIS,
+# what installs Qt, the packaging tools and pinned actions), and has
+# libgit2, git, Git for Windows, Git LFS or a locked Python package a
+# security advisory not yet read? tools/check-ci-pins.py does the work,
+# and runs the same way locally. It exits 1 when something is behind or
+# has an advisory and 2 when something couldn't be checked (a source
+# that didn't answer mustn't pass for all clear); either fails this run,
+# and a failed scheduled run is GitHub's email to the owner.
+#   Run it now: gh workflow run dependency-check.yml
+on:
+  schedule:
+    # Mondays 06:17 UTC: off the hour, when GitHub's scheduler queues
+    # the most runs and drops some.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Upstream only, matched by repository ID as ci.yml's Configure step
+    # does: a fork that turns its Actions on doesn't get our mail.
+    if: github.repository_id == '1380838933'
+    runs-on: ubuntu-24.04
+    # A normal run takes about a minute; a source that hangs is tried
+    # three times before it's reported as not checked.
+    timeout-minutes: 15
+    steps:
+      # Pinned to a commit, though ci.yml keeps GitHub's own actions on
+      # major tags: this is the job that watches pins, and
+      # tools/check-ci-pins.py follows this one too.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The image's python3; the script needs only the standard library.
+      # Its ::warning/::error lines become annotations, and the report
+      # goes to the run's summary as well.
+      - name: Check pins and advisories
+        env:
+          # Rate limits only: every request reads public data.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 tools/check-ci-pins.py > report.txt
+          status=$?
+          cat report.txt
+          { echo '```'; grep -v '^::' report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

@@ -36,7 +36,7 @@ The Mac and Windows instructions are intentionally kept as parallel as possible.
 > **Qt on macOS:** with a current Xcode SDK, Qt before 6.9.2 fails to link
 > (`ld: framework 'AGL' not found`) because its CMake package still requests
 > the AGL framework, which the SDK no longer ships. Homebrew's `qt` is well
-> past that; CI uses Qt 6.10 everywhere.
+> past that; CI uses Qt 6.11 everywhere.
 | Ninja | any recent | Homebrew | Qt installer or [ninja-build.org](https://ninja-build.org/) |
 | Git | 2.30+ (to build and run the tests; the app needs 2.25) | Apple CLT (already installed) | [git-scm.com](https://git-scm.com/download/win) |
 
@@ -50,7 +50,7 @@ A working install on either platform takes **10–20 minutes** including downloa
 
 These instructions are tested on **macOS 14 (Sonoma) and macOS 15 (Sequoia)** on both Apple Silicon and Intel.
 
-What you build targets **macOS 13 (Ventura)** or later: `CMAKE_OSX_DEPLOYMENT_TARGET` defaults to `13.0`, the oldest macOS supported by the Qt 6.10 that release builds ship with, and the app's `LSMinimumSystemVersion` is generated from it. Homebrew's own bottles (Qt, libgit2) are built for newer macOS releases, so a DMG you package against them only runs on macOS versions as new as theirs; `cpack` warns when that happens (see [Build options](#build-options)).
+What you build targets **macOS 13 (Ventura)** or later: `CMAKE_OSX_DEPLOYMENT_TARGET` defaults to `13.0`, the oldest macOS supported by the Qt 6.11 that release builds ship with, and the app's `LSMinimumSystemVersion` is generated from it. Homebrew's own bottles (Qt, libgit2) are built for newer macOS releases, so a DMG you package against them only runs on macOS versions as new as theirs; `cpack` warns when that happens (see [Build options](#build-options)).
 
 ### 1. Install Xcode Command Line Tools
 
@@ -185,8 +185,8 @@ Qt does not have an official Windows package manager equivalent to Homebrew. Use
 2. Run the installer. You'll need to create a free Qt account (or use an existing one) — Qt requires this for the open-source download.
 3. Choose **Custom installation**.
 4. Select these components:
-   - **Qt → Qt 6.10.x → MSVC 2022 64-bit** (Qt 6.8 and later ship only MSVC 2022 builds for x64; CI uses 6.10)
-   - **Qt → Qt 6.10.x → Sources** (optional, but useful for debugging)
+   - **Qt → Qt 6.11.x → MSVC 2022 64-bit** (Qt 6.8 and later ship only MSVC 2022 builds for x64; CI uses 6.11)
+   - **Qt → Qt 6.11.x → Sources** (optional, but useful for debugging)
    - **Developer and Designer Tools → CMake** (skip if you already installed CMake via VS)
    - **Developer and Designer Tools → Ninja**
 5. Accept the open-source license and click **Install**. Expect ~1.5 GB download.
@@ -224,7 +224,7 @@ So CMake can find Qt (and vcpkg, for a system libgit2), set these environment va
 
 | Variable | Value |
 |---|---|
-| `CMAKE_PREFIX_PATH` | `C:\Qt\6.10.3\msvc2022_64` (adjust version) |
+| `CMAKE_PREFIX_PATH` | `C:\Qt\6.11.3\msvc2022_64` (adjust version) |
 | `VCPKG_ROOT` | `C:\vcpkg` (system libgit2 only) |
 
 (Alternatively, pass `-DCMAKE_PREFIX_PATH` and `-DCMAKE_TOOLCHAIN_FILE` on the command line at configure time — see [Building](#building).)
@@ -267,7 +267,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja
 > On Windows, if you didn't set `CMAKE_PREFIX_PATH` and `VCPKG_ROOT` as environment variables, pass them explicitly (the vcpkg toolchain file only for a system libgit2):
 > ```cmd
 > cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja ^
->   -DCMAKE_PREFIX_PATH=C:\Qt\6.10.3\msvc2022_64 ^
+>   -DCMAKE_PREFIX_PATH=C:\Qt\6.11.3\msvc2022_64 ^
 >   -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
 > ```
 
