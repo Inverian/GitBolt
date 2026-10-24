@@ -226,14 +226,14 @@ private slots:
         QVERIFY(settings.usageStatisticsEnabled());
     }
 
-    // DO_NOT_TRACK or GITBOLT_TELEMETRY turned statistics off for this
-    // session: the switch can't say otherwise, and Apply leaves the
-    // stored preference alone.
+    // GITBOLT_TELEMETRY turned statistics off for this session: the
+    // switch can't say otherwise, and Apply leaves the stored
+    // preference alone.
     void environmentLockDisablesTheSwitch() {
         SettingsService settings;
         SettingsDialog dialog(&settings, nullptr);
         const QString reason =
-            QStringLiteral("Turned off by the DO_NOT_TRACK environment variable.");
+            QStringLiteral("Turned off by the GITBOLT_TELEMETRY environment variable.");
         dialog.setUsageStatistics(true, reason);
 
         auto* check = child<QCheckBox>(dialog, "settings.usage-statistics");

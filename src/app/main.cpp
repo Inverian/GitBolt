@@ -476,7 +476,7 @@ int main(int argc, char* argv[]) {
 
     // Usage statistics (src/telemetry, PRIVACY.md). One gate, evaluated
     // once, here: no endpoints compiled in, a test session, or an
-    // opt-out (DO_NOT_TRACK, GITBOLT_TELEMETRY, the Settings switch)
+    // opt-out (GITBOLT_TELEMETRY, the Settings switch)
     // keeps this session from sending. The queue lives next to
     // GitBolt.ini, so whatever isolates the INI (XDG_CONFIG_HOME, a
     // test's QSettings::setPath) isolates the queue too.

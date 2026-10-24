@@ -6,6 +6,14 @@ semver once 1.0 lands.
 
 ## [Unreleased]
 
+### Changed
+
+- **`DO_NOT_TRACK` no longer turns usage statistics off.** Turn them
+  off in **Tools › Settings › General**, or with the environment
+  variable `GITBOLT_TELEMETRY=0`. If you turned them off with
+  `DO_NOT_TRACK` alone, GitBolt sends them after this update until you
+  do one of those.
+
 ### Fixed
 
 - **Opening a submodule or a worktree**: Repository › Manage

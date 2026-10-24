@@ -121,7 +121,7 @@ gate the session runs under: `compiled-out` in a build without
 endpoints (any build configured without `GITBOLT_TELEMETRY_*`),
 `inert:test-bridge` in one with them;
 the other values are `inert:instance-name`, `inert:headless`,
-`inert:ci`, `off:do-not-track`, `off:env`, `off:setting` and `on`.
+`inert:ci`, `off:env`, `off:setting` and `on`.
 `telemetryIfConfigured` is the gate the same session would get with
 endpoints compiled in. Neither is ever `on` under the bridge
 (`tests/e2e/test_telemetry_inert.py`). Address the Settings switch as

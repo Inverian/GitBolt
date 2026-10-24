@@ -45,9 +45,8 @@ jobs:
     # Never send usage statistics from CI, on top of the app's own rule
     # that test, instance-named and CI sessions are inert
     # (src/telemetry/TelemetryGate.h): every GitBolt this job starts
-    # inherits these. The docker DEB smoke passes them on with -e.
+    # inherits this. The docker DEB smoke passes it on with -e.
     env:
-      DO_NOT_TRACK: '1'
       GITBOLT_TELEMETRY: '0'
 
     steps:
@@ -875,7 +874,7 @@ jobs:
             done
             [ -n "$ref" ] || { echo "::error::could not pull $image from any registry"; exit 1; }
             echo "Pulled $ref"
-            docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e DO_NOT_TRACK -e GITBOLT_TELEMETRY \
+            docker run --rm -v "$PWD/build:/in:ro" -e VER="$ver" -e GITBOLT_TELEMETRY \
               "$ref" \
               bash -euo pipefail -c '
                 export DEBIAN_FRONTEND=noninteractive

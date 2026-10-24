@@ -72,8 +72,6 @@ TestSessionKind detectTestSession(int argc, const char* const* argv,
 }
 
 EnvOptOut detectEnvOptOut(const EnvLookup& env) {
-    if (isSetAndNotFalse(env("DO_NOT_TRACK")))
-        return EnvOptOut::DoNotTrack;
     const QString telemetry = env("GITBOLT_TELEMETRY").value_or(QString()).trimmed();
     for (const char* off : {"0", "false", "off", "no"}) {
         if (telemetry.compare(QLatin1String(off), Qt::CaseInsensitive) == 0)

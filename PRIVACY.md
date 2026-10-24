@@ -137,14 +137,12 @@ the servers do not store IP addresses.
 
 ## How to turn it off
 
-Any one of these turns usage statistics, error reports and crash
+Either of these turns usage statistics, error reports and crash
 reports off:
 
 - In GitBolt, open **Tools › Settings › General** and clear **Send
   usage statistics and crash reports**. Sending stops at once, and any
   events still waiting on your computer are deleted.
-- Set the environment variable `DO_NOT_TRACK=1` (any value except
-  empty, `0` or `false` counts).
 - Set the environment variable `GITBOLT_TELEMETRY=0` (or `false`,
   `off`, `no`).
 

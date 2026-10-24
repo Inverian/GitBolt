@@ -107,7 +107,7 @@ def launch(binary: str, folder: str, env: dict, log: str, new_instance: bool) ->
     if new_instance:
         args.append("-n")
         for key in ("GITBOLT_TEST_BRIDGE", "GITBOLT_INSTANCE_NAME", "TMPDIR",
-                    "XDG_CONFIG_HOME", "HOME", "DO_NOT_TRACK", "GITBOLT_TELEMETRY"):
+                    "XDG_CONFIG_HOME", "HOME", "GITBOLT_TELEMETRY"):
             if key in env:
                 args += ["--env", f"{key}={env[key]}"]
         args += ["--stderr", log]   # where Qt's warnings go

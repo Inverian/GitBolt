@@ -46,12 +46,12 @@ function(gitbolt_add_test test_name source_file)
     # debugger; it also catches hangs outside test functions, such as
     # teardown. No function comes close to 60 s; most binaries take
     # seconds, and the slow ones get a longer TIMEOUT of their own.
-    # DO_NOT_TRACK, GITBOLT_TELEMETRY: belt and braces on top of the
+    # GITBOLT_TELEMETRY: belt and braces on top of the
     # facts that no test binary links the app, where telemetry
     # endpoints live, and that the telemetry tests inject the gate's
     # environment instead of reading this one.
     set_tests_properties(${test_name} PROPERTIES
-        ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000;DO_NOT_TRACK=1;GITBOLT_TELEMETRY=0"
+        ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000;GITBOLT_TELEMETRY=0"
         TIMEOUT 180)
 endfunction()
 

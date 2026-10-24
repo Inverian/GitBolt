@@ -4,8 +4,8 @@
 // src/app, the only place endpoints are compiled into.
 //
 //   - the gate table, injected environment only (ctest and CI set
-//     DO_NOT_TRACK, GITBOLT_TELEMETRY, QT_QPA_PLATFORM and CI in the
-//     real one), and the shared test-session / opt-out predicates
+//     GITBOLT_TELEMETRY, QT_QPA_PLATFORM and CI in the real one), and
+//     the shared test-session / opt-out predicates
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
@@ -231,7 +231,7 @@ private slots:
         const QString cocoa = QStringLiteral("cocoa");
 
         row("no endpoints beats everything", false,
-            {{"GITBOLT_TEST_BRIDGE", "b"}, {"DO_NOT_TRACK", "1"}}, cocoa, true, "compiled-out");
+            {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "compiled-out");
         row("plain user session", true, {}, cocoa, true, "on");
         row("setting off", true, {}, cocoa, false, "off:setting");
 
@@ -240,8 +240,8 @@ private slots:
         // empty value picks the default socket.
         row("empty bridge is still the bridge", true, {{"GITBOLT_TEST_BRIDGE", ""}}, cocoa, true,
             "inert:test-bridge");
-        row("bridge beats DO_NOT_TRACK", true,
-            {{"GITBOLT_TEST_BRIDGE", "b"}, {"DO_NOT_TRACK", "1"}}, cocoa, true,
+        row("bridge beats GITBOLT_TELEMETRY", true,
+            {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true,
             "inert:test-bridge");
         row("bridge beats instance", true,
             {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_INSTANCE_NAME", "i"}}, cocoa, true,
@@ -276,20 +276,14 @@ private slots:
         row("CI empty is unset", true, {{"CI", ""}}, cocoa, true, "on");
         row("CI=false", true, {{"CI", "false"}}, cocoa, true, "on");
         row("CI=0", true, {{"CI", "0"}}, cocoa, true, "on");
-        row("CI beats DO_NOT_TRACK", true, {{"CI", "1"}, {"DO_NOT_TRACK", "1"}}, cocoa, true,
-            "inert:ci");
+        row("CI beats GITBOLT_TELEMETRY", true, {{"CI", "1"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa,
+            true, "inert:ci");
 
-        row("DO_NOT_TRACK=1", true, {{"DO_NOT_TRACK", "1"}}, cocoa, true, "off:do-not-track");
-        row("DO_NOT_TRACK=yes", true, {{"DO_NOT_TRACK", "yes"}}, cocoa, true,
-            "off:do-not-track");
-        row("DO_NOT_TRACK=0 doesn't opt out", true, {{"DO_NOT_TRACK", "0"}}, cocoa, true, "on");
-        row("DO_NOT_TRACK=false doesn't opt out", true, {{"DO_NOT_TRACK", "false"}}, cocoa, true,
-            "on");
-        row("DO_NOT_TRACK empty is unset", true, {{"DO_NOT_TRACK", ""}}, cocoa, true, "on");
-        row("DO_NOT_TRACK beats the setting", true, {{"DO_NOT_TRACK", "1"}}, cocoa, false,
-            "off:do-not-track");
-        row("DO_NOT_TRACK beats GITBOLT_TELEMETRY", true,
-            {{"DO_NOT_TRACK", "1"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "off:do-not-track");
+        // DO_NOT_TRACK is no opt-out: the Settings switch and
+        // GITBOLT_TELEMETRY are.
+        row("DO_NOT_TRACK=1 is ignored", true, {{"DO_NOT_TRACK", "1"}}, cocoa, true, "on");
+        row("DO_NOT_TRACK leaves the setting to decide", true, {{"DO_NOT_TRACK", "1"}}, cocoa,
+            false, "off:setting");
 
         row("GITBOLT_TELEMETRY=0", true, {{"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "off:env");
         row("GITBOLT_TELEMETRY=FALSE", true, {{"GITBOLT_TELEMETRY", "FALSE"}}, cocoa, true,
@@ -328,7 +322,7 @@ private slots:
                          gitbolt::util::detectTestSession(platform, arguments, inputs.env)),
                      inert);
             if (!inert) {
-                const bool envOff = gate == Gate::DoNotTrack || gate == Gate::EnvOff;
+                const bool envOff = gate == Gate::EnvOff;
                 QCOMPARE(gitbolt::util::isEnvOptOut(gitbolt::util::detectEnvOptOut(inputs.env)),
                          envOff);
             }
@@ -344,9 +338,8 @@ private slots:
         const Expect table[] = {
             {Gate::CompiledOut, false, false}, {Gate::TestBridge, false, false},
             {Gate::TestInstance, false, false}, {Gate::Headless, false, false},
-            {Gate::Ci, false, false},          {Gate::DoNotTrack, false, true},
-            {Gate::EnvOff, false, true},       {Gate::SettingOff, true, true},
-            {Gate::Active, true, false},
+            {Gate::Ci, false, false},          {Gate::EnvOff, false, true},
+            {Gate::SettingOff, true, true},    {Gate::Active, true, false},
         };
         for (const Expect& e : table) {
             QCOMPARE(createsService(e.gate), e.creates);
