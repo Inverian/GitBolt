@@ -9,9 +9,10 @@ semver once 1.0 lands.
 Mostly a security release: a repository you clone or open, or a server
 you fetch from, could turn several of GitBolt's features against you
 (see Security below). Also: submodules and worktrees open in GitBolt,
-the Console works in bare repositories, a commit whose files can't be
-read says why instead of looking unchanged, and usage statistics have
-a Settings page of their own.
+the Console works in bare repositories where git's
+`safe.bareRepository` is `explicit`, a commit whose files can't be read
+says why instead of looking unchanged, and usage statistics have a
+Settings page of their own.
 
 ### Changed
 
@@ -23,8 +24,8 @@ a Settings page of their own.
 ### Fixed
 
 - **Opening a submodule or a worktree**: Repository › Manage
-  Submodules' "Open in New Window" did nothing, and Manage Worktrees'
-  showed the worktree in Finder or Explorer. Both menus now have Open
+  submodules' "Open in New Window" did nothing, and Manage worktrees'
+  showed the worktree in your file manager. Both menus now have Open
   in GitBolt, which opens the submodule or worktree in the window (a
   submodule that isn't checked out says so), and Open in File
   Explorer, which shows its folder.
@@ -42,7 +43,8 @@ a Settings page of their own.
   `/private/tmp/…` from Terminal, a path through a symlinked folder,
   and on Windows a short (8.3) name, a `subst` or mapped drive, or a
   junction. It is now listed once, under the spelling it was last
-  opened by.
+  opened by; one already listed twice becomes one entry once it has
+  been opened by each spelling again.
 - **More crashes on config lines with no value** (a name and no
   `= value`; see 0.9.7). A line with none in a branch's section of
   `.git/config` (`rebase`, say, which git reads as `true`) crashed
@@ -63,26 +65,21 @@ a Settings page of their own.
   still going for the commit before, where they used to wait for it.
 - **A commit or a working tree that couldn't be read looked
   unchanged.** When git can't read a commit's files (a tree nested
-  past the 2,048-level limit, say), the Stats row, the Diff tab and the
-  File Tree now say why, where the commit looked as if it changed
-  nothing. When the working tree's status can't be read, the toolbar
+  past the 2,048-level limit, say), the Stats row and the Diff tab now
+  say why, where the commit looked as if it changed nothing, and the
+  File Tree's "Failed to load tree" says why too. When the working tree's status can't be read, the toolbar
   shows "Commit (?)" with the reason in its tooltip, the Commit dialog
   says why, and Recent repositories shows "—" instead of what read as
   a clean status; a submodule list that can't be read says so too.
-- **Open Externally on drives that keep no file modes** (FAT, exFAT
-  and NTFS drives, and WSL's `/mnt/c`) asked about every file, since
-  every file there looks executable. It now goes by the mode git has
-  for the file, and by what the file is: a program, or a script your
-  system would run (on macOS one with no extension, or a shell or Perl
-  script, which iTerm2 runs).
 - **Discard and Unstage of a file whose name looks like a pattern**
-  (`*`, `[ab]`, `!x`, or one ending in a space) acted on every file the
-  pattern matched: discarding a file named `*` threw away the changes
-  to all of them. They now act on that one file.
+  (`*`, `[ab]`) acted on every file the pattern matched: discarding a
+  file named `*` threw away the changes to all of them. One whose name
+  ends in a space was left as it was. They now act on that one file.
 - **A commit message or name of one line of megabytes** froze the
-  window while GitBolt laid it out. Such a line is now shown cut, with
-  "…" and a note, in the Commit tab, the log and the other views that
-  show commits; Copy in the log still copies all of it.
+  window while GitBolt laid it out. Such a line is now shown cut,
+  ending in "…", in the Commit tab (which says how long a cut subject
+  or message is), the log and the other views that show commits; Copy
+  in the log still copies all of it.
 
 ### Security
 
@@ -96,10 +93,11 @@ conflict or open a file.
   sidebar's Push, Merge, Rename, Set Upstream, Checkout as local branch
   and Delete from remote, and from the toolbar's Push. In a repository
   whose `origin` is a folder on your disk, a branch could be named so
-  that pushing it ran a program. GitBolt now passes names after git's
-  `--` and pushes branches by their full name, and where that isn't
-  possible it refuses a name that begins with `-` and says why. Rename
-  and Delete from remote still work on such a branch, to get rid of it.
+  that pushing it ran a program. Push, Merge, Set Upstream and Checkout
+  as local branch now refuse a name that begins with `-` and say why,
+  and names reach git after its `--`, with branches pushed by their
+  full name. Rename and Delete from remote still work on such a branch,
+  to get rid of it.
 - **Resolve Conflicts wrote through symbolic links.** When the file in
   conflict was a symbolic link, the resolution was written to wherever
   the link pointed, which could be any file of yours outside the
@@ -112,8 +110,9 @@ conflict or open a file.
   .gitignore, .gitattributes and .mailmap don't open or save one of
   those files when it is a link.
 - **Open Externally ran programs.** On macOS, a file marked executable
-  opens in Terminal and runs, whatever its name (`CHANGELOG`, say), and
-  so does a `.command` file; a cloned repository can contain either.
+  whose name has no extension (`CHANGELOG`, say) opens in Terminal and
+  runs, and so does a `.command` file; a cloned repository can contain
+  either.
   Open Externally now asks before opening a file marked executable or
   of a type that runs, or that opens what it points to (on Windows
   also shell, Python, Ruby and Perl scripts; on a drive that keeps no
@@ -125,9 +124,9 @@ conflict or open a file.
   and never launch an app, and a submodule path that isn't a path in
   the working tree (on Windows, a network path) is refused before
   anything touches it.
-- **Removing a worktree could delete another folder.** Manage
-  Worktrees › Remove deleted whichever folder the worktree's files in
-  `.git` named. Anyone who could write to the repository's `.git`
+- **Removing a worktree could delete another folder.** Repository ›
+  Manage worktrees › Remove deleted whichever folder the worktree's
+  files in `.git` named. Anyone who could write to the repository's `.git`
   folder (a repository handed over as a folder or an archive, or kept
   in a shared folder) could make it delete any folder. GitBolt now
   checks that the worktree links back to the repository, as git does,
@@ -152,8 +151,9 @@ conflict or open a file.
   make it take gigabytes of memory, or, repeated, grow one line without
   end. All are limited now.
 - **Repositories that froze or crashed GitBolt.** A pattern of many
-  `*` in a committed `.gitattributes` or `.gitignore` made selecting a
-  commit (in some repositories, opening one) run forever at full CPU.
+  `*` in a committed `.gitattributes` made selecting a commit run
+  forever at full CPU, and one in `.gitattributes` or `.gitignore`
+  could do the same to opening the repository.
   Patterns now give up after a bounded effort, and the patterns real
   repositories use match as before. A repository whose commits nest
   folders thousands of levels deep used up all memory when GitBolt
