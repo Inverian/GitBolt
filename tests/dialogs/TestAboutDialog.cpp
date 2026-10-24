@@ -14,12 +14,18 @@
 //
 
 #include <QGuiApplication>
+#include <QTemporaryDir>
+#include <QFile>
+#include <QDir>
 #include <QLabel>
 #include <QLayout>
 #include <QScreen>
 #include <QTest>
 
 #include "dialogs/AboutDialog.h"
+#include "git/GitProcess.h"
+#include "git/GitVersion.h"
+#include "../TestProcessHelper.h"
 
 using gitbolt::dialogs::AboutDialog;
 
@@ -91,6 +97,46 @@ private slots:
                  "the dialog no longer fits the screen; the fixture is too short");
         const QStringList clipped = clippedLabels(dlg);
         QVERIFY2(clipped.isEmpty(), qPrintable(clipped.join(QStringLiteral("; "))));
+    }
+
+    // Help › About names the git GitBolt runs and where it is, from the
+    // check at launch (git::probeGit()); as rich text, the path escaped.
+    void showsTheGitItRuns() {
+#ifdef Q_OS_WIN
+        QSKIP("the stand-in git is a shell script, in a folder Windows can't name");
+#else
+        QTemporaryDir bin;
+        QVERIFY(bin.isValid());
+        const QString odd = bin.filePath(QStringLiteral("<i>odd</i>"));
+        QVERIFY(QDir().mkpath(odd));
+        const QString realGit = QString::fromStdString(gitbolt::git::GitProcess::findGitExecutable());
+        QFile standIn(odd + QStringLiteral("/git"));
+        QVERIFY(standIn.open(QIODevice::WriteOnly));
+        standIn.write("#!/bin/sh\nexec '" + QFile::encodeName(realGit) + "' \"$@\"\n");
+        standIn.close();
+        QVERIFY(standIn.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const gitbolt::test::ScopedEnv path("PATH", QFile::encodeName(odd) + ':' + qgetenv("PATH"));
+        const gitbolt::git::GitProbe probe = gitbolt::git::probeGit();
+        QCOMPARE(probe.path, QDir::cleanPath(standIn.fileName()));
+        QVERIFY(probe.version);
+
+        AboutDialog dlg;
+        const QLabel* info = nullptr;
+        for (const QLabel* label : dlg.findChildren<QLabel*>()) {
+            if (label->text().contains(QStringLiteral("<b>git:</b>")))
+                info = label;
+        }
+        QVERIFY(info);
+        QVERIFY2(info->text().contains(probe.version->text.toHtmlEscaped() + QStringLiteral(" at ")),
+                 qPrintable(info->text()));
+        QVERIFY2(info->text().contains(QStringLiteral("&lt;i&gt;odd&lt;/i&gt;/git")), qPrintable(info->text()));
+        QVERIFY(!info->text().contains(QStringLiteral("<i>odd")));
+        // A long path loses its middle rather than widen the dialog.
+        dlg.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dlg));
+        const QStringList clipped = clippedLabels(dlg);
+        QVERIFY2(clipped.isEmpty(), qPrintable(clipped.join(QStringLiteral("; "))));
+#endif
     }
 };
 

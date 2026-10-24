@@ -38,7 +38,7 @@ The Mac and Windows instructions are intentionally kept as parallel as possible.
 > the AGL framework, which the SDK no longer ships. Homebrew's `qt` is well
 > past that; CI uses Qt 6.10 everywhere.
 | Ninja | any recent | Homebrew | Qt installer or [ninja-build.org](https://ninja-build.org/) |
-| Git | 2.30+ | Apple CLT (already installed) | [git-scm.com](https://git-scm.com/download/win) |
+| Git | 2.30+ (to build and run the tests; the app needs 2.25) | Apple CLT (already installed) | [git-scm.com](https://git-scm.com/download/win) |
 
 A working install on either platform takes **10–20 minutes** including downloads. Most of that is Qt itself (~1.5 GB).
 

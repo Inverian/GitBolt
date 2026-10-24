@@ -27,6 +27,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
@@ -399,6 +400,97 @@ private slots:
         refs = remote.serverRefs();
         QVERIFY2(!refs.contains(QStringLiteral("refs/heads/feature/x.y ")), qPrintable(refs));
         QVERIFY2(refs.contains(QStringLiteral("refs/heads/v1 ")), qPrintable(refs));
+    }
+
+    // git is the first one on the PATH its children get, looked up as a
+    // command runs: a GitProcess made before a stand-in comes first on
+    // PATH runs the stand-in, and the real git again once it is gone.
+    void runsTheFirstGitOnThePath()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("the stand-in git is a shell script");
+#else
+        const QString realGit = QString::fromStdString(gitbolt::git::GitProcess::findGitExecutable());
+        QVERIFY(QDir::isAbsolutePath(realGit));
+        QTemporaryDir bin;
+        QVERIFY(bin.isValid());
+        const QString log = bin.filePath(QStringLiteral("ran"));
+        QFile standIn(bin.filePath(QStringLiteral("git")));
+        QVERIFY(standIn.open(QIODevice::WriteOnly));
+        standIn.write("#!/bin/sh\necho \"$1\" >> '" + QFile::encodeName(log) + "'\nexec '"
+                      + QFile::encodeName(realGit) + "' \"$@\"\n");
+        standIn.close();
+        QVERIFY(standIn.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        gitbolt::test::TestRepo repo;
+        const gitbolt::git::GitProcess git(repo.path().toStdString());
+        {
+            const gitbolt::test::ScopedEnv path("PATH", QFile::encodeName(bin.path()) + ':' + qgetenv("PATH"));
+            QCOMPARE(QString::fromStdString(gitbolt::git::GitProcess::findGitExecutable()),
+                     QDir::cleanPath(standIn.fileName()));
+            const auto out = git.run({"status", "--short"});
+            QVERIFY(out.ok() && out->success());
+        }
+        QCOMPARE(QString::fromStdString(gitbolt::git::GitProcess::findGitExecutable()), realGit);
+        QVERIFY(git.run({"status"}).ok());
+        QFile ran(log);
+        QVERIFY(ran.open(QIODevice::ReadOnly));
+        QCOMPARE(ran.readAll(), QByteArray("status\n"));
+#endif
+    }
+
+    // No git: an error that says so, and nothing started. Never a bare
+    // "git", which Windows looks for in the current folder before PATH:
+    // here a git.exe planted there (whoami, renamed) that would have run.
+    void noGitIsAnErrorNotABareName()
+    {
+        // The search itself, everywhere: a PATH and fallbacks with no git
+        // in them find nothing, not "git".
+        QTemporaryDir empty;
+        QVERIFY(empty.isValid());
+        QCOMPARE(gitbolt::git::GitProcess::findGitOnPath(
+                     QDir::toNativeSeparators(empty.path()).toStdString(),
+                     {empty.filePath(QStringLiteral("git")).toStdString()}),
+                 std::string());
+        QCOMPARE(gitbolt::git::GitProcess::findGitOnPath(std::string(), {}), std::string());
+        // And end to end, where no git sits in a fallback folder.
+#ifndef Q_OS_WIN
+        for (const char* fallback : {"/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"}) {
+            if (QFileInfo(QLatin1String(fallback)).isExecutable())
+                QSKIP("a git where GitBolt looks when PATH has none");
+        }
+#endif
+        QTemporaryDir noGit;
+        QTemporaryDir here;
+        QVERIFY(noGit.isValid() && here.isValid());
+#ifdef Q_OS_WIN
+        QVERIFY(QFile::copy(qEnvironmentVariable("SystemRoot") + QStringLiteral("\\System32\\whoami.exe"),
+                            here.filePath(QStringLiteral("git.exe"))));
+#endif
+        const QString before = QDir::currentPath();
+        const auto restore = qScopeGuard([&before] { QDir::setCurrent(before); });
+        QVERIFY(QDir::setCurrent(here.path()));
+        const gitbolt::test::ScopedEnv path("PATH", QFile::encodeName(QDir::toNativeSeparators(noGit.path())));
+        QCOMPARE(gitbolt::git::GitProcess::findGitExecutable(), std::string());
+        const auto out = gitbolt::git::GitProcess(here.path().toStdString()).run({"--version"});
+        QVERIFY(!out.ok());
+        QVERIFY2(out.error().message().find("git was not found") != std::string::npos,
+                 out.error().message().c_str());
+    }
+
+    // git, and what it and its hooks start, look for a program named
+    // without a path on PATH only, not first in the work tree.
+    void childrenSkipTheCurrentFolderOnWindows()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("only Windows looks in the current folder");
+#else
+        gitbolt::test::TestRepo repo;
+        const gitbolt::git::GitProcess git(repo.path().toStdString());
+        const auto out = git.run({"-c", "alias.gbvar=!printenv NoDefaultCurrentDirectoryInExePath", "gbvar"});
+        QVERIFY(out.ok());
+        QVERIFY2(out->success(), out->stderrData.c_str());
+        QCOMPARE(QString::fromStdString(out->stdoutData).trimmed(), QStringLiteral("1"));
+#endif
     }
 
 private:

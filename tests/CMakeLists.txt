@@ -63,6 +63,9 @@ gitbolt_add_test(test_status         git/TestStatus.cpp)
 # GitProcess::run(): a timeout stops git's whole process group (a job
 # object on Windows), gently first, so git rolls back its index.lock
 gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
+# What GitBolt makes of `git --version`, and the advisories it warns
+# about (git/GitVersion.h, git-advisories.json).
+gitbolt_add_test(test_git_version    git/TestGitVersion.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
 # that never answers — StallTransport, run by git via ext:: — whose
@@ -246,6 +249,11 @@ set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLAT
 gitbolt_add_test(test_recent_menu ui/TestRecentMenu.cpp)
 target_link_libraries(test_recent_menu PRIVATE gitbolt_ui)
 set_property(TEST test_recent_menu APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The note above the views about the git GitBolt runs: what it says for
+# each kind of git, plain text, and a dismissal the window remembers.
+gitbolt_add_test(test_git_notice ui/TestGitNotice.cpp)
+target_link_libraries(test_git_notice PRIVATE gitbolt_ui)
+set_property(TEST test_git_notice APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

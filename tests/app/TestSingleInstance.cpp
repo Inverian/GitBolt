@@ -454,6 +454,25 @@ private slots:
         QFETCH(QString, path);
         QCOMPARE(gitbolt::app::repoPathArgument(argument), path);
     }
+
+    // Explorer starts GitBolt in the folder it opens, a repository; on
+    // Windows GitBolt moves home once the path argument is absolute, out
+    // of reach of Windows' search for a program or a DLL by name.
+    void leavesTheStartingFolder()
+    {
+        QTemporaryDir repo;
+        QVERIFY(repo.isValid());
+        const QString before = QDir::currentPath();
+        const auto restore = qScopeGuard([&before] { QDir::setCurrent(before); });
+        QVERIFY(QDir::setCurrent(repo.path()));
+        const QString now = gitbolt::app::leaveStartingFolder();
+        QCOMPARE(now, QDir::currentPath());
+#ifdef Q_OS_WIN
+        QCOMPARE(QDir(now), QDir(QDir::homePath()));
+#else
+        QCOMPARE(QDir(now), QDir(repo.path()));
+#endif
+    }
 };
 
 QTEST_GUILESS_MAIN(TestSingleInstance)

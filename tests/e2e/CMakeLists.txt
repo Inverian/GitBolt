@@ -29,6 +29,7 @@ set(E2E_TESTS
     test_desktop_identity
     test_dialog_guards
     test_file_open
+    test_git_notice
     test_home_isolated
     test_instance_lock
     test_local_op_async

@@ -15,6 +15,7 @@ set(SOURCES
     Error.cpp
     GitProcess.cpp
     GitProcessLog.cpp
+    GitVersion.cpp
     Index.cpp
     Merge.cpp
     ObjectId.cpp
@@ -42,6 +43,7 @@ set(SOURCES
     Error.h
     GitProcess.h
     GitProcessLog.h
+    GitVersion.h
     Index.h
     Merge.h
     ObjectId.h
@@ -70,4 +72,14 @@ target_link_libraries(gitbolt_git PUBLIC gitbolt_libgit2)
 
 target_link_libraries(gitbolt_git PUBLIC gitbolt_util)
 target_link_libraries(gitbolt_git PRIVATE Qt6::Core)
+# The advisories GitBolt judges the user's git by (GitVersion.h), as
+# :/git/git-advisories.json. Data, not code: tools/check-ci-pins.py
+# reads the same file.
+qt_add_resources(gitbolt_git "git_advisories"
+    PREFIX "/git"
+    FILES git-advisories.json)
+# lupdate (see the top-level CMakeLists) reads every source of the
+# target, and would take the JSON for C++.
+set_property(TARGET gitbolt_git APPEND PROPERTY QT_EXCLUDE_SOURCES_FROM_TRANSLATION
+    ${CMAKE_CURRENT_SOURCE_DIR}/git-advisories.json)
 gitbolt_set_warnings(gitbolt_git)

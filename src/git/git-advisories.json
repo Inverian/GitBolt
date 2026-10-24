@@ -1,0 +1,79 @@
+{
+  "about": [
+    "The git versions GitBolt warns about (src/git/GitVersion.h). Compiled into GitBolt, and read by tools/check-ci-pins.py, which reports the advisories published since 'checked'.",
+    "Each advisory names, for each maintenance line (major.minor) that got the fix, its first fixed release. A git on such a line is affected below that release; one on an older line, or on a line between two listed ones, is affected; one on a newer line than every listed one is not.",
+    "'builds' says whose git it concerns: 'upstream' is git's own (git-scm.com, Homebrew, MacPorts; MSYS2's and Cygwin's on Windows), 'apple' that of Xcode and its Command Line Tools ('2.39.5 (Apple Git-154)'), 'windows' Git for Windows ('2.53.0.windows.3'). 'apple_fixed' is the first fixed 'Apple Git-N', for a fix Apple made without a new git version.",
+    "Listed: advisories rated high or critical whose attacker is a repository you clone or open, or a server you fetch from, with git's default settings. 'not_warned' lists the ones looked at and left out, and why. 'ids' and 'ghsa' are lists everywhere.",
+    "Not used on Linux and the BSDs, whose distributions backport fixes without changing git's version. There, as everywhere, GitBolt only says when git is older than 'floor' (2.25 added the sparse-checkout command, and 2.24 the --end-of-options GitBolt's commands rely on)."
+  ],
+  "checked": "2026-10-24",
+  "floor": "2.25.0",
+  "advisories": [
+    {
+      "ids": ["CVE-2026-105803", "CVE-2026-105802", "CVE-2026-69260", "CVE-2026-69261"],
+      "ghsa": ["GHSA-x72p-hmqp-46hw", "GHSA-xrgv-7vx6-5vx6", "GHSA-w3f2-pr6x-wwjc", "GHSA-x7xj-4j4f-88xr"],
+      "severity": "high",
+      "risk": "code",
+      "builds": ["windows"],
+      "fixed": ["2.56.0.windows.3"],
+      "note": "Git LFS 3.0.0 to 3.8.0, which Git for Windows includes (its full installer, where LFS is an option; MinGit has none), can run commands a repository's LFS or git configuration or an SSH URL names, and pass HTTP headers on after a redirect. Git for Windows 2.56.0(3) ships Git LFS 3.8.1, and drops the compromised eMudhra intermediate CA."
+    },
+    {
+      "ids": ["CVE-2026-32631"],
+      "ghsa": ["GHSA-9j5h-h4m7-85hx"],
+      "severity": "high",
+      "risk": "credentials",
+      "builds": ["windows"],
+      "fixed": ["2.53.0.windows.3"],
+      "note": "Symbolic links in a cloned repository that point at a network share make Windows send the user's NTLM hash there."
+    },
+    {
+      "ids": ["CVE-2025-66413"],
+      "ghsa": ["GHSA-hv9c-4jm9-jh3x"],
+      "severity": "high",
+      "risk": "credentials",
+      "builds": ["windows"],
+      "fixed": ["2.47.3.windows.2", "2.51.2.windows.2", "2.52.0.windows.2", "2.53.0.windows.2"],
+      "note": "Cloning from a malicious server sends it the user's NTLM hash."
+    },
+    {
+      "ids": ["CVE-2025-48384", "CVE-2025-48385", "CVE-2025-27614"],
+      "ghsa": ["GHSA-vwqx-4fm8-6qc9", "GHSA-m98c-vgpc-9655", "GHSA-g4v5-fjv9-mhhc"],
+      "severity": "high",
+      "kev": "2025-08-25",
+      "risk": "code",
+      "builds": ["upstream", "apple", "windows"],
+      "fixed": ["2.43.7", "2.44.4", "2.45.4", "2.46.4", "2.47.3", "2.48.2", "2.49.1", "2.50.1"],
+      "apple_fixed": 155,
+      "note": "A recursive clone can run a submodule's hook (CVE-2025-48384, in CISA's Known Exploited Vulnerabilities catalog since 2025-08-25); a server's bundle URI can write files where it likes (CVE-2025-48385); gitk can run a repository's script (CVE-2025-27614). Apple fixed CVE-2025-48384 in Xcode 26 and its Command Line Tools (git 2.50.1, Apple Git-155)."
+    },
+    {
+      "ids": ["CVE-2024-32002", "CVE-2024-32004", "CVE-2024-32465"],
+      "ghsa": ["GHSA-8h77-4q3w-gfgv", "GHSA-xfc6-vwr8-r389", "GHSA-vm9j-46j9-qvq4"],
+      "severity": "critical",
+      "risk": "code",
+      "builds": ["upstream", "apple", "windows"],
+      "fixed": ["2.39.4", "2.40.2", "2.41.1", "2.42.2", "2.43.4", "2.44.1", "2.45.1"],
+      "note": "A recursive clone on a case-insensitive file system (macOS's, Windows') can run a hook while it clones."
+    }
+  ],
+  "not_warned": [
+    {"ghsa": ["GHSA-xrpg-8j9v-v282"], "ids": ["CVE-2026-62960"], "why": "needs transfer.bundleURI=true, which is off by default (fixed in Git for Windows 2.53.0(4), 2.54.0(3), 2.55.0(4))"},
+    {"ghsa": ["GHSA-6pvw-g552-53c5"], "ids": ["CVE-2025-26625"], "why": "Git LFS 3.7.0 and older; covered by the newer Git LFS threshold above"},
+    {"ghsa": ["GHSA-q6r2-x2cc-vrp7"], "ids": ["CVE-2024-53263"], "why": "Git LFS 3.6.0 and older; covered by the newer Git LFS threshold above"},
+    {"ghsa": ["GHSA-4v56-3xvj-xvfr"], "ids": ["CVE-2025-48386"], "why": "medium (wincred); fixed in the releases that fix CVE-2025-48384, which is warned about"},
+    {"ghsa": ["GHSA-7jjc-gg6m-3329"], "ids": ["CVE-2024-52005"], "why": "a server's messages reach a terminal unfiltered; GitBolt shows them as plain text"},
+    {"ghsa": ["GHSA-r5ph-xg7q-xfrp"], "ids": ["CVE-2024-52006"], "why": "low"},
+    {"ghsa": ["GHSA-hmg8-h7qf-7cxr"], "ids": ["CVE-2024-50349"], "why": "low"},
+    {"ghsa": ["GHSA-5rfh-556j-fhgj"], "ids": ["CVE-2024-32020"], "why": "low"},
+    {"ghsa": ["GHSA-mvxm-9j2h-qjx7"], "ids": ["CVE-2024-32021"], "why": "low"},
+    {"ghsa": ["GHSA-f3cw-xrj3-wr2v"], "ids": ["CVE-2025-27613"], "why": "low (gitk)"},
+    {"ghsa": ["GHSA-rxqw-wxqg-g7hw"], "ids": [], "why": "medium (wincred heap corruption of two bytes, no code execution shown); fixed in Git for Windows 2.55.0(3)"},
+    {"ghsa": ["GHSA-v3h4-vrpr-rh9x"], "ids": ["CVE-2026-100407"], "why": "medium; the OAuth half of GHSA-rxqw-wxqg-g7hw"},
+    {"ghsa": ["GHSA-5j7x-r6vf-jhq2"], "ids": ["CVE-2026-100408"], "why": "medium; the erase half of GHSA-rxqw-wxqg-g7hw"},
+    {"ghsa": ["GHSA-gq5x-v87v-8f7g"], "ids": ["CVE-2023-29012"], "why": "Git for Windows 2.40.1; older than every Git for Windows threshold above"},
+    {"ghsa": ["GHSA-g4fv-xjqw-q7jm"], "ids": ["CVE-2023-29011"], "why": "Git for Windows 2.40.1; older than every Git for Windows threshold above"},
+    {"ghsa": ["GHSA-9w66-8mq8-5vm8"], "ids": ["CVE-2023-25815"], "why": "low"},
+    {"ghsa": ["GHSA-wxwv-49qw-35pm"], "ids": ["CVE-2023-23618"], "why": "gitk in Git for Windows 2.39.2; older than every threshold above"}
+  ]
+}

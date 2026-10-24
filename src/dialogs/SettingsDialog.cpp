@@ -12,6 +12,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDir>
 #include <QDialogButtonBox>
 #include <QFontComboBox>
 #include <QFormLayout>
@@ -26,7 +27,6 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPainter>
-#include <QProcess>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSlider>
@@ -41,17 +41,22 @@ namespace gitbolt::dialogs {
 
 namespace {
 
-// The environment `git config --global` runs in: GitBolt's, less git's
-// repository variables (git::GitProcess::repositoryEnvVars), as for
-// every git GitBolt runs. An exported GIT_CONFIG made git refuse
-// ("only one config file at a time"): the fields came up empty and
-// Apply saved nothing.
-QProcessEnvironment gitEnvironment()
+// `git config --global <args>`, run as every git GitBolt runs
+// (git::GitProcess): the git found by its full path (by name, Windows
+// looked in GitBolt's current folder first), in the home folder, so no
+// repository's config comes into it, and without git's repository
+// variables (an exported GIT_CONFIG made git refuse, "only one config
+// file at a time": the fields came up empty and Apply saved nothing).
+// Its output, trimmed; empty when it failed.
+QString globalGitConfig(const QStringList& args)
 {
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-    for (const auto& name : git::GitProcess::repositoryEnvVars())
-        env.remove(QString::fromStdString(name));
-    return env;
+    std::vector<std::string> argv{"config", "--global"};
+    for (const QString& arg : args)
+        argv.push_back(arg.toStdString());
+    const auto result = git::GitProcess(QDir::homePath().toStdString()).run(argv, 3000);
+    if (!result.ok() || !result->success())
+        return {};
+    return QString::fromStdString(result->stdoutData).trimmed();
 }
 
 
@@ -1204,6 +1209,7 @@ void SettingsDialog::loadGitConfig()
         QString name;
         QString email;
         QString credentialHelper;
+        bool noGit = false;
     };
     auto* watcher = new QFutureWatcher<GitIdentity>(this);
     connect(watcher, &QFutureWatcher<GitIdentity>::finished, this,
@@ -1212,45 +1218,43 @@ void SettingsDialog::loadGitConfig()
         userNameEdit_->setText(id.name);
         userEmailEdit_->setText(id.email);
         credentialHelperEdit_->setText(id.credentialHelper);
-        userNameEdit_->setPlaceholderText(QString());
-        userEmailEdit_->setPlaceholderText(QString());
-        credentialHelperEdit_->setPlaceholderText(QString());
+        // With no git there is nothing to read the identity from or to
+        // save it to: said so, rather than fields that Apply ignores.
+        const QString placeholder = id.noGit ? tr("git was not found") : QString();
+        for (QLineEdit* edit : {userNameEdit_, userEmailEdit_, credentialHelperEdit_}) {
+            edit->setPlaceholderText(placeholder);
+            edit->setEnabled(!id.noGit);
+        }
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([]() {
-        auto readConfig = [](const QString& key) -> QString {
-            QProcess proc;
-            proc.setProcessEnvironment(gitEnvironment());
-            proc.start(QStringLiteral("git"),
-                       {QStringLiteral("config"),
-                        QStringLiteral("--global"), key});
-            proc.waitForFinished(3000);
-            return QString::fromUtf8(
-                proc.readAllStandardOutput()).trimmed();
-        };
         GitIdentity id;
-        id.name  = readConfig(QStringLiteral("user.name"));
-        id.email = readConfig(QStringLiteral("user.email"));
-        id.credentialHelper =
-            readConfig(QStringLiteral("credential.helper"));
+        if (git::GitProcess::findGitExecutable().empty()) {
+            id.noGit = true;
+            return id;
+        }
+        id.name  = globalGitConfig({QStringLiteral("user.name")});
+        id.email = globalGitConfig({QStringLiteral("user.email")});
+        id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")});
         return id;
     }));
 }
 
 void SettingsDialog::saveGitConfig()
 {
-    auto writeConfig = [](const QString& key, const QString& value) {
-        if (value.isEmpty())
-            return;
-        QProcess proc;
-        proc.setProcessEnvironment(gitEnvironment());
-        proc.start(QStringLiteral("git"),
-                    {QStringLiteral("config"), QStringLiteral("--global"), key, value});
-        proc.waitForFinished(3000);
-    };
-
-    writeConfig(QStringLiteral("user.name"), userNameEdit_->text().trimmed());
-    writeConfig(QStringLiteral("user.email"), userEmailEdit_->text().trimmed());
+    // Not read (no git), so nothing to save.
+    if (!userNameEdit_->isEnabled())
+        return;
+    const QString name = userNameEdit_->text().trimmed();
+    const QString email = userEmailEdit_->text().trimmed();
+    // On a worker, as loadGitConfig reads: finding git may wait for the
+    // login shell's PATH (util::pathForChildren).
+    (void)QtConcurrent::run([name, email]() {
+        if (!name.isEmpty())
+            globalGitConfig({QStringLiteral("user.name"), name});
+        if (!email.isEmpty())
+            globalGitConfig({QStringLiteral("user.email"), email});
+    });
 }
 
 void SettingsDialog::apply()

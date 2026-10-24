@@ -2894,6 +2894,73 @@ private slots:
 #endif
     }
 
+    // cmd runs a program typed by name from PATH, never from the folder
+    // it is in: the repository, where a .bat or a git.exe could have
+    // been committed. Named by its path, it still runs.
+    void cmdRunsNoProgramFromTheRepository()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("ConPTY is the Windows terminal backend");
+#else
+        QTemporaryDir repo;
+        QVERIFY(repo.isValid());
+        QFile planted(repo.filePath(QStringLiteral("gbplanted.bat")));
+        QVERIFY(planted.open(QIODevice::WriteOnly));
+        planted.write("@echo gbplanted-ran\r\n");
+        planted.close();
+
+        TerminalWidget terminal;
+        terminal.start(repo.path());
+        showAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QTest::keyClicks(&terminal, QStringLiteral("gbplanted"));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(prompts(terminal) >= 2 && atPrompt(terminal),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+        QVERIFY2(!rows(terminal).contains(QStringLiteral("gbplanted-ran")),
+                 qPrintable(terminal.toPlainText()));
+
+        QTest::keyClicks(&terminal, QStringLiteral(".\\gbplanted"));
+        QTest::keyClick(&terminal, Qt::Key_Return);
+        QTRY_VERIFY2_WITH_TIMEOUT(rows(terminal).contains(QStringLiteral("gbplanted-ran")),
+                                  qPrintable(terminal.toPlainText()), kTimeoutMs);
+#endif
+    }
+
+    // A $SHELL that isn't a full path names no shell: execve() would
+    // have taken it from the current folder, which the child has just
+    // made the repository. Another shell starts (the account's, or sh),
+    // and the one planted there never runs.
+    void ptyRunsNoShellFromTheRepository()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("$SHELL is the Unix terminal backend's");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        QTemporaryDir repo;
+        QVERIFY(repo.isValid());
+        QFile planted(repo.filePath(QStringLiteral("gbsh")));
+        QVERIFY(planted.open(QIODevice::WriteOnly));
+        planted.write("#!/bin/sh\necho gbplanted-ran\nexec /bin/sh\n");
+        planted.close();
+        QVERIFY(planted.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        qputenv("SHELL", "gbsh");   // PlainShell puts SHELL back
+
+        TerminalWidget terminal;
+        terminal.resize(800, 400);
+        terminal.start(repo.path());
+        QVERIFY(terminal.isRunning());
+        // Long enough for the planted script to have said so: it does at
+        // once.
+        QTest::qWait(1500);
+        QVERIFY(terminal.isRunning());
+        QVERIFY2(!terminal.toPlainText().contains(QStringLiteral("gbplanted-ran")),
+                 qPrintable(terminal.toPlainText()));
+#endif
+    }
+
     // A shell started again (a bare repository opened, so a new GIT_DIR)
     // while the old one was partway through a CSI too long to be one,
     // which the widget drops as it comes, as far as its final byte. That

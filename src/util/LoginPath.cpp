@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QList>
 #include <QStringList>
 
@@ -67,7 +68,9 @@ char** hostEnviron() {
 }
 
 QString defaultShell() {
-    if (const QByteArray shell = qgetenv("SHELL"); !shell.isEmpty())
+    // A full path only: posix_spawn() takes a relative one from
+    // GitBolt's current folder.
+    if (const QByteArray shell = qgetenv("SHELL"); shell.startsWith('/'))
         return QFile::decodeName(shell);
     // getpwuid_r: this runs on a thread of its own.
     struct passwd pw {};
@@ -269,6 +272,33 @@ QString pathForChildren(const QString& own) {
         return own;
     const QString login = result.get();
     return login.isEmpty() ? own : mergePathLists(login, own);
+}
+
+QString findExecutableOnPath(const QString& name, const QString& pathList)
+{
+    QString file = name;
+#ifdef Q_OS_WIN
+    if (QFileInfo(name).suffix().isEmpty())
+        file += QStringLiteral(".exe");
+#endif
+    for (QString dir : pathList.split(kListSeparator, Qt::SkipEmptyParts)) {
+#ifdef Q_OS_WIN
+        // cmd.exe takes an entry in quotes ("C:\Program Files\Git\cmd").
+        if (dir.size() > 1 && dir.startsWith(QLatin1Char('"')) && dir.endsWith(QLatin1Char('"')))
+            dir = dir.mid(1, dir.size() - 2);
+#endif
+        if (!QDir::isAbsolutePath(dir))
+            continue;
+        const QFileInfo candidate(QDir(dir), file);
+        if (candidate.isFile() && candidate.isExecutable())
+            return QDir::cleanPath(candidate.absoluteFilePath());
+    }
+    return {};
+}
+
+QString findExecutableForChildren(const QString& name)
+{
+    return findExecutableOnPath(name, pathForChildren(qEnvironmentVariable("PATH")));
 }
 
 } // namespace gitbolt::util

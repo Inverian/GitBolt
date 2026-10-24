@@ -17,6 +17,7 @@
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -138,30 +139,107 @@ private slots:
 #endif
     }
 
-    // Last: the lookup is once per process. git's children, a hook or
-    // (here) an alias, get the login shell's entries ahead of their own.
-    void gitsChildrenGetTheLoginPath() {
+    void findsAProgramInTheFirstFolderThatHasIt() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(QStringLiteral("a")));
+        QVERIFY(QDir(dir.path()).mkpath(QStringLiteral("b")));
+        const auto touch = [](const QString& path, bool executable) {
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly))
+                return false;
+            file.write("#!/bin/sh\n");
+            file.close();
+            return file.setPermissions(executable
+                ? QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner
+                : QFile::ReadOwner | QFile::WriteOwner);
+        };
+#ifdef Q_OS_WIN
+        // In a: what cmd.exe would run, not a program. b quoted, as cmd takes it.
+        QVERIFY(touch(dir.filePath(QStringLiteral("a/gbtool.bat")), true));
+        QVERIFY(touch(dir.filePath(QStringLiteral("a/gbtool.cmd")), true));
+        QVERIFY(touch(dir.filePath(QStringLiteral("b/gbtool.exe")), true));
+        const QString found = dir.filePath(QStringLiteral("b/gbtool.exe"));
+        const QString list = QDir::toNativeSeparators(dir.filePath(QStringLiteral("a"))) + QLatin1Char(';')
+            + QLatin1Char('"') + QDir::toNativeSeparators(dir.filePath(QStringLiteral("b"))) + QLatin1Char('"');
+#else
+        // In a: not executable.
+        QVERIFY(touch(dir.filePath(QStringLiteral("a/gbtool")), false));
+        QVERIFY(touch(dir.filePath(QStringLiteral("b/gbtool")), true));
+        const QString found = dir.filePath(QStringLiteral("b/gbtool"));
+        const QString list = dir.filePath(QStringLiteral("a")) + QLatin1Char(':') + dir.filePath(QStringLiteral("b"));
+#endif
+        QCOMPARE(util::findExecutableOnPath(QStringLiteral("gbtool"), list), QDir::cleanPath(found));
+    }
+
+    // A relative folder is GitBolt's working directory or below it (on
+    // Windows, after Explorer, the repository) and is passed over; nothing
+    // listed finds nothing, not what GitBolt's own PATH has.
+    void passesOverRelativeFolders() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(QStringLiteral("bin")));
+#ifdef Q_OS_WIN
+        const QString program = QStringLiteral("gbtool.exe");
+#else
+        const QString program = QStringLiteral("gbtool");
+#endif
+        for (const QString& path : {dir.filePath(program), dir.filePath(QStringLiteral("bin/") + program)}) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+            file.close();
+            QVERIFY(file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        }
+        const QString before = QDir::currentPath();
+        const auto restore = qScopeGuard([&before] { QDir::setCurrent(before); });
+        QVERIFY(QDir::setCurrent(dir.path()));
+        QCOMPARE(util::findExecutableOnPath(QStringLiteral("gbtool"),
+                     QStringLiteral(".") + QDir::listSeparator() + QStringLiteral("bin")), QString());
+        QCOMPARE(util::findExecutableOnPath(QStringLiteral("git"), QString()), QString());
+    }
+
+    // Last: the lookup is once per process. git's children (an alias
+    // here) get the login shell's entries first, and git itself is the
+    // first one there: a stand-in in a folder the login shell puts
+    // first, which notes its commands and runs the real git. From the
+    // Dock, GitBolt ran Apple's /usr/bin/git while the user's shell ran
+    // a patched one from Homebrew.
+    void gitAndItsChildrenComeFromTheLoginPath() {
 #ifdef Q_OS_WIN
         QSKIP("no login shell on Windows");
 #else
         QTemporaryDir dir;
-        QVERIFY(dir.isValid());
+        QTemporaryDir loginBin;
+        QVERIFY(dir.isValid() && loginBin.isValid());
+        const QString realGit = QString::fromStdString(git::GitProcess::findGitExecutable());
+        QVERIFY(QDir::isAbsolutePath(realGit));
+        const QString ran = dir.filePath(QStringLiteral("ran"));
+        const QString standIn = script(loginBin, "git",
+            "printf '%s\\n' \"$*\" >> '" + QFile::encodeName(ran) + "'\n"
+            "exec '" + QFile::encodeName(realGit) + "' \"$@\"\n");
+        QVERIFY(!standIn.isEmpty());
         const QString shell = script(dir, "loginsh",
-            "PATH=\"/opt/from-login/bin:/usr/bin:$PATH\"; export PATH\neval \"$2\"\n");
+            "PATH=\"" + QFile::encodeName(loginBin.path())
+            + ":/opt/from-login/bin:/usr/bin:$PATH\"; export PATH\neval \"$2\"\n");
+        test::TestRepo repo;
+        git::GitProcess git(repo.path().toStdString());   // made before: git is found as it runs
         QCOMPARE(util::pathForChildren(QStringLiteral("/usr/bin:/bin")),
                  QStringLiteral("/usr/bin:/bin"));      // not started: as it is
         util::startLoginPathLookup(shell);
         QVERIFY(util::pathForChildren(QStringLiteral("/usr/bin:/bin"))
-                    .startsWith(QStringLiteral("/opt/from-login/bin:/usr/bin:")));
+                    .startsWith(loginBin.path() + QStringLiteral(":/opt/from-login/bin:/usr/bin:")));
+        QCOMPARE(QString::fromStdString(git::GitProcess::findGitExecutable()), QDir::cleanPath(standIn));
 
-        test::TestRepo repo;
-        git::GitProcess git(repo.path().toStdString());
         const auto out = git.run({"-c", "alias.showpath=!printenv PATH", "showpath"});
         QVERIFY(out.ok() && out->success());
         const QStringList entries =
             QString::fromStdString(out->stdoutData).trimmed().split(QLatin1Char(':'));
         QVERIFY2(entries.contains(QStringLiteral("/opt/from-login/bin")),
                  qPrintable(entries.join(QLatin1Char(':'))));
+        QFile log(ran);
+        QVERIFY(log.open(QIODevice::ReadOnly));
+        QVERIFY2(log.readAll().contains("alias.showpath"), "git didn't come from the login shell's PATH");
 #endif
     }
 };

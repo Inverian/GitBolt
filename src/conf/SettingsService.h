@@ -147,6 +147,16 @@ public:
     /// geometry.
     QString ensureTelemetryInstallId();
 
+    // ----- The note about the git GitBolt runs (widgets::GitNoticeBar) -----
+    //
+    /// Whether the user dismissed the note `key` names
+    /// (widgets::GitNotice::key: the git, its version and what is wrong
+    /// with it), so a new git, or a new advisory for this one, shows.
+    bool gitNoticeDismissed(const QString& key) const;
+    /// Remembers it, with the ones dismissed last before it. No
+    /// settingsChanged: nothing else shows it.
+    void dismissGitNotice(const QString& key);
+
     /// GitBolt.ini's path. main() keeps the telemetry queue next to
     /// it, so whatever isolates the INI (XDG_CONFIG_HOME in e2e runs,
     /// QSettings::setPath in unit tests) isolates the queue too.
@@ -232,6 +242,9 @@ private:
     // configurable `maxRecentRepositories()` setter overrides this
     // for any new add-to-recents operation.
     static constexpr int kDefaultMaxRecentRepositories = 10;
+    // How many dismissed git notes are remembered: a few gits, a few
+    // versions of each.
+    static constexpr int kRememberedGitNotices = 16;
     QSettings settings_;
     /// emit settingsChanged immediately, or defer it to the
     /// outermost endUpdate() while a batch is open.

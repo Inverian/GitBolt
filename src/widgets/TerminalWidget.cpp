@@ -364,8 +364,13 @@ void TerminalWidget::start(const QString& workingDirectory)
         info.workingDirectory = QDir::toNativeSeparators(pendingCwd_).toStdWString();
     // The Unix child's TERM and GITBOLT_TERM. ConPTY renders the console
     // as xterm-256color, and TERM is what Git for Windows' less and vim
-    // go by.
-    info.environment = {{L"TERM", L"xterm-256color"}, {L"GITBOLT_TERM", L"1"}};
+    // go by. And cmd runs a program typed by name from PATH only, not
+    // from the folder it is in first: that is the repository, where a
+    // git.exe or a .bat could have been committed. One there runs as
+    // .\name, as in PowerShell.
+    info.environment = {{L"TERM", L"xterm-256color"},
+                        {L"GITBOLT_TERM", L"1"},
+                        {L"NoDefaultCurrentDirectoryInExePath", L"1"}};
     // The repository is the one the shell starts in, as for every git
     // GitBolt runs (git::GitProcess::repositoryEnvVars).
     for (const auto& name : git::GitProcess::repositoryEnvVars())
@@ -435,8 +440,10 @@ void TerminalWidget::start(const QString& workingDirectory)
     const QByteArray cwdBytes = pendingCwd_.toLocal8Bit();
 
     // Pick the user's login shell (parent side — getpwuid may lock).
+    // $SHELL only as a full path: execve() takes a relative one from
+    // the current folder, which the child makes the repository first.
     QByteArray shellBytes;
-    if (const char* shellEnv = getenv("SHELL"); shellEnv && *shellEnv) {
+    if (const char* shellEnv = getenv("SHELL"); shellEnv && *shellEnv == '/') {
         shellBytes = shellEnv;
     } else {
         struct passwd* pw = getpwuid(getuid());

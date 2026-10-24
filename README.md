@@ -64,6 +64,11 @@ Installers for every release are on the
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
 
+GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
+or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
+runs the git your login shell finds first, and says so when that git
+has known security flaws.
+
 ---
 
 ## Features
