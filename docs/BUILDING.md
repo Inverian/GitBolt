@@ -441,7 +441,7 @@ cmake -B build-telemetry-local -G Ninja \
 A build directory keeps these values until it is configured fresh,
 and its plain launches send, so don't reuse it for everyday builds.
 Launches with the test bridge, `GITBOLT_INSTANCE_NAME`, an offscreen
-platform, `DO_NOT_TRACK=1` or `GITBOLT_TELEMETRY=0` never send.
+platform or `GITBOLT_TELEMETRY=0` never send.
 
 ### Bundled libgit2
 

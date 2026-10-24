@@ -6,6 +6,13 @@ semver once 1.0 lands.
 
 ## [Unreleased]
 
+### Changed
+
+- **Usage statistics have a Settings page of their own**, **Tools ›
+  Settings › Usage Statistics**, where they were part of General. Turn
+  them off there, or with the environment variable
+  `GITBOLT_TELEMETRY=0`; `DO_NOT_TRACK` no longer does.
+
 ### Fixed
 
 - **Opening a submodule or a worktree**: Repository › Manage

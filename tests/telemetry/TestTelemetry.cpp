@@ -4,8 +4,8 @@
 // src/app, the only place endpoints are compiled into.
 //
 //   - the gate table, injected environment only (ctest and CI set
-//     DO_NOT_TRACK, GITBOLT_TELEMETRY, QT_QPA_PLATFORM and CI in the
-//     real one), and the shared test-session / opt-out predicates
+//     GITBOLT_TELEMETRY, QT_QPA_PLATFORM and CI in the real one), and
+//     the shared test-session / opt-out predicates
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
@@ -79,7 +79,7 @@ gitbolt::util::EnvLookup envFrom(const EnvMap& env) {
 Config testConfig(const HttpStub& stub, const QString& dir) {
     Config config = Config::fromEndpoints(stub.origin(), QStringLiteral("test-client"),
                                           QStringLiteral("test-key-value"), kGlitchTipKey,
-                                          QStringLiteral("42"), QStringLiteral("1.2.3"),
+                                          QStringLiteral("42"), QStringLiteral("0.1.0"),
                                           dir + QStringLiteral("/telemetry"));
     config.paceMs = 50;
     config.transferTimeoutMs = 300;
@@ -128,7 +128,7 @@ QSet<QString> keySet(const QJsonObject& object) {
 
 ClientInfo clientFor(const QString& os, const QString& osVersion, const QString& arch) {
     ClientInfo client;
-    client.appVersion = QStringLiteral("0.9.5");
+    client.appVersion = QStringLiteral("0.1.5");
     client.env.os = os;
     client.env.osVersion = osVersion;
     client.env.arch = arch;
@@ -148,7 +148,7 @@ int closedPort() {
 // A crash.log the parser accepts. A macOS report wherever this runs:
 // the parser's frame rules follow the OS line (CrashHeader.h).
 QString crashReport() {
-    return QString::fromUtf8(gitbolt::test::crashHeader("0.9.1", true, false, false))
+    return QString::fromUtf8(gitbolt::test::crashHeader("0.1.1", true, false, false))
            + QStringLiteral("Signal: SIGSEGV (11)\nEpoch: 1760000000\n\n"
                             "--- Stack Trace ---\n"
                             "#0 GitBolt +0x10 ?\n"
@@ -231,7 +231,7 @@ private slots:
         const QString cocoa = QStringLiteral("cocoa");
 
         row("no endpoints beats everything", false,
-            {{"GITBOLT_TEST_BRIDGE", "b"}, {"DO_NOT_TRACK", "1"}}, cocoa, true, "compiled-out");
+            {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "compiled-out");
         row("plain user session", true, {}, cocoa, true, "on");
         row("setting off", true, {}, cocoa, false, "off:setting");
 
@@ -240,8 +240,8 @@ private slots:
         // empty value picks the default socket.
         row("empty bridge is still the bridge", true, {{"GITBOLT_TEST_BRIDGE", ""}}, cocoa, true,
             "inert:test-bridge");
-        row("bridge beats DO_NOT_TRACK", true,
-            {{"GITBOLT_TEST_BRIDGE", "b"}, {"DO_NOT_TRACK", "1"}}, cocoa, true,
+        row("bridge beats GITBOLT_TELEMETRY", true,
+            {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true,
             "inert:test-bridge");
         row("bridge beats instance", true,
             {{"GITBOLT_TEST_BRIDGE", "b"}, {"GITBOLT_INSTANCE_NAME", "i"}}, cocoa, true,
@@ -276,20 +276,14 @@ private slots:
         row("CI empty is unset", true, {{"CI", ""}}, cocoa, true, "on");
         row("CI=false", true, {{"CI", "false"}}, cocoa, true, "on");
         row("CI=0", true, {{"CI", "0"}}, cocoa, true, "on");
-        row("CI beats DO_NOT_TRACK", true, {{"CI", "1"}, {"DO_NOT_TRACK", "1"}}, cocoa, true,
-            "inert:ci");
+        row("CI beats GITBOLT_TELEMETRY", true, {{"CI", "1"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa,
+            true, "inert:ci");
 
-        row("DO_NOT_TRACK=1", true, {{"DO_NOT_TRACK", "1"}}, cocoa, true, "off:do-not-track");
-        row("DO_NOT_TRACK=yes", true, {{"DO_NOT_TRACK", "yes"}}, cocoa, true,
-            "off:do-not-track");
-        row("DO_NOT_TRACK=0 doesn't opt out", true, {{"DO_NOT_TRACK", "0"}}, cocoa, true, "on");
-        row("DO_NOT_TRACK=false doesn't opt out", true, {{"DO_NOT_TRACK", "false"}}, cocoa, true,
-            "on");
-        row("DO_NOT_TRACK empty is unset", true, {{"DO_NOT_TRACK", ""}}, cocoa, true, "on");
-        row("DO_NOT_TRACK beats the setting", true, {{"DO_NOT_TRACK", "1"}}, cocoa, false,
-            "off:do-not-track");
-        row("DO_NOT_TRACK beats GITBOLT_TELEMETRY", true,
-            {{"DO_NOT_TRACK", "1"}, {"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "off:do-not-track");
+        // DO_NOT_TRACK is no opt-out: the Settings switch and
+        // GITBOLT_TELEMETRY are.
+        row("DO_NOT_TRACK=1 is ignored", true, {{"DO_NOT_TRACK", "1"}}, cocoa, true, "on");
+        row("DO_NOT_TRACK leaves the setting to decide", true, {{"DO_NOT_TRACK", "1"}}, cocoa,
+            false, "off:setting");
 
         row("GITBOLT_TELEMETRY=0", true, {{"GITBOLT_TELEMETRY", "0"}}, cocoa, true, "off:env");
         row("GITBOLT_TELEMETRY=FALSE", true, {{"GITBOLT_TELEMETRY", "FALSE"}}, cocoa, true,
@@ -328,7 +322,7 @@ private slots:
                          gitbolt::util::detectTestSession(platform, arguments, inputs.env)),
                      inert);
             if (!inert) {
-                const bool envOff = gate == Gate::DoNotTrack || gate == Gate::EnvOff;
+                const bool envOff = gate == Gate::EnvOff;
                 QCOMPARE(gitbolt::util::isEnvOptOut(gitbolt::util::detectEnvOptOut(inputs.env)),
                          envOff);
             }
@@ -344,9 +338,8 @@ private slots:
         const Expect table[] = {
             {Gate::CompiledOut, false, false}, {Gate::TestBridge, false, false},
             {Gate::TestInstance, false, false}, {Gate::Headless, false, false},
-            {Gate::Ci, false, false},          {Gate::DoNotTrack, false, true},
-            {Gate::EnvOff, false, true},       {Gate::SettingOff, true, true},
-            {Gate::Active, true, false},
+            {Gate::Ci, false, false},          {Gate::EnvOff, false, true},
+            {Gate::SettingOff, true, true},    {Gate::Active, true, false},
         };
         for (const Expect& e : table) {
             QCOMPARE(createsService(e.gate), e.creates);
@@ -401,18 +394,18 @@ private slots:
     void userAgentCarriesOsTokenOnly() {
         QCOMPARE(userAgent(clientFor(QStringLiteral("macOS"), QStringLiteral("15.6"),
                                      QStringLiteral("arm64"))),
-                 QStringLiteral("GitBolt/0.9.5 (Macintosh; Mac OS X 15_6)"));
+                 QStringLiteral("GitBolt/0.1.5 (Macintosh; Mac OS X 15_6)"));
         QCOMPARE(userAgent(clientFor(QStringLiteral("Windows"), QStringLiteral("11"),
                                      QStringLiteral("x86_64"))),
-                 QStringLiteral("GitBolt/0.9.5 (Windows NT 10.0; Win64; x64)"));
+                 QStringLiteral("GitBolt/0.1.5 (Windows NT 10.0; Win64; x64)"));
         QCOMPARE(userAgent(clientFor(QStringLiteral("Linux"), QStringLiteral("ubuntu 24.04"),
                                      QStringLiteral("x86_64"))),
-                 QStringLiteral("GitBolt/0.9.5 (X11; Linux x86_64)"));
+                 QStringLiteral("GitBolt/0.1.5 (X11; Linux x86_64)"));
 
         // This machine's: the OS token and nothing else, whatever it is.
-        const ClientInfo here{QStringLiteral("1.2.3"), Environment::current()};
+        const ClientInfo here{QStringLiteral("0.1.0"), Environment::current()};
         const QRegularExpression shape(QStringLiteral(
-            "^GitBolt/1\\.2\\.3 \\((Macintosh(; Mac OS X \\d+(_\\d+)*)?"
+            "^GitBolt/0\\.1\\.0 \\((Macintosh(; Mac OS X \\d+(_\\d+)*)?"
             "|Windows NT 10\\.0; (Win64; x64|ARM64)|X11; Linux [a-z0-9_]+)\\)$"));
         QVERIFY2(shape.match(userAgent(here)).hasMatch(), qPrintable(userAgent(here)));
     }
@@ -540,7 +533,7 @@ private slots:
         auto config = [](const QString& host) {
             return Config::fromEndpoints(host, QStringLiteral("id"), QStringLiteral("secret"),
                                          kGlitchTipKey, QStringLiteral("7"),
-                                         QStringLiteral("0.9.5"), QStringLiteral("/tmp/q"));
+                                         QStringLiteral("0.1.5"), QStringLiteral("/tmp/q"));
         };
         QVERIFY(config(QStringLiteral("https://telemetry.example.com")).isComplete());
         QVERIFY(config(QStringLiteral("http://127.0.0.1:8080")).isComplete());
@@ -557,7 +550,7 @@ private slots:
         QVERIFY(!missing.isComplete());
         Config badProject = Config::fromEndpoints(
             QStringLiteral("https://example.com"), QStringLiteral("id"), QStringLiteral("s"),
-            kGlitchTipKey, QStringLiteral("abc"), QStringLiteral("0.9.5"), QStringLiteral("/q"));
+            kGlitchTipKey, QStringLiteral("abc"), QStringLiteral("0.1.5"), QStringLiteral("/q"));
         QVERIFY(!badProject.isComplete());
         Config badVersion = config(QStringLiteral("https://example.com"));
         badVersion.appVersion = QStringLiteral("unknown");
@@ -643,7 +636,7 @@ private slots:
         QCOMPARE(request.header("accept-language"), QByteArray("*"));
         QCOMPARE(request.header("accept-encoding"), QByteArray("identity"));
         const QString agent = QString::fromLatin1(request.header("user-agent"));
-        QVERIFY2(QRegularExpression(QStringLiteral("^GitBolt/1\\.2\\.3 \\((Macintosh|Windows NT|X11)"
+        QVERIFY2(QRegularExpression(QStringLiteral("^GitBolt/0\\.1\\.0 \\((Macintosh|Windows NT|X11)"
                                                    "[^)]*\\)$"))
                      .match(agent)
                      .hasMatch(),
@@ -672,7 +665,7 @@ private slots:
                              QStringLiteral("Linux")})
                     .contains(props.value(QStringLiteral("__os")).toString()));
         QCOMPARE(props.value(QStringLiteral("__device")).toString(), QStringLiteral("desktop"));
-        QCOMPARE(props.value(QStringLiteral("app_version")).toString(), QStringLiteral("1.2.3"));
+        QCOMPARE(props.value(QStringLiteral("app_version")).toString(), QStringLiteral("0.1.0"));
         QVERIFY(QRegularExpression(QStringLiteral("^[a-z]{2,3}$|^und$"))
                     .match(props.value(QStringLiteral("locale")).toString())
                     .hasMatch());
@@ -694,7 +687,7 @@ private slots:
             QueuedRecord record;
             record.queued = queued;
             record.payload = *appLaunchedEvent(
-                ClientInfo{QStringLiteral("1.2.3"), Environment::current()}, kInstallId);
+                ClientInfo{QStringLiteral("0.1.0"), Environment::current()}, kInstallId);
             queue.append(record);
         }
         auto service = makeService(config, provider);
@@ -1552,7 +1545,7 @@ private slots:
             if (tags.contains(QStringLiteral("code")))
                 QCOMPARE(tags.value(QStringLiteral("code")).toString(), QStringLiteral("other"));
             QByteArray all = request.everything();
-            all.replace("gitbolt@1.2.3", "");   // the release names the app, not a person
+            all.replace("gitbolt@0.1.0", "");   // the release names the app, not a person
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com",
                                          "feature/"})
                 QVERIFY2(!all.contains(sentinel), sentinel);
@@ -1594,7 +1587,7 @@ private slots:
         QVERIFY(auth.startsWith("Sentry "));
         QVERIFY(auth.contains("sentry_version=7"));
         QVERIFY(auth.contains("sentry_key=" + kGlitchTipKey.toLatin1()));
-        QVERIFY(auth.contains("sentry_client=gitbolt/1.2.3"));
+        QVERIFY(auth.contains("sentry_client=gitbolt/0.1.0"));
 
         const QJsonObject event = request.json();
         QVERIFY(QRegularExpression(QStringLiteral("^[0-9a-f]{32}$"))
@@ -1602,7 +1595,7 @@ private slots:
                     .hasMatch());
         QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("error"));
         QCOMPARE(event.value(QStringLiteral("platform")).toString(), QStringLiteral("native"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@1.2.3"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.0"));
         QCOMPARE(event.value(QStringLiteral("environment")).toString(),
                  QStringLiteral("production"));
         QCOMPARE(event.value(QStringLiteral("message")).toString(),
@@ -1666,7 +1659,7 @@ private slots:
 
         const QJsonObject event = stub_->requests().first().json();
         QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.9.1"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.1"));
         QCOMPARE(event.value(QStringLiteral("timestamp")).toString(),
                  QDateTime::fromSecsSinceEpoch(1760000000, QTimeZone::UTC)
                      .toString(Qt::ISODateWithMs));

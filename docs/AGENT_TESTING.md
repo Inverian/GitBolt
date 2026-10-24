@@ -92,6 +92,7 @@ tools/bridge.py trigger commands/resolve-conflicts
 tools/bridge.py list-widgets          # windows (a message box's text too), buttons, views, editors (with classes)
 tools/bridge.py select-row QTableView:0 0     # the AX-impossible operation
 tools/bridge.py select-row commit.unstagedList 0,2,5   # multi-row (ExtendedSelection lists)
+tools/bridge.py select-row settings.nav 0/5    # child row 5 of top-level row 0 (Settings › GitBolt › Usage Statistics)
 tools/bridge.py click "Lock/Unlock"
 tools/bridge.py select-item toolbar.branchCombo feature/login   # exact text, or '#N'
 tools/bridge.py type CommitMessageEdit:0 "subject\n\nbody line"   # \n \t \\ decoded
@@ -121,7 +122,7 @@ gate the session runs under: `compiled-out` in a build without
 endpoints (any build configured without `GITBOLT_TELEMETRY_*`),
 `inert:test-bridge` in one with them;
 the other values are `inert:instance-name`, `inert:headless`,
-`inert:ci`, `off:do-not-track`, `off:env`, `off:setting` and `on`.
+`inert:ci`, `off:env`, `off:setting` and `on`.
 `telemetryIfConfigured` is the gate the same session would get with
 endpoints compiled in. Neither is ever `on` under the bridge
 (`tests/e2e/test_telemetry_inert.py`). Address the Settings switch as

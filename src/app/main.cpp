@@ -476,7 +476,7 @@ int main(int argc, char* argv[]) {
 
     // Usage statistics (src/telemetry, PRIVACY.md). One gate, evaluated
     // once, here: no endpoints compiled in, a test session, or an
-    // opt-out (DO_NOT_TRACK, GITBOLT_TELEMETRY, the Settings switch)
+    // opt-out (GITBOLT_TELEMETRY, the Settings switch)
     // keeps this session from sending. The queue lives next to
     // GitBolt.ini, so whatever isolates the INI (XDG_CONFIG_HOME, a
     // test's QSettings::setPath) isolates the queue too.
@@ -647,7 +647,7 @@ int main(int argc, char* argv[]) {
             crashBox.setInformativeText(QObject::tr(
                 "A summary of the report, with no repository data, is being sent "
                 "with the usage statistics. You can turn them off for the future in "
-                "Tools › Settings › General."));
+                "Tools › Settings › Usage Statistics."));
         }
         crashBox.setDetailedText(crashReport);
         crashBox.setStandardButtons(QMessageBox::Ok);

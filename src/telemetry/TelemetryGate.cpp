@@ -15,7 +15,6 @@ Gate evaluateGate(const GateInputs& inputs) {
     }
 
     switch (util::detectEnvOptOut(inputs.env)) {
-    case util::EnvOptOut::DoNotTrack:       return Gate::DoNotTrack;
     case util::EnvOptOut::GitBoltTelemetry: return Gate::EnvOff;
     case util::EnvOptOut::None:             break;
     }
@@ -30,7 +29,6 @@ QString gateName(Gate gate) {
     case Gate::TestInstance: return QStringLiteral("inert:instance-name");
     case Gate::Headless:     return QStringLiteral("inert:headless");
     case Gate::Ci:           return QStringLiteral("inert:ci");
-    case Gate::DoNotTrack:   return QStringLiteral("off:do-not-track");
     case Gate::EnvOff:       return QStringLiteral("off:env");
     case Gate::SettingOff:   return QStringLiteral("off:setting");
     case Gate::Active:       return QStringLiteral("on");
@@ -43,7 +41,7 @@ bool createsService(Gate gate) {
 }
 
 bool discardsQueue(Gate gate) {
-    return gate == Gate::DoNotTrack || gate == Gate::EnvOff || gate == Gate::SettingOff;
+    return gate == Gate::EnvOff || gate == Gate::SettingOff;
 }
 
 } // namespace gitbolt::telemetry

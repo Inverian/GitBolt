@@ -312,9 +312,21 @@ QByteArray TestBridge::handleLine(const QString& line)
         // toInt() without the ok-flag yields 0 on garbage — which
         // silently selected row 0 instead of erroring. An agent-
         // facing surface must fail loudly.
+        // "P/C": child row C of top-level row P, as a tree such as
+        // Settings' navigation has its pages under their categories.
+        int parentRow = -1;
+        QString rowSpec = parts.at(2);
+        if (const qsizetype slash = rowSpec.indexOf(QLatin1Char('/')); slash >= 0) {
+            bool okParent = false;
+            parentRow = rowSpec.left(slash).toInt(&okParent);
+            if (!okParent)
+                return errLine(QStringLiteral("select-row: not an integer: ")
+                               + rowSpec.left(slash));
+            rowSpec = rowSpec.mid(slash + 1);
+        }
         QList<int> rows;
         const QStringList rowParts =
-            parts.at(2).split(QLatin1Char(','), Qt::SkipEmptyParts);
+            rowSpec.split(QLatin1Char(','), Qt::SkipEmptyParts);
         for (const QString& p : rowParts) {
             bool okRow = false;
             const int row = p.toInt(&okRow);
@@ -325,7 +337,7 @@ QByteArray TestBridge::handleLine(const QString& line)
         }
         if (rows.isEmpty())
             return errLine(QStringLiteral("select-row: no rows given"));
-        return cmdSelectRow(parts.at(1), rows);
+        return cmdSelectRow(parts.at(1), rows, parentRow);
     }
     if (verb == QStringLiteral("select-item") && parts.size() >= 3)
         // section() keeps the remainder, so item texts with spaces work.
@@ -548,7 +560,7 @@ QByteArray TestBridge::cmdClick(const QString& spec)
 }
 
 QByteArray TestBridge::cmdSelectRow(const QString& viewSpec,
-                                    const QList<int>& rows)
+                                    const QList<int>& rows, int parentRow)
 {
     auto* view = resolveWidget<QAbstractItemView>(viewSpec);
     if (!view)
@@ -557,7 +569,16 @@ QByteArray TestBridge::cmdSelectRow(const QString& viewSpec,
     auto* model = view->model();
     if (!model)
         return errLine(QStringLiteral("view has no model"));
-    const int rowCount = model->rowCount(view->rootIndex());
+    QModelIndex root = view->rootIndex();
+    if (parentRow >= 0) {
+        const int parents = model->rowCount(root);
+        if (parentRow >= parents)
+            return errLine(QStringLiteral("parent row %1 out of range (%2 rows)")
+                               .arg(parentRow)
+                               .arg(parents));
+        root = model->index(parentRow, 0, root);
+    }
+    const int rowCount = model->rowCount(root);
     for (int row : rows) {
         if (row < 0 || row >= rowCount)
             return errLine(QStringLiteral("row %1 out of range (%2 rows)")
@@ -571,10 +592,10 @@ QByteArray TestBridge::cmdSelectRow(const QString& viewSpec,
     // lists, where Stage/Unstage act on everything selected.
     QItemSelection selection;
     for (int row : rows) {
-        const QModelIndex idx = model->index(row, 0, view->rootIndex());
+        const QModelIndex idx = model->index(row, 0, root);
         selection.select(idx, idx);
     }
-    view->setCurrentIndex(model->index(rows.first(), 0, view->rootIndex()));
+    view->setCurrentIndex(model->index(rows.first(), 0, root));
     view->selectionModel()->select(
         selection, QItemSelectionModel::ClearAndSelect
                        | QItemSelectionModel::Rows);

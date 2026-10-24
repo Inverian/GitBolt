@@ -74,7 +74,7 @@ private slots:
         Config config = Config::fromEndpoints(
             stub.origin(), QStringLiteral("test-client"), QStringLiteral("test-key-value"),
             QStringLiteral("0123456789abcdef0123456789abcdef"), QStringLiteral("42"),
-            QStringLiteral("1.2.3"), dataDir_.filePath(QStringLiteral("telemetry")));
+            QStringLiteral("0.1.0"), dataDir_.filePath(QStringLiteral("telemetry")));
         config.paceMs = 50;
         config.transferTimeoutMs = 300;
         config.firstFlushDelayMs = 0;

@@ -66,12 +66,12 @@ bool isHeadlessPlatform(QStringView spec);
 /// did. Shared for the same reason as detectTestSession: the crash
 /// header's "Opt-out: env" and the gate's off states can't drift.
 ///
-///   - DoNotTrack: DO_NOT_TRACK is set to anything but empty, "0" or
-///     "false" (the more protective reading of the convention, which
-///     only promises "=1").
 ///   - GitBoltTelemetry: GITBOLT_TELEMETRY is 0, false, off or no,
 ///     case-insensitive.
-enum class EnvOptOut { None, DoNotTrack, GitBoltTelemetry };
+///
+/// DO_NOT_TRACK isn't one: GitBolt's own switch (Settings) and
+/// GITBOLT_TELEMETRY are the ways to turn it off.
+enum class EnvOptOut { None, GitBoltTelemetry };
 
 EnvOptOut detectEnvOptOut(const EnvLookup& env = processEnvironment);
 

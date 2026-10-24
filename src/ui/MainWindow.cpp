@@ -5641,9 +5641,7 @@ void MainWindow::showSettingsDialog()
     // inert test-session gates show the switch as usual; toggling it
     // there does nothing, as nothing runs.
     QString usageLockedReason;
-    if (telemetryGate_ == telemetry::Gate::DoNotTrack)
-        usageLockedReason = tr("Turned off by the DO_NOT_TRACK environment variable.");
-    else if (telemetryGate_ == telemetry::Gate::EnvOff)
+    if (telemetryGate_ == telemetry::Gate::EnvOff)
         usageLockedReason = tr("Turned off by the GITBOLT_TELEMETRY environment variable.");
     dlg.setUsageStatistics(telemetryGate_ != telemetry::Gate::CompiledOut, usageLockedReason);
     dlg.exec();

@@ -19,7 +19,7 @@ namespace gitbolt::telemetry {
 ///     report's "Session: test". Inert: no service, no install ID,
 ///     and the queue is never opened, created or deleted, so a test
 ///     run can't touch a real user's queue even outside XDG isolation.
-///   - DoNotTrack, EnvOff: the user opted out through the environment
+///   - EnvOff: the user opted out through the environment
 ///     (util::detectEnvOptOut). The queue is discarded; no service.
 ///   - SettingOff: the Settings switch is off. The queue is discarded,
 ///     and a disabled service is created so the switch can be turned
@@ -31,7 +31,6 @@ enum class Gate : int {
     TestInstance,
     Headless,
     Ci,
-    DoNotTrack,
     EnvOff,
     SettingOff,
     Active,
@@ -55,8 +54,8 @@ struct GateInputs {
 Gate evaluateGate(const GateInputs& inputs);
 
 /// "compiled-out", "inert:test-bridge", "inert:instance-name",
-/// "inert:headless", "inert:ci", "off:do-not-track", "off:env",
-/// "off:setting" or "on". For the test bridge's dump-state.
+/// "inert:headless", "inert:ci", "off:env", "off:setting" or "on".
+/// For the test bridge's dump-state.
 QString gateName(Gate gate);
 
 /// Active and SettingOff: main() creates a TelemetryService.

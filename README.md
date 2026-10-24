@@ -259,9 +259,9 @@ commands are used and how fast repositories open, under a random
 install ID, and summaries of crashes and errors, which carry no
 install ID. Never repository names, paths, branches, commit messages
 or file contents. It is on by default; turn it off in **Tools ›
-Settings › General**, or with `DO_NOT_TRACK=1` or
-`GITBOLT_TELEMETRY=0`. A build without a Usage statistics group there,
-such as a build from source or a fork, sends nothing.
+Settings › Usage Statistics**, or with `GITBOLT_TELEMETRY=0`. A build
+without that page, such as a build from source or a fork, sends
+nothing.
 
 [PRIVACY.md](PRIVACY.md) lists exactly what is sent, how long it is
 kept, and how to have it deleted.

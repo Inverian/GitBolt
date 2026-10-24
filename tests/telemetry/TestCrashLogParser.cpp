@@ -83,7 +83,7 @@ QString report(const QByteArray& header, const QStringList& frames,
            + frames.join(QLatin1Char('\n')) + QStringLiteral("\n\n=== End of Report ===\n");
 }
 
-QByteArray officialHeader(const char* version = "0.9.5") {
+QByteArray officialHeader(const char* version = "0.1.5") {
     return crashHeader(version, true, false, false);
 }
 
@@ -140,8 +140,8 @@ private slots:
         QFETCH(bool, optOut);
         QFETCH(bool, testSession);
         QFETCH(bool, accepted);
-        const QByteArray header = crashHeader("1.2.3", official, optOut, testSession);
-        QVERIFY(header.startsWith("=== GitBolt Crash Report ===\nFormat: 2\nApp version: 1.2.3\n"));
+        const QByteArray header = crashHeader("0.1.0", official, optOut, testSession);
+        QVERIFY(header.startsWith("=== GitBolt Crash Report ===\nFormat: 2\nApp version: 0.1.0\n"));
         QVERIFY(header.contains(official ? "\nBuild: official\n" : "\nBuild: unofficial\n"));
         QVERIFY(header.contains(optOut ? "\nOpt-out: env\n" : "\nOpt-out: none\n"));
         QVERIFY(header.contains(testSession ? "\nSession: test\n" : "\nSession: user\n"));
@@ -153,7 +153,7 @@ private slots:
         QCOMPARE(event.has_value(), accepted);
         if (!accepted)
             return;
-        QCOMPARE(event->release, QStringLiteral("1.2.3"));
+        QCOMPARE(event->release, QStringLiteral("0.1.0"));
         QCOMPARE(event->qtVersion, QString::fromLatin1(qVersion()));
         QCOMPARE(event->frames.size(), 1);
         QCOMPARE(event->frames.first().offset, std::optional<quint64>(0x30));
@@ -215,7 +215,7 @@ private slots:
         const std::optional<CrashEvent> event = CrashLogParser::parse(fixture(name));
         QVERIFY(event);
         // From the report, never from the running app.
-        QCOMPARE(event->release, QStringLiteral("0.9.5"));
+        QCOMPARE(event->release, QStringLiteral("0.1.5"));
         QCOMPARE(event->at, QDateTime::fromSecsSinceEpoch(epoch, QTimeZone::UTC));
         QCOMPARE(event->signal, signal);
         QCOMPARE(event->signalNumber, signalNumber);
@@ -384,16 +384,16 @@ private slots:
         QCOMPARE(a->fingerprint.size(), 3);
         QCOMPARE(a->fingerprint.at(0), QStringLiteral("crash"));
         QCOMPARE(a->fingerprint.at(1), QStringLiteral("SIGSEGV"));
-        QVERIFY(QRegularExpression(QStringLiteral("^gitbolt@0\\.9\\.5:[0-9a-f]{16}$"))
+        QVERIFY(QRegularExpression(QStringLiteral("^gitbolt@0\\.1\\.5:[0-9a-f]{16}$"))
                     .match(a->fingerprint.at(2))
                     .hasMatch());
 
         // Per release: offsets mean nothing across builds.
         QString other = log;
-        other.replace(QStringLiteral("App version: 0.9.5"), QStringLiteral("App version: 0.9.6"));
+        other.replace(QStringLiteral("App version: 0.1.5"), QStringLiteral("App version: 0.1.6"));
         const std::optional<CrashEvent> c = CrashLogParser::parse(other);
         QVERIFY(c);
-        QVERIFY(c->fingerprint.at(2).startsWith(QLatin1String("gitbolt@0.9.6:")));
+        QVERIFY(c->fingerprint.at(2).startsWith(QLatin1String("gitbolt@0.1.6:")));
         QCOMPARE(c->fingerprint.at(2).mid(14), a->fingerprint.at(2).mid(14));
 
         // A different crash site, a different group: any of the first
@@ -423,7 +423,7 @@ private slots:
                                 QStringLiteral("tags")}));
         QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
         QCOMPARE(event.value(QStringLiteral("platform")).toString(), QStringLiteral("native"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.9.5"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.5"));
         QCOMPARE(event.value(QStringLiteral("timestamp")).toString(),
                  QDateTime::fromSecsSinceEpoch(1760000123, QTimeZone::UTC).toString(Qt::ISODateWithMs));
         QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
@@ -510,7 +510,7 @@ private slots:
         // glibc's dladdr names the main program by argv[0], and an
         // AppImage runs GitBolt as AppRun or by the .AppImage's name.
         QTest::newRow("through a link of another name")
-            << QStringLiteral("GitBolt-0.9.5-x86_64.AppImage") << false;
+            << QStringLiteral("GitBolt-0.1.5-x86_64.AppImage") << false;
         // A real fault, in a leaf function of GitBolt's own: that
         // function must be the newest frame. macOS's backtrace() walks
         // frame pointers and never has the interrupted PC, so the
@@ -543,7 +543,7 @@ private slots:
         QFile file(home.filePath(QStringLiteral(".gitbolt/crash.log")));
         QVERIFY(file.open(QIODevice::ReadOnly));
         const QString log = QString::fromUtf8(file.readAll());
-        QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("1.2.3", true, false, false))),
+        QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("0.1.0", true, false, false))),
                  qPrintable(log));
         QVERIFY2(log.contains(QStringLiteral("\nSignal: SIGSEGV (11)\n")), qPrintable(log));
 
@@ -572,7 +572,7 @@ private slots:
 
         const std::optional<CrashEvent> event = CrashLogParser::parse(log);
         QVERIFY2(event, qPrintable(log));
-        QCOMPARE(event->release, QStringLiteral("1.2.3"));
+        QCOMPARE(event->release, QStringLiteral("0.1.0"));
         QCOMPARE(event->signal, QStringLiteral("SIGSEGV"));
         QCOMPARE(event->signalNumber, 11);
         QCOMPARE(event->frames.size(), lines.size() - 2);
@@ -644,7 +644,7 @@ private slots:
         QFile testLog(home.filePath(QStringLiteral(".gitbolt/crash-test.log")));
         QVERIFY(testLog.open(QIODevice::ReadOnly));
         const QString log = QString::fromUtf8(testLog.readAll());
-        QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("1.2.3", true, false, true))),
+        QVERIFY2(log.startsWith(QString::fromUtf8(CrashHandler::renderHeader("0.1.0", true, false, true))),
                  qPrintable(log));
         QVERIFY(log.contains(QStringLiteral("\n--- Stack Trace ---\n#0 ")));
         QVERIFY(!CrashLogParser::parse(log));

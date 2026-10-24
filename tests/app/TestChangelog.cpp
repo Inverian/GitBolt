@@ -67,7 +67,7 @@ bool isUnreleased(const QString& heading)
         || heading == QLatin1String("## [Unreleased]");
 }
 
-// "## [1.2.3] — 2026-01-01" → "1.2.3". CI looks the section up by the
+// "## [0.1.0] — 2026-01-01" → "0.1.0". CI looks the section up by the
 // literal prefix "## [<version>]", so no other spelling counts.
 QString versionOf(const QString& heading)
 {

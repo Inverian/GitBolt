@@ -193,7 +193,7 @@ int main(int argc, char* argv[]) {
     if (!testSession && !checkPorts)
         keepCrashReporterOut();
 #endif
-    gitbolt::util::CrashHandler::install("1.2.3", /*officialBuild=*/true,
+    gitbolt::util::CrashHandler::install("0.1.0", /*officialBuild=*/true,
                                          /*envOptOut=*/false, testSession);
     if (checkPorts) {
 #ifdef Q_OS_MACOS

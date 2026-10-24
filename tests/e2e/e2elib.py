@@ -29,7 +29,7 @@ test run can coexist with a real GitBolt session and with other tests:
   which may end in a modal nobody would dismiss. (QLocalServer named
   sockets are unix-domain sockets, which is why these tests are gated
   off on Windows.)
-- DO_NOT_TRACK=1, GITBOLT_TELEMETRY=0: usage statistics off, on top of
+- GITBOLT_TELEMETRY=0: usage statistics off, on top of
   the app's own rule that a bridge or instance-named session never
   sends (src/telemetry/TelemetryGate.h; test_telemetry_inert checks
   it). CI tests the very binary it ships, endpoints compiled in.
@@ -75,7 +75,6 @@ def app_env(runtime_dir: str, instance_name: str,
     env["HOME"] = home or os.path.join(runtime_dir, "home")
     os.makedirs(env["HOME"], exist_ok=True)
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
-    env["DO_NOT_TRACK"] = "1"
     env["GITBOLT_TELEMETRY"] = "0"
     return env
 
