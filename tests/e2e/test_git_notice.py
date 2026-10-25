@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
 """The git GitBolt runs, and the note about it.
 
-GitBolt runs the first git on the PATH its children get, the login
-shell's entries first. Started from the Dock, it looked on launchd's
-PATH alone, and ran Apple's /usr/bin/git (2.39.5, open to
-CVE-2025-48384) while the user's shell ran a patched git from Homebrew.
-
-Here the login shell puts a git of the test's first. It answers
---version with a version the test picks, notes every command, and runs
-the real git for everything else. GitBolt must run it, to ask its
-version and to fetch alike, and:
-
-  - with a flawed version (on macOS Apple's 2.39.5; on Linux, whose
-    distributions backport fixes and keep the version, one older than
-    GitBolt's floor) show the note, which Dismiss hides;
-  - launched again with that git, not show it again;
-  - with another flawed version of it, show it again;
-  - with a git that is fine, show nothing.
+Started as the Dock starts it (launchd's PATH), GitBolt must run the
+login shell's git: here a stand-in that answers --version with a flawed
+version, notes every command and runs the real git for the rest. It
+must ask that git its version and fetch with it, show the note, which
+Dismiss hides, and not show it again on the next launch. What it says
+about other gits is TestGitNotice's.
 """
 from __future__ import annotations
 
@@ -31,21 +21,18 @@ from e2elib import App, Failure, check_for, git, make_repo, run  # noqa: E402
 
 DISMISS = "gitNotice.dismiss"
 
-if sys.platform == "darwin":
-    FLAWED = "git version 2.39.5 (Apple Git-154)"
-    ALSO_FLAWED = "git version 2.39.3 (Apple Git-146)"
-else:
-    FLAWED = "git version 2.20.1"
-    ALSO_FLAWED = "git version 2.17.1"
-FINE = "git version 2.99.0"   # one from the future: nothing is known against it
+# On Linux, whose distributions backport fixes and keep the version, only
+# a git older than GitBolt's floor gets a note.
+FLAWED = ("git version 2.39.5 (Apple Git-154)" if sys.platform == "darwin"
+          else "git version 2.20.1")
 
 
-def stand_in_git(tools: str, real_git: str, log: str, version_file: str) -> None:
+def stand_in_git(tools: str, real_git: str, log: str) -> None:
     path = os.path.join(tools, "git")
     with open(path, "w") as fh:
         fh.write("#!/bin/sh\n"
                  f"printf '%s\\n' \"$*\" >> '{log}'\n"
-                 f"if [ \"$1\" = --version ]; then cat '{version_file}'; exit 0; fi\n"
+                 f"if [ \"$1\" = --version ]; then echo '{FLAWED}'; exit 0; fi\n"
                  f"exec '{real_git}' \"$@\"\n")
     os.chmod(path, 0o755)
 
@@ -102,8 +89,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     with open(os.path.join(home, ".profile"), "w") as fh:
         fh.write('PATH="$HOME/tools:$PATH"; export PATH\n')
     log = os.path.join(scratch, "git.log")
-    version_file = os.path.join(scratch, "version")
-    stand_in_git(tools, real_git, log, version_file)
+    stand_in_git(tools, real_git, log)
     config_home = os.path.join(scratch, "config")
 
     upstream = os.path.join(scratch, "upstream.git")
@@ -112,9 +98,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     git("remote", "add", "origin", upstream, cwd=work)
     git("push", "-q", "origin", "main", cwd=work)
 
-    def start(version: str, label: str) -> App:
-        with open(version_file, "w") as fh:
-            fh.write(version + "\n")
+    def start(label: str) -> App:
         asked = commands(log, "--version")
         app = launch(binary, work, home, config_home, label)
         apps.append(app)
@@ -124,7 +108,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
         return app
 
     # A flawed git: the note, and the fetch runs that git too.
-    app = start(FLAWED, "flawed git")
+    app = start("flawed git")
     wait_for(lambda: notice_shown(app), "the note about the git", app)
     # The repository open and Fetch on first: the trigger does nothing
     # before.
@@ -140,19 +124,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure(f"app exited non-zero after quit{app.tail()}")
 
     # The same git again: dismissed for good.
-    app = start(FLAWED, "same git again")
+    app = start("same git again")
     check_for(2, "the dismissed note came back",
-              lambda: "shown" if notice_shown(app) else None)
-    app.quit()
-
-    # Another flawed version of it: a note of its own.
-    app = start(ALSO_FLAWED, "another version")
-    wait_for(lambda: notice_shown(app), "the note about another version", app)
-    app.quit()
-
-    # A git with nothing wrong: no note.
-    app = start(FINE, "a fine git")
-    check_for(2, "a note about a git with nothing wrong",
               lambda: "shown" if notice_shown(app) else None)
     app.quit()
 

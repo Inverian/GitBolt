@@ -1,21 +1,8 @@
 //
-// TestGitVersion — what GitBolt makes of the git it runs (git/GitVersion.h).
-//
-// GitBolt runs the user's git for clones, fetches, commits and rebases,
-// and Apple's /usr/bin/git, which a Mac started from the Dock used to get
-// whatever the user's shell ran, was 2.39.5: open to CVE-2025-48384, in
-// CISA's catalog of exploited vulnerabilities. GitBolt now says so:
-//
-//   - `git --version` is taken apart: git's own builds, Apple's ("Apple
-//     Git-N"), Git for Windows' (".windows.N") and anyone else's;
-//   - a version is affected by an advisory below the fixed release of
-//     its line, on a line between or before the fixed ones, and not on a
-//     newer one; an Apple build also by its Apple Git-N;
-//   - on Linux only a git older than the floor is worth a word, since
-//     distributions backport fixes and keep the version;
-//   - the table built into GitBolt reads, and says what it should about
-//     the gits users have (Apple Git-154, Git for Windows lines);
-//   - a malformed table is refused whole, never half read.
+// TestGitVersion — what GitBolt makes of the git it runs (git/GitVersion.h):
+// `git --version` taken apart by whose build it is, which advisories a
+// version is affected by on each platform, and the table built into
+// GitBolt against the gits users have (Apple Git-154, Git for Windows).
 //
 
 #include <QTest>
@@ -23,6 +10,7 @@
 #include "git/GitVersion.h"
 
 using gitbolt::git::GitAdvisories;
+using gitbolt::git::GitAdvisory;
 using gitbolt::git::GitPlatform;
 using gitbolt::git::GitVersion;
 
@@ -31,20 +19,14 @@ Q_DECLARE_METATYPE(GitPlatform)
 namespace {
 
 // Two advisories with what the semantics need: lines with a fix, a
-// line between them, an Apple build number, and one Windows-only.
-const QByteArray kTable = R"({
-  "checked": "2026-10-24",
-  "floor": "2.24.0",
-  "advisories": [
-    {"ids": ["CVE-A"], "risk": "code", "builds": ["upstream", "apple", "windows"],
-     "fixed": ["2.43.7", "2.50.1"], "apple_fixed": 155},
-    {"ids": ["CVE-W"], "risk": "credentials", "builds": ["windows"],
-     "fixed": ["2.53.0.windows.4", "2.55.0.windows.4"]}
-  ]
-})";
-
+// line between them, and one Windows-only.
 GitAdvisories table() {
-    return *gitbolt::git::parseGitAdvisories(kTable);
+    using Build = GitVersion::Build;
+    using Risk = GitAdvisory::Risk;
+    return {{2, 24, 0},
+            {{{"CVE-A"}, Risk::RunsCode, {Build::Upstream, Build::Apple, Build::Windows},
+              {{2, 43, 7}, {2, 50, 1}}},
+             {{"CVE-W"}, Risk::LeaksCredentials, {Build::Windows}, {{2, 53, 0, 4}, {2, 55, 0, 4}}}}};
 }
 
 // The first ID of each advisory `output` is affected by on `platform`,
@@ -74,7 +56,7 @@ private slots:
         QTest::addColumn<int>("minor");
         QTest::addColumn<int>("patch");
         QTest::addColumn<int>("build");
-        QTest::addColumn<int>("number");   // Apple Git-N or .windows.N
+        QTest::addColumn<int>("revision");   // .windows.N
         QTest::addColumn<QString>("text");
 
         const int upstream = int(GitVersion::Build::Upstream);
@@ -89,7 +71,7 @@ private slots:
         QTest::newRow("from a checkout") << "git version 2.52.0.153.g1a2b3c4.dirty" << 2 << 52 << 0
                                          << upstream << 0 << "2.52.0.153.g1a2b3c4.dirty";
         QTest::newRow("apple") << "git version 2.39.5 (Apple Git-154)" << 2 << 39 << 5 << apple
-                               << 154 << "2.39.5 (Apple Git-154)";
+                               << 0 << "2.39.5 (Apple Git-154)";
         QTest::newRow("git for windows") << "git version 2.53.0.windows.3" << 2 << 53 << 0
                                          << windows << 3 << "2.53.0.windows.3";
         QTest::newRow("git for windows rc") << "git version 2.56.0.rc2.windows.1" << 2 << 56 << 0
@@ -106,10 +88,7 @@ private slots:
         QTEST(version->minor, "minor");
         QTEST(version->patch, "patch");
         QTEST(int(version->build), "build");
-        QFETCH(int, number);
-        QCOMPARE(version->build == GitVersion::Build::Apple ? version->appleBuild
-                                                            : version->windowsRevision,
-                 number);
+        QTEST(version->windowsRevision, "revision");
         QTEST(version->text, "text");
     }
 
@@ -147,10 +126,8 @@ private slots:
         QTest::newRow("older line") << "git version 2.39.5" << mac << a;
         QTest::newRow("line between") << "git version 2.46.9" << mac << a;
         QTest::newRow("newer line") << "git version 2.51.0" << mac << none;
-        // Apple: by its git version, or by Apple Git-N.
+        // Apple's: by its git version.
         QTest::newRow("apple 154") << "git version 2.39.5 (Apple Git-154)" << mac << a;
-        QTest::newRow("apple 155") << "git version 2.39.5 (Apple Git-155)" << mac << none;
-        QTest::newRow("apple fixed git") << "git version 2.50.1 (Apple Git-150)" << mac << none;
         // Git for Windows: its revision counts, and what is for upstream
         // counts for it too.
         QTest::newRow("windows rev below")
@@ -179,13 +156,15 @@ private slots:
         QTEST(verdict(output, platform, table()), "expected");
     }
 
-    // The table GitBolt ships reads, and says what it must about the
-    // gits users have: the ones Xcode's tools and Git for Windows put
-    // there. Named by ID, so a new advisory doesn't fail it.
+    // The table GitBolt ships says what it must about the gits users
+    // have: the ones Xcode's tools and Git for Windows put there. Named
+    // by ID, so a new advisory doesn't fail it.
     void builtInTableSaysWhatItShould() {
         const GitAdvisories& builtIn = gitbolt::git::builtInGitAdvisories();
         QVERIFY(!builtIn.advisories.empty());
-        QVERIFY(builtIn.checked >= QDate(2026, 10, 24));
+        // GitNoticeBar names the first ID; isAffected() needs a fix.
+        for (const GitAdvisory& advisory : builtIn.advisories)
+            QVERIFY(!advisory.ids.isEmpty() && !advisory.fixed.empty());
         QCOMPARE(builtIn.floor.major, 2);
         QCOMPARE(builtIn.floor.minor, 25);   // git sparse-checkout
 
@@ -217,36 +196,6 @@ private slots:
                     .contains(QStringLiteral("CVE-2026-105803")));
         QVERIFY(!ids("git version 2.56.0.windows.3", GitPlatform::Windows)
                      .contains(QStringLiteral("CVE-2026-105803")));
-    }
-
-    void refusesAMalformedTable_data() {
-        QTest::addColumn<QByteArray>("json");
-        const auto with = [](const char* advisory) {
-            return QByteArray(R"({"checked": "2026-10-24", "floor": "2.24.0", "advisories": [)")
-                   + advisory + "]}";
-        };
-        QTest::newRow("not json") << QByteArray("checked: today");
-        QTest::newRow("no advisories") << with("");
-        QTest::newRow("no date") << QByteArray(
-            R"({"floor": "2.24.0", "advisories": [{"ids": ["X"], "risk": "code",
-                "builds": ["upstream"], "fixed": ["2.1.0"]}]})");
-        QTest::newRow("no ids")
-            << with(R"({"ids": [], "risk": "code", "builds": ["upstream"], "fixed": ["2.1.0"]})");
-        QTest::newRow("unknown risk")
-            << with(R"({"ids": ["X"], "risk": "fire", "builds": ["upstream"], "fixed": ["2.1.0"]})");
-        QTest::newRow("unknown build")
-            << with(R"({"ids": ["X"], "risk": "code", "builds": ["linux"], "fixed": ["2.1.0"]})");
-        QTest::newRow("no fixed release")
-            << with(R"({"ids": ["X"], "risk": "code", "builds": ["upstream"], "fixed": []})");
-        QTest::newRow("not a version")
-            << with(R"({"ids": ["X"], "risk": "code", "builds": ["upstream"], "fixed": ["two"]})");
-        QTest::newRow("a line twice") << with(
-            R"({"ids": ["X"], "risk": "code", "builds": ["upstream"], "fixed": ["2.1.0", "2.1.3"]})");
-    }
-
-    void refusesAMalformedTable() {
-        QFETCH(QByteArray, json);
-        QVERIFY(!gitbolt::git::parseGitAdvisories(json));
     }
 };
 

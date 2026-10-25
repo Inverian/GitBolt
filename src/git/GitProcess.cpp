@@ -81,53 +81,35 @@ constexpr int kRebaseTimeoutMs = 300000;
 // or test the whole tree: as long as a rebase step, not run()'s 30 s.
 constexpr int kCommitTimeoutMs = 300000;
 
-// Where git is when the PATH has none: the places git's packages put it
-// (Homebrew on Apple silicon has one of its own). After the PATH; none
-// on Windows, where these would be taken on the current drive.
-const std::vector<std::string>& gitFallbacks() {
-#ifdef Q_OS_WIN
-    static const std::vector<std::string> none;
-    return none;
-#else
-    static const std::vector<std::string> places{"/usr/bin/git", "/usr/local/bin/git",
-                                                 "/opt/homebrew/bin/git"};
-    return places;
-#endif
-}
-
-// What a git command fails with when there is no git to run: never a
-// bare "git" instead, which Windows looks for in the current folder
-// (GitBolt's, and after Explorer's "Open in GitBolt" a repository)
-// before PATH.
+// What a git command fails with when there is no git: never a bare "git"
+// instead, which Windows looks for in the current folder before PATH.
 constexpr char kNoGit[] =
     "git was not found: install git, or add the folder it is in to your PATH";
 
-// findGitExecutable()'s answers, by the PATH they were found on: a test
-// that puts a git of its own first gets that one, and the user's is
-// looked up once. An answer counts while its file is there.
-struct GitByPath {
-    std::mutex mutex;
-    QHash<QString, QString> found;
-};
-
-GitByPath& gitByPath() {
-    static GitByPath instance;
-    return instance;
-}
-
+// The first git in an absolute folder of `pathList`, else where git's
+// packages put it; empty if none. Kept per PATH while the file is there:
+// a test that puts a git of its own first gets that one, and the user's
+// is looked up once.
 QString gitOnPath(const QString& pathList) {
-    GitByPath& cache = gitByPath();
+    static std::mutex mutex;
+    static QHash<QString, QString> found;
     {
-        std::lock_guard<std::mutex> lock(cache.mutex);
-        const auto known = cache.found.constFind(pathList);
-        if (known != cache.found.constEnd() && QFileInfo(*known).isExecutable())
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto known = found.constFind(pathList);
+        if (known != found.constEnd() && QFileInfo(*known).isExecutable())
             return *known;
     }
-    const QString program = QString::fromStdString(
-        GitProcess::findGitOnPath(pathList.toStdString(), gitFallbacks()));
+    QString program = util::findExecutableOnPath(QStringLiteral("git"), pathList);
+#ifndef Q_OS_WIN
+    // Homebrew on Apple silicon has a folder of its own. Not on Windows,
+    // where these would be taken on the current drive.
+    for (const char* place : {"/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"})
+        if (program.isEmpty() && QFileInfo(QLatin1String(place)).isExecutable())
+            program = QLatin1String(place);
+#endif
     if (!program.isEmpty()) {
-        std::lock_guard<std::mutex> lock(cache.mutex);
-        cache.found.insert(pathList, program);
+        std::lock_guard<std::mutex> lock(mutex);
+        found.insert(pathList, program);
     }
     return program;
 }
@@ -1678,18 +1660,6 @@ Result<ProcessOutput> GitProcess::fsck() const { return run({"fsck", "--full"}, 
 
 std::string GitProcess::findGitExecutable() {
     return gitOnPath(util::pathForChildren(qEnvironmentVariable("PATH"))).toStdString();
-}
-
-std::string GitProcess::findGitOnPath(const std::string& pathList,
-                                      const std::vector<std::string>& fallbacks) {
-    const QString found = util::findExecutableOnPath(QStringLiteral("git"),
-                                                     QString::fromStdString(pathList));
-    if (!found.isEmpty())
-        return found.toStdString();
-    for (const std::string& fallback : fallbacks)
-        if (QFileInfo(QString::fromStdString(fallback)).isExecutable())
-            return fallback;
-    return {};
 }
 
 } // namespace gitbolt::git

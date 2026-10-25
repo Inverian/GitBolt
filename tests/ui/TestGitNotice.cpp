@@ -1,23 +1,8 @@
 //
 // TestGitNotice — the strip above the views that says what is wrong
-// with the git GitBolt runs (widgets/GitNoticeBar.h).
-//
-// GitBolt ran whatever git it found first, and said nothing about it:
-// Apple's 2.39.5, open to CVE-2025-48384, or a git too old for the
-// --end-of-options its commands rely on. Now:
-//
-//   - a git with known security flaws gets a note that names them, the
-//     git and where it is, what the flaws let a repository do, and the
-//     fix for that kind of git (Apple's tools or Homebrew, Git for
-//     Windows, git);
-//   - one older than GitBolt's floor gets a note that says so, on Linux
-//     too, where distributions backport fixes and versions say nothing
-//     more;
-//   - no git, or Apple's stand-in without the tools behind it, gets a
-//     note too; a git that is fine, or didn't say, gets none;
-//   - the note is plain text (the path is the disk's);
-//   - Dismiss hides it, and the window doesn't show it again for that
-//     git and version, but does for another.
+// with the git GitBolt runs (widgets/GitNoticeBar.h): what it says for
+// each kind of git (flawed, too old, missing, fine), as plain text, and
+// a dismissal the window keeps for that git and version only.
 //
 
 #include <QDir>
@@ -33,8 +18,10 @@
 #include "ui/MainWindow.h"
 #include "widgets/GitNoticeBar.h"
 
+using gitbolt::git::GitAdvisories;
 using gitbolt::git::GitPlatform;
 using gitbolt::git::GitProbe;
+using gitbolt::git::GitVersion;
 using gitbolt::widgets::GitNoticeBar;
 
 Q_DECLARE_METATYPE(GitPlatform)
@@ -44,16 +31,14 @@ namespace {
 
 // As in TestGitVersion: one advisory that runs code, for every build,
 // and one Windows-only that leaks credentials.
-const QByteArray kTable = R"({
-  "checked": "2026-10-24",
-  "floor": "2.24.0",
-  "advisories": [
-    {"ids": ["CVE-A"], "risk": "code", "builds": ["upstream", "apple", "windows"],
-     "fixed": ["2.43.7", "2.50.1"], "apple_fixed": 155},
-    {"ids": ["CVE-W"], "risk": "credentials", "builds": ["windows"],
-     "fixed": ["2.55.0.windows.4"]}
-  ]
-})";
+GitAdvisories table() {
+    using Build = GitVersion::Build;
+    using Risk = gitbolt::git::GitAdvisory::Risk;
+    return {{2, 24, 0},
+            {{{"CVE-A"}, Risk::RunsCode, {Build::Upstream, Build::Apple, Build::Windows},
+              {{2, 43, 7}, {2, 50, 1}}},
+             {{"CVE-W"}, Risk::LeaksCredentials, {Build::Windows}, {{2, 55, 0, 4}}}}};
+}
 
 GitProbe probe(const QString& path, const char* version, bool toolsMissing = false) {
     GitProbe found;
@@ -91,8 +76,8 @@ private slots:
             << QStringList{"git 2.39.5 (Apple Git-154)", QDir::toNativeSeparators(usrBin), "(CVE-A)",
                            "could run programs", "Command Line Tools", "brew install git"}
             << "/usr/bin/git\n2.39.5 (Apple Git-154)\nCVE-A";
-        QTest::newRow("apple, fixed by its build")
-            << probe(usrBin, "git version 2.39.5 (Apple Git-155)") << GitPlatform::MacOS
+        QTest::newRow("apple, fixed")
+            << probe(usrBin, "git version 2.50.1 (Apple Git-155)") << GitPlatform::MacOS
             << QStringList() << QString();
         QTest::newRow("homebrew's, flawed")
             << probe(QStringLiteral("/opt/homebrew/bin/git"), "git version 2.43.0")
@@ -130,8 +115,7 @@ private slots:
         QFETCH(GitPlatform, platform);
         QFETCH(QStringList, says);
         QFETCH(QString, key);
-        const auto notice = GitNoticeBar::noticeFor(found, platform,
-                                                    *gitbolt::git::parseGitAdvisories(kTable));
+        const auto notice = GitNoticeBar::noticeFor(found, platform, table());
         QCOMPARE(notice.has_value(), !says.isEmpty());
         if (!notice)
             return;

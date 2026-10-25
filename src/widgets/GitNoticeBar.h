@@ -15,7 +15,7 @@ namespace gitbolt::widgets {
 
 /// What GitBolt tells the user about the git it runs (git::probeGit()):
 /// there is none, it is too old for GitBolt, or it has known security
-/// flaws (git-advisories.json), and what to do about it.
+/// flaws (git::builtInGitAdvisories()), and what to do about it.
 struct GitNotice {
     /// The git, its version and what is wrong with it, a line each: a
     /// dismissal (SettingsService::dismissGitNotice) lasts until one of

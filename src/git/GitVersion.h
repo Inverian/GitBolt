@@ -1,7 +1,5 @@
 #pragma once
 
-#include <QByteArray>
-#include <QDate>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -24,11 +22,9 @@ struct GitVersion {
     int patch = 0;
     /// Git for Windows' N in X.Y.Z.windows.N; 0 for any other git.
     int windowsRevision = 0;
-    /// Apple's N in "(Apple Git-N)"; 0 for any other git.
-    int appleBuild = 0;
     Build build = Build::Upstream;
     /// What git said after "git version ": "2.39.5 (Apple Git-154)".
-    QString text;
+    QString text{};
 };
 
 /// `git --version`'s first line taken apart; nullopt when it isn't one
@@ -39,7 +35,7 @@ std::optional<GitVersion> parseGitVersion(const QString& output);
 /// (a git built by anyone else has 0): -1, 0 or 1.
 int compareGitVersions(const GitVersion& a, const GitVersion& b);
 
-/// A security advisory GitBolt warns about (git-advisories.json).
+/// A security advisory GitBolt warns about (builtInGitAdvisories()).
 struct GitAdvisory {
     /// What a git it affects can let a repository or a server do.
     enum class Risk {
@@ -54,35 +50,21 @@ struct GitAdvisory {
     QList<GitVersion::Build> builds;
     /// The first fixed release of each maintenance line that got one.
     std::vector<GitVersion> fixed;
-    /// For Apple's builds: the first fixed "Apple Git-N", 0 if Apple
-    /// fixed it only with a newer git.
-    int appleFixed = 0;
 };
 
-/// git-advisories.json.
+/// What GitBolt judges a git by.
 struct GitAdvisories {
-    /// When the advisories were last looked through.
-    QDate checked;
-    /// The oldest git GitBolt works with. Default: none.
+    /// The oldest git GitBolt works with.
     GitVersion floor;
     std::vector<GitAdvisory> advisories;
 };
 
-/// A table in git-advisories.json's form; nullopt when it is malformed:
-/// not JSON, no valid "checked" date or "floor", no advisories, or one
-/// with no IDs, an unknown risk or build, or a "fixed" release that
-/// isn't a version.
-std::optional<GitAdvisories> parseGitAdvisories(const QByteArray& json);
-
-/// The table built into GitBolt (:/git/git-advisories.json), read once.
-/// Empty, with no floor, if it couldn't be read (test_git_version
-/// fails then).
+/// The table built into GitBolt (GitVersion.cpp).
 const GitAdvisories& builtInGitAdvisories();
 
 /// Whether `version` is a git `advisory` concerns and is not fixed in:
 /// below the fixed release of its line, or on a line that got none and
-/// is older than the newest line that did. An Apple build counts as
-/// fixed by its git version or by its Apple Git-N.
+/// is older than the newest line that did.
 bool isAffected(const GitVersion& version, const GitAdvisory& advisory);
 
 /// Where GitBolt runs, as far as warnings about git go.
@@ -127,10 +109,9 @@ struct GitProbe {
     bool appleToolsMissing = false;
 };
 
-/// Finds git and asks it its version, once per git: a later call that
-/// finds the same one answers from memory. Waits for the login shell's
-/// PATH (util::pathForChildren()) and for git, so never on the GUI
-/// thread: MainWindow::checkGitVersion() runs it on a worker.
+/// Finds git and asks it its version. Waits for the login shell's PATH
+/// (util::pathForChildren()) and for git, so never on the GUI thread:
+/// MainWindow::checkGitVersion() runs it on a worker, once per launch.
 GitProbe probeGit();
 
 /// What the last probeGit() found, without waiting; nullopt until one

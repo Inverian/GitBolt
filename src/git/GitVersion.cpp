@@ -2,15 +2,10 @@
 #include "git/GitProcess.h"
 
 #include <QDir>
-#include <QFile>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QRegularExpression>
 
 #include <algorithm>
-#include <map>
 #include <mutex>
 #include <tuple>
 
@@ -23,33 +18,9 @@ namespace {
 // of Git for Windows.
 constexpr int kVersionTimeoutMs = 10000;
 
-std::optional<GitVersion::Build> buildNamed(const QString& name) {
-    if (name == QLatin1String("upstream"))
-        return GitVersion::Build::Upstream;
-    if (name == QLatin1String("apple"))
-        return GitVersion::Build::Apple;
-    if (name == QLatin1String("windows"))
-        return GitVersion::Build::Windows;
-    return std::nullopt;
-}
-
-// A version as git-advisories.json writes one: "2.43.7",
-// "2.53.0.windows.4".
-std::optional<GitVersion> versionNamed(const QString& name) {
-    return parseGitVersion(QStringLiteral("git version ") + name);
-}
-
-// What probeGit() found, by git.
-struct Probes {
-    std::mutex mutex;
-    std::map<QString, GitProbe> byPath;
-    std::optional<GitProbe> last;
-};
-
-Probes& probes() {
-    static Probes instance;
-    return instance;
-}
+// What the last probeGit() found, for lastGitProbe().
+std::mutex probeMutex;
+std::optional<GitProbe> lastProbe;
 
 #ifdef Q_OS_MACOS
 // /usr/bin/git is a stand-in that runs the git of the developer tools
@@ -78,7 +49,7 @@ std::optional<GitVersion> parseGitVersion(const QString& output) {
     static const QRegularExpression line(
         QStringLiteral(R"(^git version ((\d+)\.(\d+)(?:\.(\d+))?(.*))$)"));
     // "(Apple Git-154)", after a space.
-    static const QRegularExpression apple(QStringLiteral(R"(^ +\(Apple Git-(\d+)[^)]*\)$)"));
+    static const QRegularExpression apple(QStringLiteral(R"(^ +\(Apple Git-\d+[^)]*\)$)"));
     // ".windows.3", after a release candidate's "-rc2" or ".rc2".
     static const QRegularExpression windows(QStringLiteral(R"(^(?:[.-]rc\d+)?\.windows\.(\d+)$)"));
     // Nothing, a release candidate, or a build from a checkout:
@@ -105,9 +76,8 @@ std::optional<GitVersion> parseGitVersion(const QString& output) {
     }
     version.text = match.captured(1);
     const QString rest = match.captured(5);
-    if (const auto a = apple.match(rest); a.hasMatch()) {
+    if (apple.match(rest).hasMatch()) {
         version.build = GitVersion::Build::Apple;
-        version.appleBuild = a.captured(1).toInt();
     } else if (const auto w = windows.match(rest); w.hasMatch()) {
         version.build = GitVersion::Build::Windows;
         version.windowsRevision = w.captured(1).toInt();
@@ -128,83 +98,61 @@ int compareGitVersions(const GitVersion& a, const GitVersion& b) {
     return key(b) < key(a) ? 1 : 0;
 }
 
-std::optional<GitAdvisories> parseGitAdvisories(const QByteArray& json) {
-    QJsonParseError error{};
-    const QJsonDocument document = QJsonDocument::fromJson(json, &error);
-    if (error.error != QJsonParseError::NoError || !document.isObject())
-        return std::nullopt;
-    const QJsonObject root = document.object();
-
-    GitAdvisories table;
-    table.checked = QDate::fromString(root.value(QStringLiteral("checked")).toString(),
-                                      Qt::ISODate);
-    const auto floor = versionNamed(root.value(QStringLiteral("floor")).toString());
-    if (!table.checked.isValid() || !floor)
-        return std::nullopt;
-    table.floor = *floor;
-
-    for (const QJsonValue& value : root.value(QStringLiteral("advisories")).toArray()) {
-        const QJsonObject entry = value.toObject();
-        GitAdvisory advisory;
-        for (const QJsonValue& id : entry.value(QStringLiteral("ids")).toArray()) {
-            if (id.toString().isEmpty())
-                return std::nullopt;
-            advisory.ids << id.toString();
-        }
-        const QString risk = entry.value(QStringLiteral("risk")).toString();
-        if (risk == QLatin1String("code"))
-            advisory.risk = GitAdvisory::Risk::RunsCode;
-        else if (risk == QLatin1String("credentials"))
-            advisory.risk = GitAdvisory::Risk::LeaksCredentials;
-        else
-            return std::nullopt;
-        for (const QJsonValue& name : entry.value(QStringLiteral("builds")).toArray()) {
-            const auto build = buildNamed(name.toString());
-            if (!build)
-                return std::nullopt;
-            advisory.builds << *build;
-        }
-        for (const QJsonValue& name : entry.value(QStringLiteral("fixed")).toArray()) {
-            const auto fixed = versionNamed(name.toString());
-            if (!fixed)
-                return std::nullopt;
-            // One release per line: which one would count?
-            const bool lineListed = std::any_of(
-                advisory.fixed.cbegin(), advisory.fixed.cend(), [&](const GitVersion& f) {
-                    return f.major == fixed->major && f.minor == fixed->minor;
-                });
-            if (lineListed)
-                return std::nullopt;
-            advisory.fixed.push_back(*fixed);
-        }
-        advisory.appleFixed = entry.value(QStringLiteral("apple_fixed")).toInt(0);
-        if (advisory.ids.isEmpty() || advisory.builds.isEmpty() || advisory.fixed.empty())
-            return std::nullopt;
-        table.advisories.push_back(std::move(advisory));
-    }
-    if (table.advisories.empty())
-        return std::nullopt;
-    return table;
-}
-
+// check-ci-pins: git/git advisories reviewed 2026-10-24
+// check-ci-pins: git-for-windows/git advisories reviewed 2026-10-24
+// check-ci-pins: git-lfs/git-lfs advisories reviewed 2026-10-24
+//
+// Advisories rated high or critical whose attacker is a repository the
+// user clones or opens, or a server they fetch from, with git's default
+// settings.
 const GitAdvisories& builtInGitAdvisories() {
-    static const GitAdvisories table = [] {
-        QFile file(QStringLiteral(":/git/git-advisories.json"));
-        if (file.open(QIODevice::ReadOnly)) {
-            if (auto parsed = parseGitAdvisories(file.readAll()))
-                return std::move(*parsed);
-        }
-        qWarning("git-advisories.json is missing or malformed: no git version warnings");
-        return GitAdvisories{};
-    }();
+    using Build = GitVersion::Build;
+    using Risk = GitAdvisory::Risk;
+    static const GitAdvisories table{
+        // 2.25 added git sparse-checkout, 2.24 the --end-of-options
+        // GitBolt's commands rely on.
+        {2, 25, 0},
+        {
+            // Git LFS 3.0.0 to 3.8.0, in Git for Windows' full installer,
+            // runs commands a repository's config or an SSH URL names;
+            // 2.56.0(3) ships 3.8.1.
+            {{"CVE-2026-105803", "CVE-2026-105802", "CVE-2026-69260", "CVE-2026-69261"},
+             Risk::RunsCode, {Build::Windows}, {{2, 56, 0, 3}}},
+            // A cloned symbolic link to a network share sends it the NTLM hash.
+            {{"CVE-2026-32631"}, Risk::LeaksCredentials, {Build::Windows}, {{2, 53, 0, 3}}},
+            // Cloning from a malicious server sends it the NTLM hash.
+            {{"CVE-2025-66413"}, Risk::LeaksCredentials, {Build::Windows},
+             {{2, 47, 3, 2}, {2, 51, 2, 2}, {2, 52, 0, 2}, {2, 53, 0, 2}}},
+            // A recursive clone runs a submodule's hook (48384, in CISA's
+            // KEV catalog), a bundle URI writes files anywhere, gitk runs a
+            // repository's script. Apple's fix: 2.50.1 (Apple Git-155).
+            {{"CVE-2025-48384", "CVE-2025-48385", "CVE-2025-27614"}, Risk::RunsCode,
+             {Build::Upstream, Build::Apple, Build::Windows},
+             {{2, 43, 7}, {2, 44, 4}, {2, 45, 4}, {2, 46, 4}, {2, 47, 3}, {2, 48, 2}, {2, 49, 1},
+              {2, 50, 1}}},
+            // A recursive clone on a case-insensitive file system runs a hook.
+            {{"CVE-2024-32002", "CVE-2024-32004", "CVE-2024-32465"}, Risk::RunsCode,
+             {Build::Upstream, Build::Apple, Build::Windows},
+             {{2, 39, 4}, {2, 40, 2}, {2, 41, 1}, {2, 42, 2}, {2, 43, 4}, {2, 44, 1}, {2, 45, 1}}},
+            // Not warned about:
+            // CVE-2026-62960: needs transfer.bundleURI=true, off by default.
+            // CVE-2025-26625, CVE-2024-53263: older Git LFS, covered above.
+            // CVE-2025-48386: medium (wincred), fixed with CVE-2025-48384.
+            // CVE-2024-52005: a server's messages reach a terminal unfiltered;
+            //   GitBolt shows them as plain text.
+            // GHSA-rxqw-wxqg-g7hw, CVE-2026-100407, CVE-2026-100408: medium
+            //   (wincred, two bytes of heap, no code execution shown).
+            // CVE-2023-29012, CVE-2023-29011 (Git for Windows 2.40.1),
+            //   CVE-2023-23618 (its gitk in 2.39.2): older than every
+            //   Git for Windows fix above.
+            // Low: CVE-2024-52006, CVE-2024-50349, CVE-2024-32020,
+            //   CVE-2024-32021, CVE-2025-27613 (gitk), CVE-2023-25815.
+        }};
     return table;
 }
 
 bool isAffected(const GitVersion& version, const GitAdvisory& advisory) {
     if (!advisory.builds.contains(version.build))
-        return false;
-    if (version.build == GitVersion::Build::Apple && advisory.appleFixed > 0
-        && version.appleBuild >= advisory.appleFixed)
         return false;
     const auto sameLine = [&version](const GitVersion& fixed) {
         return fixed.major == version.major && fixed.minor == version.minor;
@@ -247,14 +195,6 @@ GitAssessment assessGitVersion(const GitVersion& version, GitPlatform platform,
 GitProbe probeGit() {
     GitProbe probe;
     probe.path = QString::fromStdString(GitProcess::findGitExecutable());
-    Probes& state = probes();
-    {
-        std::lock_guard<std::mutex> lock(state.mutex);
-        if (const auto known = state.byPath.find(probe.path); known != state.byPath.end()) {
-            state.last = known->second;
-            return known->second;
-        }
-    }
 #ifdef Q_OS_MACOS
     probe.appleToolsMissing = probe.path == QLatin1String("/usr/bin/git")
                               && !appleDeveloperToolsInstalled();
@@ -266,18 +206,14 @@ GitProbe probeGit() {
         if (said.ok() && said->success())
             probe.version = parseGitVersion(QString::fromStdString(said->stdoutData));
     }
-    std::lock_guard<std::mutex> lock(state.mutex);
-    // No git, or the tools to be installed: asked again next time.
-    if (!probe.path.isEmpty() && !probe.appleToolsMissing)
-        state.byPath[probe.path] = probe;
-    state.last = probe;
+    std::lock_guard<std::mutex> lock(probeMutex);
+    lastProbe = probe;
     return probe;
 }
 
 std::optional<GitProbe> lastGitProbe() {
-    Probes& state = probes();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    return state.last;
+    std::lock_guard<std::mutex> lock(probeMutex);
+    return lastProbe;
 }
 
 } // namespace gitbolt::git

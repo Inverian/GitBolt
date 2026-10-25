@@ -41,14 +41,10 @@ QString pathForChildren(const QString& own);
 /// once, in order, empty ones dropped (':'-separated; ';' on Windows).
 QString mergePathLists(const QString& first, const QString& second);
 
-/// The first `name` in an absolute folder of `pathList` (split as
-/// mergePathLists() splits it) that is an executable file, by its full
-/// path; empty if there is none. A relative folder ("." among them) is
-/// passed over: it is GitBolt's current folder or one below it, which
-/// on Windows, after Explorer's "Open in GitBolt", was the repository.
-/// Nothing listed finds nothing, not what GitBolt's own PATH has. On
-/// Windows a `name` without an extension is looked for as name.exe
-/// only, not as the .bat or .cmd PATHEXT allows (cmd.exe runs those).
+/// The first `name` in an absolute folder of `pathList` that is an
+/// executable file, by its full path; empty if none. A relative folder is
+/// passed over: it is under the current one, on Windows maybe a repository.
+/// On Windows, name.exe only: a .bat or .cmd would run through cmd.exe.
 QString findExecutableOnPath(const QString& name, const QString& pathList);
 
 /// Runs `shell -ilc` in a session of its own, with no terminal and

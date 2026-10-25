@@ -287,25 +287,11 @@ public:
     Result<ProcessOutput> prune() const;
     Result<ProcessOutput> fsck() const;
 
-    /// The git every GitProcess runs, by its full path: the first `git`
-    /// (git.exe on Windows) in an absolute folder of the PATH git's own
-    /// children get, the login shell's entries ahead of GitBolt's
-    /// (util::pathForChildren()), so that a hook, an alias and the
-    /// Console run the same one; else, on macOS and Linux, the first of
-    /// /usr/bin/git, /usr/local/bin/git and /opt/homebrew/bin/git there
-    /// is. Empty when there is none: never a bare "git", which Windows
-    /// looks for in GitBolt's current folder before PATH. Found once per
-    /// PATH and remembered while the file is there. May wait for the
-    /// login shell's PATH (at most util::kLoginPathTimeoutMs), as every
-    /// git command does; run() and clone() look it up as they start git,
-    /// not when the GitProcess is made.
+    /// The git every GitProcess runs, by its full path (by name, Windows
+    /// looks in the current folder first): the first on the PATH git's
+    /// children get (util::pathForChildren()), so hooks and the Console run
+    /// the same one. Empty when there is none. May wait for the login shell.
     static std::string findGitExecutable();
-
-    /// findGitExecutable()'s search, uncached: the first git in an
-    /// absolute folder of `pathList`, else the first of `fallbacks` that
-    /// is there; empty when there's none.
-    static std::string findGitOnPath(const std::string& pathList,
-                                     const std::vector<std::string>& fallbacks);
 
 private:
     /// Shared child-process environment: inherits the session env

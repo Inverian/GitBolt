@@ -237,11 +237,9 @@ QString telemetryQueueDir(const QString& settingsFile)
 
 int main(int argc, char* argv[]) {
 #ifdef Q_OS_WIN
-    // DLLs from the system's and GitBolt's own folders, never first from
-    // the current one: Explorer's "Open in GitBolt" on a folder's
-    // background starts GitBolt in that folder, a repository. Before
-    // QApplication, which loads the platform plugin and what it needs;
-    // not inherited by the programs GitBolt starts.
+    // DLLs never from the current folder, which after Explorer's "Open in
+    // GitBolt" is a repository; set before QApplication loads its plugins.
+    // The programs GitBolt starts don't inherit it.
     SetDllDirectoryW(L"");
 #endif
     // An askpass for a git command nobody is waiting on (the periodic
@@ -588,10 +586,8 @@ int main(int argc, char* argv[]) {
         telemetryService->start();
     }
 
-    // The git GitBolt runs, and what to tell the user about it: a note
-    // above the views (MainWindow::checkGitVersion), on a worker once
-    // the window is up, since finding git waits for the login shell's
-    // PATH.
+    // The note about the git GitBolt runs, once the window is up: finding
+    // git waits for the login shell's PATH.
     window.checkGitVersion();
 
     // Test bridge — agent/test control channel, never active unless

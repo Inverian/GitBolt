@@ -355,23 +355,13 @@ gitbolt_patch(src/libgit2/attr_file.c
     "\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n\nskip:\n\t/* GitBolt: the rule took too many; it is skipped, as one with\n\t * none. What it took is the caller's to free with the rule. */\n\tgit_attr_assignment__free(assign);\n\t*base = git__next_line(scan);\n\treturn GIT_ENOTFOUND;\n}\n"
     "return \\(assigns->length == 0\\) \\? GIT_ENOTFOUND : 0;\n}")
 
-# An object cut short: a loose object whose file ends inside its zlib
-# stream, or a delta in a pack whose data runs out before its header
-# does. inflate() then says Z_BUF_ERROR, which libgit2 takes for "give
-# me more room" (zstream_seterr), and the loops reading on had no more
-# input to give it: they asked again, forever, at full CPU. Reading the
-# loose object (any lookup of it: a commit, a blob for a diff or the
-# File view) or the packed delta's header (a diff's file sizes, an
-# object's type check) never returned. A disk or sync error or an
-# interrupted write can leave a loose object so, and a repository can
-# be made so. Both reads now fail ("premature end of zlib stream",
-# "truncated packfile"). And an error from the delta's stream no longer
-# adds -1 to the header's length, which wrapped it and had the header
-# read past its 16-byte buffer: a corrupt pack, not only a short one. libgit2's own fixes, from its main branch
-# (5254f5dc, PR #7346; PR #7402), in v2.0.0-rc.1 but in no 1.9 release
-# as of 2026-10-24. Their code as it is, comments included: a release
-# that has them then finds these patches' result already there, and
-# they do nothing. Drop them then.
+# An object cut short (a loose object's zlib stream, or a packed delta's
+# data, ending early) was read forever at full CPU: inflate()'s
+# Z_BUF_ERROR was taken for "more room". Both reads now fail, and a delta
+# stream error no longer wraps the header's length past its buffer.
+# libgit2's own fixes (5254f5dc, PR #7346; PR #7402), in v2.0.0-rc.1 and
+# no 1.9 release, copied as they are: a release that has them makes these
+# patches do nothing, so drop them then.
 gitbolt_patch(src/util/zstream.c
     "\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\tout_remain -= out_written;"
     "\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\t/*\n\t\t * with output space still available, a Z_BUF_ERROR that wrote\n\t\t * nothing could be the input is exhausted in the middle of the stream.\n\t\t * It is unlikely further input will arrive within this loop,\n\t\t * so we fail it.\n\t\t */\n\t\tif (!out_written && zstream->zerr == Z_BUF_ERROR) {\n\t\t\tgit_error_set(GIT_ERROR_ZLIB, \"premature end of zlib stream\");\n\t\t\treturn -1;\n\t\t}\n\n\t\tout_remain -= out_written;"

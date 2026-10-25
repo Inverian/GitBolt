@@ -1,47 +1,8 @@
 #!/usr/bin/env python3
 """Report (or apply) newer releases of what GitBolt's builds pin, and
-security advisories published since each was last reviewed.
-
-.github/workflows/ci.yml downloads its packaging tools from tagged
-GitHub releases, each checked against the sha256 it had when it was
-pinned, and pins actions to commits; the build pins libgit2, CI pins
-Qt, NSIS and what installs Qt (.github/qt-requirements.*). Nothing
-bumps those for us, and nothing says when one of them, or the git
-GitBolt runs, has a security advisory. This does the legwork, by hand
-or weekly in .github/workflows/dependency-check.yml (a failed run mails
-the owner):
-
-  fetch, uses: pins  the newest tagged release (never a 'continuous'
-                     build, which is rebuilt in place, nor an older
-                     major's late release); --write bumps them
-  libgit2            a newer release of the pinned series, and
-                     libgit2's GitHub security advisories
-  Qt                 a newer patch release of the pinned series
-                     (download.qt.io), and whether the series'
-                     open-source support has ended (endoflife.date)
-  NSIS               a newer NSIS release (SourceForge)
-  Python             a newer CPython release of the minor CI pins
-                     (actions/python-versions, where setup-python takes
-                     it from)
-  Python packages    the locked versions in .github/*.txt (a file with
-                     --hash= lines): GitHub's reviewed advisories against
-                     each (a project's own, before GitHub reviews them,
-                     only for the repositories with a reviewed date);
-                     not their newest release, as the lock is refreshed
-                     on purpose (.github/qt-requirements.in). A package
-                     pinned to a GitHub commit (in the .in file): a
-                     release that has it, to pin instead
-  git                git's, Git for Windows' and Git LFS's GitHub
-                     security advisories since src/git/git-advisories.json
-                     was 'checked', that it lists nowhere
-
-A repository's advisories count from the date in a comment (libgit2's
-in cmake/Libgit2.cmake, py7zr's and aqtinstall's in
-.github/qt-requirements.in), published on or after it:
-  # check-ci-pins: <owner>/<repo> advisories reviewed <YYYY-MM-DD>
-A bump that has to wait is accepted until a date by a comment in any
-file read here, naming the key the report prints in brackets:
-  # check-ci-pins: accept <key> until <YYYY-MM-DD>
+security advisories published since each was last reviewed. What it
+follows, the comments it reads and how to act on a report are in
+tools/README.md.
 
 Usage:
   tools/check-ci-pins.py            report; exits 1 if anything is
@@ -50,14 +11,7 @@ Usage:
   tools/check-ci-pins.py --write    also rewrite the fetch and uses: pins
   tools/check-ci-pins.py --offline  only list the pins found (no network)
 
-Review a --write like any other change: a new linuxdeploy can change
-the AppImage, so run the workflow on the branch (workflow_dispatch
-builds the installers) before merging. The ubuntu and debian image
-digests the DEB is tested in are not followed: it prints a reminder.
-
-Uses the GitHub API without a token (60 requests an hour is enough for
-the pins; the advisory lookups want more); set GITHUB_TOKEN to lift
-that limit.
+Set GITHUB_TOKEN to lift the GitHub API's rate limit.
 """
 
 from __future__ import annotations
@@ -77,10 +31,16 @@ import xml.etree.ElementTree as ET
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 LIBGIT2 = "cmake/Libgit2.cmake"
-GIT_TABLE = "src/git/git-advisories.json"
-# The git GitBolt runs comes from these; GIT_TABLE says what of theirs
-# has been read.
-GIT_REPOS = ("git/git", "git-for-windows/git", "git-lfs/git-lfs")
+GIT_VERSION = "src/git/GitVersion.cpp"
+# The advisories that must have a reviewed date, and where it's kept: the
+# git GitBolt runs comes from git, Git for Windows and Git LFS.
+MUST_REVIEW = {"libgit2/libgit2": LIBGIT2, "git/git": GIT_VERSION,
+               "git-for-windows/git": GIT_VERSION, "git-lfs/git-lfs": GIT_VERSION}
+# A release on GitHub counts once it has been out this long, time for a
+# bad upload to be noticed and pulled (the wait .github/qt-requirements.in
+# sets for the lock); an advisory counts at once. Qt's and NSIS's count at
+# once: they have no advisory feed here, so a release is how a fix shows.
+COOLDOWN = datetime.timedelta(days=14)
 
 QT_RELEASES = "https://download.qt.io/official_releases/qt/"
 QT_SUPPORT = "https://endoflife.date/api/v1/products/qt/"
@@ -92,15 +52,11 @@ USER_AGENT = "GitBolt-check-ci-pins (+https://github.com/Inverian/GitBolt)"
 FETCH = re.compile(
     r"fetch (https://github\.com/([^/\s]+)/([^/\s]+)/releases/download/"
     r"([^/\s]+)/([^/\s]+))\s*\\\s*\n\s*([0-9a-f]{64})")
-# uses: <owner>/<repo>[/<path>]@<40-hex commit> # <tag>
+# uses: <owner>/<repo>[/<path>]@v<major>
 # (actions/cache/restore is a path in the actions/cache repository)
-USES = re.compile(
-    r"uses: ([^/\s]+)/([^/@\s]+)(/[^@\s]*)?@([0-9a-f]{40}) # (\S+)")
+USES = re.compile(r"uses: ([^/\s]+)/([^/@\s]+)(/[^@\s]*)?@(v\d+)(?![\w.])")
 LIBGIT2_VERSION = re.compile(r"set\(GITBOLT_LIBGIT2_VERSION (\d+\.\d+\.\d+)\)")
 QT_VERSION = re.compile(r"\bCI_QT_VERSION: '?(\d+\.\d+\.\d+)\b")
-PYTHON_VERSION = re.compile(r"^\s+python-version: '?(\d+\.\d+\.\d+)'?\s*$", re.M)
-# actions/python-versions' release tags: <version>-<build id>
-PYTHON_RELEASE = re.compile(r"(\d+)\.(\d+)\.(\d+)-\d+")
 NSIS = re.compile(
     r"downloads\.sourceforge\.net/project/nsis/NSIS%20(\d+)/(\d+(?:\.\d+)+)/nsis-\2\.zip")
 # name==version, or name @ URL, as pip's requirement files have them
@@ -110,7 +66,6 @@ GITHUB_COMMIT = re.compile(
     r"github\.com/([^/\s]+)/([^/\s@]+?)(?:\.git)?(?:/archive/|@)([0-9a-f]{40})\b")
 REVIEWED = re.compile(r"check-ci-pins: (\S+/\S+) advisories reviewed (\d{4}-\d{2}-\d{2})\b")
 ACCEPT = re.compile(r"check-ci-pins: accept (\S+) until (\d{4}-\d{2}-\d{2})\b")
-DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # Statuses that fail the run, with their GitHub annotation level.
 FAILING = {"behind": "warning", "eol": "error", "advisory": "error"}
@@ -166,22 +121,24 @@ def version_key(tag: str) -> tuple:
     return tuple(int(n) for n in re.findall(r"\d+", tag))
 
 
-def releases(owner: str, repo: str) -> list:
-    """(version_key, tag) of every release that is neither a draft, a
-    pre-release nor a 'continuous' build, newest version first."""
+def releases(owner: str, repo: str, cutoff: str) -> list:
+    """(version_key, tag) of every release published by `cutoff` that is
+    neither a draft, a pre-release nor a 'continuous' build, newest
+    version first."""
     answer = api(f"repos/{owner}/{repo}/releases?per_page=100")
     if not isinstance(answer, list):
         raise ValueError(f"{owner}/{repo}: releases answered {type(answer).__name__}")
     found = sorted(((version_key(r["tag_name"]), r["tag_name"]) for r in answer
-                    if not (r["draft"] or r["prerelease"] or r["tag_name"] == "continuous")),
+                    if not (r["draft"] or r["prerelease"] or r["tag_name"] == "continuous")
+                    and (r.get("published_at") or "")[:10] <= cutoff),
                    reverse=True)
     if not found:
-        raise ValueError(f"{owner}/{repo}: no tagged release")
+        raise ValueError(f"{owner}/{repo}: no tagged release published by {cutoff}")
     return found
 
 
-def latest_tag(owner: str, repo: str) -> str:
-    return releases(owner, repo)[0][1]
+def latest_tag(owner: str, repo: str, cutoff: str) -> str:
+    return releases(owner, repo, cutoff)[0][1]
 
 
 def sha256_of(url: str) -> str:
@@ -194,6 +151,8 @@ class Report:
 
     def __init__(self, accepted: dict, today: str, annotate: bool):
         self.accepted, self.today, self.annotate = accepted, today, annotate
+        # The last day a release may have been published to count
+        self.cutoff = (datetime.date.fromisoformat(today) - COOLDOWN).isoformat()
         self.used = set()
         self.failing = self.unchecked = 0
 
@@ -244,9 +203,18 @@ class Pins:
                       if "--hash=" in self.texts[rel]]
         self.sources = self.find(".github/*.in")
         libgit2 = self.read(LIBGIT2)
+        self.read(GIT_VERSION)
 
         self.fetch = [(rel, m) for rel in self.workflows for m in self.matches(FETCH, rel)]
-        self.uses = [(rel, m) for rel in self.workflows for m in self.matches(USES, rel)]
+        # A line a workflow repeats is checked once
+        self.uses = list({(rel, m.group(0)): (rel, m) for rel in self.workflows
+                          for m in self.matches(USES, rel)}.values())
+        # An action pinned any other way (a full tag, a commit) isn't followed
+        for rel in self.workflows:
+            for ref in re.findall(r"^[\s-]*uses: (\S+)", self.texts[rel], re.M):
+                if not ref.startswith("./") and not USES.search(f"uses: {ref}"):
+                    self.missing.append(f"{rel}: uses: {ref} isn't on a major tag (@vN), "
+                                        "so it isn't followed")
 
         m = LIBGIT2_VERSION.search(libgit2)
         self.libgit2 = m and m.group(1)
@@ -258,9 +226,6 @@ class Pins:
         if not self.qt:
             self.missing.append(f"Qt version: found {', '.join(sorted(qt)) or 'none'} as "
                                 "CI_QT_VERSION in .github/workflows, expected one")
-
-        self.python_runtime = sorted({(m.group(1), rel) for rel in self.workflows
-                                      for m in self.matches(PYTHON_VERSION, rel)})
 
         nsis = {m.groups(): rel for rel in self.workflows for m in self.matches(NSIS, rel)}
         self.nsis = next(iter(nsis.items())) if len(nsis) == 1 else None
@@ -280,10 +245,10 @@ class Pins:
                 repo, date = m.groups()
                 if repo not in self.reviewed or date < self.reviewed[repo][0]:
                     self.reviewed[repo] = (date, rel)
-        if "libgit2/libgit2" not in self.reviewed:
-            self.missing.append(f"{LIBGIT2}: no 'check-ci-pins: libgit2/libgit2 advisories "
-                                "reviewed <date>' comment")
-        self.git = self.git_table()
+        for repo, rel in MUST_REVIEW.items():
+            if repo not in self.reviewed:
+                self.missing.append(f"{rel}: no 'check-ci-pins: {repo} advisories "
+                                    "reviewed <date>' comment")
 
         self.accepted = {}
         for text in self.texts.values():
@@ -310,25 +275,6 @@ class Pins:
                 self.missing.append(f"{rel}: {e.strerror}")
                 self.texts[rel] = ""
         return self.texts[rel]
-
-    def git_table(self):
-        """GIT_TABLE's 'checked' date, and every GHSA it names, in its
-        advisories and in what it chose not to warn about."""
-        try:
-            with open(os.path.join(self.root, GIT_TABLE), encoding="utf-8") as fh:
-                table = json.load(fh)
-        except (OSError, ValueError) as e:   # ValueError: not JSON
-            self.missing.append(f"{GIT_TABLE}: {getattr(e, 'strerror', None) or e}")
-            return None
-        checked = table.get("checked")
-        if not (isinstance(checked, str) and DATE.fullmatch(checked)):
-            self.missing.append(f"{GIT_TABLE}: 'checked' is not a YYYY-MM-DD date")
-            return None
-        known = set()
-        for entry in table.get("advisories", []) + table.get("not_warned", []):
-            ghsa = entry.get("ghsa", [])
-            known.update(ghsa if isinstance(ghsa, list) else [ghsa])
-        return checked, known
 
     def python_pins(self) -> list:
         """(name, version or None, GitHub commit URL or None, where) per
@@ -358,7 +304,7 @@ class Pins:
     def describe(self) -> list:
         lines = [f"{owner}/{repo} {tag} ({rel})"
                  for rel, m in self.fetch for _, owner, repo, tag, _, _ in [m.groups()]]
-        lines += [f"{m.group(1)}/{m.group(2)}{m.group(3) or ''} {m.group(5)} ({rel})"
+        lines += [f"{m.group(1)}/{m.group(2)}{m.group(3) or ''} {m.group(4)} ({rel})"
                   for rel, m in self.uses]
         if self.libgit2:
             lines.append(f"libgit2 {self.libgit2} ({LIBGIT2})")
@@ -366,13 +312,9 @@ class Pins:
             lines.append(f"Qt {self.qt[0]} ({self.qt[1]})")
         if self.nsis:
             lines.append(f"NSIS {self.nsis[0][1]} ({self.nsis[1]})")
-        lines += [f"Python {version} ({rel})" for version, rel in self.python_runtime]
         lines += [f"{name} {version or url} ({rel})" for name, version, url, rel in self.python]
         lines += [f"{repo} advisories reviewed {date} ({where})"
                   for repo, (date, where) in sorted(self.reviewed.items())]
-        if self.git:
-            lines.append(f"{', '.join(GIT_REPOS)} advisories checked {self.git[0]} "
-                         f"({GIT_TABLE})")
         lines += [f"accept {key} until {until}" for key, until in sorted(self.accepted.items())]
         return lines
 
@@ -381,7 +323,7 @@ class Pins:
 
 def check_fetch(out: Report, updated: dict, rel: str, m) -> None:
     url, owner, repo, tag, asset, sha = m.groups()
-    newest = latest_tag(owner, repo)
+    newest = latest_tag(owner, repo, out.cutoff)
     if version_key(newest) <= version_key(tag):
         out.add("ok", f"{owner}/{repo} {tag}")
         return
@@ -394,24 +336,25 @@ def check_fetch(out: Report, updated: dict, rel: str, m) -> None:
 
 
 def check_uses(out: Report, updated: dict, rel: str, m) -> None:
-    owner, repo, path, commit, tag = m.groups()
+    """A major tag takes its major's releases as they come; behind once
+    a newer major is out."""
+    owner, repo, path, tag = m.groups()
     action = f"{owner}/{repo}{path or ''}"
-    newest = latest_tag(owner, repo)
-    if version_key(newest) <= version_key(tag):
-        out.add("ok", f"{action} {tag}")
+    newest = latest_tag(owner, repo, out.cutoff)
+    major = f"v{version_key(newest)[0]}"
+    if version_key(major) <= version_key(tag):
+        out.add("ok", f"{action} {tag} ({newest})")
         return
-    new_commit = api(f"repos/{owner}/{repo}/commits/{newest}")["sha"]
-    if out.add("behind", f"{action} {tag} -> {newest}\n{new_commit}",
-               f"{repo}-{newest}") == "behind":
-        updated[rel] = updated[rel].replace(
-            m.group(0), f"uses: {action}@{new_commit} # {newest}")
+    if out.add("behind", f"{action} {tag} -> {major} ({newest})",
+               f"{repo}-{major}") == "behind":
+        updated[rel] = updated[rel].replace(m.group(0), f"uses: {action}@{major}")
 
 
 def check_libgit2(out: Report, version: str) -> None:
     """Behind when the pinned series has a newer release (libgit2's
     security fixes come as those); a newer series is news, not a
     failure: the advisories say when the pinned one is affected."""
-    found = releases("libgit2", "libgit2")
+    found = releases("libgit2", "libgit2", out.cutoff)
     pin = version_key(version)
     series = [tag for key, tag in found if key[:2] == pin[:2] and key > pin]
     if series:
@@ -435,15 +378,14 @@ def repository_advisories(repo: str) -> list:
     return answer
 
 
-def check_advisories(out: Report, repo: str, reviewed: str, where: str,
-                     known: frozenset = frozenset()) -> None:
+def check_advisories(out: Report, repo: str, reviewed: str, where: str) -> None:
     """Every advisory of `repo` published on or after `reviewed` (one
-    from later that day wasn't read), less those `known` names."""
+    from later that day wasn't read)."""
     new = 0
     for a in repository_advisories(repo):
         published = (a.get("published_at") or "")[:10]
         # Newest first, but a page in another order mustn't stop it early.
-        if published < reviewed or a.get("withdrawn_at") or a["ghsa_id"] in known:
+        if published < reviewed or a.get("withdrawn_at"):
             continue
         new += 1
         about = ", ".join(x for x in (a.get("cve_id"), a.get("severity"), published) if x)
@@ -522,30 +464,13 @@ def check_nsis(out: Report, major: str, version: str) -> None:
         out.add("ok", f"NSIS {version}")
 
 
-def check_python_runtime(out: Report, version: str, where: str) -> None:
-    pin = version_key(version)
-    found = sorted({tuple(map(int, m.groups()))
-                    for r in api("repos/actions/python-versions/releases?per_page=100")
-                    if not (r["draft"] or r["prerelease"])
-                    for m in [PYTHON_RELEASE.fullmatch(r["tag_name"])] if m},
-                   reverse=True)
-    if not found:
-        raise ValueError("actions/python-versions: no release")
-    newer = [v for v in found if v[:2] == pin[:2] and v > pin]
-    if newer:
-        new = ".".join(map(str, newer[0]))
-        out.add("behind", f"Python {version} -> {new} ({where})", f"python-{new}")
-    else:
-        out.add("ok", f"Python {version}")
-
-
 def check_python(out: Report, name: str, version: str | None, url: str | None,
                  where: str) -> None:
     if url:
         # A commit, for a fix not released yet: behind once a release
         # has it, so the pin can go back to a version.
         owner, repo, commit = GITHUB_COMMIT.search(url).groups()
-        tag = latest_tag(owner, repo)
+        tag = latest_tag(owner, repo, out.cutoff)
         status = api(f"repos/{owner}/{repo}/compare/{commit}...{tag}")["status"]
         if status in ("ahead", "identical"):
             out.add("behind", f"{name} @ {commit[:12]}: {owner}/{repo} {tag} has it; pin "
@@ -604,17 +529,10 @@ def main(argv: list | None = None, root: str = ROOT, today: str | None = None) -
         out.guard("Qt", check_qt, *pins.qt)
     if pins.nsis:
         out.guard("NSIS", check_nsis, *pins.nsis[0])
-    for version, rel in pins.python_runtime:
-        out.guard(f"Python {version}", check_python_runtime, version, rel)
     for pin in pins.python:
         out.guard(pin[0], check_python, *pin)
     for repo, (date, where) in sorted(pins.reviewed.items()):
         out.guard(f"{repo} advisories", check_advisories, repo, date, where)
-    if pins.git:
-        checked, known = pins.git
-        for repo in GIT_REPOS:
-            out.guard(f"{repo} advisories", check_advisories, repo, checked, GIT_TABLE,
-                      frozenset(known))
 
     for key, until in sorted(pins.accepted.items()):
         if key not in out.used and not out.unchecked:

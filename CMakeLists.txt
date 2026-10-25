@@ -69,28 +69,25 @@ set(CMAKE_AUTOUIC ON)
 # .clang-tidy is useless without it).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
 # Options
 option(GITBOLT_BUILD_TESTS "Build tests" ON)
 option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
-# The pinned libgit2, patched by cmake/PatchLibgit2.cmake against
-# repositories that crash or freeze GitBolt, as every installer has it.
-# OFF takes a system libgit2, for packagers whose policy is the
-# distribution's: it has none of those patches (configure lists them)
-# and must be 1.9.5 or later (cmake/Libgit2Floor.cmake). A build
-# directory configured before this default keeps its OFF until
-# configured with -DGITBOLT_BUNDLED_LIBGIT2=ON or afresh.
+# OFF: a system libgit2, for packagers whose policy is the distribution's
+# (cmake/Libgit2.cmake). Libgit2Floor gives the help strings its floor.
+include(Libgit2Floor)
 option(GITBOLT_BUNDLED_LIBGIT2
-    "Build the pinned libgit2, with GitBolt's patches, from source and link it statically; OFF uses a system copy (1.9.5 or later) without them"
+    "Build the pinned libgit2, with GitBolt's patches, from source and link it statically; OFF uses a system copy (${GITBOLT_LIBGIT2_FLOOR} or later) without them"
     ON)
 include(CMakeDependentOption)
 cmake_dependent_option(GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2
-    "With GITBOLT_BUNDLED_LIBGIT2=OFF, accept a system libgit2 before 1.9.5 (1.8.6) whose distribution backported the fixes for CVE-2026-53584 and CVE-2026-53585"
+    "With GITBOLT_BUNDLED_LIBGIT2=OFF, accept a system libgit2 before ${GITBOLT_LIBGIT2_FLOOR} (${GITBOLT_LIBGIT2_FLOOR_1_8} on 1.8), for a distribution that backported those releases' security fixes (cmake/Libgit2Floor.cmake)"
     OFF "NOT GITBOLT_BUNDLED_LIBGIT2" OFF)
 option(GITBOLT_REQUIRE_ENGLISH_PLURALS
     "Fail the configure when the English plural forms can't be built (no Qt LinguistTools, or Qt before 6.7)"
     OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 # Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
 # Empty, the default, compiles telemetry out.

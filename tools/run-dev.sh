@@ -70,13 +70,7 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
     echo "==> Configuring CMake (first build)..."
     cmake -B "$BUILD_DIR" -S "$PROJECT_ROOT" \
           -DCMAKE_BUILD_TYPE=Debug \
-          -DGITBOLT_BUNDLED_LIBGIT2=ON \
           -G Ninja
-elif grep -q '^GITBOLT_BUNDLED_LIBGIT2:BOOL=OFF$' "$BUILD_DIR/CMakeCache.txt" 2>/dev/null; then
-    # Configured when a system libgit2 was the default: that one has none
-    # of GitBolt's patches, and an old one now stops the configure.
-    echo "==> Switching $BUILD_DIR to the bundled libgit2 (now the default)..."
-    cmake -B "$BUILD_DIR" -S "$PROJECT_ROOT" -DGITBOLT_BUNDLED_LIBGIT2=ON
 fi
 
 # ---------------------------------------------------------------------------

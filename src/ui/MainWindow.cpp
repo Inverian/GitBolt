@@ -261,8 +261,7 @@ MainWindow::~MainWindow()
 void MainWindow::checkGitVersion()
 {
     // On a worker: finding git may wait for the login shell's PATH
-    // (util::pathForChildren), and asking it its version is a process.
-    // The answer is kept per git (git::probeGit), for About too.
+    // (util::pathForChildren), and asking its version runs it.
     auto* watcher = new QFutureWatcher<git::GitProbe>(this);
     connect(watcher, &QFutureWatcher<git::GitProbe>::finished, this, [this, watcher]() {
         showGitNotice(watcher->result());
@@ -275,8 +274,7 @@ void MainWindow::showGitNotice(const git::GitProbe& probe)
 {
     const std::optional<widgets::GitNotice> notice =
         widgets::GitNoticeBar::noticeFor(probe, git::currentGitPlatform());
-    // One the user dismissed stays away until its git, the git's
-    // version or what is wrong with it changes (GitNotice::key).
+    // A dismissed one stays away until its key changes (GitNotice::key).
     if (!notice || settingsService_->gitNoticeDismissed(notice->key)) {
         gitNotice_->hide();
         return;
@@ -284,11 +282,8 @@ void MainWindow::showGitNotice(const git::GitProbe& probe)
     gitNotice_->showNotice(*notice);
 }
 
-// Tools › GitK, once the PATH GitBolt's children get is known: gitk by
-// its full path, as the Console would find it. By name, Windows looked in
-// GitBolt's current folder before PATH, which Explorer's "Open in
-// GitBolt" made the repository: a gitk.exe committed there would have
-// run.
+// gitk by its full path on the PATH GitBolt's children get: by name,
+// Windows looks in the current folder first, and a gitk.exe there would run.
 void MainWindow::launchGitk(const QString& childPath)
 {
     const QString program = util::findExecutableOnPath(QStringLiteral("gitk"), childPath);
@@ -3814,9 +3809,8 @@ void MainWindow::buildToolsMenu()
         a->setObjectName(QStringLiteral("tools.gitk"));
         connect(a, &QAction::triggered, this, [this]() {
             if (!gitService_ || !gitService_->isOpen()) return;
-            // The PATH GitBolt's children get, the login shell's first, on
-            // a worker: shortly after launch it may still wait for the
-            // login shell (util::pathForChildren).
+            // On a worker: shortly after launch the PATH GitBolt's children
+            // get may still wait for the login shell (util::pathForChildren).
             auto* watcher = new QFutureWatcher<QString>(this);
             connect(watcher, &QFutureWatcher<QString>::finished, this, [this, watcher]() {
                 watcher->deleteLater();

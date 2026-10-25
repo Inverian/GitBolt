@@ -77,9 +77,8 @@ public:
     /// reports it in dump-state.
     telemetry::Gate telemetryGate() const;
 
-    /// Finds the git GitBolt runs and asks it its version, on a worker
-    /// (git::probeGit()), then shows what there is to say about it
-    /// (showGitNotice). main() calls it once the window is up.
+    /// Probes the git GitBolt runs on a worker (git::probeGit()), then
+    /// shows what there is to say about it (showGitNotice).
     void checkGitVersion();
 
     /// The note above the views about `probe` (widgets::GitNoticeBar),

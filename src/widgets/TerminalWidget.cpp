@@ -146,12 +146,9 @@ bool isCshFamily(const QString& name)
     return name == QLatin1String("csh") || name == QLatin1String("tcsh");
 }
 
-// The shells a switch types its line into: they drop their line on a
-// Ctrl+C at the prompt, and take a `cd` quoted as shellWord quotes. A
-// program an rc file `exec`s in the shell's place (tmux, screen, ssh)
-// holds the terminal without counting as a command (see
-// commandRunning), and would pass the line, and a Ctrl+C, on to
-// whatever runs in it: vim, a half-typed line in another pane, a build.
+// The shells a switch types its line into, quoted as shellWord quotes.
+// A program an rc file `exec`s in their place (tmux, ssh) isn't seen as
+// a command (commandRunning), and would pass the line and Ctrl+C on.
 bool takesTypedSwitches(const QString& name)
 {
     return isShFamily(name) || isCshFamily(name) || name == QLatin1String("fish");
@@ -334,7 +331,6 @@ void TerminalWidget::start(const QString& workingDirectory)
     if (!workingDirectory.isEmpty())
         pendingCwd_ = workingDirectory;
     shellGitDir_ = gitDir_;
-    shellCwd_ = pendingCwd_;
 
 #ifdef Q_OS_WIN
     // A hidden widget has no real size yet, and ConPTY lays its screen
@@ -366,10 +362,8 @@ void TerminalWidget::start(const QString& workingDirectory)
         info.workingDirectory = QDir::toNativeSeparators(pendingCwd_).toStdWString();
     // The Unix child's TERM and GITBOLT_TERM. ConPTY renders the console
     // as xterm-256color, and TERM is what Git for Windows' less and vim
-    // go by. And cmd runs a program typed by name from PATH only, not
-    // from the folder it is in first: that is the repository, where a
-    // git.exe or a .bat could have been committed. One there runs as
-    // .\name, as in PowerShell.
+    // go by. And cmd looks for a program typed by name on PATH only, not
+    // first in the repository, where a git.exe or a .bat can be committed.
     info.environment = {{L"TERM", L"xterm-256color"},
                         {L"GITBOLT_TERM", L"1"},
                         {L"NoDefaultCurrentDirectoryInExePath", L"1"}};
@@ -592,119 +586,47 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 {
     if (path.isEmpty())
         return;
-    // The repository the shell is in, or on its way to (a switch that
-    // waits goes to the latest), opened again: Recent, the dashboard, a
-    // second launch handing its path over. There is nothing to type, and
-    // a Ctrl+C would only drop what the user has on the line.
+    // The repository the shell is on its way to (where it is, unless a
+    // switch waits), opened again (Recent, a second launch): nothing to
+    // type, and a Ctrl+C would only drop the user's line.
     if (path == pendingCwd_ && gitDir == gitDir_)
         return;
     gitDir_ = gitDir;
     pendingCwd_ = path;
-    // Back to where the shell is while a switch away from it waits: the
-    // switch is off, or its Ctrl+C would drop the line for nothing.
-    if (isRunning() && path == shellCwd_ && gitDir == shellGitDir_) {
-        cancelSwitch();
-        return;
-    }
     // A shell not started yet takes both at its start (showEvent).
     if (isRunning())
         switchWhenIdle();
 }
 
-// The shell follows the repository opened: a `cd` typed into it at its
-// prompt, with a new GIT_DIR (a bare repository opened or left) ahead
-// of it on its line (see gitDirCommand). The shell keeps its variables,
-// its history and its jobs. A new GIT_DIR used to start it again, which
-// hung up what it ran: its jobs, one stopped with Ctrl+Z (the editor of
-// a `git commit`) or run in the background, which leave it at its
-// prompt (see commandRunning), and on Windows the command running too.
-// Typed while a command runs, the line would go to the command (an
-// editor, a pager, a REPL, `cat`), so it waits for the prompt, which is
-// looked for as the shell's output arrives (the prompt is output) and
-// every so often in case none does; meanwhile a note says so, below the
-// command's output. A `cd` alone, between two repositories with work
-// trees, used to be typed at once, into whatever ran; it now waits as a
-// GIT_DIR does. A switch meanwhile changes only where the shell goes. A
-// shell gitDirCommand has no line for is still started again for a new
-// GIT_DIR, once the command has ended, and its jobs are hung up with
-// it; so is one whose folder a `cd` can't be typed for (cdTypeable).
+// The shell follows the repository opened: a `cd` typed at its prompt,
+// with a new GIT_DIR ahead of it on the line (gitDirCommand), so it
+// keeps its variables, its history and its jobs. The rules:
 //
-// The prompt the line is typed at isn't always an empty one. A line the
-// user had partly typed there took the switch's line on its end, and
-// the Enter after it: the line ran, the `cd` among its arguments (a
-// half-typed `rm -rf build` removed the build folder, and the
-// repository being opened with it). Keys typed ahead while a command
-// ran did the same once it ended. And at a prompt that continues a line
-// (an open quote, a heredoc, a trailing backslash, tcsh's `foreach?`)
-// the switch went into the string, the heredoc or the loop. A GIT_DIR
-// then stayed as it was, yet shellGitDir_ took it for changed, so every
-// switch after that typed only the `cd`, and git in the shell went on
-// at the old bare repository (a `git branch -D` there deleted its
-// branch). None of that shows in what the shell prints, so the line is
-// dropped first, with a Ctrl+C, as a shell started again dropped it.
-// Every shell drops its line on one, a continued one too, in whatever
-// mode its line editor is (Ctrl+E Ctrl+U, say, left the line where it
-// was in vi's command mode), and the terminal drops with it the keys
-// typed ahead that the shell hasn't read. The one line known to be
-// empty is one nothing has gone to since the shell started, since such
-// a Ctrl+C, or since a switch typed its own whole line (lineEmpty_),
-// and that gets no Ctrl+C: switching repositories without typing into
-// the Console looks as it always did, a `cd` at the prompt. Otherwise
-// the Ctrl+C shows, as a ^C (bash, sh) or the line left as it was
-// (zsh), and a new prompt for the switch's line.
-// The line and its Ctrl+C go only to a shell of the sh, csh or fish
-// families (takesTypedSwitches): a program an rc file `exec`ed in the
-// shell's place (tmux, screen, ssh), which commandRunning can't see
-// into, would pass them on to what runs there, a pane's vim or its
-// half-typed line, so that one is started again instead (a tmux client
-// detached, not what its session runs), and so is any other shell,
-// whose quoting a `cd` can't be typed in. A switch back to where the
-// shell is, while one away from it waits, is called off.
-//
-// The line goes in at the timer's next tick rather than with the
-// Ctrl+C, which is a signal: on Linux a shell that reads a whole line
-// at a time (dash) can read it before the signal reaches it (a read of
-// the terminal waits for input under way before it looks for one), and
-// then drop it with the line before. Anything sent to the shell
-// meanwhile can leave a line again (see noteTyped), and then another
-// Ctrl+C goes first (lineEmpty_). A command that runs meanwhile can't:
-// the Ctrl+C has emptied the line and the terminal's input, and only
-// what is sent after it puts anything there. One taken for a line again
-// used to send a Ctrl+C at every prompt for good where a prompt hook
-// runs a program (bash's PROMPT_COMMAND, zsh's precmd): the Ctrl+C has
-// the shell show its prompt again, which runs the hook, the shell's
-// output is read while the hook holds the terminal, and at the tick the
-// line counted as not empty. And the PTY is read before the Ctrl+C,
-// since one makes it drop what it holds unread (on macOS, a background
-// job's last lines).
-//
-// Once a command the switch waited for has ended, a switch that drops
-// the line or starts the shell again waits a tick more (commandRan_)
-// before it goes on. A command typed ahead, with its Enter, then gets
-// to start, and the switch waits for it in turn: a Ctrl+C sent as soon
-// as the shell took its terminal back reached zsh before it had read
-// the line, which it dropped unread, though the terminal had shown it
-// typed. A tick isn't always enough: a prompt that runs something in
-// itself (`$(git …)` in PS1, precmd or PROMPT_COMMAND, as git prompts
-// and starship do) keeps the shell from reading the line for as long as
-// that takes, and it runs in the shell's own process group, so no
-// command is seen running. So the Ctrl+C also waits while the terminal
-// holds a whole line the shell hasn't read (lineUnread), a few ticks at
-// most. And on Windows conhost has painted the program's last output by
-// then (see below).
-//
-// On Windows there is no note: conhost paints its screen with absolute
-// cursor moves, and would paint over it. And cmd is started again for a
-// new GIT_DIR rather than typed it (see gitDirCommand), and for a `cd`
-// too unless nothing can be on its line (lineEmpty_): a Ctrl+C through
-// ConPTY ends cmd's read of its line, but conhost leaves the keys typed
-// ahead in the console's input (only Ctrl+Break flushes it), and ends
-// no read while one of its popups (F7's history) is up, so the `cd`
-// would go on their end. Starting cmd again closes its pseudo console.
-// What the console had not yet painted went with it, and what
-// ConPtyProcess had read but not handed over (stopShell): cmd started
-// again as soon as the program was seen to end lost its last lines, a
-// `git push`'s error say. Hence the tick, and the output taken first.
+// - Never while a command runs (commandRunning): the line would go to it
+//   (an editor, a pager, `cat`). The switch waits, looking again as the
+//   shell's output arrives and every tick, with a note below the output;
+//   a switch meanwhile only changes where it goes.
+// - A Ctrl+C first unless nothing can be on the line (lineEmpty_): a line
+//   partly typed, keys typed ahead or a continued line (an open quote, a
+//   heredoc) took the switch's line on its end and ran it, or swallowed
+//   it, and nothing the shell prints tells. Every shell drops its line on
+//   one, in any editing mode, and the terminal drops unread keys with it.
+// - The line a tick after the Ctrl+C, a signal: dash can read the line
+//   before the signal lands, and drop it. Keys sent meanwhile get another
+//   Ctrl+C (noteTyped); a prompt hook run by the Ctrl+C doesn't. The PTY
+//   is read first, since a Ctrl+C drops what it holds unread.
+// - After a command waited for, a Ctrl+C or a start again waits a tick
+//   more (commandRan_), and a Ctrl+C also while the terminal holds a whole
+//   line unread behind a slow prompt (lineUnread), kMaxUnreadWaits ticks
+//   at most: a command typed ahead gets to run rather than dropped unread.
+// - Started again instead, once no command runs, where the line can't be
+//   typed: a GIT_DIR gitDirCommand has no line for, a folder cdTypeable
+//   turns down, any program but a shell takesTypedSwitches knows.
+// - Windows: no note, which conhost would paint over. cmd is started
+//   again for a new GIT_DIR, and for a `cd` too unless lineEmpty_: a
+//   Ctrl+C through ConPTY leaves keys typed ahead in the console's input,
+//   and ends no read while a popup (F7's history) is up. A tick first,
+//   and the output taken, or closing the console loses its last lines.
 void TerminalWidget::switchWhenIdle()
 {
     if (!commandRunning()) {
@@ -713,13 +635,11 @@ void TerminalWidget::switchWhenIdle()
         const bool sameGitDir = gitDir_ == shellGitDir_;
         const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
         // The line typed into the shell, rather than the shell started
-        // again; cmd only where nothing can be on its line (see above).
+        // again (see above).
         bool typeIt = (sameGitDir || !gitDirLine.isNull()) && cdTypeable(pendingCwd_);
 #ifdef Q_OS_WIN
         typeIt = typeIt && lineEmpty_;
 #else
-        // And only into a shell at its prompt, never into a program in
-        // its place, whatever has or hasn't been typed into it.
         typeIt = typeIt && takesTypedSwitches(shellProgram());
 #endif
         if (commandRan_ && !(typeIt && lineEmpty_)) {
@@ -757,7 +677,6 @@ void TerminalWidget::switchWhenIdle()
             // read it: lineEmpty_ stays set.
             writeToPty(toTerminalBytes(gitDirLine + cdCommand(pendingCwd_)));
             shellGitDir_ = gitDir_;
-            shellCwd_ = pendingCwd_;
             return;
         }
         // Closing the PTY loses what it holds unread, and a command that
@@ -863,17 +782,6 @@ void TerminalWidget::removeSwitchNote()
         last.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
         last.removeSelectedText();
     }
-}
-
-void TerminalWidget::cancelSwitch()
-{
-    if (switchTimer_->isActive()) {
-        switchTimer_->stop();
-        removeSwitchNote();
-    }
-    commandRan_ = false;
-    waitForTick_ = false;
-    unreadWaits_ = 0;
 }
 
 bool TerminalWidget::commandRunning() const
@@ -1759,19 +1667,10 @@ void TerminalWidget::keyPressEvent(QKeyEvent* event)
     }
 }
 
-// Whatever the user sends the shell can leave something on its line: a
-// key at its prompt (an arrow or a Tab as much as a letter), an Enter
-// that continues the line, keys typed ahead while a command runs, which
-// the shell reads once it ends. So the next switch drops the line before
-// it types its own (see switchWhenIdle), and one that has dropped it
-// already and still waits drops it again. That costs a Ctrl+C at an
-// empty prompt where the keys left none, after a command run and done
-// say: nothing the shell prints tells an empty line from a continued one
-// (the prompts are the user's to set). Only keys at the prompt used to
-// count, after its last Enter, so the change went into a continued line
-// or keys typed ahead; and a `cd` alone took no Ctrl+C at all. And only
-// what is sent can: a command that runs after the Ctrl+C, a prompt
-// hook's, puts nothing on the line (see switchWhenIdle).
+// Anything sent to the shell can leave something on its line: a key at
+// the prompt, an Enter that continues the line, keys typed ahead while a
+// command runs. Nothing it prints tells an empty line from a continued
+// one, so the next switch drops the line first (see switchWhenIdle).
 void TerminalWidget::noteTyped()
 {
     lineEmpty_ = false;

@@ -13,25 +13,26 @@ semver once 1.0 lands.
   it, as every download has it. It used to take a libgit2 installed on
   the system, which has none of them. `-DGITBOLT_BUNDLED_LIBGIT2=OFF`
   still uses an installed one, which must now be 1.9.5 (or 1.8.6) or
-  later, and configure lists the fixes it lacks. A build directory
-  configured before keeps its OFF: configure it with
-  `-DGITBOLT_BUNDLED_LIBGIT2=ON` (`tools/run-dev.sh` does so once).
-  Help › About says when GitBolt runs on a libgit2 without its fixes.
-- Development: CI installs Qt with nothing installed by version range
-  or without a hash check: Python 3.14.8, every Python package
-  aqtinstall needs with its hash (`.github/qt-requirements.txt`,
-  installed with `--require-hashes`), and aqtinstall at a commit,
-  since no release of it reads Qt 6.11's Windows packages yet. None of
-  it runs when Qt comes from the cache.
+  later, and configure warns that it has none of GitBolt's fixes. A
+  build directory configured before keeps its OFF: configure it with
+  `-DGITBOLT_BUNDLED_LIBGIT2=ON`, or afresh. Help › About says when
+  GitBolt runs on a libgit2 without its fixes.
+- Development: CI installs Qt with no Python package installed by
+  version range or without a hash check: every one aqtinstall needs
+  with its hash (`.github/qt-requirements.txt`, installed with
+  `--require-hashes`), and aqtinstall at a commit, since no release of
+  it reads Qt 6.11's Windows packages yet. None of it runs when Qt
+  comes from the cache.
 - Development: a weekly check, `.github/workflows/dependency-check.yml`
   running `tools/check-ci-pins.py`, fails (and so mails the owner) when
-  libgit2's or Qt's pinned series, NSIS, aqtinstall or a pinned action
-  or tool has a newer release, when the pinned Qt series' open-source
-  support has ended, when CI's Python has a newer patch release, when
-  GitHub's advisory database lists a vulnerability in a locked Python
-  package, or when libgit2, git, Git for Windows, Git LFS, py7zr or
-  aqtinstall publishes a security advisory not yet reviewed. A source that
-  doesn't answer fails it too, instead of passing for all clear.
+  Qt's pinned series or NSIS has a newer release, when libgit2's
+  pinned series, aqtinstall or a packaging tool has had one out for two
+  weeks, when an action has a new major version, when the pinned Qt
+  series' open-source support has ended, when GitHub's advisory
+  database lists a vulnerability in a locked Python package, or when
+  libgit2, git, Git for Windows, Git LFS, py7zr or aqtinstall publishes
+  a security advisory not yet reviewed. A source that doesn't answer
+  fails it too, instead of passing for all clear.
 
 ### Fixed
 
@@ -46,7 +47,7 @@ semver once 1.0 lands.
   in the shell, and clears the line at the prompt with a Ctrl+C first
   if anything has been typed into the Console since it started or
   since the last switch. Opening the repository the Console is already
-  in, or switching back to it while a switch waits, leaves it alone.
+  in leaves it alone.
   Only a shell of the sh, csh or fish families is typed the `cd`: a
   program your shell's startup files run in its place (tmux, screen,
   ssh), which would pass the line and the Ctrl+C on to what runs in it,

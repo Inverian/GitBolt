@@ -273,7 +273,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug -G Ninja
 
 CMake will print a summary of what it found. Look for:
 
-- `libgit2: bundled 1.9.7 (static)`; [the bundled libgit2](#bundled-libgit2)'s own configure output is prefixed `[libgit2]`. With `-DGITBOLT_BUNDLED_LIBGIT2=OFF`: `Found libgit2, version 1.x.x` and a warning listing the fixes [a system libgit2](#a-system-libgit2) lacks
+- `libgit2: bundled 1.9.7 (static)`; [the bundled libgit2](#bundled-libgit2)'s own configure output is prefixed `[libgit2]`. With `-DGITBOLT_BUNDLED_LIBGIT2=OFF`: `Found libgit2, version 1.x.x` and a warning that [a system libgit2](#a-system-libgit2) has none of GitBolt's patches
 - `Configuring done`
 - `Generating done`
 - `Build files have been written to: <path>/build`
@@ -376,8 +376,8 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 |---|---|---|
 | `GITBOLT_BUILD_TESTS` | `ON` | Build the unit test executables |
 | `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
-| `GITBOLT_BUNDLED_LIBGIT2` | `ON` | Build the pinned libgit2, with GitBolt's patches, from source and link it statically (see [Bundled libgit2](#bundled-libgit2)). `OFF` uses [a system libgit2](#a-system-libgit2) (1.9.5 or later) |
-| `GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2` | `OFF` | With `GITBOLT_BUNDLED_LIBGIT2=OFF`, accept a system libgit2 older than 1.9.5 (1.8.6), for a distribution that backported the fixes for CVE-2026-53584 and CVE-2026-53585 |
+| `GITBOLT_BUNDLED_LIBGIT2` | `ON` | Build the pinned libgit2, with GitBolt's patches, from source and link it statically (see [Bundled libgit2](#bundled-libgit2)). `OFF` uses [a system libgit2](#a-system-libgit2) |
+| `GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2` | `OFF` | With `GITBOLT_BUNDLED_LIBGIT2=OFF`, accept a system libgit2 older than [the floor](#a-system-libgit2), for a distribution that backported its fixes |
 | `GITBOLT_REQUIRE_ENGLISH_PLURALS` | `OFF` | Fail the configure when the [English plural forms](#english-plural-forms) can't be built (no Qt LinguistTools, or Qt before 6.7). CI sets it |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
@@ -476,10 +476,6 @@ no libgit2 library.
   `-DFETCHCONTENT_SOURCE_DIR_LIBGIT2=<that directory>`.
 - On Windows it needs neither vcpkg nor pkgconf.
 
-A build directory configured before this was the default keeps
-`GITBOLT_BUNDLED_LIBGIT2=OFF` until it is configured with
-`-DGITBOLT_BUNDLED_LIBGIT2=ON`, as below, or afresh.
-
 ```bash
 cmake -B build-bundled -DCMAKE_BUILD_TYPE=Release -DGITBOLT_BUNDLED_LIBGIT2=ON -G Ninja
 cmake --build build-bundled --parallel
@@ -490,9 +486,9 @@ cmake --build build-bundled --parallel
 `-DGITBOLT_BUNDLED_LIBGIT2=OFF` links a libgit2 installed on the system
 instead (found by pkg-config, then as libgit2's CMake package), for
 packagers whose policy is the distribution's libgit2. It has none of
-the patches above: configure prints a warning listing them, Help ›
-About shows the version followed by "(system, without GitBolt's
-patches)", and the tests of the patches skip. It must have libgit2's
+the patches above: configure warns about that, Help › About shows the
+version followed by "(system, without GitBolt's patches)", and the
+tests of the patches skip. It must have libgit2's
 own fixes for what a repository can do to it: 1.9.5 or later, or 1.8.6
 or later on 1.8 (CVE-2026-53584, a submodule path that leads out of the
 work tree; CVE-2026-53585, a delta that allocates without bound; and a
@@ -548,7 +544,7 @@ You asked for [a system libgit2](#a-system-libgit2) and CMake found none. Leave 
 
 ### "the system libgit2 (pkg-config) is 1.9.2, without libgit2's fixes for CVE-2026-53584 …"
 
-The build directory uses a system libgit2 (`GITBOLT_BUNDLED_LIBGIT2=OFF`, which a directory configured before the bundled libgit2 became the default still has), and that libgit2 is too old. Configure with `-DGITBOLT_BUNDLED_LIBGIT2=ON` (or delete the directory and configure afresh), or upgrade the libgit2 (`brew upgrade libgit2`) and configure again. See [A system libgit2](#a-system-libgit2).
+The build directory uses a system libgit2 (`GITBOLT_BUNDLED_LIBGIT2=OFF`, which a directory configured before the bundled libgit2 became the default still has), and that libgit2 is too old. Configure with `-DGITBOLT_BUNDLED_LIBGIT2=ON` (or delete the directory and configure afresh), or upgrade the libgit2 (`brew upgrade libgit2`), delete the build directory's `CMakeCache.txt` (it keeps the version found before) and configure again with `-DGITBOLT_BUNDLED_LIBGIT2=OFF`. See [A system libgit2](#a-system-libgit2).
 
 ### "MOC found unused class"
 

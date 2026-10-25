@@ -64,7 +64,7 @@ gitbolt_add_test(test_status         git/TestStatus.cpp)
 # object on Windows), gently first, so git rolls back its index.lock
 gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
 # What GitBolt makes of `git --version`, and the advisories it warns
-# about (git/GitVersion.h, git-advisories.json).
+# about (git/GitVersion.h).
 gitbolt_add_test(test_git_version    git/TestGitVersion.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
@@ -373,13 +373,9 @@ if(NOT WIN32)
     endif()
 endif()
 
-# CI's Qt install stays pinned: .github/qt-requirements.txt holds every
-# package with its sha256, ci.yml installs nothing unhashed and pins the
-# actions that install Qt to commits, and tools/check-ci-pins.py (the
-# weekly dependency check) finds and follows every pin (a path inside an
-# action's repository, an older major's late release) and the advisories
-# since each was reviewed. Offline, and it only reads the source tree, so
-# the Python found above will do.
+# CI's Qt install stays pinned (hashed packages, nothing unhashed), and
+# tools/check-ci-pins.py, the weekly dependency check, follows every pin.
+# Offline and reads only the source tree, so the Python found above will do.
 if(NOT WIN32 AND Python3_FOUND)
     add_test(NAME ci_pins
         COMMAND ${Python3_EXECUTABLE}

@@ -1,7 +1,7 @@
 name: Dependency check
 
 # Weekly: is everything the builds pin still current (libgit2, Qt, NSIS,
-# what installs Qt, the packaging tools and pinned actions), and has
+# what installs Qt, the packaging tools and the actions), and has
 # libgit2, git, Git for Windows, Git LFS or a locked Python package a
 # security advisory not yet read? tools/check-ci-pins.py does the work,
 # and runs the same way locally. It exits 1 when something is behind or
@@ -29,10 +29,7 @@ jobs:
     # three times before it's reported as not checked.
     timeout-minutes: 15
     steps:
-      # Pinned to a commit, though ci.yml keeps GitHub's own actions on
-      # major tags: this is the job that watches pins, and
-      # tools/check-ci-pins.py follows this one too.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 

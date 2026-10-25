@@ -246,7 +246,7 @@ Required tools at a glance:
 On macOS with a current Xcode SDK, Qt before 6.9.2 fails to link: its CMake
 package still requests the AGL framework, which the SDK no longer ships.
 CI builds with Qt 6.11 on all three platforms, and on all three it builds
-libgit2 1.9.7 from source, with GitBolt's patches, and links it
+the pinned libgit2 from source, with GitBolt's patches, and links it
 statically, as a build from source does by default, so no installer
 depends on a libgit2 package. The first configure of a build directory
 downloads it. libgit2 only accesses local repositories:

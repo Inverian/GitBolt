@@ -443,16 +443,6 @@ private slots:
     // here a git.exe planted there (whoami, renamed) that would have run.
     void noGitIsAnErrorNotABareName()
     {
-        // The search itself, everywhere: a PATH and fallbacks with no git
-        // in them find nothing, not "git".
-        QTemporaryDir empty;
-        QVERIFY(empty.isValid());
-        QCOMPARE(gitbolt::git::GitProcess::findGitOnPath(
-                     QDir::toNativeSeparators(empty.path()).toStdString(),
-                     {empty.filePath(QStringLiteral("git")).toStdString()}),
-                 std::string());
-        QCOMPARE(gitbolt::git::GitProcess::findGitOnPath(std::string(), {}), std::string());
-        // And end to end, where no git sits in a fallback folder.
 #ifndef Q_OS_WIN
         for (const char* fallback : {"/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"}) {
             if (QFileInfo(QLatin1String(fallback)).isExecutable())

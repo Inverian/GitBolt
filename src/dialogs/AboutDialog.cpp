@@ -67,11 +67,9 @@ QString buildDateString() {
     return QStringLiteral(__DATE__ " " __TIME__);
 }
 
-// The git GitBolt runs, as the window's check at launch found it
-// (git::probeGit()): rows of the table, for a bug report: its version
-// and where it is, and what is known against it. Escaped: rich text,
-// and the path is the disk's. The table doesn't wrap, so a long path
-// loses its middle.
+// Rows for the git the launch check found (git::lastGitProbe()), for
+// bug reports. Escaped, as rich text; a long path loses its middle,
+// since the table doesn't wrap.
 QString gitRows() {
     const auto row = [](const QString& name, const QString& value) {
         return QStringLiteral("<tr><td valign='top'><b>%1</b></td><td>%2</td></tr>")

@@ -89,19 +89,12 @@ public:
     void setGitDir(const QString& gitDir) { gitDir_ = gitDir; }
     QString gitDir() const { return gitDir_; }
 
-    /// The repository the shell works in: `cd` there, with `gitDir` as
-    /// setGitDir has it. A running shell of the sh, csh or fish families
-    /// is typed the `cd` at its prompt (cdCommand), and a change of
-    /// GIT_DIR (a bare repository opened or left) on its line, in its own
-    /// syntax (sh's `export` and `unset`, csh's `setenv` and `unsetenv`,
-    /// fish's `set`): never while a command runs in it, but a moment
-    /// after that command ends, and after a Ctrl+C has dropped its line
-    /// if anything has been typed into it since it started or since the
-    /// last switch. Any other program in the shell's place (another
-    /// shell, tmux an rc file exec'd), and cmd on Windows once anything
-    /// has been typed into it, is started again there instead (see
-    /// switchWhenIdle). The repository the shell is in, or on its way
-    /// to, opened again changes nothing.
+    /// The repository the shell works in, with `gitDir` as setGitDir has
+    /// it: a `cd`, and a new GIT_DIR ahead of it, typed at the shell's
+    /// prompt once no command runs in it, or the shell started again there
+    /// where that can't be typed safely (see switchWhenIdle). The
+    /// repository it is on its way to (where it is, when no switch waits)
+    /// opened again changes nothing.
     void changeRepository(const QString& path, const QString& gitDir);
 
     /// Returns true if the child shell is currently running.
@@ -151,9 +144,6 @@ private:
     /// changes, or a start again): now, unless a command the shell
     /// started is running, and then once it no longer is.
     void switchWhenIdle();
-    /// A switch that waits called off (the shell's own folder opened
-    /// again meanwhile), with its note.
-    void cancelSwitch();
     /// The note below a running command's output while a switch waits.
     static QString switchNote();
     void removeSwitchNote();
@@ -252,14 +242,10 @@ private:
     QString          pendingCwd_;
     QString          gitDir_;          // setGitDir
     QString          shellGitDir_;     // the running shell's GIT_DIR, as far as is known
-    QString          shellCwd_;        // the running shell's folder, as far as is known
     QString          shellName_;       // the file name of the shell started
-    /// Nothing can be on the shell's line: nothing has gone to the shell
-    /// (noteTyped) since it started, since a switch's Ctrl+C dropped its
-    /// line, or since a switch typed a whole line of its own there. A
-    /// switch then types its line with no Ctrl+C ahead of it (see
-    /// switchWhenIdle). A command that runs meanwhile, a prompt hook's,
-    /// leaves it set.
+    /// Nothing can be on the shell's line: nothing has gone to it
+    /// (noteTyped) since it started, a switch's Ctrl+C or a switch's own
+    /// line. A switch then types its line with no Ctrl+C ahead of it.
     bool             lineEmpty_    = true;
     /// The switch has seen a command run, and waits a tick after its end
     /// before it drops the line or starts the shell again (see

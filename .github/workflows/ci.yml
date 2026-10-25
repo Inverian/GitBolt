@@ -65,54 +65,23 @@ jobs:
       - uses: actions/checkout@v7
 
       # ------------------------------------------------------------------
-      # Qt, by aqtinstall from Qt's online repository (download.qt.io,
-      # which the official installer reads), with nothing installed by
-      # version range or without a hash check. jurplel/install-qt-action did this
-      # through 0.9.8, and pip-installed aqtinstall and some 24 packages by
-      # version range, without hashes, on every run, cache hits too:
-      # py7zr 1.1.0 among them, with its path traversal (CVE-2026-23879).
-      #   Python: an exact version, one the runner images have. 3.14
-      #     also stops zipfile.is_zipfile from taking some Qt .7z
-      #     archives for zips (miurahr/aqtinstall#1042).
-      #   Packages: .github/qt-requirements.txt, each with its sha256,
-      #     wheels only, into a venv of their own (the .in file next to
-      #     it says how to refresh it).
-      #   aqtinstall: a commit, as no release reads Qt 6.11's Windows
-      #     packages yet (see the .in file). git checks what it fetches
-      #     against the commit's hash, and pip builds it with no index,
-      #     from the locked setuptools.
-      #   Qt's archives: aqt checks each against the SHA-256 that
-      #     download.qt.io publishes for it, never a mirror's.
-      # All of that only on a cache miss: a hit restores the Qt tree and
-      # runs no Python. The key covers what shapes that tree: the Qt
-      # version, both requirements files, and -aqt1 for Install Qt's
-      # command (bump it when that changes: other modules, another
-      # arch). The cache is saved once Qt environment has checked the
-      # tree, so a broken install is never kept, and before the build, so
-      # a later failure doesn't waste the download.
-      # A pull request can read main's cache but writes only its own, so
-      # pushes to main restore only what a push to main installed.
-      # GitHub's own actions are pinned to commits on this path too, as
-      # install-qt-action pinned the setup-python and cache code it ran.
-      # tools/check-ci-pins.py follows every commit pin in this file.
-      #
-      # setup-python is also the Python Configure finds (Python3_ROOT_DIR)
-      # for the e2e and Nautilus tests, as install-qt-action's was.
-      # v7.0.0 rather than v7.1.0 (2026-10-22), which hasn't been out the
-      # two weeks the Python lock waits for too.
-      # check-ci-pins: accept setup-python-v7.1.0 until 2026-11-07
-      # Python 3.14.8, as the runner images have it: 3.14.9 (2026-10-21)
-      # waits too.
-      # check-ci-pins: accept python-3.14.9 until 2026-11-04
+      # Qt, by aqtinstall, only on a cache miss and with nothing installed
+      # unchecked: the locked packages by sha256, aqtinstall by its commit,
+      # and each Qt archive (by aqt) against the SHA-256 download.qt.io
+      # publishes. The key covers what shapes the Qt tree (-aqt1: bump it
+      # when Install Qt's command changes); the tree is saved once Qt
+      # environment has checked it. Python 3.14: its zipfile no longer
+      # takes some Qt .7z archives for zips (miurahr/aqtinstall#1042), and
+      # Configure finds it for the e2e and Nautilus tests too.
       - name: Set up Python
         id: python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.14.8'
+          python-version: '3.14'
 
       - name: Restore Qt
         id: qt
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.workspace }}/Qt
           key: qt-${{ env.CI_QT_VERSION }}-${{ runner.os }}-${{ runner.arch }}-aqt1-${{ hashFiles('.github/qt-requirements.in', '.github/qt-requirements.txt') }}
@@ -212,7 +181,7 @@ jobs:
 
       - name: Save Qt
         if: steps.qt.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/save@v6
         with:
           path: ${{ runner.workspace }}/Qt
           key: ${{ steps.qt.outputs.cache-primary-key }}

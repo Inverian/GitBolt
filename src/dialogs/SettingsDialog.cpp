@@ -41,12 +41,9 @@ namespace gitbolt::dialogs {
 
 namespace {
 
-// `git config --global <args>`, run as every git GitBolt runs
-// (git::GitProcess): the git found by its full path (by name, Windows
-// looked in GitBolt's current folder first), in the home folder, so no
-// repository's config comes into it, and without git's repository
-// variables (an exported GIT_CONFIG made git refuse, "only one config
-// file at a time": the fields came up empty and Apply saved nothing).
+// `git config --global <args>` as GitProcess runs every git: by its full
+// path, without git's repository variables (an exported GIT_CONFIG makes
+// git refuse), and in the home folder so no repository's config comes in.
 // Its output, trimmed; empty when it failed.
 QString globalGitConfig(const QStringList& args)
 {
@@ -1245,9 +1242,8 @@ void SettingsDialog::saveGitConfig()
     // Not read (no git), so nothing to save.
     if (!userNameEdit_->isEnabled())
         return;
-    // Here and now, not on a worker: two saves (Apply, then OK) then run
-    // in order, and none outlives the application. Finding git may wait
-    // for the login shell's PATH, but only in GitBolt's first seconds.
+    // Here, not on a worker: Apply then OK save in order and no save
+    // outlives the app. Finding git waits only in GitBolt's first seconds.
     const QString name = userNameEdit_->text().trimmed();
     const QString email = userEmailEdit_->text().trimmed();
     if (!name.isEmpty())
