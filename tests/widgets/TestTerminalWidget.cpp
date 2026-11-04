@@ -302,7 +302,10 @@ constexpr Qt::KeyboardModifier kTerminalCtrl = Qt::ControlModifier;
 // A test that runs bash instead gets the prompt from HOME's .bashrc as
 // well: Debian's and Ubuntu's bash read /etc/bash.bashrc first, which
 // sets a PS1 of its own over the one in the environment, and ~/.bashrc
-// after it. dash, and bash run as sh, don't read it.
+// after it. dash, and bash run as sh, don't read it. On macOS the
+// Console is a login shell, which reads /etc/profile (macOS's sets a PS1
+// for bash, as sh too) and then ~/.profile, not ~/.bashrc: HOME's
+// .profile reads the .bashrc.
 class PlainShell {
 public:
     PlainShell()
@@ -316,6 +319,9 @@ public:
         QFile bashrc(home_.path() + QStringLiteral("/.bashrc"));
         if (home_.isValid() && bashrc.open(QIODevice::WriteOnly))
             bashrc.write("PS1='" + kShPrompt.toLatin1() + " '\n");
+        QFile profile(home_.path() + QStringLiteral("/.profile"));
+        if (home_.isValid() && profile.open(QIODevice::WriteOnly))
+            profile.write(". \"$HOME/.bashrc\"\n");
     }
 
     ~PlainShell()
@@ -2719,6 +2725,27 @@ private slots:
         QTest::qWait(1500);
         QVERIFY(terminal.isRunning());
         QVERIFY2(!terminal.toPlainText().contains(QStringLiteral("gbplanted-ran")),
+                 qPrintable(terminal.toPlainText()));
+#endif
+    }
+
+    // On macOS the shell is a login shell, as Terminal's are: started
+    // from the Dock, only a login shell's files put Homebrew's git on
+    // PATH.
+    void ptyShellIsALoginShellOnMacOS()
+    {
+#ifndef Q_OS_MACOS
+        QSKIP("macOS only");
+#else
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        QVERIFY2(typed(terminal, QStringLiteral("case $0 in -*) echo gb-lo\"\"gin ;; esac")),
+                 qPrintable(terminal.toPlainText()));
+        QVERIFY2(terminal.toPlainText().contains(QStringLiteral("\ngb-login")),
                  qPrintable(terminal.toPlainText()));
 #endif
     }

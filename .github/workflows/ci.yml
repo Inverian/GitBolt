@@ -53,9 +53,10 @@ jobs:
       # without a commit. >= 6.9.2: older FindWrapOpenGL.cmake falls
       # back to a hard-coded `-framework AGL`, which current macOS SDKs
       # no longer ship. 6.11: 6.10 gets no more fixes. 6.11's own
-      # open-source support ended 2026-09-30, but its 6.11.3 has the
-      # October QtNetwork and QJsonDocument fixes (CVE-2026-96432,
-      # CVE-2026-101201) that 6.12.0 doesn't; move on with 6.12.1.
+      # open-source support ended 2026-09-30, but its 6.11.3 has fixes
+      # that 6.12.0 doesn't (CVE-2026-105924, a QtSvg blur overflow, newer
+      # bundled libpng and FreeType); move on with 6.12.1, which has them
+      # all, and needs macOS 14.4.
       # check-ci-pins: accept qt-eol-6.11 until 2026-12-15
       CI_QT_VERSION: '6.11.3'
 

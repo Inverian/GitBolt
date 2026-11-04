@@ -487,8 +487,17 @@ void TerminalWidget::start(const QString& workingDirectory)
         envp.push_back(e.data());
     envp.push_back(nullptr);
 
+    // On macOS a login shell ("-zsh"), as Terminal starts: GitBolt
+    // started from the Dock or the Finder has launchd's short PATH, and
+    // only a login shell's files (path_helper, ~/.zprofile) put
+    // Homebrew's and the user's folders on it, so the Console runs the
+    // git GitBolt does (git::GitProcess::findGitExecutable).
+    QByteArray arg0 = shellBytes;
+#ifdef Q_OS_MACOS
+    arg0 = '-' + shellBytes.mid(shellBytes.lastIndexOf('/') + 1);
+#endif
     QByteArray arg1 = QByteArrayLiteral("-i");
-    std::vector<char*> argv{shellBytes.data(), arg1.data(), nullptr};
+    std::vector<char*> argv{arg0.data(), arg1.data(), nullptr};
 
     // forkpty does the openpty + fork + dup2-of-slave-to-stdio in
     // one call. The child gets a fresh controlling terminal.

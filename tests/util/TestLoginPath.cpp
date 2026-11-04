@@ -110,8 +110,13 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!test::processAlive(child), 5000);
 
         QCOMPARE(util::queryLoginShellPath(script(dir, "fails", "exit 1\n"), 5000), QString());
+        // A relative entry goes, not the rest of the PATH.
         QCOMPARE(util::queryLoginShellPath(
-                     script(dir, "relative", "echo __GITBOLT_LOGIN_PATH__; echo 'bin:/usr/bin'\n"),
+                     script(dir, "relative", "echo __GITBOLT_LOGIN_PATH__; echo 'bin:/usr/bin:.'\n"),
+                     5000),
+                 QStringLiteral("/usr/bin"));
+        QCOMPARE(util::queryLoginShellPath(
+                     script(dir, "allRelative", "echo __GITBOLT_LOGIN_PATH__; echo 'bin:.'\n"),
                      5000),
                  QString());
         QCOMPARE(util::queryLoginShellPath(dir.filePath(QStringLiteral("missing")), 5000),

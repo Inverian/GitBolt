@@ -82,21 +82,21 @@ QString defaultShell() {
     return QStringLiteral("/bin/sh");
 }
 
-// The line after the marker, if it's a PATH: absolute entries only.
+// The line after the marker: its absolute entries. A relative one
+// (./node_modules/.bin) would be GitBolt's working folder or below it,
+// and goes; the rest of the PATH stays.
 QString parseShellOutput(const QByteArray& output) {
     const QList<QByteArray> lines = output.split('\n');
     for (qsizetype i = 0; i + 1 < lines.size(); ++i) {
         if (lines[i].trimmed() != kMarker)
             continue;
+        QStringList absolute;
         const QString path = QFile::decodeName(lines[i + 1].trimmed());
-        const QStringList entries = path.split(kListSeparator, Qt::SkipEmptyParts);
-        if (entries.isEmpty())
-            return {};
-        for (const QString& entry : entries) {
-            if (!QDir::isAbsolutePath(entry))
-                return {};
+        for (const QString& entry : path.split(kListSeparator, Qt::SkipEmptyParts)) {
+            if (QDir::isAbsolutePath(entry))
+                absolute.append(entry);
         }
-        return path;
+        return absolute.join(kListSeparator);
     }
     return {};
 }

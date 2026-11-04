@@ -1198,9 +1198,12 @@ void SettingsDialog::loadGitConfig()
     // worker. The three sequential reads each carried a 3 s timeout
     // and ran in the constructor, so a slow git stalled the dialog
     // up to ~9 s before it could paint.
-    userNameEdit_->setPlaceholderText(tr("loading…"));
-    userEmailEdit_->setPlaceholderText(tr("loading…"));
-    credentialHelperEdit_->setPlaceholderText(tr("loading…"));
+    // Disabled until read: the read's result would replace what was
+    // typed meanwhile, and saveGitConfig() skips a disabled field.
+    for (QLineEdit* edit : {userNameEdit_, userEmailEdit_, credentialHelperEdit_}) {
+        edit->setPlaceholderText(tr("loading…"));
+        edit->setEnabled(false);
+    }
 
     struct GitIdentity {
         QString name;

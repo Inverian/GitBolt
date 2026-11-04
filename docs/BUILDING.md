@@ -486,9 +486,9 @@ cmake --build build-bundled --parallel
 `-DGITBOLT_BUNDLED_LIBGIT2=OFF` links a libgit2 installed on the system
 instead (found by pkg-config, then as libgit2's CMake package), for
 packagers whose policy is the distribution's libgit2. It has none of
-the patches above: configure warns about that, Help › About shows the
-version followed by "(system, without GitBolt's patches)", and the
-tests of the patches skip. It must have libgit2's
+the patches above: configure warns about that, Help › About GitBolt
+shows the version followed by "(system, without GitBolt's patches)",
+and the tests of the patches skip. It must have libgit2's
 own fixes for what a repository can do to it: 1.9.5 or later, or 1.8.6
 or later on 1.8 (CVE-2026-53584, a submodule path that leads out of the
 work tree; CVE-2026-53585, a delta that allocates without bound; and a

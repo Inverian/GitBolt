@@ -48,10 +48,10 @@ QString mergePathLists(const QString& first, const QString& second);
 QString findExecutableOnPath(const QString& name, const QString& pathList);
 
 /// Runs `shell -ilc` in a session of its own, with no terminal and
-/// stdin and stderr on /dev/null, and returns the PATH it set up. Empty
-/// when it couldn't run, said nothing usable (an entry that isn't an
-/// absolute path), or took longer than `timeoutMs` (it's killed, with
-/// whatever it started). Unix only.
+/// stdin and stderr on /dev/null, and returns the PATH it set up, less
+/// any entry that isn't an absolute path. Empty when it couldn't run,
+/// said nothing usable, or took longer than `timeoutMs` (it's killed,
+/// with whatever it started). Unix only.
 QString queryLoginShellPath(const QString& shell, int timeoutMs);
 
 } // namespace gitbolt::util

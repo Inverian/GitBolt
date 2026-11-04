@@ -78,9 +78,11 @@ std::optional<GitNotice> GitNoticeBar::noticeFor(const git::GitProbe& probe,
     if (version.build == git::GitVersion::Build::Apple) {
         // Xcode 26 and its tools need macOS 15.6; Homebrew's git runs on
         // every macOS GitBolt does.
+        // /usr/bin/git runs the git of the tools xcode-select names:
+        // the Command Line Tools or Xcode.
         advice = tr("Install git from Homebrew (brew install git), or on macOS 15.6 or later "
-                    "update Apple's Command Line Tools to version 26 (in Software Update), "
-                    "then restart GitBolt.");
+                    "update Apple's Command Line Tools or Xcode, whichever xcode-select -p "
+                    "names, to version 26, then restart GitBolt.");
     } else if (version.build == git::GitVersion::Build::Windows) {
         advice = tr("Update Git for Windows, then restart GitBolt.");
     } else if (platform == git::GitPlatform::MacOS) {

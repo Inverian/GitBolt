@@ -8,19 +8,22 @@ semver once 1.0 lands.
 
 ### Changed
 
-- **GitHub's "Latest" release is the newest one again.** Every 0.x
-  release was published as a pre-release, which GitHub never marks
+- **GitHub's "Latest" release is the newest one again.** Every release
+  after 0.9.0 was published as a pre-release, which GitHub never marks
   Latest, so its Latest release was still 0.9.0, older than every
   security fix since. Releases are now full releases, marked Latest.
 - **Building from source builds GitBolt's own libgit2**, the pinned
   release with GitBolt's fixes for repositories that crash or freeze
   it, as every download has it. It used to take a libgit2 installed on
-  the system, which has none of them. `-DGITBOLT_BUNDLED_LIBGIT2=OFF`
-  still uses an installed one, which must now be 1.9.5 (or 1.8.6) or
-  later, and configure warns that it has none of GitBolt's fixes. A
-  build directory configured before keeps its OFF: configure it with
-  `-DGITBOLT_BUNDLED_LIBGIT2=ON`, or afresh. Help › About says when
-  GitBolt runs on a libgit2 without its fixes.
+  the system when it found one, which has none of them.
+  `-DGITBOLT_BUNDLED_LIBGIT2=OFF` still uses an installed one, which
+  must now be 1.9.5 or later (1.8.6 or later on 1.8), and configure
+  warns that it has none of GitBolt's fixes;
+  `-DGITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2=ON` takes an older one whose
+  distribution backported their fixes. A build directory configured
+  before keeps its OFF: configure it with `-DGITBOLT_BUNDLED_LIBGIT2=ON`,
+  or afresh. Help › About GitBolt says when GitBolt runs on a libgit2
+  without its fixes.
 - Development: the Windows installer is built with NSIS 3.13, up
   from 3.12.
 - Development: CI installs Qt with no Python package installed by
@@ -33,8 +36,9 @@ semver once 1.0 lands.
   running `tools/check-ci-pins.py`, fails (and so mails the owner) when
   Qt's pinned series or NSIS has a newer release, when libgit2's
   pinned series, aqtinstall or a packaging tool has had one out for two
-  weeks, when an action has a new major version, when the pinned Qt
-  series' open-source support has ended, when GitHub's advisory
+  weeks, or an action a new major version, when the pinned Qt series'
+  open-source support has ended (Qt 6.11's is accepted until
+  2026-12-15), when GitHub's advisory
   database lists a vulnerability in a locked Python package, or when
   libgit2, git, Git for Windows, Git LFS, py7zr or aqtinstall publishes
   a security advisory not yet reviewed. A source that doesn't answer
@@ -54,19 +58,27 @@ semver once 1.0 lands.
   if anything has been typed into the Console since it started or
   since the last switch. Opening the repository the Console is already
   in leaves it alone.
-  Only a shell of the sh, csh or fish families is typed the `cd`: a
+  On macOS and Linux, only a shell of the sh, csh or fish families is
+  typed the `cd`: a
   program your shell's startup files run in its place (tmux, screen,
   ssh), which would pass the line and the Ctrl+C on to what runs in it,
   and any other shell (nushell, PowerShell), whose quoting the `cd`
   can't be typed in, are started again in the new repository at each
   switch (a tmux session is detached, not stopped). On Windows, once
   anything has been typed into cmd, it is started again in the new
-  repository too, and a program cmd started with `start` keeps the
-  Console where it is until that program ends.
-- **No git installed**: every git command failed with "Failed to start
-  git process". It now says git wasn't found, the Settings page for
-  git's name and email says so instead of saving nothing, and a note at
-  launch says so too, with a link to git's downloads.
+  repository too, and a console program cmd started with `start`, in a
+  window of its own, keeps the Console where it is until that program
+  ends.
+- **No git installed** (Windows, Linux): git commands failed with
+  "Failed to start git process". They now say git wasn't found, the
+  Settings page for git's name and email says so instead of saving
+  nothing, and a note at launch says so too, with a link to git's
+  downloads. A Mac always has Apple's `/usr/bin/git`; without the
+  Command Line Tools it needs, the note at launch says to install them.
+- **Settings could overwrite your git name and email.** Typed into
+  Settings while it was still reading them from git, they were replaced
+  by the old ones when the read finished, and Apply then OK could save
+  the old ones back. The fields now wait for the read.
 
 ### Security
 
@@ -75,17 +87,21 @@ semver once 1.0 lands.
   PATH, so it ran Apple's `/usr/bin/git` (2.39.5 until the Command Line
   Tools 26, open to CVE-2025-48384, which attackers exploit) even where
   your shell runs a newer git, from Homebrew say. It now runs the git
-  your login shell finds first, as commit hooks and the Console already
-  did, and starts gitk the same way. A version manager's shim (asdf,
-  mise) on that PATH now picks git for GitBolt too.
+  your login shell finds first, as commit hooks already did, and starts
+  gitk the same way; a folder on that PATH that isn't a full path
+  (`./bin`) is passed over. The Console starts a login shell, as
+  Terminal does, so the git you type there is that one too (it ran
+  Apple's). A version manager's shim (asdf, mise) on that PATH now
+  picks git for GitBolt too.
 - **A note when your git has known security flaws.** Once GitBolt has
   asked git its version, a note across the top of the window names the
   flaws and the fix: on macOS git from Homebrew, or on macOS 15.6 and
-  later the Command Line Tools 26; on Windows a newer Git for Windows.
-  Dismissed, it stays away until that git or its version changes. On
-  Linux, whose distributions fix git without changing its version, the
-  note only says when git is older than 2.25, which GitBolt needs.
-  Help › About shows which git GitBolt runs, and where it is.
+  later the Command Line Tools or Xcode 26; on Windows a newer Git for
+  Windows. Dismissed, it stays away until that git, its version or the
+  flaws GitBolt knows of in it change. On Linux, whose distributions
+  fix git without changing its version, the note only says when git is
+  older than 2.25, which GitBolt needs. Help › About GitBolt shows which
+  git GitBolt runs, and where it is.
 - **Windows: a program in a repository could run in place of git.**
   Explorer's "Open in GitBolt" on a folder's background starts GitBolt
   in that folder, and Windows looks for a program named without its
@@ -93,25 +109,26 @@ semver once 1.0 lands.
   and gitk that way, so a `git.exe` or `gitk.exe` at the top of a
   repository could run instead. GitBolt now starts every program by its
   full path, leaves the folder it was started in for your home folder,
-  loads no library from it, and has git, gitk and the Console look for
-  the programs they start by name on PATH only. In the Console, a
+  loads no library from it, and has git, gitk and the Console no longer
+  look in the current folder for a program they start by name. In the
+  Console, a
   program in the current folder runs when you type `.\name`, and a
   script run there finds its neighbours by a path too (`%~dp0name`),
   not by name alone.
 - **Repositories that froze GitBolt.** An object cut short, a loose
   object whose file ends early (a disk or sync error, a write cut off)
-  or a packed delta whose data does, made reading it run forever at
-  full CPU: whatever needed it, such as a commit's diff, never came.
-  It now fails with "premature end of zlib stream" or "truncated
-  packfile". These are libgit2's own fixes, not yet in a libgit2
-  release, built into every GitBolt download.
-- **Built with Qt 6.11.3**, up from Qt 6.10.3, which gets no more
-  fixes. Among the fixes since are crashes a server could cause with
-  an oversized Cache-Control header (CVE-2026-76151) or over HTTP/2
-  (CVE-2026-96432), which in GitBolt only the usage statistics
-  connection could meet, and crashes on crafted JSON (CVE-2026-101201)
-  and SVG (CVE-2026-8168, CVE-2026-6210), which GitBolt only reads from
-  its own files and the desktop's icon theme.
+  or a packed delta whose data ends before its header, made reading it
+  run forever at full CPU: whatever needed it, such as a commit's diff,
+  never came. It now fails with "premature end of zlib stream" or
+  "truncated packfile". These are libgit2's own fixes, in no stable
+  libgit2 release yet, built into every GitBolt download.
+- **Built with Qt 6.11.3**, up from Qt 6.10.3. Among the fixes since
+  are crashes a server could cause with an oversized Cache-Control
+  header (CVE-2026-76151) or over HTTP/2 (CVE-2026-95620,
+  CVE-2026-96432), which in GitBolt only the connection that sends
+  usage statistics and crash reports could meet, and crashes on crafted
+  SVG (CVE-2026-8168, CVE-2026-6210), which GitBolt only reads from its
+  own files and the desktop's icon theme.
 
 ## [0.9.8] — 2026-10-23
 

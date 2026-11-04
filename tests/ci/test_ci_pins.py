@@ -27,7 +27,11 @@ from unittest import mock
 # source tree.
 sys.dont_write_bytecode = True
 
-ROOT = os.path.abspath(sys.argv.pop(1) if len(sys.argv) > 1 else
+# The source tree: the argument ctest passes, else this file's. Only a
+# directory counts, so unittest's and pytest's arguments (-v, this file)
+# don't stand in for it and skip every test.
+ROOT = os.path.abspath(sys.argv.pop(1) if __name__ == "__main__" and len(sys.argv) > 1
+                       and os.path.isdir(sys.argv[1]) else
                        os.path.join(os.path.dirname(__file__), "..", ".."))
 CI = os.path.join(ROOT, ".github", "workflows", "ci.yml")
 LOCK = os.path.join(ROOT, ".github", "qt-requirements.txt")
