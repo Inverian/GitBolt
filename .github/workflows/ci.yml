@@ -682,26 +682,26 @@ jobs:
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         uses: actions/cache@v6
         with:
-          path: ${{ runner.temp }}/nsis-3.12
-          key: nsis-3.12-56581f90
+          path: ${{ runner.temp }}/nsis-3.13
+          key: nsis-3.13-ba63dffc
       - name: Install NSIS (Windows)
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
         timeout-minutes: 10
         shell: pwsh
         env:
-          NSIS_SHA256: 56581f90db321581c5381193d796fffcf2d24b2f8fed2160a6c6a3baa67f2c4f
+          NSIS_SHA256: ba63dffc4410ee89193e1cb5a41989991bd77c61068da17e3156d136b7b0b3d8
         run: |
-          $nsis = Join-Path $env:RUNNER_TEMP 'nsis-3.12'
+          $nsis = Join-Path $env:RUNNER_TEMP 'nsis-3.13'
           if (-not (Test-Path (Join-Path $nsis 'makensis.exe'))) {
             # curl.exe, not Invoke-WebRequest: SourceForge answers a
             # browser-like user agent with an HTML "download starting"
             # page instead of the redirect to a mirror.
-            $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.12.zip'
+            $zip = Join-Path $env:RUNNER_TEMP 'nsis-3.13.zip'
             curl.exe -fsSL --retry 5 --retry-all-errors -o $zip `
-              'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.12/nsis-3.12.zip'
+              'https://downloads.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip'
             if ($LASTEXITCODE) { throw "NSIS download failed ($LASTEXITCODE)" }
             $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-            if ($hash -ne $env:NSIS_SHA256) { throw "nsis-3.12.zip has SHA-256 $hash, expected $env:NSIS_SHA256" }
+            if ($hash -ne $env:NSIS_SHA256) { throw "nsis-3.13.zip has SHA-256 $hash, expected $env:NSIS_SHA256" }
             Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
           }
           & (Join-Path $nsis 'makensis.exe') /VERSION
@@ -1251,8 +1251,9 @@ jobs:
       # upload leaves no tag and the next push to main simply tries again.
       # It refuses to touch an already-published release with this tag.
       # Notes arrive through env, never ${{ }} inside the script.
-      # 0.x releases are betas: published as pre-releases (never marked
-      # "Latest") until 1.0.0.
+      # A full release marked "Latest", 0.x too: GitHub never makes a
+      # pre-release Latest, so its Latest stayed on 0.9.0, older than every
+      # security fix, while 0.9.1-0.9.8 shipped as pre-releases.
       - name: Create tag and release
         if: steps.recheck.outputs.go == 'true'
         env:
@@ -1260,13 +1261,11 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.md"
-          extra=()
-          [ "${VERSION%%.*}" = 0 ] && extra+=(--prerelease)
           gh release create "$TAG" dist/* \
             --target "$GITHUB_SHA" \
             --title "GitBolt $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md" \
-            "${extra[@]}"
+            --latest
           tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
           [ "$tagged" = "$GITHUB_SHA" ] || { echo "::error::$TAG points at $tagged, expected $GITHUB_SHA"; exit 1; }
           echo "### Released [$TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG) at \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"

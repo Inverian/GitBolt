@@ -4,10 +4,14 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [Unreleased]
+## [0.9.9] — 2026-11-04
 
 ### Changed
 
+- **GitHub's "Latest" release is the newest one again.** Every 0.x
+  release was published as a pre-release, which GitHub never marks
+  Latest, so its Latest release was still 0.9.0, older than every
+  security fix since. Releases are now full releases, marked Latest.
 - **Building from source builds GitBolt's own libgit2**, the pinned
   release with GitBolt's fixes for repositories that crash or freeze
   it, as every download has it. It used to take a libgit2 installed on
@@ -17,6 +21,8 @@ semver once 1.0 lands.
   build directory configured before keeps its OFF: configure it with
   `-DGITBOLT_BUNDLED_LIBGIT2=ON`, or afresh. Help › About says when
   GitBolt runs on a libgit2 without its fixes.
+- Development: the Windows installer is built with NSIS 3.13, up
+  from 3.12.
 - Development: CI installs Qt with no Python package installed by
   version range or without a hash check: every one aqtinstall needs
   with its hash (`.github/qt-requirements.txt`, installed with
