@@ -4,7 +4,7 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [0.9.9] — 2026-11-04
+## [0.9.9] — 2026-11-05
 
 ### Changed
 
@@ -24,6 +24,8 @@ semver once 1.0 lands.
   before keeps its OFF: configure it with `-DGITBOLT_BUNDLED_LIBGIT2=ON`,
   or afresh. Help › About GitBolt says when GitBolt runs on a libgit2
   without its fixes.
+- **Help › About GitBolt shows its version larger**, in the text's
+  own colour instead of a faint grey.
 - Development: the Windows installer is built with NSIS 3.13, up
   from 3.12.
 - Development: CI installs Qt with no Python package installed by

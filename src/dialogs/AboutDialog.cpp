@@ -152,10 +152,12 @@ void AboutDialog::setupUi()
     iconLabel_->setFixedWidth(140);
 
     // ----- Text column ----------------------------------------------------
+    // The version in the theme's own text colour: the fixed grey it had
+    // was faint on the light theme and dim on the dark one.
     titleLabel_ = new QLabel(this);
     titleLabel_->setText(
         QStringLiteral("<div style='font-size:22pt; font-weight:bold;'>GitBolt</div>"
-                       "<div style='font-size:10pt; color:gray;'>Version %1</div>")
+                       "<div style='font-size:12pt;'>Version %1</div>")
             .arg(QApplication::applicationVersion()));
     titleLabel_->setTextFormat(Qt::RichText);
 
