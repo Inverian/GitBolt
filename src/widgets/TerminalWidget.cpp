@@ -88,7 +88,7 @@ constexpr int kMaxPendingOsc = 4096;
 constexpr qsizetype kMaxCountDigits = 5;
 constexpr int kMaxCount = 99999;
 
-// How often a GIT_DIR that waits for a command to end looks again, and
+// How often a switch that waits for a command to end looks again, and
 // how long it waits after the command's end and after the Ctrl+C that
 // drops the shell's line (see TerminalWidget::switchWhenIdle).
 constexpr int kSwitchCheckMs = 250;
@@ -144,6 +144,14 @@ bool isShFamily(const QString& name)
 bool isCshFamily(const QString& name)
 {
     return name == QLatin1String("csh") || name == QLatin1String("tcsh");
+}
+
+// The shells a switch types its line into, quoted as shellWord quotes.
+// A program an rc file `exec`s in their place (tmux, ssh) isn't seen as
+// a command (commandRunning), and would pass the line and Ctrl+C on.
+bool takesTypedSwitches(const QString& name)
+{
+    return isShFamily(name) || isCshFamily(name) || name == QLatin1String("fish");
 }
 
 // `text` as one word of a line typed into the shell whose program is
@@ -354,8 +362,11 @@ void TerminalWidget::start(const QString& workingDirectory)
         info.workingDirectory = QDir::toNativeSeparators(pendingCwd_).toStdWString();
     // The Unix child's TERM and GITBOLT_TERM. ConPTY renders the console
     // as xterm-256color, and TERM is what Git for Windows' less and vim
-    // go by.
-    info.environment = {{L"TERM", L"xterm-256color"}, {L"GITBOLT_TERM", L"1"}};
+    // go by. And cmd looks for a program typed by name on PATH only, not
+    // first in the repository, where a git.exe or a .bat can be committed.
+    info.environment = {{L"TERM", L"xterm-256color"},
+                        {L"GITBOLT_TERM", L"1"},
+                        {L"NoDefaultCurrentDirectoryInExePath", L"1"}};
     // The repository is the one the shell starts in, as for every git
     // GitBolt runs (git::GitProcess::repositoryEnvVars).
     for (const auto& name : git::GitProcess::repositoryEnvVars())
@@ -425,8 +436,12 @@ void TerminalWidget::start(const QString& workingDirectory)
     const QByteArray cwdBytes = pendingCwd_.toLocal8Bit();
 
     // Pick the user's login shell (parent side — getpwuid may lock).
+    // $SHELL only as a full path: execve() takes a relative one from
+    // the current folder, which the child makes the repository first.
     QByteArray shellBytes;
-    if (const char* shellEnv = getenv("SHELL"); shellEnv && *shellEnv) {
+    const char* shellEnv = getenv("SHELL");
+    const bool relativeShell = shellEnv && *shellEnv && *shellEnv != '/';
+    if (shellEnv && *shellEnv == '/') {
         shellBytes = shellEnv;
     } else {
         struct passwd* pw = getpwuid(getuid());
@@ -446,6 +461,11 @@ void TerminalWidget::start(const QString& workingDirectory)
     QList<QByteArray> dropped{QByteArrayLiteral("TERM="), QByteArrayLiteral("GITBOLT_TERM=")};
     for (const auto& name : git::GitProcess::repositoryEnvVars())
         dropped.append(QByteArray::fromStdString(name) + '=');
+    // A relative $SHELL goes too, for the shell started: a program run in
+    // the Console that runs $SHELL (script, an editor's :shell) would
+    // take it from the repository as well.
+    if (relativeShell)
+        dropped.append(QByteArrayLiteral("SHELL="));
     QList<QByteArray> envBytes;
     for (char** e = hostEnviron(); e && *e; ++e) {
         const QByteArray entry(*e);
@@ -456,6 +476,8 @@ void TerminalWidget::start(const QString& workingDirectory)
     }
     envBytes.append(QByteArrayLiteral("TERM=xterm-256color"));
     envBytes.append(QByteArrayLiteral("GITBOLT_TERM=1"));
+    if (relativeShell)
+        envBytes.append("SHELL=" + shellBytes);
     if (!gitDir_.isEmpty())
         envBytes.append("GIT_DIR=" + QFile::encodeName(gitDir_));
 
@@ -465,8 +487,17 @@ void TerminalWidget::start(const QString& workingDirectory)
         envp.push_back(e.data());
     envp.push_back(nullptr);
 
+    // On macOS a login shell ("-zsh"), as Terminal starts: GitBolt
+    // started from the Dock or the Finder has launchd's short PATH, and
+    // only a login shell's files (path_helper, ~/.zprofile) put
+    // Homebrew's and the user's folders on it, so the Console runs the
+    // git GitBolt does (git::GitProcess::findGitExecutable).
+    QByteArray arg0 = shellBytes;
+#ifdef Q_OS_MACOS
+    arg0 = '-' + shellBytes.mid(shellBytes.lastIndexOf('/') + 1);
+#endif
     QByteArray arg1 = QByteArrayLiteral("-i");
-    std::vector<char*> argv{shellBytes.data(), arg1.data(), nullptr};
+    std::vector<char*> argv{arg0.data(), arg1.data(), nullptr};
 
     // forkpty does the openpty + fork + dup2-of-slave-to-stdio in
     // one call. The child gets a fresh controlling terminal.
@@ -527,7 +558,7 @@ void TerminalWidget::stopShell()
     droppingCsi_ = false;
     decoder_.resetState();
     switchTimer_->stop();
-    lineDropped_ = false;
+    lineEmpty_ = true;  // a new shell's line holds nothing
     commandRan_ = false;
     waitForTick_ = false;
     unreadWaits_ = 0;
@@ -560,50 +591,15 @@ void TerminalWidget::stopShell()
 #endif
 }
 
-void TerminalWidget::changeDirectory(const QString& path)
-{
-    if (path.isEmpty())
-        return;
-
-    pendingCwd_ = path;
-
-    if (!isRunning())
-        return;  // start() will pick up pendingCwd_ when called
-
-    // Not typed: the shell starts again in the folder once no command
-    // runs (see cdTypeable and switchWhenIdle).
-    if (!cdTypeable(path)) {
-        switchWhenIdle();
-        return;
-    }
-
-#ifdef Q_OS_WIN
-    // cmd.exe; /d switches the drive too. Windows paths can't contain
-    // '"', so the double quotes need no escaping, but %NAME% still
-    // expands inside them: each '%' goes outside the quotes behind a
-    // caret, where it can't start a variable name.
-    QString safe = QDir::toNativeSeparators(path);
-    safe.replace(QLatin1Char('%'), QStringLiteral("\"^%\""));
-    const QString cmd = QStringLiteral("cd /d \"%1\"\r").arg(safe);
-#else
-    // Shell-quoted, for the shell that runs (see shellWord). Leading
-    // space lets the user keep HISTCONTROL=ignorespace if they want
-    // to, but the cd will still take effect.
-    const QString cmd = QStringLiteral(" cd %1\n").arg(shellWord(path, shellProgram()));
-#endif
-    writeToPty(toTerminalBytes(cmd));
-}
-
 void TerminalWidget::changeRepository(const QString& path, const QString& gitDir)
 {
     if (path.isEmpty())
         return;
-    // While a GIT_DIR waits, the shell goes to the latest repository,
-    // and no `cd` is typed into the command running.
-    if (gitDir == gitDir_ && !switchTimer_->isActive()) {
-        changeDirectory(path);
+    // The repository the shell is on its way to (where it is, unless a
+    // switch waits), opened again (Recent, a second launch): nothing to
+    // type, and a Ctrl+C would only drop the user's line.
+    if (path == pendingCwd_ && gitDir == gitDir_)
         return;
-    }
     gitDir_ = gitDir;
     pendingCwd_ = path;
     // A shell not started yet takes both at its start (showEvent).
@@ -611,133 +607,85 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
         switchWhenIdle();
 }
 
-// GIT_DIR is in the shell's environment, and a new one goes in as the
-// `cd` does: typed into the shell at its prompt, on the cd's line (see
-// gitDirCommand). The shell keeps its variables, its history and its
-// jobs. It used to be started again, which hung up what it ran: its
-// jobs, one stopped with Ctrl+Z (the editor of a `git commit`) or run
-// in the background, which leave it at its prompt (see commandRunning),
-// and on Windows the command running too. Typed while a command runs,
-// the line would go to the command (an editor, a pager), so it waits
-// for the prompt, which is looked for as the shell's output arrives (the
-// prompt is output) and every so often in case none does; meanwhile a
-// note says so, below the command's output. A switch back meanwhile to
-// the GIT_DIR the shell has leaves only the `cd`, which waits all the
-// same. A shell gitDirCommand has no line for is still started again,
-// once the command has ended, and its jobs are hung up with it; so is
-// one whose folder a `cd` can't be typed for (cdTypeable).
+// The shell follows the repository opened: a `cd` typed at its prompt,
+// with a new GIT_DIR ahead of it on the line (gitDirCommand), so it
+// keeps its variables, its history and its jobs. The rules:
 //
-// The prompt the change is typed at isn't always an empty one. A line
-// the user had partly typed there took the change on its end, and the
-// Enter after it: the line ran, the change its arguments. Keys typed
-// ahead while a command ran did the same once it ended. And at a prompt
-// that continues a line (an open quote, a heredoc, a trailing
-// backslash, tcsh's `foreach?`) the change went into the string, the
-// heredoc or the loop. Either way GIT_DIR stayed as it was, yet
-// shellGitDir_ took it for changed, so every switch after that typed
-// only the `cd`, and git in the shell went on at the old bare
-// repository (a `git branch -D` there deleted its branch). None of that
-// shows in what the shell prints, so the line is dropped first, with a
-// Ctrl+C, at every change of GIT_DIR, as a shell started again dropped
-// it. Every shell drops its line on one, a continued one too, in
-// whatever mode its line editor is (Ctrl+E Ctrl+U, say, left the line
-// where it was in vi's command mode), and the terminal drops with it the
-// keys typed ahead that the shell hasn't read. A switch that keeps
-// GIT_DIR types its `cd` without one, as ever: nothing is taken for done
-// there.
-//
-// The change goes in at the timer's next tick rather than with the
-// Ctrl+C, which is a signal: on Linux a shell that reads a whole line at
-// a time (dash) can read the change before the signal reaches it (a read
-// of the terminal waits for input under way before it looks for one),
-// and then drop the change with the line. Anything sent to the shell
-// meanwhile can leave a line again (see noteTyped), and then another
-// Ctrl+C goes first (lineDropped_). A command that runs meanwhile can't:
-// the Ctrl+C has emptied the line and the terminal's input, and only
-// what is sent after it puts anything there. One taken for a line again
-// used to send a Ctrl+C at every prompt for good where a prompt hook
-// runs a program (bash's PROMPT_COMMAND, zsh's precmd): the Ctrl+C has
-// the shell show its prompt again, which runs the hook, the shell's
-// output is read while the hook holds the terminal, and at the tick the
-// line counted as not dropped. And the PTY is read before the Ctrl+C,
-// since one makes it drop what it holds unread (on macOS, a background
-// job's last lines).
-//
-// Once a command the switch waited for has ended, a change of GIT_DIR
-// waits a tick more (commandRan_) before it goes on. A command typed
-// ahead, with its Enter, then gets to start, and the switch waits for it
-// in turn: a Ctrl+C sent as soon as the shell took its terminal back
-// reached zsh before it had read the line, which it dropped unread,
-// though the terminal had shown it typed. A tick isn't always enough: a
-// prompt that runs something in itself (`$(git …)` in PS1, precmd or
-// PROMPT_COMMAND, as git prompts and starship do) keeps the shell from
-// reading the line for as long as that takes, and it runs in the shell's
-// own process group, so no command is seen running. So the Ctrl+C also
-// waits while the terminal holds a whole line the shell hasn't read
-// (lineUnread), a few ticks at most. And on Windows conhost has painted
-// the program's last output by then (see below).
-//
-// On Windows there is no note: conhost paints its screen with absolute
-// cursor moves, and would paint over it. And cmd is started again for a
-// new GIT_DIR rather than typed it (see gitDirCommand), which closes its
-// pseudo console. What the console had not yet painted went with it, and
-// what ConPtyProcess had read but not handed over (stopShell): cmd
-// started again as soon as the program was seen to end lost its last
-// lines, a `git push`'s error say. Hence the tick, and the output taken
-// first.
+// - Never while a command runs (commandRunning): the line would go to it
+//   (an editor, a pager, `cat`). The switch waits, looking again as the
+//   shell's output arrives and every tick, with a note below the output;
+//   a switch meanwhile only changes where it goes.
+// - A Ctrl+C first unless nothing can be on the line (lineEmpty_): a line
+//   partly typed, keys typed ahead or a continued line (an open quote, a
+//   heredoc) took the switch's line on its end and ran it, or swallowed
+//   it, and nothing the shell prints tells. Every shell drops its line on
+//   one, in any editing mode, and the terminal drops unread keys with it.
+// - The line a tick after the Ctrl+C, a signal: dash can read the line
+//   before the signal lands, and drop it. Keys sent meanwhile get another
+//   Ctrl+C (noteTyped); a prompt hook run by the Ctrl+C doesn't. The PTY
+//   is read first, since a Ctrl+C drops what it holds unread.
+// - After a command waited for, a Ctrl+C or a start again waits a tick
+//   more (commandRan_), and a Ctrl+C also while the terminal holds a whole
+//   line unread behind a slow prompt (lineUnread), kMaxUnreadWaits ticks
+//   at most: a command typed ahead gets to run rather than dropped unread.
+// - Started again instead, once no command runs, where the line can't be
+//   typed: a GIT_DIR gitDirCommand has no line for, a folder cdTypeable
+//   turns down, any program but a shell takesTypedSwitches knows.
+// - Windows: no note, which conhost would paint over. cmd is started
+//   again for a new GIT_DIR, and for a `cd` too unless lineEmpty_: a
+//   Ctrl+C through ConPTY leaves keys typed ahead in the console's input,
+//   and ends no read while a popup (F7's history) is up. A tick first,
+//   and the output taken, or closing the console loses its last lines.
 void TerminalWidget::switchWhenIdle()
 {
-    const QString note = tr("[gitbolt] the shell will switch to this repository "
-                            "when the running command ends");
     if (!commandRunning()) {
         if (waitForTick_)
             return;
         const bool sameGitDir = gitDir_ == shellGitDir_;
-        if (!sameGitDir && commandRan_ && !lineDropped_) {
+        const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
+        // The line typed into the shell, rather than the shell started
+        // again (see above).
+        bool typeIt = (sameGitDir || !gitDirLine.isNull()) && cdTypeable(pendingCwd_);
+#ifdef Q_OS_WIN
+        typeIt = typeIt && lineEmpty_;
+#else
+        typeIt = typeIt && takesTypedSwitches(shellProgram());
+#endif
+        if (commandRan_ && !(typeIt && lineEmpty_)) {
             commandRan_ = false;
             waitForTick_ = true;
             switchTimer_->start();  // a whole tick from now
             return;
         }
-        const QString gitDirLine = sameGitDir ? QString() : gitDirCommand();
-        if ((sameGitDir || !gitDirLine.isNull()) && cdTypeable(pendingCwd_)) {
+        if (typeIt) {
 #ifndef Q_OS_WIN
-            if (!sameGitDir && !lineDropped_ && lineUnread()
-                && unreadWaits_ < kMaxUnreadWaits) {
+            if (!lineEmpty_ && lineUnread() && unreadWaits_ < kMaxUnreadWaits) {
                 ++unreadWaits_;
                 waitForTick_ = true;
                 switchTimer_->start();
                 return;
             }
-            if (!sameGitDir && !lineDropped_) {
+            if (!lineEmpty_) {
                 unreadWaits_ = 0;
                 takePtyOutput();
                 writeToPty(QByteArrayLiteral("\x03"));
-                lineDropped_ = true;
+                lineEmpty_ = true;
                 waitForTick_ = true;
                 switchTimer_->start();
                 return;
             }
 #endif
-            lineDropped_ = false;
             commandRan_ = false;
             if (switchTimer_->isActive()) {
                 switchTimer_->stop();
                 // The note goes too, or it stays below the prompt: the
-                // shell's output went on above it. It is the last row
-                // but one, below it the row a new shell would have
-                // started on.
-                QTextCursor last(document());
-                last.movePosition(QTextCursor::End);
-                last.movePosition(QTextCursor::PreviousBlock, QTextCursor::KeepAnchor);
-                if (last.block().text() == note) {
-                    last.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
-                    last.removeSelectedText();
-                }
+                // shell's output went on above it.
+                removeSwitchNote();
             }
-            writeToPty(toTerminalBytes(gitDirLine));
+            // A whole line, so the shell's is empty again once it has
+            // read it: lineEmpty_ stays set.
+            writeToPty(toTerminalBytes(gitDirLine + cdCommand(pendingCwd_)));
             shellGitDir_ = gitDir_;
-            changeDirectory(pendingCwd_);
             return;
         }
         // Closing the PTY loses what it holds unread, and a command that
@@ -769,7 +717,7 @@ void TerminalWidget::switchWhenIdle()
     // anchor goes along all the same: left there, it selected the note,
     // and the command's next output wrote over it.
     screenCursor_.setKeepPositionOnInsert(true);
-    appendPlainText(note + QLatin1Char('\n'));
+    appendPlainText(switchNote() + QLatin1Char('\n'));
     screenCursor_.setKeepPositionOnInsert(false);
     screenCursor_.clearSelection();
 #endif
@@ -825,6 +773,26 @@ bool TerminalWidget::lineUnread() const
 }
 #endif
 
+QString TerminalWidget::switchNote()
+{
+    return tr("[gitbolt] the shell will switch to this repository "
+              "when the running command ends");
+}
+
+// The note of a switch that waited, taken away. It is the last row but
+// one, below it the row a new shell would have started on: the
+// command's output goes on above it (see switchWhenIdle).
+void TerminalWidget::removeSwitchNote()
+{
+    QTextCursor last(document());
+    last.movePosition(QTextCursor::End);
+    last.movePosition(QTextCursor::PreviousBlock, QTextCursor::KeepAnchor);
+    if (last.block().text() == switchNote()) {
+        last.movePosition(QTextCursor::PreviousCharacter, QTextCursor::KeepAnchor);
+        last.removeSelectedText();
+    }
+}
+
 bool TerminalWidget::commandRunning() const
 {
 #ifdef Q_OS_WIN
@@ -837,7 +805,7 @@ bool TerminalWidget::commandRunning() const
 #endif
 }
 
-// GIT_DIR goes ahead of the `cd` (changeDirectory) on its line, so the
+// GIT_DIR goes ahead of the `cd` (cdCommand) on its line, so the
 // shell takes both in one go, in the syntax of the shell that runs: sh's
 // `export` and `unset` in the shells that have them, csh's `setenv` and
 // `unsetenv`, and fish's `set`. Null for any other (nushell, PowerShell,
@@ -861,7 +829,7 @@ QString TerminalWidget::gitDirCommand() const
 #else
     if (!typeable(gitDir_) || !typeable(pendingCwd_))
         return {};
-    // Quoted as changeDirectory quotes, and with its leading space.
+    // Quoted as cdCommand quotes, and with its leading space.
     const QString shell = shellProgram();
     const QString value = shellWord(gitDir_, shell);
     if (shell == QLatin1String("fish")) {
@@ -877,6 +845,24 @@ QString TerminalWidget::gitDirCommand() const
                                  : QStringLiteral(" export GIT_DIR=%1;").arg(value);
     }
     return {};
+#endif
+}
+
+QString TerminalWidget::cdCommand(const QString& path) const
+{
+#ifdef Q_OS_WIN
+    // cmd.exe; /d switches the drive too. Windows paths can't contain
+    // '"', so the double quotes need no escaping, but %NAME% still
+    // expands inside them: each '%' goes outside the quotes behind a
+    // caret, where it can't start a variable name.
+    QString safe = QDir::toNativeSeparators(path);
+    safe.replace(QLatin1Char('%'), QStringLiteral("\"^%\""));
+    return QStringLiteral("cd /d \"%1\"\r").arg(safe);
+#else
+    // Shell-quoted, for the shell that runs (see shellWord). Leading
+    // space lets the user keep HISTCONTROL=ignorespace if they want
+    // to, but the cd will still take effect.
+    return QStringLiteral(" cd %1\n").arg(shellWord(path, shellProgram()));
 #endif
 }
 
@@ -1690,19 +1676,13 @@ void TerminalWidget::keyPressEvent(QKeyEvent* event)
     }
 }
 
-// Whatever the user sends the shell can leave something on its line
-// again: a key at its prompt (an arrow or a Tab as much as a letter), an
-// Enter that continues the line, keys typed ahead while a command runs,
-// which the shell reads once it ends. So a line dropped for a GIT_DIR
-// that still waits (see switchWhenIdle) is dropped again before the
-// change goes in. That only costs a Ctrl+C at an empty prompt where the
-// keys left none. Only keys at the prompt used to count, after its last
-// Enter, so the change went into a continued line or keys typed ahead.
-// And only what is sent can: a command that runs after the Ctrl+C, a
-// prompt hook's, puts nothing on the line (see switchWhenIdle).
+// Anything sent to the shell can leave something on its line: a key at
+// the prompt, an Enter that continues the line, keys typed ahead while a
+// command runs. Nothing it prints tells an empty line from a continued
+// one, so the next switch drops the line first (see switchWhenIdle).
 void TerminalWidget::noteTyped()
 {
-    lineDropped_ = false;
+    lineEmpty_ = false;
 }
 
 void TerminalWidget::resizeEvent(QResizeEvent* event)

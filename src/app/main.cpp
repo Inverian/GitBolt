@@ -22,6 +22,13 @@
 #include "platform/macos/MacServices.h"
 #endif
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>  // SetDllDirectoryW
+#endif
+
 #include <memory>
 #include <string_view>
 
@@ -229,6 +236,12 @@ QString telemetryQueueDir(const QString& settingsFile)
 } // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef Q_OS_WIN
+    // DLLs never from the current folder, which after Explorer's "Open in
+    // GitBolt" is a repository; set before QApplication loads its plugins.
+    // The programs GitBolt starts don't inherit it.
+    SetDllDirectoryW(L"");
+#endif
     // An askpass for a git command nobody is waiting on (the periodic
     // auto-fetch, GitProcess::forbidPrompts): no, at once, before
     // anything could show a window or a Dock icon. Fails the question,
@@ -340,6 +353,9 @@ int main(int argc, char* argv[]) {
         // Explorer drive root's).
         initialRepoPath = gitbolt::app::repoPathArgument(positionalArgs.first());
     }
+    // Out of the folder GitBolt was started in, now that the path
+    // argument is absolute: on Windows, home (see leaveStartingFolder).
+    gitbolt::app::leaveStartingFolder();
 
     // Folders macOS asks a running GitBolt to open: open-documents
     // events (a Dock drop, `open -a GitBolt <folder>`), taken from here
@@ -569,6 +585,10 @@ int main(int argc, char* argv[]) {
         telemetryService->recordLaunch();
         telemetryService->start();
     }
+
+    // The note about the git GitBolt runs, once the window is up: finding
+    // git waits for the login shell's PATH.
+    window.checkGitVersion();
 
     // Test bridge — agent/test control channel, never active unless
     // explicitly requested via the environment. Declared after

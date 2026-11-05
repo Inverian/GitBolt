@@ -287,6 +287,10 @@ public:
     Result<ProcessOutput> prune() const;
     Result<ProcessOutput> fsck() const;
 
+    /// The git every GitProcess runs, by its full path (by name, Windows
+    /// looks in the current folder first): the first on the PATH git's
+    /// children get (util::pathForChildren()), so hooks and the Console run
+    /// the same one. Empty when there is none. May wait for the login shell.
     static std::string findGitExecutable();
 
 private:
@@ -371,7 +375,6 @@ private:
 
     std::string workDir_;
     std::string gitDir_;   // GIT_DIR, if set (setGitDir)
-    std::string gitPath_;
     std::vector<std::shared_ptr<std::atomic<bool>>> cancelFlags_;
     bool promptsForbidden_ = false;
 };

@@ -1,3 +1,4 @@
+#include <QStringList>
 #include <QTest>
 #include <git2.h>
 #include "git/Repository.h"
@@ -57,6 +58,49 @@ private slots:
         QVERIFY2((git_libgit2_features() & GIT_FEATURE_HTTPS) == 0,
                  backend(GIT_FEATURE_HTTPS));
 #endif
+#endif
+    }
+
+    // The bundled build is held to its patches as well: the tests of a
+    // patch skip without it (their #ifdefs), so a patch whose detection
+    // in cmake/Libgit2.cmake stopped matching would go untested, and an
+    // installer could ship without it, with only a configure warning.
+    void bundledIsPatched() {
+#ifndef GITBOLT_LIBGIT2_BUNDLED
+        QSKIP("linked against a system libgit2");
+#else
+        QStringList missing;
+#ifndef GITBOLT_LIBGIT2_CONFIG_PATCHED
+        missing << QStringLiteral("config fixes");
+#endif
+#ifndef GITBOLT_LIBGIT2_NULL_VALUES_PATCHED
+        missing << QStringLiteral("fixes for config lines with no value");
+#endif
+#ifndef GITBOLT_LIBGIT2_LIMITS_PATCHED
+        missing << QStringLiteral("limits on hostile content");
+#endif
+#ifndef GITBOLT_LIBGIT2_TRUNCATION_PATCHED
+        missing << QStringLiteral("fixes for objects cut short");
+#endif
+        QVERIFY2(missing.isEmpty(),
+                 qPrintable(QStringLiteral("cmake/PatchLibgit2.cmake's ")
+                            + missing.join(QStringLiteral(", "))
+                            + QStringLiteral(" not found (see configure's warnings)")));
+        // Help › About then shows the plain version.
+        QCOMPARE(QString::fromStdString(gitbolt::git::libgit2VersionDescription()),
+                 QString::fromStdString(gitbolt::git::libgit2Version()));
+#endif
+    }
+
+    // Help › About says when the libgit2 is a system one, without
+    // GitBolt's patches, so a bug report copied from it says so too.
+    void systemVersionSaysUnpatched() {
+#ifdef GITBOLT_LIBGIT2_BUNDLED
+        QSKIP("linked against the bundled libgit2");
+#else
+        QCOMPARE(QString::fromStdString(gitbolt::git::libgit2VersionDescription()),
+                 QString::fromStdString(gitbolt::git::libgit2Version())
+                     + QStringLiteral(" (system, without GitBolt's patches)"));
 #endif
     }
 };

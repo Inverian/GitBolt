@@ -913,11 +913,11 @@ widgets::RepoOperationBar* RepositoryView::operationBar() const
     return operationBar_;
 }
 
-// Forward the repository path to the embedded terminal. The
-// TerminalWidget::changeDirectory call handles both states
-// (stash cwd if not yet running, send `cd <path>` if already
-// running) so we can route both "first open" and "switched repo"
-// events through the same entry point.
+// Forward the repository path to the embedded terminal.
+// TerminalWidget::changeRepository handles every state (stash the
+// folder if the shell isn't running yet, `cd` a running one there once
+// no command runs in it) so we can route both "first open" and
+// "switched repo" events through the same entry point.
 void RepositoryView::setRepositoryPath(const QString& path, const QString& bareGitDir)
 {
     if (!terminalWidget_ || path.isEmpty())

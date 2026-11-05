@@ -45,6 +45,14 @@ std::string libgit2Version();
 /// flags at runtime.
 std::string libgit2Features();
 
+/// libgit2Version(), followed by where it came from when that is not
+/// the bundled build with all of cmake/PatchLibgit2.cmake's fixes:
+/// "1.9.2 (system, without GitBolt's patches)", or, for a bundled one
+/// built from a source tree the patch script didn't run over, "1.9.7
+/// (without some of GitBolt's patches)". For Help › About, and so the
+/// bug reports copied from it.
+std::string libgit2VersionDescription();
+
 class Repository {
 public:
     ~Repository();

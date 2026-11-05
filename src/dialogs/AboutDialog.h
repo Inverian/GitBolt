@@ -8,7 +8,8 @@ namespace gitbolt::dialogs {
 
 /// "About GitBolt" dialog — shown from Help → About. Displays the
 /// application name, version, tagline, a detailed build-info block
-/// (Qt version, libgit2 version and features, compiler, build date),
+/// (Qt version, libgit2 version and features, compiler, build date, the
+/// git GitBolt runs and what is known against it),
 /// license notice, and clickable links to the project repo,
 /// trademark policy, license text, and privacy policy (what usage
 /// statistics collect).

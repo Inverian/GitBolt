@@ -128,4 +128,10 @@ private:
 /// E:". No Windows path contains a quote.
 QString repoPathArgument(const QString& argument);
 
+/// Windows: makes the home folder current (else the application's) and
+/// returns it. Explorer's "Open in GitBolt" starts GitBolt in a repository,
+/// and a lookup or relative path that uses the current folder would take a
+/// file from it. Elsewhere it only returns the current folder.
+QString leaveStartingFolder();
+
 } // namespace gitbolt::app

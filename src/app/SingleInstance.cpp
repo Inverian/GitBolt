@@ -2,6 +2,7 @@
 
 #include "util/LockFiles.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDeadlineTimer>
@@ -164,6 +165,15 @@ QString repoPathArgument(const QString& argument)
 #endif
     // A bare "." becomes the full path, not the literal ".".
     return QFileInfo(path).absoluteFilePath();
+}
+
+QString leaveStartingFolder()
+{
+#ifdef Q_OS_WIN
+    if (!QDir::setCurrent(QDir::homePath()))
+        QDir::setCurrent(QCoreApplication::applicationDirPath());
+#endif
+    return QDir::currentPath();
 }
 
 } // namespace gitbolt::app

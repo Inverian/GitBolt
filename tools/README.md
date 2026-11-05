@@ -12,7 +12,7 @@ Everything here is optional — the main build and run instructions in [`docs/BU
 |---|---|---|
 | [`run-dev.sh`](#run-devsh) | macOS | Kill + rebuild + launch GitBolt in one command |
 | [`click.py`](#clickpy) | macOS | Synthetic mouse click via Quartz CGEvents (bypasses overlay apps) |
-| [`check-ci-pins.py`](#check-ci-pinspy) | any | Find newer releases of the tools CI pins by hash, and bump them |
+| [`check-ci-pins.py`](#check-ci-pinspy) | any | Find newer releases of what the builds pin, and advisories against them or the git GitBolt runs |
 
 ---
 
@@ -30,7 +30,7 @@ tools/run-dev.sh ~/projects/linux       # Open an arbitrary repository
 
 ### What it does
 
-1. Makes sure Homebrew's `brew shellenv` is loaded, so `cmake`, `ninja`, Qt, and libgit2 are all on `PATH` even if you ran the script from a non-login shell.
+1. Makes sure Homebrew's `brew shellenv` is loaded, so `cmake`, `ninja` and Qt are all on `PATH` even if you ran the script from a non-login shell.
 2. Kills any running GitBolt instance with `pkill -9` (including orphaned ones that Launch Services may be keeping alive).
 3. Configures the build directory if it hasn't been configured yet (`cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug`). Subsequent runs skip this step.
 4. Incrementally builds with `cmake --build build --parallel`.
@@ -42,7 +42,7 @@ During development, the cycle "make a code change → stop the running app → r
 
 ### Requirements
 
-- Homebrew with `cmake`, `qt`, `libgit2`, `pkg-config`, and `ninja` installed (see [`docs/BUILDING.md`](../docs/BUILDING.md))
+- Homebrew with `cmake`, `qt` and `ninja` installed (the first configure downloads and builds the pinned libgit2; see [`docs/BUILDING.md`](../docs/BUILDING.md))
 - macOS — the script uses `open`, `pkill`, and Homebrew paths that don't exist on Linux or Windows
 
 ---
@@ -129,20 +129,26 @@ tools/click.py 1269 668
 
 ## `check-ci-pins.py`
 
-CI downloads its packaging tools (linuxdeploy, its Qt plugin, the AppImage runtime) from tagged GitHub releases and checks each against the sha256 it had when it was pinned; it also pins `jurplel/install-qt-action` to a commit. That keeps a re-uploaded asset or a moved tag out of our installers, but nothing bumps the pins. This script finds the newest tagged release of each (never a `continuous` build, which is rebuilt in place) and works out the new hash.
+What GitBolt's builds pin stays put until someone moves it: CI downloads its packaging tools (linuxdeploy, its Qt plugin, the AppImage runtime) from tagged GitHub releases and checks each against the sha256 it had when it was pinned, keeps actions on major tags, and pins Qt, NSIS and what installs Qt (`.github/qt-requirements.*`); the build pins libgit2. That keeps a re-uploaded asset out of our installers, but nothing bumps the pins, and nothing says when one of them, or the git GitBolt runs, has a security advisory. This script does both:
+
+- **Pins:** the newest tagged release of each tool (never a `continuous` build, which is rebuilt in place, and the highest version where a project also releases fixes for an older major), with the new hash; a new major of each action; a newer patch release of libgit2's series, Qt's series (and whether its open-source support has ended) and NSIS; a release of aqtinstall that has the commit CI pins. A release on GitHub counts once it has been out 14 days, the wait `.github/qt-requirements.in` sets for the lock, so a bad upload can be noticed and pulled first; Qt's and NSIS's count at once, as nothing else here would show their security fixes. An action pinned other than by major tag (`@vN`) is reported, since it can't be followed. CI's Python is a minor version (`3.14`) that setup-python keeps on its newest patch release, so it isn't followed.
+- **Advisories**, reported as soon as they're published: libgit2's, git's, Git for Windows', Git LFS's, py7zr's and aqtinstall's since the date in a `check-ci-pins: <owner>/<repo> advisories reviewed <YYYY-MM-DD>` comment (in `cmake/Libgit2.cmake`, `src/git/GitVersion.cpp` and `.github/qt-requirements.in`; move it on once you've read what came after it, and the libgit2 and git ones must be there); and what GitHub's reviewed advisory database lists against every locked Python package (not their newest releases: the lock is refreshed on purpose).
+
+`.github/workflows/dependency-check.yml` runs it every Monday; a failed run is GitHub's email to the owner. A bump that has to wait is accepted until a date by a comment in any file it reads (`# check-ci-pins: accept <key> until <YYYY-MM-DD>`, the key it prints in brackets).
 
 ### Usage
 
 ```bash
-tools/check-ci-pins.py            # report; exits 1 if any pin is behind
-tools/check-ci-pins.py --write    # also rewrite .github/workflows/ci.yml
+tools/check-ci-pins.py            # report; exits 1 if anything is behind or has an advisory, 2 if something couldn't be checked
+tools/check-ci-pins.py --write    # also rewrite the fetch and uses: pins in .github/workflows
+tools/check-ci-pins.py --offline  # only list the pins it finds
 ```
 
-A bumped linuxdeploy can change the AppImage, so run the workflow on the branch (Actions → CI → Run workflow builds every installer) before merging. NSIS (a SourceForge zip) and the ubuntu image digest the DEB is tested in are not followed; the script prints a reminder.
+A bumped linuxdeploy can change the AppImage, so run the workflow on the branch (Actions → CI → Run workflow builds every installer) before merging. libgit2, Qt, NSIS and the Python lock are bumped by hand (the report says where; `.github/qt-requirements.in` says how to refresh the lock). The ubuntu and debian image digests the DEB is tested in are not followed; the script prints a reminder.
 
 ### Requirements
 
-- Python 3 and network access. It calls the GitHub API without a token (60 requests an hour is plenty); set `GITHUB_TOKEN` to lift the limit.
+- Python 3 and network access. It calls the GitHub API without a token; the advisory lookups take more than its 60 requests an hour, so set `GITHUB_TOKEN` (the workflow passes its own).
 
 ---
 

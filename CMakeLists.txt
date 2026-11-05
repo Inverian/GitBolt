@@ -15,7 +15,7 @@ endif()
 
 # Oldest macOS the app runs on. Unset, the binary targets the build
 # machine's SDK (macOS 26 on CI), whatever Info.plist says. 13.0 is the
-# minos of the Qt 6.10 frameworks CI ships (aqt), so nothing in the
+# minos of the Qt 6.11 frameworks CI ships (aqt), so nothing in the
 # bundle needs more; LSMinimumSystemVersion is generated from this same
 # variable (src/app/platform/macos/Info.plist.in). Must precede
 # project(), whose compiler checks use it. CMAKE_HOST_APPLE because
@@ -41,7 +41,7 @@ endif()
 # a cached OFF from before until it is configured fresh.
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
-project(GitBolt VERSION 0.9.8 LANGUAGES CXX)
+project(GitBolt VERSION 0.9.9 LANGUAGES CXX)
 # Objective-C++ for the few AppKit calls Qt has no API for
 # (src/app/platform/macos/MacServices.mm). It takes CXX_STANDARD.
 if(APPLE)
@@ -69,17 +69,25 @@ set(CMAKE_AUTOUIC ON)
 # .clang-tidy is useless without it).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
 # Options
 option(GITBOLT_BUILD_TESTS "Build tests" ON)
 option(GITBOLT_SANITIZERS "Enable sanitizers (address, undefined)" OFF)
+# OFF: a system libgit2, for packagers whose policy is the distribution's
+# (cmake/Libgit2.cmake). Libgit2Floor gives the help strings its floor.
+include(Libgit2Floor)
 option(GITBOLT_BUNDLED_LIBGIT2
-    "Build the pinned libgit2 from source and link it statically instead of using a system copy"
-    OFF)
+    "Build the pinned libgit2, with GitBolt's patches, from source and link it statically; OFF uses a system copy (${GITBOLT_LIBGIT2_FLOOR} or later) without them"
+    ON)
+include(CMakeDependentOption)
+cmake_dependent_option(GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2
+    "With GITBOLT_BUNDLED_LIBGIT2=OFF, accept a system libgit2 before ${GITBOLT_LIBGIT2_FLOOR} (${GITBOLT_LIBGIT2_FLOOR_1_8} on 1.8), for a distribution that backported those releases' security fixes (cmake/Libgit2Floor.cmake)"
+    OFF "NOT GITBOLT_BUNDLED_LIBGIT2" OFF)
 option(GITBOLT_REQUIRE_ENGLISH_PLURALS
     "Fail the configure when the English plural forms can't be built (no Qt LinguistTools, or Qt before 6.7)"
     OFF)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
 # Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
 # Empty, the default, compiles telemetry out.
@@ -95,8 +103,8 @@ endif()
 find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Svg Network)
 qt_standard_project_setup()
 
-# libgit2 -> the gitbolt_libgit2 target: a system copy, or the pinned
-# static build (GITBOLT_BUNDLED_LIBGIT2, or when there is no system one)
+# libgit2 -> the gitbolt_libgit2 target: the pinned, patched static
+# build (GITBOLT_BUNDLED_LIBGIT2, the default), or a system copy
 include(Libgit2)
 
 # Source modules

@@ -41,7 +41,7 @@ APP_BUNDLE="$BUILD_DIR/src/app/GitBolt.app"
 BINARY="$APP_BUNDLE/Contents/MacOS/GitBolt"
 
 # ---------------------------------------------------------------------------
-# 1. Ensure Homebrew PATH is set — cmake, qt, libgit2 all live there
+# 1. Ensure Homebrew PATH is set — cmake, ninja and qt live there
 # ---------------------------------------------------------------------------
 if [[ -x /opt/homebrew/bin/brew ]]; then
     eval "$(/opt/homebrew/bin/brew shellenv)"

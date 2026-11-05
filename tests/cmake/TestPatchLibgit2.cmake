@@ -85,13 +85,24 @@ set(_attr_file_new_from
     "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\n\t/* If subdir file path, convert context for file paths */\n\t\tif ((error = git_attr_fnmatch__parse(&rule->match, &attrs->pool, context, &scan)) < 0 ||\n\t\t    (error = git_attr_assignment__parse(repo, &attrs->pool, &rule->assigns, &scan)) < 0)\nint git_attr_assignment__parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base)\n{\n\tint error;\n\tconst char *scan = *base;\n\tgit_attr_assignment *assign = NULL;\n\t\t\t\tgit_attr_assignment *massign;\n\n\t\t\t\tgit_vector_foreach(&macro->assigns, i, massign) {\n\t\t/* insert allocated assign into vector */\n\t\terror = git_vector_insert_sorted(assigns, assign, &merge_assignments);\n\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n}\n")
 set(_attr_file_new_to
     "static bool parse_optimized_patterns(\n\tgit_attr_fnmatch *spec,\n\tgit_pool *pool,\n\tconst char *pattern);\n\n/*\n * GitBolt: libgit2 copies a macro into each rule that names it, so N\n * rules naming a macro of K names took N x K. A rule takes at most this\n * many assignments, its macros' included (a macro is a rule too): git\n * skips a line of 2048 bytes or more, and a shorter one names no more.\n * Each goes into the rule's sorted list, which took time as the square\n * of a long line's names.\n */\n#define GIT_ATTR_MAX_RULE_ASSIGNS 1024\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget);\n\nint git_attr_file__parse_buffer(\n\tgit_repository *repo, git_attr_file *attrs, const char *data, bool allow_macros)\n{\n\tconst char *scan = data, *context = NULL;\n\tgit_attr_rule *rule = NULL;\n\tint ignorecase = 0, error = 0;\n\t/* GitBolt: and the file's rules, all together, a rule's worth plus\n\t * one for each byte of the file. A name written out takes two bytes\n\t * at least, so macros can't make a file hold much more than its\n\t * names would. A rule past either limit is skipped. */\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS + strlen(data);\n\n\t/* If subdir file path, convert context for file paths */\n\t\tif ((error = git_attr_fnmatch__parse(&rule->match, &attrs->pool, context, &scan)) < 0 ||\n\t\t    (error = attr_assignment_parse(repo, &attrs->pool, &rule->assigns, &scan, &budget)) < 0)\nint git_attr_assignment__parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base)\n{\n\tsize_t budget = GIT_ATTR_MAX_RULE_ASSIGNS;\n\n\treturn attr_assignment_parse(repo, pool, assigns, base, &budget);\n}\n\n/*\n * GitBolt: takes n more assignments for a rule, from what the rule and\n * its file have left, or says one of them hasn't that many.\n */\nstatic bool attr_assignments_take(size_t *rule_left, size_t *budget, size_t n)\n{\n\tif (n > *rule_left || n > *budget)\n\t\treturn false;\n\t*rule_left -= n;\n\t*budget -= n;\n\treturn true;\n}\n\nstatic int attr_assignment_parse(\n\tgit_repository *repo,\n\tgit_pool *pool,\n\tgit_vector *assigns,\n\tconst char **base,\n\tsize_t *budget)\n{\n\tint error;\n\tconst char *scan = *base;\n\tgit_attr_assignment *assign = NULL;\n\tsize_t rule_left = GIT_ATTR_MAX_RULE_ASSIGNS;\n\t\t\t\tgit_attr_assignment *massign;\n\n\t\t\t\t/* GitBolt: a macro's assignments count as the rule's. */\n\t\t\t\tif (!attr_assignments_take(&rule_left, budget, macro->assigns.length))\n\t\t\t\t\tgoto skip;\n\n\t\t\t\tgit_vector_foreach(&macro->assigns, i, massign) {\n\t\t/* insert allocated assign into vector */\n\t\tif (!attr_assignments_take(&rule_left, budget, 1))\n\t\t\tgoto skip;\n\t\terror = git_vector_insert_sorted(assigns, assign, &merge_assignments);\n\t*base = git__next_line(scan);\n\n\treturn (assigns->length == 0) ? GIT_ENOTFOUND : 0;\n\nskip:\n\t/* GitBolt: the rule took too many; it is skipped, as one with\n\t * none. What it took is the caller's to free with the rule. */\n\tgit_attr_assignment__free(assign);\n\t*base = git__next_line(scan);\n\treturn GIT_ENOTFOUND;\n}\n")
+# The fixes for objects cut short, from libgit2's main branch: only a
+# version after 0.9.8 patches these files. A libgit2 release that has the
+# fixes has the _to text already.
+set(_zstream_new_from
+    "\twhile (out_remain > 0 && zstream->zerr != Z_STREAM_END) {\n\t\tsize_t out_written = out_remain;\n\n\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\tout_remain -= out_written;\n\t\tout = ((char *)out) + out_written;\n\t}\n")
+set(_zstream_new_to
+    "\twhile (out_remain > 0 && zstream->zerr != Z_STREAM_END) {\n\t\tsize_t out_written = out_remain;\n\n\t\tif (git_zstream_get_output_chunk(out, &out_written, zstream) < 0)\n\t\t\treturn -1;\n\n\t\t/*\n\t\t * with output space still available, a Z_BUF_ERROR that wrote\n\t\t * nothing could be the input is exhausted in the middle of the stream.\n\t\t * It is unlikely further input will arrive within this loop,\n\t\t * so we fail it.\n\t\t */\n\t\tif (!out_written && zstream->zerr == Z_BUF_ERROR) {\n\t\t\tgit_error_set(GIT_ERROR_ZLIB, \"premature end of zlib stream\");\n\t\t\treturn -1;\n\t\t}\n\n\t\tout_remain -= out_written;\n\t\tout = ((char *)out) + out_written;\n\t}\n")
+set(_delta_new_from
+    "\tlen = read = 0;\n\twhile (len < buffer_len) {\n\t\tread = git_packfile_stream_read(stream, &buffer[len], buffer_len - len);\n\n\t\tif (read == 0)\n\t\t\tbreak;\n\n\t\tif (read == GIT_EBUFS)\n\t\t\tcontinue;\n\n\t\tlen += read;\n\t}\n")
+set(_delta_new_to
+    "\tlen = read = 0;\n\twhile (len < buffer_len) {\n\t\toff64_t curpos = stream->curpos;\n\n\t\tread = git_packfile_stream_read(stream, &buffer[len], buffer_len - len);\n\n\t\tif (read == 0)\n\t\t\tbreak;\n\n\t\tif (read == GIT_EBUFS) {\n\t\t\t/*\n\t\t\t * The stream made no progress at all: inflate()\n\t\t\t * stalled on truncated input (Z_BUF_ERROR) and the\n\t\t\t * pack has no more data to offer (curpos is stuck\n\t\t\t * past the end of the packfile).  Retrying would\n\t\t\t * loop forever, so fail instead of hanging.\n\t\t\t */\n\t\t\tif (stream->curpos == curpos) {\n\t\t\t\tgit_error_set(GIT_ERROR_ODB, \"truncated packfile\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tcontinue;\n\t\t}\n\n\t\tif (read < 0)\n\t\t\treturn -1;\n\n\t\tlen += read;\n\t}\n")
 foreach(_file config config_file repository)
     set(_${_file}_from "${_${_file}_old_from}${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_old_to}${_${_file}_new_to}")
     # As the 0.9.7 script left it.
     set(_${_file}_097 "${_${_file}_old_to}${_${_file}_new_from}")
 endforeach()
-foreach(_file checkout merge wildmatch tree_h iterator tree_c attr_file)
+foreach(_file checkout merge wildmatch tree_h iterator tree_c attr_file zstream delta)
     set(_${_file}_from "${_${_file}_new_from}")
     set(_${_file}_to "${_${_file}_new_to}")
     set(_${_file}_097 "${_${_file}_new_from}")
@@ -99,9 +110,18 @@ endforeach()
 foreach(_file cflags common submodule remote)
     set(_${_file}_097 "${_${_file}_to}")
 endforeach()
+# As the 0.9.8 script left each file: all patched but the two of the
+# fixes for objects cut short.
+foreach(_file cflags common config config_file submodule remote repository checkout merge
+              wildmatch tree_h iterator tree_c attr_file)
+    set(_${_file}_098 "${_${_file}_to}")
+endforeach()
+foreach(_file zstream delta)
+    set(_${_file}_098 "${_${_file}_from}")
+endforeach()
 
-# A tree with the fourteen files: <suffix> picks each one's text (_from,
-# _to or _097), <config_file> config_file.c's.
+# A tree with the sixteen files: <suffix> picks each one's text (_from,
+# _to, _097 or _098), <config_file> config_file.c's.
 function(write_tree dir suffix config_file)
     file(REMOVE_RECURSE ${dir})
     file(WRITE ${dir}/cmake/DefaultCFlags.cmake "${_cflags${suffix}}")
@@ -118,6 +138,8 @@ function(write_tree dir suffix config_file)
     file(WRITE ${dir}/src/libgit2/iterator.c "${_iterator${suffix}}")
     file(WRITE ${dir}/src/libgit2/tree.c "${_tree_c${suffix}}")
     file(WRITE ${dir}/src/libgit2/attr_file.c "${_attr_file${suffix}}")
+    file(WRITE ${dir}/src/util/zstream.c "${_zstream${suffix}}")
+    file(WRITE ${dir}/src/libgit2/delta.c "${_delta${suffix}}")
 endfunction()
 
 function(run_patch dir result)
@@ -135,7 +157,8 @@ function(expect_patched what dir)
                   "src/libgit2/repository.c;_repository_to" "src/libgit2/checkout.c;_checkout_to"
                   "src/libgit2/merge.c;_merge_to" "src/util/wildmatch.c;_wildmatch_to"
                   "src/libgit2/tree.h;_tree_h_to" "src/libgit2/iterator.c;_iterator_to"
-                  "src/libgit2/tree.c;_tree_c_to" "src/libgit2/attr_file.c;_attr_file_to")
+                  "src/libgit2/tree.c;_tree_c_to" "src/libgit2/attr_file.c;_attr_file_to"
+                  "src/util/zstream.c;_zstream_to" "src/libgit2/delta.c;_delta_to")
         list(GET _pair 0 _file)
         list(GET _pair 1 _expected)
         file(READ ${dir}/${_file} _text)
@@ -170,6 +193,29 @@ if(NOT _rc EQUAL 0)
     message(FATAL_ERROR "a tree 0.9.7 patched: the script failed:\n${_rc_OUTPUT}")
 endif()
 expect_patched("a tree 0.9.7 patched" ${_tree})
+
+# And one the 0.9.8 script patched: it gets the fixes for objects cut
+# short.
+write_tree(${_tree} _098 "${_config_file_to}")
+run_patch(${_tree} _rc)
+if(NOT _rc EQUAL 0)
+    message(FATAL_ERROR "a tree 0.9.8 patched: the script failed:\n${_rc_OUTPUT}")
+endif()
+expect_patched("a tree 0.9.8 patched" ${_tree})
+
+# A libgit2 whose zstream.c has the fix but whose delta.c has a loop the
+# script doesn't know: fails, naming the file.
+string(REPLACE "if (read == GIT_EBUFS)\n\t\t\tcontinue;" "if (read == GIT_EBUFS)\n\t\t\tgitbolt_unknown();"
+    _unknown_delta "${_delta_from}")
+write_tree(${_tree} _to "${_config_file_to}")
+file(WRITE ${_tree}/src/libgit2/delta.c "${_unknown_delta}")
+run_patch(${_tree} _rc)
+if(_rc EQUAL 0)
+    message(FATAL_ERROR "a delta.c patched in an unknown way: the script succeeded")
+endif()
+if(NOT _rc_OUTPUT MATCHES "delta\\.c")
+    message(FATAL_ERROR "a delta.c patched in an unknown way: the error doesn't name the file:\n${_rc_OUTPUT}")
+endif()
 
 # A tree patched in a way the script doesn't know (an earlier version of
 # it, say): fails, rather than leaving it as it is.

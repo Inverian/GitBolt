@@ -15,6 +15,7 @@ set(SOURCES
     Error.cpp
     GitProcess.cpp
     GitProcessLog.cpp
+    GitVersion.cpp
     Index.cpp
     Merge.cpp
     ObjectId.cpp
@@ -42,6 +43,7 @@ set(SOURCES
     Error.h
     GitProcess.h
     GitProcessLog.h
+    GitVersion.h
     Index.h
     Merge.h
     ObjectId.h

@@ -43,6 +43,18 @@ std::string libgit2Features() {
     return out;
 }
 
+std::string libgit2VersionDescription() {
+    // GITBOLT_LIBGIT2_*: cmake/Libgit2.cmake, on gitbolt_libgit2.
+#if !defined(GITBOLT_LIBGIT2_BUNDLED)
+    return libgit2Version() + " (system, without GitBolt's patches)";
+#elif defined(GITBOLT_LIBGIT2_CONFIG_PATCHED) && defined(GITBOLT_LIBGIT2_NULL_VALUES_PATCHED) \
+    && defined(GITBOLT_LIBGIT2_LIMITS_PATCHED) && defined(GITBOLT_LIBGIT2_TRUNCATION_PATCHED)
+    return libgit2Version();
+#else
+    return libgit2Version() + " (without some of GitBolt's patches)";
+#endif
+}
+
 
 namespace {
 

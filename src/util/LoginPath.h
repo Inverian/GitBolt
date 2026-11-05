@@ -41,11 +41,17 @@ QString pathForChildren(const QString& own);
 /// once, in order, empty ones dropped (':'-separated; ';' on Windows).
 QString mergePathLists(const QString& first, const QString& second);
 
+/// The first `name` in an absolute folder of `pathList` that is an
+/// executable file, by its full path; empty if none. A relative folder is
+/// passed over: it is under the current one, on Windows maybe a repository.
+/// On Windows, name.exe only: a .bat or .cmd would run through cmd.exe.
+QString findExecutableOnPath(const QString& name, const QString& pathList);
+
 /// Runs `shell -ilc` in a session of its own, with no terminal and
-/// stdin and stderr on /dev/null, and returns the PATH it set up. Empty
-/// when it couldn't run, said nothing usable (an entry that isn't an
-/// absolute path), or took longer than `timeoutMs` (it's killed, with
-/// whatever it started). Unix only.
+/// stdin and stderr on /dev/null, and returns the PATH it set up, less
+/// any entry that isn't an absolute path. Empty when it couldn't run,
+/// said nothing usable, or took longer than `timeoutMs` (it's killed,
+/// with whatever it started). Unix only.
 QString queryLoginShellPath(const QString& shell, int timeoutMs);
 
 } // namespace gitbolt::util
