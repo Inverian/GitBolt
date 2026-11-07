@@ -10,6 +10,7 @@
 #   util, conf, watcher — foundation, no cross-deps
 #   telemetry → util (TestSession: one test-session predicate, shared
 #                     with the crash handler); Core, Network
+#   update → util (TestSession); Core, Network
 #   git → util (for caches)
 #   models → git
 #   services → git, models, util, watcher
@@ -24,6 +25,7 @@ add_subdirectory(util)
 add_subdirectory(conf)
 add_subdirectory(watcher)
 add_subdirectory(telemetry)
+add_subdirectory(update)
 add_subdirectory(git)
 add_subdirectory(models)
 add_subdirectory(services)
