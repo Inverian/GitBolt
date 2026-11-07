@@ -6,6 +6,7 @@
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "git/GitProcess.h"
+#include "git/GitVersion.h"
 
 #include <QAction>
 #include <QApplication>
@@ -1210,6 +1211,8 @@ void SettingsDialog::loadGitConfig()
         QString email;
         QString credentialHelper;
         bool noGit = false;
+        // macOS: the git found is Apple's stand-in, with no tools to run.
+        bool toolsMissing = false;
     };
     auto* watcher = new QFutureWatcher<GitIdentity>(this);
     connect(watcher, &QFutureWatcher<GitIdentity>::finished, this,
@@ -1220,7 +1223,9 @@ void SettingsDialog::loadGitConfig()
         credentialHelperEdit_->setText(id.credentialHelper);
         // With no git there is nothing to read the identity from or to
         // save it to: said so, rather than fields that Apply ignores.
-        const QString placeholder = id.noGit ? tr("git was not found") : QString();
+        const QString placeholder = id.toolsMissing ? tr("git needs Apple's Command Line Tools")
+                                    : id.noGit      ? tr("git was not found")
+                                                    : QString();
         for (QLineEdit* edit : {userNameEdit_, userEmailEdit_, credentialHelperEdit_}) {
             edit->setPlaceholderText(placeholder);
             edit->setEnabled(!id.noGit);
@@ -1229,7 +1234,11 @@ void SettingsDialog::loadGitConfig()
     });
     watcher->setFuture(QtConcurrent::run([]() {
         GitIdentity id;
-        if (git::GitProcess::findGitExecutable().empty()) {
+        const std::string git = git::GitProcess::findGitExecutable();
+        // Apple's /usr/bin/git without the tools it runs would only ask
+        // to install them, and print nothing to read: no git either.
+        id.toolsMissing = git::appleToolsMissing(QString::fromStdString(git));
+        if (git.empty() || id.toolsMissing) {
             id.noGit = true;
             return id;
         }

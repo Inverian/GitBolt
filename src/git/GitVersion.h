@@ -109,6 +109,17 @@ struct GitProbe {
     bool appleToolsMissing = false;
 };
 
+/// macOS: `gitPath` is /usr/bin/git, Apple's stand-in, and neither Xcode
+/// nor the Command Line Tools are installed, so running it would only ask
+/// to install them. Always false elsewhere.
+bool appleToolsMissing(const QString& gitPath);
+
+namespace detail {
+/// appleToolsMissing() with the folders it looks in for the tools' git
+/// (usr/bin/git in each) given, for tests.
+bool appleToolsMissing(const QString& gitPath, const QStringList& toolDirs);
+} // namespace detail
+
 /// Finds git and asks it its version. Waits for the login shell's PATH
 /// (util::pathForChildren()) and for git, so never on the GUI thread:
 /// MainWindow::checkGitVersion() runs it on a worker, once per launch.

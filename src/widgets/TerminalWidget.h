@@ -165,6 +165,10 @@ private:
     QString shellProgram() const;
     /// The shell's terminal holds a whole line it hasn't read yet.
     bool lineUnread() const;
+    /// The shell's terminal is in its line mode (ICANON).
+    bool inLineMode() const;
+    /// The shell's end of the PTY, opened anew; -1 if it can't be.
+    int openShellTerminal() const;
 #endif
     void writeToPty(const QByteArray& bytes);
     /// Write as much as the master fd accepts right now; returns the
@@ -257,6 +261,9 @@ private:
     /// Ticks the Ctrl+C has waited for the shell to read a line typed
     /// ahead (see switchWhenIdle), up to kMaxUnreadWaits.
     int              unreadWaits_  = 0;
+    /// Ticks a line too long for the terminal's line mode has waited for
+    /// the shell's line editor (see switchWhenIdle), up to kMaxUnreadWaits.
+    int              lineModeWaits_ = 0;
     bool             autoStarted_  = false;
 };
 

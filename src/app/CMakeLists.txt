@@ -33,25 +33,31 @@ endif()
 # GitBolt.app/Contents/Resources/, where CFBundleIconFile expects it.
 # Pulled directly from the canonical resources/icons/ folder — when
 # that file changes, CMake re-copies it into the bundle on next build.
+# The licence texts (cmake/Notices.cmake) go in Resources the same way,
+# so the bundle the DMG ships carries them; Windows and Linux install
+# them in cmake/Packaging.cmake.
 if(APPLE)
     set(GITBOLT_MACOS_ICON "${CMAKE_SOURCE_DIR}/resources/icons/gitbolt.icns")
-    set_source_files_properties(${GITBOLT_MACOS_ICON} PROPERTIES
+    set(GITBOLT_MACOS_LICENSES "${CMAKE_SOURCE_DIR}/LICENSE" "${GITBOLT_NOTICES_FILE}")
+    set_source_files_properties(${GITBOLT_MACOS_ICON} ${GITBOLT_MACOS_LICENSES} PROPERTIES
         MACOSX_PACKAGE_LOCATION "Resources"
     )
-    list(APPEND GITBOLT_APP_SOURCES ${GITBOLT_MACOS_ICON})
+    list(APPEND GITBOLT_APP_SOURCES ${GITBOLT_MACOS_ICON} ${GITBOLT_MACOS_LICENSES})
 endif()
 
 # On Windows, embed the .ico into the .exe so Explorer, the Start
-# menu, the Alt+Tab switcher, and the taskbar all show our icon.
+# menu, the Alt+Tab switcher, and the taskbar all show our icon, and
+# a version resource, which Explorer's Properties > Details shows.
 #
 # The mechanism: we copy the canonical resources/icons/gitbolt.ico
 # into the build tree via configure_file(COPYONLY) — which also sets
 # up CMake's dependency tracking, so a change to the canonical icon
 # causes the exe to rebuild on the next build. Then we materialize a
 # .rc file next to the copy (same directory so the resource compiler
-# finds the .ico via its relative reference) and add it to the target
-# sources. CMake automatically hands .rc files to the platform's
-# resource compiler (rc.exe on MSVC, windres on MinGW).
+# finds the .ico via its relative reference), with the project()
+# version filled in, and add it to the target sources. CMake
+# automatically hands .rc files to the platform's resource compiler
+# (rc.exe on MSVC, windres on MinGW).
 if(WIN32)
     configure_file(
         "${CMAKE_SOURCE_DIR}/resources/icons/gitbolt.ico"
@@ -61,7 +67,7 @@ if(WIN32)
     configure_file(
         "${CMAKE_CURRENT_SOURCE_DIR}/platform/windows/gitbolt.rc.in"
         "${CMAKE_CURRENT_BINARY_DIR}/gitbolt.rc"
-        COPYONLY
+        @ONLY
     )
     list(APPEND GITBOLT_APP_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/gitbolt.rc")
 endif()
@@ -103,6 +109,14 @@ set_target_properties(gitbolt PROPERTIES
     WIN32_EXECUTABLE TRUE
     OUTPUT_NAME "GitBolt"
 )
+
+# The name in GitBolt.exe's manifest, which Qt 6.11.3 and later write
+# (app.exe.manifest.in) with com.yourcompany.<target> unless told: the
+# macOS bundle's identifier.
+if(WIN32)
+    set_target_properties(gitbolt PROPERTIES
+        QT_WINDOWS_APP_PROJECT_IDENTIFIER "com.gitbolt.app")
+endif()
 
 # Linux executables are lowercase by convention, and gitbolt.desktop
 # (Exec=gitbolt), the Nautilus extension and the AppStream <binary> all
@@ -180,8 +194,12 @@ else()
     # to compute each plugin's new RUNPATH, so it names the private lib
     # dir (plugins get $ORIGIN/../../lib). EXCLUDE_PLUGIN_TYPES: evdev/
     # libinput, eglfs/KMS and GTK-theme plugins pull system libraries a
-    # desktop Git client doesn't need. NO_TRANSLATIONS: the default target
-    # would be <prefix>/translations.
+    # desktop Git client doesn't need. The wayland-* ones are qtwayland's
+    # client extensions, of no use without its platform plugin, which the
+    # deploy doesn't ship (GitBolt runs on xcb, through XWayland in a
+    # Wayland session, as the AppImage does); they brought libQt6Wayland*
+    # and libwayland-* into the package. NO_TRANSLATIONS: the default
+    # target would be <prefix>/translations.
     qt_generate_deploy_script(
         TARGET gitbolt
         OUTPUT_SCRIPT gitbolt_deploy_script
@@ -192,11 +210,19 @@ set(QT_DEPLOY_PLUGINS_DIR \"${GITBOLT_PRIVATE_DIR}/plugins\")
 qt_deploy_runtime_dependencies(
     EXECUTABLE \"$<TARGET_FILE:gitbolt>\"
     EXCLUDE_PLUGIN_TYPES generic egldeviceintegrations platformthemes
+        wayland-decoration-client wayland-graphics-integration-client
+        wayland-shell-integration
     GENERATE_QT_CONF
     NO_TRANSLATIONS
 )
 ")
     install(SCRIPT "${gitbolt_deploy_script}")
+    # Each library under its soname alone (platform/linux/
+    # FlattenLibraryLinks.cmake says why).
+    install(CODE "
+        set(GITBOLT_LIB_DIR \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${GITBOLT_PRIVATE_DIR}/lib\")
+    ")
+    install(SCRIPT platform/linux/FlattenLibraryLinks.cmake)
     file(CREATE_LINK "../${GITBOLT_PRIVATE_DIR}/gitbolt"
          "${CMAKE_CURRENT_BINARY_DIR}/gitbolt-bin-link" SYMBOLIC)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/gitbolt-bin-link"

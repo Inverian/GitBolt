@@ -555,6 +555,12 @@ jobs:
           app="$mnt/GitBolt.app"
           [ -x "$app/Contents/MacOS/GitBolt" ] || { echo "::error::no GitBolt.app in $dmg"; exit 1; }
           [ -L "$mnt/Applications" ] || err "missing /Applications symlink"
+          # The licence texts (cmake/Notices.cmake): GitBolt's, and Qt's
+          # and libgit2's in the notices.
+          cmp -s LICENSE "$app/Contents/Resources/LICENSE" || err "the bundle lacks LICENSE"
+          notices="$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
+          grep -q 'GNU LESSER GENERAL PUBLIC LICENSE' "$notices" && grep -q '^libgit2: COPYING$' "$notices" \
+            || err "the bundle lacks THIRD-PARTY-NOTICES.txt, or it lacks Qt's or libgit2's licence"
 
           # 1) Nested frameworks/dylibs/plugins + bundle seal. An invalid one
           #    is what Gatekeeper shows as "GitBolt is damaged".
@@ -753,9 +759,11 @@ jobs:
           # 1) Layout + plugins nothing imports directly.
           $bad = @()
           # plugins\tls: usage statistics' HTTPS (Schannel, the system's TLS).
+          # LICENSE.txt, THIRD-PARTY-NOTICES.txt: the licence texts
+          # (cmake/Notices.cmake).
           foreach ($f in 'bin\GitBolt.exe', 'bin\qt.conf',
                          'plugins\platforms\qwindows.dll', 'plugins\iconengines\qsvgicon.dll',
-                         'plugins\tls\qschannelbackend.dll') {
+                         'plugins\tls\qschannelbackend.dll', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt') {
             if (-not (Test-Path (Join-Path $dest $f))) { $bad += "missing $f" }
           }
 
@@ -792,6 +800,18 @@ jobs:
             if ($dll.Name -match '^(lib)?(git2|ssh2|pcre2?|zlib1?|z|http_parser)(-\d+)?\.dll$') {
               $bad += "bin\$($dll.Name) belongs to a libgit2 DLL build, not the static one"
             }
+          }
+          # 3b) Versions Explorer shows (gitbolt.rc.in, CPACK_NSIS_DEFINES)
+          #     and GitBolt.exe's manifest name, which Qt 6.11.3 writes
+          #     (QT_WINDOWS_APP_PROJECT_IDENTIFIER in src/app/CMakeLists.txt).
+          $exe = Join-Path $bin 'GitBolt.exe'
+          foreach ($pe in $exe, $setup[0].FullName) {
+            $said = (Get-Item $pe).VersionInfo.ProductVersion
+            if ($said -ne $version) { $bad += "$(Split-Path $pe -Leaf) says it is version '$said'" }
+          }
+          $exeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
+          if ($exeText -match 'yourcompany' -or $exeText -notmatch 'assemblyIdentity[^>]*name="com\.gitbolt\.app"') {
+            $bad += "GitBolt.exe's manifest is not named com.gitbolt.app"
           }
           if ($bad) {
             Get-ChildItem $dest -Recurse -File | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }
@@ -863,6 +883,12 @@ jobs:
           # appimagetool would run appstreamcli only if the image ships
           # it; the metadata is linted explicitly above instead.
           LDAI_NO_APPSTREAM: '1'
+          # The SVG icon engine (iconengines/libqsvgicon), which draws the
+          # menus' SVG icons at any scale. The Qt plugin deploys it with
+          # the svg module, which it finds by what gitbolt links, and the
+          # linker drops libQt6Svg from that list (nothing calls it
+          # directly; the .deb's deploy goes by the CMake target instead).
+          EXTRA_QT_MODULES: 'svg'
         run: |
           set -euo pipefail
           # QT_ROOT_DIR: from Qt environment, above.
@@ -901,6 +927,8 @@ jobs:
           done
           install -Dm644 src/app/platform/linux/com.gitbolt.app.metainfo.xml \
             AppDir/usr/share/metainfo/com.gitbolt.app.metainfo.xml
+          # The licence texts, where the .deb has them (cmake/Notices.cmake).
+          install -Dm644 build/copyright AppDir/usr/share/doc/gitbolt/copyright
 
           # Two passes, to drop the Qt 5-era AppRun hook the Qt plugin's
           # tag still writes (later, untagged commits skip it on Qt 6): on
@@ -949,9 +977,20 @@ jobs:
                    ./usr/lib/gitbolt/plugins/tls/libqopensslbackend.so \
                    ./usr/share/applications/gitbolt.desktop \
                    ./usr/share/metainfo/com.gitbolt.app.metainfo.xml \
-                   ./usr/share/icons/hicolor/256x256/apps/gitbolt.png; do
+                   ./usr/share/icons/hicolor/256x256/apps/gitbolt.png \
+                   ./usr/lib/gitbolt/plugins/iconengines/libqsvgicon.so \
+                   ./usr/share/doc/gitbolt/copyright; do
             grep -qxF "$f" deb.lst || { echo "::error::DEB lacks $f"; exit 1; }
           done
+          # No Wayland pieces without the Wayland platform plugin to use
+          # them (src/app/CMakeLists.txt): qtwayland's client plugins and
+          # libraries, and the libwayland-* they pulled into Depends.
+          if grep -i wayland deb.lst; then
+            echo "::error::DEB ships Wayland pieces but no Wayland platform plugin"; exit 1
+          fi
+          if dpkg-deb -f "$deb" Depends | grep -F libwayland; then
+            echo "::error::Depends names libwayland-*, which only the Wayland pieces need"; exit 1
+          fi
           if grep -E '^\./usr/(lib/(x86_64-linux-gnu/)?[^/]+\.so|bin/qt\.conf$|plugins/|translations/)' deb.lst; then
             echo "::error::DEB puts private Qt files on shared system paths"; exit 1
           fi
@@ -968,6 +1007,23 @@ jobs:
           # Plugins must find the private Qt libs on their own: glibc does
           # not apply the exe's RUNPATH to a dlopen'd plugin's deps.
           rm -rf debroot && dpkg-deb -x "$deb" debroot
+          # The licence texts, Qt's and libgit2's among them.
+          grep -q 'GNU LESSER GENERAL PUBLIC LICENSE' debroot/usr/share/doc/gitbolt/copyright \
+            && grep -q '^libgit2: COPYING$' debroot/usr/share/doc/gitbolt/copyright \
+            || { echo "::error::the DEB's copyright file lacks Qt's or libgit2's licence"; exit 1; }
+          # Each private library under its soname alone, and Installed-Size
+          # near what the files take: CPack counts a link at its target's
+          # size, and with Qt's soname links it said twice the real size.
+          # /usr/bin/gitbolt, a link to the binary, still counts twice.
+          if find debroot/usr/lib/gitbolt/lib -type l | grep .; then
+            echo "::error::soname links in /usr/lib/gitbolt/lib (src/app/platform/linux/FlattenLibraryLinks.cmake)"; exit 1
+          fi
+          files_kib=$(find debroot -type f -printf '%s\n' | awk '{s += $1} END {print int((s + 1023) / 1024)}')
+          said_kib=$(dpkg-deb -f "$deb" Installed-Size)
+          echo "Installed-Size $said_kib KiB, files $files_kib KiB"
+          if [ "$said_kib" -gt $((files_kib * 12 / 10)) ]; then
+            echo "::error::Installed-Size $said_kib KiB is far over the files' $files_kib KiB"; exit 1
+          fi
           readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' | grep -qF '[$ORIGIN/../../lib]' \
             || { echo "::error::bundled plugin RUNPATH is not \$ORIGIN/../../lib"; readelf -d debroot/usr/lib/gitbolt/plugins/platforms/libqxcb.so | grep -E 'R(UN)?PATH' || true; exit 1; }
 
@@ -1048,6 +1104,13 @@ jobs:
             echo "::error::the AppImage bundles a libgit2, but libgit2 is linked in statically"
             exit 1
           fi
+
+          # 6) The SVG icon engine (EXTRA_QT_MODULES in Build AppImage) and
+          #    the licence texts.
+          [ -f squashfs-root/usr/plugins/iconengines/libqsvgicon.so ] \
+            || { echo "::error::the AppImage lacks plugins/iconengines/libqsvgicon.so"; exit 1; }
+          cmp -s build/copyright squashfs-root/usr/share/doc/gitbolt/copyright \
+            || { echo "::error::the AppImage lacks usr/share/doc/gitbolt/copyright"; exit 1; }
           rm -rf squashfs-root
 
       # ---- all: collect + upload ------------------------------------------

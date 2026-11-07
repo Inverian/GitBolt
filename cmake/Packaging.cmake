@@ -25,8 +25,9 @@ if(APPLE)
     # deprecated DMG SLAs, every scripted `hdiutil attach` (CI, this
     # repo's own smoke test) hangs on the agreement prompt, and users
     # get a wall of license text before they can drag the app. The
-    # license still ships inside the bundle and for generators where
-    # an agreement step is normal (NSIS).
+    # license ships inside the bundle instead (Contents/Resources/LICENSE
+    # and THIRD-PARTY-NOTICES.txt, see src/app/CMakeLists.txt), and as an
+    # agreement step only where one is normal (NSIS).
     set(CPACK_DMG_SLA_USE_RESOURCE_FILE_LICENSE OFF)
     # The DragNDrop generator adds the /Applications symlink itself, so
     # the bundle sits at the DMG root with no install-prefix override.
@@ -56,6 +57,20 @@ elseif(WIN32)
     # nothing from being on PATH.
     set(CPACK_NSIS_MODIFY_PATH OFF)
     set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    # The installer's own version resource, which Explorer's Properties >
+    # Details shows (GitBolt.exe's is in src/app/platform/windows/
+    # gitbolt.rc.in). CPack puts CPACK_NSIS_DEFINES near the top of its
+    # NSIS template, and sets it only for component installs, which
+    # GitBolt's isn't; CI's NSIS smoke test reads the version back.
+    set(CPACK_NSIS_DEFINES "
+  VIProductVersion '${PROJECT_VERSION}.0'
+  VIFileVersion '${PROJECT_VERSION}.0'
+  VIAddVersionKey 'ProductName' 'GitBolt'
+  VIAddVersionKey 'CompanyName' 'GitBolt'
+  VIAddVersionKey 'FileDescription' 'GitBolt Setup'
+  VIAddVersionKey 'FileVersion' '${PROJECT_VERSION}'
+  VIAddVersionKey 'ProductVersion' '${PROJECT_VERSION}'
+")
 
     # Ship the MSVC runtime (msvcp140*.dll, vcruntime140*.dll,
     # concrt140.dll) app-local in bin\ from VS's redist folder. CI runners
@@ -64,6 +79,11 @@ elseif(WIN32)
     # not found"), and an older system msvcp140.dll hits the VS 17.10+
     # std::mutex crash. The UCRT is part of Windows 10+.
     include(InstallRequiredSystemLibraries)
+
+    # The licence texts (cmake/Notices.cmake) in $INSTDIR, next to bin\;
+    # the installer's licence page shows LICENSE but leaves no copy.
+    install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION . RENAME LICENSE.txt)
+    install(FILES "${GITBOLT_NOTICES_FILE}" DESTINATION .)
 
     # Start menu shortcuts
     set(CPACK_NSIS_CREATE_ICONS_EXTRA
@@ -113,6 +133,10 @@ else()
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "libssl3t64 | libssl3")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://www.gitbolt.com")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+
+    # The licence texts in one file, where Debian keeps a package's
+    # (cmake/Notices.cmake); the AppImage step in CI puts it there too.
+    install(FILES "${GITBOLT_COPYRIGHT_FILE}" DESTINATION share/doc/gitbolt)
 
     # Install Linux desktop integration files
     install(FILES "${CMAKE_SOURCE_DIR}/src/app/platform/linux/gitbolt.desktop"

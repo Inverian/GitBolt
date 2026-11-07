@@ -2141,6 +2141,91 @@ private slots:
 #endif
     }
 
+    // A switch whose line is longer than the terminal takes in its line
+    // mode (1024 bytes on macOS, 4096 on Linux): a path outside ASCII
+    // goes as printf's escapes, four characters a byte, and a bare
+    // repository's goes twice. Typed while a slow prompt hook, run by
+    // the switch's Ctrl+C, still had the terminal in that mode, the line
+    // was cut, and the shell left in an open quote. The switch waits for
+    // the line editor now, and a shell with none is started again.
+    void ptyLongSwitchLineWaitsForTheLineEditor_data()
+    {
+        QTest::addColumn<QString>("program");
+        QTest::addColumn<QByteArray>("rc");
+        QTest::addColumn<bool>("startsAgain");
+        QTest::newRow("bash, a slow prompt")
+            << QStringLiteral("/bin/bash") << QByteArrayLiteral("PROMPT_COMMAND='gbslow=$(sleep 1)'")
+            << false;
+        QTest::newRow("zsh, a slow prompt")
+            << QStringLiteral("/bin/zsh") << QByteArrayLiteral("precmd() { gbslow=$(sleep 1) }")
+            << false;
+        QTest::newRow("bash, no line editor")
+            << QStringLiteral("/bin/bash") << QByteArrayLiteral("set +o emacs; set +o vi") << true;
+    }
+
+    void ptyLongSwitchLineWaitsForTheLineEditor()
+    {
+#ifdef Q_OS_WIN
+        QSKIP("The PTY is the Unix terminal backend");
+#else
+        QFETCH(QString, program);
+        QFETCH(QByteArray, rc);
+        QFETCH(bool, startsAgain);
+        PlainShell shell;
+        QVERIFY(shell.isValid());
+        if (!QFileInfo::exists(program))
+            QSKIP("the shell isn't installed");
+        useShell(shell, program, rc);
+        if (QTest::currentTestFailed())
+            return;
+        QTemporaryDir dirs;
+        QVERIFY(dirs.isValid());
+        // Three folders of 80 CJK characters, 240 bytes each: some 3 KB of
+        // escapes a path, twice that on the line.
+        const QString part(80, QChar(0x6587));
+        const QString bare = dirs.filePath(
+            QStringList{part, part, part + QStringLiteral(".git")}.join(QLatin1Char('/')));
+        QVERIFY(QDir().mkpath(bare));
+        // The shells' own test, which takes the path however it got there.
+        shell.set("GBWANT", QFile::encodeName(bare));
+
+        TerminalWidget terminal;
+        startAtPrompt(terminal);
+        if (QTest::currentTestFailed())
+            return;
+        const auto open = [&] { terminal.changeRepository(bare, bare); };
+        if (startsAgain) {
+            // Nothing typed, so no Ctrl+C: the shell is started again once
+            // the waits are over, and shows one prompt more.
+            QVERIFY2(prompted(terminal, open), qPrintable(terminal.toPlainText()));
+        } else {
+            // Something typed first, so the switch sends its Ctrl+C, and
+            // the prompt hook runs.
+            QVERIFY2(typed(terminal, QStringLiteral("gbmark=kept")),
+                     qPrintable(terminal.toPlainText()));
+            // Waited for by prompts, not by the `cd` shown (switched): the
+            // terminal wraps a line this long, maybe inside the " cd ". The
+            // Ctrl+C's prompt, then the one after the switch's line, which
+            // a line cut short never gets to (the shell's next is "> ").
+            const qsizetype before = shPrompts(terminal);
+            open();
+            const auto done = [&] {
+                return shPrompts(terminal) >= before + 2 && atShPrompt(terminal);
+            };
+            QVERIFY2(QTest::qWaitFor(done, kTimeoutMs), qPrintable(terminal.toPlainText()));
+            const qsizetype shown = shPrompts(terminal);
+            QTest::qWait(400);
+            QVERIFY2(done() && shPrompts(terminal) == shown, qPrintable(terminal.toPlainText()));
+        }
+        QVERIFY2(typed(terminal, QStringLiteral("[ \"$GIT_DIR\" -ef \"$GBWANT\" ] && [ \"$PWD\" -ef "
+                                                "\"$GBWANT\" ] && echo \"gbin[${gbmark-unset}]\"")),
+                 qPrintable(terminal.toPlainText()));
+        const QString expected = startsAgain ? QStringLiteral("gbin[unset]")
+                                             : QStringLiteral("gbin[kept]");
+        QVERIFY2(rows(terminal).contains(expected), qPrintable(terminal.toPlainText()));
+#endif
+    }
+
     // A folder whose path holds a control character, as a cloned
     // repository's submodule path can (git takes a Tab in one), opened
     // with GIT_DIR as it was. Typed in the `cd`, bash's Tab completed
