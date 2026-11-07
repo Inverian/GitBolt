@@ -562,9 +562,11 @@ jobs:
           cmp -s LICENSE "$app/Contents/Resources/LICENSE" || err "the bundle lacks LICENSE"
           notices="$app/Contents/Resources/THIRD-PARTY-NOTICES.txt"
           [ -f "$notices" ] || err "the bundle lacks THIRD-PARTY-NOTICES.txt"
-          for want in 'GNU LESSER GENERAL PUBLIC LICENSE' "^Qt [0-9.]*: code of others in Qt's libraries$" \
+          # Headings and lines only the appended texts have, not the index
+          # at the top (cmake/Notices.cmake).
+          for want in '^Qt: GNU Lesser General Public License v3\.0$' "^Qt [0-9.]*: code of others in Qt's libraries$" \
                       '^libgit2: COPYING$' '^libgit2: code COPYING leaves out$' '^LibXDiff, in libgit2: ' \
-                      '^Material Symbols$' '^Apache License 2.0$'; do
+                      '^GitBolt modified every one of the ' '^Apache License 2.0$'; do
             grep -q "$want" "$notices" 2>/dev/null || err "THIRD-PARTY-NOTICES.txt lacks /$want/"
           done
 
@@ -814,12 +816,22 @@ jobs:
             if (Test-Path (Join-Path $dest $f)) { $bad += "ships $f, which GitBolt never loads" }
           }
           if (Get-ChildItem $dest -Recurse -Filter 'qt_*.qm') { $bad += "ships Qt's translations (qt_*.qm), which GitBolt never loads" }
+          # Headings and lines only the appended texts have, not the index
+          # at the top (cmake/Notices.cmake); CMake writes the file with
+          # CRLF here, so the line ends go first. NSIS's notice must be of
+          # the makensis that made this installer.
           $notices = Join-Path $dest 'THIRD-PARTY-NOTICES.txt'
           if (Test-Path $notices) {
-            foreach ($want in 'GNU LESSER GENERAL PUBLIC LICENSE', '(?m)^Qt [0-9.]*: code of others in Qt''s libraries$',
-                              '(?m)^libgit2: COPYING$', '(?m)^LibXDiff, in libgit2: ', '(?m)^Material Symbols$',
-                              '(?m)^Microsoft Visual C\+\+ runtime$', '(?m)^NSIS: COPYING$') {
-              if ((Get-Content -Raw $notices) -notmatch $want) { $bad += "THIRD-PARTY-NOTICES.txt lacks /$want/" }
+            $text = (Get-Content -Raw $notices) -replace "`r`n", "`n"
+            $nsisVersion = ((& makensis /VERSION) | Out-String).Trim().TrimStart('v')
+            foreach ($want in '(?m)^Qt: GNU Lesser General Public License v3\.0$',
+                              '(?m)^Qt [0-9.]*: code of others in Qt''s libraries$',
+                              '(?m)^libgit2: COPYING$', '(?m)^LibXDiff, in libgit2: ',
+                              '(?m)^GitBolt modified every one of the ',
+                              '(?m)^They are Microsoft Corporation''s software, not part of GitBolt',
+                              '(?m)^NSIS: COPYING$',
+                              "(?m)^NSIS $([regex]::Escape($nsisVersion))'s COPYING ") {
+              if ($text -notmatch $want) { $bad += "THIRD-PARTY-NOTICES.txt lacks /$want/" }
             }
           }
 
@@ -833,8 +845,14 @@ jobs:
           }
           # Printed, with the manifest Qt wrote for the link, so a failure
           # says whether the name never reached Qt or got lost after it.
+          # Only the manifest's own XML: GitBolt.exe also holds CHANGELOG.md
+          # verbatim (rcc leaves it uncompressed), which names the old
+          # com.yourcompany.gitbolt; matched against the whole file, that
+          # is what failed 0.9.10's first dry run.
           $exeText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($exe))
-          $ids = @([regex]::Matches($exeText, '<assemblyIdentity[^>]*>') | ForEach-Object { $_.Value })
+          $manifests = @([regex]::Matches($exeText,
+            '<assembly xmlns="urn:schemas-microsoft-com:asm\.v1"[\s\S]*?</assembly>') | ForEach-Object { $_.Value })
+          $ids = @($manifests | ForEach-Object { [regex]::Matches($_, '<assemblyIdentity[^>]*>') } | ForEach-Object { $_.Value })
           Write-Host "GitBolt.exe's manifest: $($ids -join ' | ')"
           $qtManifest = 'build\src\app\GitBolt.exe.manifest'
           if (Test-Path $qtManifest) {
@@ -991,7 +1009,11 @@ jobs:
           cr=AppDir/usr/share/doc/gitbolt/copyright
           install -Dm644 build/copyright "$cr"
           runtime_notice=resources/licenses/appimage-runtime-20251108.txt
-          [ -f "$runtime_notice" ] || { echo "::error::no $runtime_notice for the runtime fetched above"; exit 1; }
+          [ -f "$runtime_notice" ] || { echo "::error::no $runtime_notice"; exit 1; }
+          # The notice names the SHA-256 of the runtime it is for: a pin
+          # bumped (tools/check-ci-pins.py --write) needs a new notice.
+          grep -qF "$(sha256sum runtime-x86_64 | cut -d' ' -f1)" "$runtime_notice" \
+            || { echo "::error::$runtime_notice is not the notice of the runtime fetched above (its SHA-256 isn't in it)"; exit 1; }
           rule=$(printf '=%.0s' $(seq 80))
           declare -A libs=()
           for f in AppDir/usr/lib/*.so*; do
@@ -1094,9 +1116,9 @@ jobs:
           # ICU's by the major version of the libicuuc the DEB ships.
           icu=$(sed -n 's|^\./usr/lib/gitbolt/lib/libicuuc\.so\.\([0-9]*\)$|\1|p' deb.lst)
           [ -n "$icu" ] || { echo "::error::the DEB ships no libicuuc.so.<major>"; exit 1; }
-          for want in 'GNU LESSER GENERAL PUBLIC LICENSE' "^Qt [0-9.]*: code of others in Qt's libraries$" \
+          for want in '^Qt: GNU Lesser General Public License v3\.0$' "^Qt [0-9.]*: code of others in Qt's libraries$" \
                       '^libgit2: COPYING$' '^libgit2: code COPYING leaves out$' '^LibXDiff, in libgit2: ' \
-                      "^ICU $icu\.[0-9]*: LICENSE$" '^Material Symbols$' '^Apache License 2.0$'; do
+                      "^ICU $icu\.[0-9]*: LICENSE$" '^GitBolt modified every one of the ' '^Apache License 2.0$'; do
             grep -q "$want" debroot/usr/share/doc/gitbolt/copyright \
               || { echo "::error::the DEB's copyright file lacks /$want/"; exit 1; }
           done

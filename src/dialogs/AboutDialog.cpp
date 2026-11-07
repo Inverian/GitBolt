@@ -281,7 +281,7 @@ void AboutDialog::setupUi()
         + tr("<p style='font-size:9pt;'>GitBolt uses Qt %1 (© The Qt Company Ltd. and other "
              "contributors) under the GNU LGPL v3, libgit2 under the GNU GPL v2 with the "
              "linking exception, LibXDiff (© 2003-2016 Davide Libenzi, Johannes E. "
-             "Schindelin) under the GNU LGPL v2.1 or later, and other free software: "
+             "Schindelin) under the GNU LGPL v2.1 or later, and other software: "
              "see <a href='%2'>their licences</a>"
              "&nbsp;· <a href='%3'>About Qt</a></p>")
               .arg(QString::fromLatin1(qVersion()).toHtmlEscaped(), noticesHref,

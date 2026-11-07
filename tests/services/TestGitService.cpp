@@ -204,8 +204,16 @@ public:
         });
     }
 
+    // How long the waits below give an operation by default. They return
+    // as soon as it is done, so this only bounds a failure: a reword
+    // through `git rebase -i` on a busy Windows runner, which starts git,
+    // its sequence editor and its message editor in turn, has taken more
+    // than 10 s.
+    static constexpr int kOperationTimeoutMs = 30000;
+
     // Spins the event loop until every one of `names` has arrived.
-    [[nodiscard]] bool waitFor(const QStringList& names, int timeoutMs = 10000) {
+    [[nodiscard]] bool waitFor(const QStringList& names,
+                               int timeoutMs = kOperationTimeoutMs) {
         return QTest::qWaitFor([&] {
             return std::all_of(names.begin(), names.end(),
                                [this](const QString& n) { return contains(n); });
@@ -216,7 +224,7 @@ public:
     // every one of `then`. Order-aware because the repository watcher
     // can slip in a status refresh of its own at any point.
     [[nodiscard]] bool waitForAfter(const QString& first, const QStringList& then,
-                                    int timeoutMs = 10000) {
+                                    int timeoutMs = kOperationTimeoutMs) {
         return QTest::qWaitFor([&] {
             const qsizetype at = indexOf(first);
             return at >= 0
@@ -3718,7 +3726,7 @@ private slots:
 
         const gitbolt::test::ScopedEnv shortDefault("GITBOLT_GIT_TIMEOUT_MS", "1000");
         svc.rebaseContinue();
-        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}, 20000),
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}),
                  qPrintable(log.join(QStringLiteral(", "))));
         QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("rebase --continue"), true, false}));
@@ -4545,7 +4553,7 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QVERIFY(!commits.at(0).at(0).toBool());
 
-        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}, 15000),
+        QVERIFY2(log.waitForAfter(QStringLiteral("rebaseStep"), {"status", "log"}),
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(steps.size(), 1);
         QCOMPARE(steps.at(0), (QVariantList{QStringLiteral("merge --abort"), true, false}));

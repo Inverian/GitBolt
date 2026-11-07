@@ -10,19 +10,21 @@ semver once 1.0 lands.
 
 - **The packages didn't include the licences of what they hold**:
   since 0.9.0 only the Windows installer showed GitBolt's GPL, on its
-  licence page, and none left a copy, nor of the licences of the
-  software of others they include. Each now has GitBolt's licence and a
-  THIRD-PARTY-NOTICES.txt with those: of Qt (LGPL-3.0) and the code of
+  licence page, and none left a copy of it or of the licences of Qt and
+  libgit2 (the AppImage had only the Debian copyright files of its
+  Ubuntu libraries). Each now has GitBolt's licence and those of the
+  software of others it includes: of Qt (LGPL-3.0) and the code of
   others in Qt's libraries; of libgit2 and the code in it, LibXDiff
   (LGPL-2.1) among it; of the Material Symbols GitBolt's menu icons come
   from (Apache-2.0); on Linux of ICU; on Windows of Microsoft's C++
   runtime and NSIS; and in the AppImage of the Ubuntu libraries and the
-  AppImage runtime it bundles. They are in GitBolt.app's
-  Contents/Resources on macOS, in the installation folder on Windows
-  (LICENSE.txt and THIRD-PARTY-NOTICES.txt), and together in
-  usr/share/doc/gitbolt/copyright in the .deb (/usr/share/doc/gitbolt
-  once installed) and the AppImage. Help › About GitBolt names Qt,
-  libgit2 and LibXDiff, opens those licences, and shows About Qt.
+  AppImage runtime it bundles. They are in LICENSE and
+  THIRD-PARTY-NOTICES.txt in GitBolt.app's Contents/Resources on macOS,
+  in LICENSE.txt and THIRD-PARTY-NOTICES.txt in the installation folder
+  on Windows, and in one file, usr/share/doc/gitbolt/copyright, in the
+  .deb (/usr/share/doc/gitbolt/copyright once installed) and the
+  AppImage. Help › About GitBolt names Qt, libgit2 and LibXDiff, opens
+  those licences, and shows About Qt.
 - **Settings on a Mac without Apple's Command Line Tools** asked to
   install them as it opened, and the user.name and user.email fields on
   its Git › Git Config page saved nothing. They are now disabled and say
@@ -46,19 +48,21 @@ semver once 1.0 lands.
   Both are gone. Its Installed-Size also said about twice the space it
   takes; it is now some 7% over, as the link /usr/bin/gitbolt counts the
   program twice.
-- **The Windows installer no longer installs what GitBolt never
-  loads**, 47 MB of the 84 MB 0.9.9 took: the software OpenGL
-  (opengl32sw.dll), the Direct3D and DXC shader compilers
-  (d3dcompiler_47.dll, dxcompiler.dll, dxil.dll) and Qt's translations.
+- **GitBolt takes 47 MB less on Windows**, of the 84 MB 0.9.9 took: the
+  installer no longer installs the software OpenGL (opengl32sw.dll), the
+  Direct3D and DXC shader compilers (d3dcompiler_47.dll, dxcompiler.dll,
+  dxil.dll) or Qt's translations, none of which GitBolt loads.
 - **Windows**: GitBolt.exe and the installer have version details
   (Properties › Details), and GitBolt.exe's manifest names it
   com.gitbolt.app, where 0.9.9's had Qt's placeholder
   com.yourcompany.gitbolt.
 - Development: `resources/licenses/` holds the licence texts the
-  packages ship, with where each comes from (`SOURCES.md`);
+  packages ship, with where each comes from (`SOURCES.md`), but for
+  GitBolt's own LICENSE, libgit2's COPYING and the AppImage's Ubuntu
+  copyright files, which the build takes from where they are;
   `tools/update-qt-notices.py` writes Qt's from its metadata, and CI
-  fails while a text for the Qt, libgit2 or ICU it builds with is
-  missing. `resources/icons/menu/README.md` says where the icons come
+  fails while a text for the Qt, libgit2, ICU, NSIS or AppImage runtime
+  it builds with is missing. `resources/icons/menu/README.md` says where the icons come
   from and how they were changed.
 - Development: 0.9.9's source held a stray `{{pkgetc}}/cert.pem`, a
   link to a file on the maintainer's machine. It is gone.

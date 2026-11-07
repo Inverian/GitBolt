@@ -691,8 +691,10 @@ def main() -> int:
     data = text.encode("utf-8")
     if args.check:
         try:
+            # A Windows checkout may have made the line ends CRLF; the
+            # output never has a CR, so this hides no real difference.
             with open(out, "rb") as f:
-                current = f.read()
+                current = f.read().replace(b"\r\n", b"\n")
         except FileNotFoundError:
             current = None
         if current != data:
