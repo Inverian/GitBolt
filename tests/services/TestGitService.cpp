@@ -1010,11 +1010,15 @@ private slots:
     // the service is going. A commit's diff over a big tree (here 20,000
     // files of 40 lines) went on to its end: the next read waited for it
     // on the read thread, the close and the open on the repository's
-    // lock, and quitting in ~GitService. Now the next
-    // read's answer, the close, the open (an async one too, the pool's
-    // threads all taken by refreshes waiting behind the read) and the
-    // destructor come well before the whole diff would have been done,
-    // and the stopped read answers nothing.
+    // lock, and quitting in ~GitService. Now the read stops (its diff
+    // fails as cancelled) well before the whole diff would have been
+    // done, once the next read is asked for, the close, the open (an
+    // async one too, the pool's threads all taken by refreshes waiting
+    // behind the read) or the destructor, and answers nothing.
+    // Timed to where the read stops, not to where the open is done: an
+    // open also re-registers the file watcher's paths, and on macOS
+    // FSEvents took a second over that now and then, which failed the
+    // 0.9.10 release run's test with the read stopped in time.
     void aReadStopsWhenItIsForNothing_data() {
         QTest::addColumn<QString>("how");
         QTest::newRow("superseded") << QStringLiteral("superseded");
@@ -1040,11 +1044,18 @@ private slots:
         std::atomic<bool> started{false};
         bool answered = false;
         auto superseded = std::make_shared<std::atomic<bool>>(false);
+        // Written by the read as it returns; steady_clock ticks.
+        auto stoppedCancelled = std::make_shared<std::atomic<bool>>(false);
+        auto stoppedAt = std::make_shared<std::atomic<std::chrono::steady_clock::rep>>(0);
         svc->readAsync(
             &context,
-            [wide, &started](gitbolt::git::Repository& r, const std::function<bool()>& cancelled) {
+            [wide, &started, stoppedCancelled, stoppedAt](gitbolt::git::Repository& r,
+                                                          const std::function<bool()>& cancelled) {
                 started = true;
-                return r.diffCommit(wide, cancelled).ok();
+                const auto diff = r.diffCommit(wide, cancelled);
+                stoppedCancelled->store(!diff.ok() && diff.error().code() == gitbolt::git::GitErrorCode::User);
+                stoppedAt->store(std::chrono::steady_clock::now().time_since_epoch().count());
+                return diff.ok();
             },
             [&answered](bool) { answered = true; },
             [superseded] { return superseded->load(); });
@@ -1054,7 +1065,7 @@ private slots:
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         QVERIFY(started);
 
-        timer.restart();
+        const auto asked = std::chrono::steady_clock::now();
         if (how == QLatin1String("superseded")) {
             superseded->store(true);
             std::string workdir;
@@ -1084,10 +1095,16 @@ private slots:
         } else {
             svc.reset();
         }
-        const qint64 tookMs = timer.elapsed();
-        QVERIFY2(tookMs < wholeMs / 2,
-                 qPrintable(QStringLiteral("%1 ms, where the whole diff takes %2 ms")
-                                .arg(tookMs).arg(wholeMs)));
+        // Each way waits for the read before it's done (the lock, the
+        // read thread, ~GitService), so it has stopped by now.
+        QVERIFY(stoppedAt->load() != 0);
+        QVERIFY2(stoppedCancelled->load(), "the read ran to its end");
+        const auto stoppedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(stoppedAt->load()))
+            - asked).count();
+        QVERIFY2(stoppedMs < wholeMs / 2,
+                 qPrintable(QStringLiteral("stopped after %1 ms, where the whole diff takes %2 ms")
+                                .arg(stoppedMs).arg(wholeMs)));
         if (svc)
             QTRY_VERIFY(!svc->workRunning());
         QTest::qWait(100);
