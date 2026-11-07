@@ -41,7 +41,7 @@ endif()
 # a cached OFF from before until it is configured fresh.
 set(X_VCPKG_APPLOCAL_DEPS_INSTALL ON CACHE BOOL
     "Copy vcpkg runtime DLLs into the install tree (NSIS payload)")
-project(GitBolt VERSION 0.9.9 LANGUAGES CXX)
+project(GitBolt VERSION 0.9.10 LANGUAGES CXX)
 # Objective-C++ for the few AppKit calls Qt has no API for
 # (src/app/platform/macos/MacServices.mm). It takes CXX_STANDARD.
 if(APPLE)
@@ -106,6 +106,10 @@ qt_standard_project_setup()
 # libgit2 -> the gitbolt_libgit2 target: the pinned, patched static
 # build (GITBOLT_BUNDLED_LIBGIT2, the default), or a system copy
 include(Libgit2)
+
+# The licence texts the packages ship (THIRD-PARTY-NOTICES.txt and
+# Linux's copyright file), from the Qt and libgit2 above
+include(Notices)
 
 # Source modules
 add_subdirectory(src)

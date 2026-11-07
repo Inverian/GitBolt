@@ -12,15 +12,25 @@
 // 1366x768 at 125 %, a common laptop) with the app's .qrc linked, so the
 // dialog shows its real 128 px icon.
 //
+// And it carries the notices the LGPL asks of an app that shows copyright
+// notices (LGPL-3.0 4(c) for Qt, LGPL-2.1 section 6 for the LibXDiff in
+// libgit2), with links to the licence texts GitBolt's package installs
+// and to About Qt.
+//
 
+#include <QApplication>
+#include <QDesktopServices>
 #include <QGuiApplication>
+#include <QMessageBox>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QFile>
 #include <QDir>
 #include <QLabel>
 #include <QLayout>
 #include <QScreen>
 #include <QTest>
+#include <QUrl>
 
 #include "dialogs/AboutDialog.h"
 #include "git/GitProcess.h"
@@ -48,6 +58,38 @@ QStringList clippedLabels(const AboutDialog& dlg) {
     }
     return clipped;
 }
+
+// The label with the third-party notices.
+QLabel* noticeLabel(const AboutDialog& dlg) {
+    for (QLabel* label : dlg.findChildren<QLabel*>()) {
+        if (label->text().contains(QStringLiteral("LibXDiff")))
+            return label;
+    }
+    return nullptr;
+}
+
+// Takes the URLs QDesktopServices would hand the desktop.
+class UrlCatcher : public QObject {
+    Q_OBJECT
+public:
+    UrlCatcher() {
+        for (const QString& scheme : schemes())
+            QDesktopServices::setUrlHandler(scheme, this, "open");
+    }
+    ~UrlCatcher() override {
+        for (const QString& scheme : schemes())
+            QDesktopServices::unsetUrlHandler(scheme);
+    }
+    QList<QUrl> urls;
+
+public slots:
+    void open(const QUrl& url) { urls << url; }
+
+private:
+    static QStringList schemes() {
+        return {QStringLiteral("file"), QStringLiteral("http"), QStringLiteral("https")};
+    }
+};
 
 } // namespace
 
@@ -137,6 +179,127 @@ private slots:
         const QStringList clipped = clippedLabels(dlg);
         QVERIFY2(clipped.isEmpty(), qPrintable(clipped.join(QStringLiteral("; "))));
 #endif
+    }
+
+    // Qt's copyright notice and LibXDiff's, each with its licence, and
+    // libgit2's licence, beside GitBolt's own.
+    void namesTheSoftwareItShips() {
+        AboutDialog dlg;
+        const QLabel* label = noticeLabel(dlg);
+        QVERIFY(label);
+        const QString text = label->text();
+        const QStringList parts = {
+            QStringLiteral("Qt %1 (").arg(QString::fromLatin1(qVersion())),
+            QStringLiteral("© The Qt Company Ltd. and other contributors"),
+            QStringLiteral("GNU LGPL v3"),
+            QStringLiteral("libgit2 under the GNU GPL v2 with the linking exception"),
+            QStringLiteral("LibXDiff (© 2003-2016 Davide Libenzi, Johannes E. Schindelin) under the GNU LGPL v2.1"),
+            QStringLiteral(">their licences</a>"),
+            QStringLiteral("<a href='#about-qt'>About Qt</a>"),
+        };
+        for (const QString& part : parts)
+            QVERIFY2(text.contains(part), qPrintable(QStringLiteral("no \"%1\" in: %2").arg(part, text)));
+        // Beside GitBolt's own notice, in the same label.
+        QVERIFY(text.contains(QStringLiteral("Copyright © 2026 GitBolt.")));
+    }
+
+    // Where each package puts the licence texts, relative to the folder
+    // of its binary; a build tree on Linux or Windows has none there.
+    void findsTheNoticesOfEachPackage_data() {
+        QTest::addColumn<QString>("appDir");
+        QTest::addColumn<QString>("notices");
+        QTest::addColumn<bool>("found");
+        QTest::newRow("macOS bundle") << QStringLiteral("GitBolt.app/Contents/MacOS")
+            << QStringLiteral("GitBolt.app/Contents/Resources/THIRD-PARTY-NOTICES.txt") << true;
+        QTest::newRow("Windows install") << QStringLiteral("GitBolt/bin")
+            << QStringLiteral("GitBolt/THIRD-PARTY-NOTICES.txt") << true;
+        QTest::newRow(".deb") << QStringLiteral("usr/lib/gitbolt")
+            << QStringLiteral("usr/share/doc/gitbolt/copyright") << true;
+        QTest::newRow("AppImage") << QStringLiteral("squashfs-root/usr/bin")
+            << QStringLiteral("squashfs-root/usr/share/doc/gitbolt/copyright") << true;
+        QTest::newRow("build tree") << QStringLiteral("build/src/app")
+            << QStringLiteral("build/THIRD-PARTY-NOTICES.txt") << false;
+    }
+
+    void findsTheNoticesOfEachPackage() {
+        QFETCH(QString, appDir);
+        QFETCH(QString, notices);
+        QFETCH(bool, found);
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString bin = root.filePath(appDir);
+        const QString file = root.filePath(notices);
+        QVERIFY(QDir().mkpath(bin));
+        QCOMPARE(AboutDialog::thirdPartyNoticesPath(bin), QString());
+        // A folder of that name is not the file.
+        QVERIFY(QDir().mkpath(file));
+        QCOMPARE(AboutDialog::thirdPartyNoticesPath(bin), QString());
+        QVERIFY(QDir().rmdir(file));
+        QFile text(file);
+        QVERIFY(text.open(QIODevice::WriteOnly));
+        text.close();
+        QCOMPARE(AboutDialog::thirdPartyNoticesPath(bin),
+                 found ? QDir::cleanPath(file) : QString());
+    }
+
+    // "their licences" opens the notices file installed with GitBolt in
+    // the desktop's viewer, or their folder on GitHub when there is none,
+    // and the web links still go to the browser. The label mustn't open
+    // links itself (setOpenExternalLinks): then it hands none to the
+    // dialog.
+    void opensTheLicences() {
+        UrlCatcher catcher;
+        AboutDialog dlg;
+        QLabel* label = noticeLabel(dlg);
+        QVERIFY(label);
+        QVERIFY(!label->openExternalLinks());
+        // The test's binary is mostly in <build>/tests, so this is the
+        // build's own THIRD-PARTY-NOTICES.txt, where a Windows install
+        // has it; the label links the same either way.
+        const QString notices =
+            AboutDialog::thirdPartyNoticesPath(QCoreApplication::applicationDirPath());
+        const QString href = notices.isEmpty()
+            ? QStringLiteral("https://github.com/Inverian/GitBolt/tree/main/resources/licenses")
+            : QStringLiteral("#third-party-notices");
+        QVERIFY2(label->text().contains(QStringLiteral("<a href='%1'>their licences</a>").arg(href)),
+                 qPrintable(label->text()));
+        emit label->linkActivated(href);
+        QCOMPARE(catcher.urls,
+                 QList<QUrl>{notices.isEmpty() ? QUrl(href) : QUrl::fromLocalFile(notices)});
+
+        catcher.urls.clear();
+        const QString license = QStringLiteral("https://github.com/Inverian/GitBolt/blob/main/LICENSE");
+        QVERIFY(label->text().contains(QStringLiteral("<a href='%1'>").arg(license)));
+        emit label->linkActivated(license);
+        QCOMPARE(catcher.urls, QList<QUrl>{QUrl(license)});
+    }
+
+    // About Qt shows Qt's own box, with its version and licences.
+    void aboutQtLinkShowsQtsAbout() {
+        UrlCatcher catcher;
+        AboutDialog dlg;
+        QLabel* label = noticeLabel(dlg);
+        QVERIFY(label);
+        QString shown;
+        // On macOS the box is shown and left; elsewhere it runs its own
+        // event loop, which this closes it from.
+        QTimer closer;
+        closer.setInterval(20);
+        connect(&closer, &QTimer::timeout, &closer, [&shown]() {
+            for (QWidget* window : QApplication::topLevelWidgets()) {
+                auto* box = qobject_cast<QMessageBox*>(window);
+                if (box && box->isVisible()) {
+                    shown = box->text() + box->informativeText();
+                    box->done(QMessageBox::Ok);
+                }
+            }
+        });
+        closer.start();
+        emit label->linkActivated(QStringLiteral("#about-qt"));
+        QTRY_VERIFY(!shown.isEmpty());
+        QVERIFY2(shown.contains(QStringLiteral("Qt version %1").arg(QString::fromLatin1(qVersion()))),
+                 qPrintable(shown));
+        QVERIFY(catcher.urls.isEmpty());
     }
 };
 

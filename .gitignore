@@ -31,3 +31,8 @@ qrc_*.cpp
 
 # Crash logs
 crash.log
+
+# Folders named by a template placeholder that a tool failed to fill in,
+# made in whatever folder it ran from (a Homebrew post-install once left
+# {{pkgetc}}/cert.pem here, and 0.9.9 shipped it)
+/{{*}}/

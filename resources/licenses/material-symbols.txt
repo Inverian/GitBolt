@@ -1,0 +1,19 @@
+GitBolt's menu icons are Material Symbols, by Google LLC: 69 icons in the
+Outlined style at its default settings (fill 0, weight 400, grade 0, optical
+size 24), as 24 px SVG files. GitBolt's executable holds them; in GitBolt's
+source they are resources/icons/menu/*.svg.
+https://fonts.google.com/icons
+https://github.com/google/material-design-icons
+
+Google licenses Material Symbols under the Apache License, Version 2.0, whose
+text GitBolt's notices carry under "Apache License 2.0" (Apache-2.0.txt in
+resources/licenses/ of GitBolt's source). The licence file of
+google/material-design-icons, at commit
+10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7:
+https://raw.githubusercontent.com/google/material-design-icons/10ecc14790612ca8fd164e3f4ffe9c16fc50d5b7/LICENSE
+
+GitBolt modified every one of the 69 files, and only in this way: it recoloured
+the icon by adding a fill attribute to the root <svg> element, as that
+element's first attribute (fill="#rrggbb" followed by a space). Each file uses
+one of these colours: #16a085, #1f77d4, #43a047, #666a73, #7f8c8d, #8e44ad,
+#d33b2e, #e67e22. Nothing else in the files differs from Google's.

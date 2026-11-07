@@ -99,6 +99,16 @@ add_test(NAME test_patch_libgit2
 add_test(NAME test_libgit2_floor
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLibgit2Floor.cmake)
 
+# The Linux install step that keeps each private library under its
+# soname alone (src/app/platform/linux/FlattenLibraryLinks.cmake). Not
+# on Windows, where making a symbolic link needs developer mode.
+if(NOT WIN32)
+    add_test(NAME test_flatten_library_links
+        COMMAND ${CMAKE_COMMAND}
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/flatten-library-links
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestFlattenLibraryLinks.cmake)
+endif()
+
 # util/ tests — AsyncRunner's threading guarantees (no repository needed)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
 # The login shell's PATH for git's children (util/LoginPath.h): a

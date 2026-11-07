@@ -4,14 +4,17 @@
 #include "git/Repository.h"  // libgit2VersionDescription(), libgit2Features()
 
 #include <QApplication>
+#include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPixmap>
 #include <QPushButton>
 #include <QSysInfo>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QtGlobal>
 
@@ -29,6 +32,13 @@ namespace gitbolt::dialogs {
 // but we're explicit about "built with" vs "runtime" in the dialog.
 
 namespace {
+
+// The licence label's links that openLink() handles here, not the
+// browser; and where the notices are when no file is installed (a
+// build tree on Linux or Windows).
+constexpr char kNoticesLink[] = "#third-party-notices";
+constexpr char kAboutQtLink[] = "#about-qt";
+constexpr char kNoticesWebUrl[] = "https://github.com/Inverian/GitBolt/tree/main/resources/licenses";
 
 QString compilerString() {
 #if defined(__clang__)
@@ -121,8 +131,51 @@ QString gitRows() {
 
 AboutDialog::AboutDialog(QWidget* parent)
     : QDialog(parent)
+    , noticesPath_(thirdPartyNoticesPath(QCoreApplication::applicationDirPath()))
 {
     setupUi();
+}
+
+QString AboutDialog::thirdPartyNoticesPath(const QString& appDir)
+{
+    if (appDir.isEmpty())
+        return {};
+    const QString macos = QStringLiteral("../Resources/THIRD-PARTY-NOTICES.txt");  // GitBolt.app/Contents/MacOS
+    const QString windows = QStringLiteral("../THIRD-PARTY-NOTICES.txt");          // <install>\bin
+    const QString deb = QStringLiteral("../../share/doc/gitbolt/copyright");       // /usr/lib/gitbolt
+    const QString appImage = QStringLiteral("../share/doc/gitbolt/copyright");     // usr/bin
+    // Every package's place, on every platform: they are GitBolt's own,
+    // and so one machine's test tries them all. This platform's first.
+#if defined(Q_OS_MACOS)
+    const QStringList places = {macos, windows, deb, appImage};
+#elif defined(Q_OS_WIN)
+    const QStringList places = {windows, macos, deb, appImage};
+#else
+    const QStringList places = {deb, appImage, macos, windows};
+#endif
+    const QDir dir(appDir);
+    for (const QString& place : places) {
+        const QString path = QDir::cleanPath(dir.absoluteFilePath(place));
+        if (QFileInfo(path).isFile())
+            return path;
+    }
+    return {};
+}
+
+void AboutDialog::openLink(const QString& link)
+{
+    if (link == QLatin1String(kAboutQtLink)) {
+        QApplication::aboutQt();
+        return;
+    }
+    // Linked only when the file is there; the label links the web copy
+    // otherwise.
+    if (link == QLatin1String(kNoticesLink)) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(noticesPath_));
+        return;
+    }
+    // What setOpenExternalLinks(true) did for every link.
+    QDesktopServices::openUrl(QUrl(link));
 }
 
 void AboutDialog::setupUi()
@@ -207,23 +260,36 @@ void AboutDialog::setupUi()
         // Last: no %N after it for a '%' in the path to be taken for.
         .arg(gitRows()));
 
-    // License notice + clickable links. Using a single QLabel with
-    // openExternalLinks=true lets the user click straight through to
-    // GitHub / the license text in their browser.
+    // License notice + clickable links (openLink()): the web ones open
+    // in the browser, the licences of the software GitBolt ships in the
+    // desktop's text viewer (on GitHub for a build tree that has none),
+    // About Qt in Qt's own box. Qt's and LibXDiff's copyright notices,
+    // and a way to their licence texts, are what the LGPL asks of an
+    // app that shows copyright notices: LGPL-3.0 4(c), LGPL-2.1 section 6.
     licenseLabel_ = new QLabel(this);
     licenseLabel_->setTextFormat(Qt::RichText);
-    licenseLabel_->setOpenExternalLinks(true);
     licenseLabel_->setWordWrap(true);
+    connect(licenseLabel_, &QLabel::linkActivated, this, &AboutDialog::openLink);
+    const QString noticesHref = noticesPath_.isEmpty()
+        ? QString::fromLatin1(kNoticesWebUrl) : QString::fromLatin1(kNoticesLink);
     licenseLabel_->setText(tr(
         "<p style='font-size:9pt;'>Copyright © 2026 GitBolt. "
         "Licensed under the <a href='https://www.gnu.org/licenses/gpl-3.0.html'>"
         "GNU General Public License v3.0</a>. "
         "See the <a href='https://github.com/Inverian/GitBolt/blob/main/LICENSE'>"
-        "LICENSE</a> file for the full terms.</p>"
-        "<p style='font-size:9pt;'>The name \"GitBolt\" and the GitBolt logo are "
-        "trademarks, protected separately from the source code license. "
-        "See the <a href='https://github.com/Inverian/GitBolt/blob/main/TRADEMARK.md'>"
-        "trademark policy</a> for details.</p>"));
+        "LICENSE</a> file for the full terms.</p>")
+        + tr("<p style='font-size:9pt;'>GitBolt uses Qt %1 (© The Qt Company Ltd. and other "
+             "contributors) under the GNU LGPL v3, libgit2 under the GNU GPL v2 with the "
+             "linking exception, LibXDiff (© 2003-2016 Davide Libenzi, Johannes E. "
+             "Schindelin) under the GNU LGPL v2.1 or later, and other software: "
+             "see <a href='%2'>their licences</a>"
+             "&nbsp;· <a href='%3'>About Qt</a></p>")
+              .arg(QString::fromLatin1(qVersion()).toHtmlEscaped(), noticesHref,
+                   QString::fromLatin1(kAboutQtLink))
+        + tr("<p style='font-size:9pt;'>The name \"GitBolt\" and the GitBolt logo are "
+             "trademarks, protected separately from the source code license. "
+             "See the <a href='https://github.com/Inverian/GitBolt/blob/main/TRADEMARK.md'>"
+             "trademark policy</a> for details.</p>"));
 
     linksLabel_ = new QLabel(this);
     linksLabel_->setTextFormat(Qt::RichText);

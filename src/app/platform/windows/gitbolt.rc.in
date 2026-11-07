@@ -1,11 +1,13 @@
 // =====================================================================
-// GitBolt — Windows resource script (auto-generated from gitbolt.rc.in)
+// GitBolt — Windows resource script (generated from gitbolt.rc.in)
 //
 // Embeds the application icon into GitBolt.exe so Explorer, the Start
-// menu, the Alt+Tab switcher, and the taskbar all show it. The .ico
-// file referenced below is copied into the build tree at configure
-// time from the canonical resources/icons/gitbolt.ico — see the
-// matching `configure_file(... COPYONLY)` in src/app/CMakeLists.txt.
+// menu, the Alt+Tab switcher, and the taskbar all show it, and the
+// version Explorer's Properties > Details shows. The .ico file
+// referenced below is copied into the build tree at configure time from
+// the canonical resources/icons/gitbolt.ico, and the version filled in
+// from project() — see the matching configure_file() calls in
+// src/app/CMakeLists.txt.
 //
 // That copy wires the resource compiler's dependency tracking to the
 // canonical source, so replacing resources/icons/gitbolt.ico causes
@@ -13,5 +15,35 @@
 // further manual steps.
 // =====================================================================
 
+#include <winver.h>
+
 #define IDI_ICON1 101
 IDI_ICON1 ICON DISCARDABLE "gitbolt.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK  VS_FFI_FILEFLAGSMASK
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "GitBolt"
+            VALUE "FileDescription",  "GitBolt"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "InternalName",     "GitBolt"
+            VALUE "OriginalFilename", "GitBolt.exe"
+            VALUE "ProductName",      "GitBolt"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

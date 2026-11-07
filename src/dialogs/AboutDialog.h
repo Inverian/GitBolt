@@ -10,7 +10,9 @@ namespace gitbolt::dialogs {
 /// application name, version, tagline, a detailed build-info block
 /// (Qt version, libgit2 version and features, compiler, build date, the
 /// git GitBolt runs and what is known against it),
-/// license notice, and clickable links to the project repo,
+/// license notice, the notices of the software it ships that the LGPL
+/// asks for (Qt's, LibXDiff's), with links to their licence texts and
+/// to About Qt, and clickable links to the project repo,
 /// trademark policy, license text, and privacy policy (what usage
 /// statistics collect).
 ///
@@ -22,9 +24,24 @@ class AboutDialog : public QDialog {
 public:
     explicit AboutDialog(QWidget* parent = nullptr);
 
+    /// The licence texts of the software GitBolt ships (THIRD-PARTY-
+    /// NOTICES.txt, cmake/Notices.cmake), where its package installs
+    /// them relative to `appDir`, the folder of the running binary
+    /// (QCoreApplication::applicationDirPath()): Contents/Resources/
+    /// THIRD-PARTY-NOTICES.txt in the macOS bundle, THIRD-PARTY-
+    /// NOTICES.txt above Windows's bin folder, and share/doc/gitbolt/
+    /// copyright on Linux, from /usr/lib/gitbolt (the .deb) or usr/bin
+    /// (the AppImage). Empty when none is there, as in a build tree on
+    /// Linux or Windows.
+    static QString thirdPartyNoticesPath(const QString& appDir);
+
 private:
     void setupUi();
+    // The licence label's links: the notices file and About Qt here,
+    // the web ones in the browser.
+    void openLink(const QString& link);
 
+    QString noticesPath_;  // thirdPartyNoticesPath(), or empty
     QLabel* iconLabel_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QLabel* taglineLabel_ = nullptr;
