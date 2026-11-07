@@ -215,7 +215,8 @@ private slots:
         // The heading is there to link to, and is the only one GitHub
         // would give that anchor (a second one would be update-checks-1).
         QFile privacy(QFileInfo(QStringLiteral(__FILE__)).dir().filePath(QStringLiteral("../../PRIVACY.md")));
-        QVERIFY2(privacy.open(QIODevice::ReadOnly), qPrintable(privacy.fileName()));
+        // Text mode: a Windows checkout may have CRLF line ends.
+        QVERIFY2(privacy.open(QIODevice::ReadOnly | QIODevice::Text), qPrintable(privacy.fileName()));
         const QList<QByteArray> lines = privacy.readAll().split('\n');
         QCOMPARE(std::count_if(lines.cbegin(), lines.cend(),
                                [](const QByteArray& line) {
