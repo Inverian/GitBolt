@@ -1062,6 +1062,7 @@ jobs:
                       DisplayName     = $display
                       DisplayVersion  = [string]$key.GetValue('DisplayVersion')
                       UninstallString = [string]$key.GetValue('UninstallString')
+                      Values          = (@($key.GetValueNames() | ForEach-Object { if ($_) { $_ } else { '(default)' } }) -join ', ')
                     }
                   }
                   $key.Close()
@@ -1079,13 +1080,21 @@ jobs:
             foreach ($default in (Join-Path $env:ProgramFiles 'GitBolt'), (Join-Path ${env:ProgramFiles(x86)} 'GitBolt')) {
               if (Test-Path $default) { $bad += "$default exists: the installer did not take /D=" }
             }
-            $keys = @(Get-UninstallKeys)
-            foreach ($k in $keys) {
-              $line = "Uninstall key ({0}): {1}; DisplayName '{2}', DisplayVersion '{3}', UninstallString {4}"
-              Write-Host ($line -f $when, $k.Location, $k.DisplayName, $k.DisplayVersion, $k.UninstallString)
+            $all = @(Get-UninstallKeys)
+            foreach ($k in $all) {
+              $line = "Uninstall key ({0}): {1}; DisplayName '{2}', DisplayVersion '{3}', UninstallString {4}; values: {5}"
+              Write-Host ($line -f $when, $k.Location, $k.DisplayName, $k.DisplayVersion, $k.UninstallString, $k.Values)
+            }
+            # An entry Windows lists (Apps & features) has a DisplayName and
+            # an UninstallString. A GitBolt key with neither is no second
+            # install (dry run 3 found an empty one in the 64-bit view, with
+            # the real one in WOW6432Node): reported, not failed.
+            $keys = @($all | Where-Object { $_.DisplayName -and $_.UninstallString })
+            foreach ($k in @($all | Where-Object { -not ($_.DisplayName -and $_.UninstallString) })) {
+              Write-Host "::warning::${when}: a GitBolt Uninstall key that lists nothing: $($k.Location) (values: $($k.Values))"
             }
             if ($keys.Count -ne 1) {
-              $bad += "$($keys.Count) GitBolt Uninstall keys, expected exactly one"
+              $bad += "$($keys.Count) GitBolt Uninstall entries with a DisplayName and an UninstallString, expected exactly one"
             } else {
               if ($keys[0].DisplayVersion -ne $version) { $bad += "the Uninstall key says version '$($keys[0].DisplayVersion)'" }
               $uninstaller = Join-Path $dest 'Uninstall.exe'
