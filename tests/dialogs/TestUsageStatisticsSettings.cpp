@@ -162,7 +162,8 @@ private slots:
 
     // Source builds and forks have no telemetry: nothing to show, and a
     // dialog nobody told about it looks as it always did. The page is
-    // GitBolt's last, after Recent Repositories.
+    // GitBolt's sixth (row 0/5, which e2e/test_telemetry_inert.py
+    // selects), after Recent Repositories and before Updates, its last.
     void pageHiddenUnlessAvailable() {
         SettingsService settings;
         SettingsDialog dialog(&settings, nullptr);
@@ -172,10 +173,11 @@ private slots:
         QVERIFY(nav && pages && group);
         QTreeWidgetItem* gitbolt = nav->topLevelItem(0);
         QVERIFY(gitbolt);
-        QTreeWidgetItem* item = gitbolt->child(gitbolt->childCount() - 1);
+        QTreeWidgetItem* item = gitbolt->child(5);
         QCOMPARE(item->text(0), QStringLiteral("Usage Statistics"));
-        QCOMPARE(gitbolt->child(gitbolt->childCount() - 2)->text(0),
-                 QStringLiteral("Recent Repositories"));
+        QCOMPARE(gitbolt->child(4)->text(0), QStringLiteral("Recent Repositories"));
+        QCOMPARE(gitbolt->child(gitbolt->childCount() - 1)->text(0), QStringLiteral("Updates"));
+        QCOMPARE(gitbolt->childCount(), 7);
         QVERIFY(item->isHidden());
 
         dialog.setUsageStatistics(false, QString());

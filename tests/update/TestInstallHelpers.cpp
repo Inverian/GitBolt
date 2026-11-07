@@ -25,17 +25,27 @@
 //     quotes, $ and newlines, a run for real, and none of the usual
 //     bashisms in the text;
 //   - shellQuote round-trips any text through sh;
-//   - the Windows helper, as text only: every path in a single-quoted
+//   - the Windows helper, as text: every path in a single-quoted
 //     literal with each kind of quote PowerShell ends one at doubled,
 //     no double-quoted (interpolated) strings at all, /D= last and
 //     unquoted in the one ArgumentList string, no use of $pid, and
-//     -EncodedCommand's UTF-16LE base64 decoding back to the script.
+//     -EncodedCommand's UTF-16LE base64 decoding back to the script;
+//   - and for real, on Windows, when GITBOLT_TEST_NSIS_INSTALLER and
+//     GITBOLT_TEST_NSIS_DIR name a GitBolt installer and a folder it
+//     installed into (CI's NSIS smoke test sets them; skipped
+//     otherwise): started as Installer::launchHelper starts it, the
+//     helper gives up on a stand-in GitBolt that outlives its timeout;
+//     with time, it waits for it, then runs that installer elevated
+//     over the install, logs its exit code 0, and starts the installed
+//     GitBolt.exe, which shows its window and is closed.
 //
 
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QList>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QScopeGuard>
@@ -45,12 +55,19 @@
 #include "FakeApps.h"
 #include "../TestProcessHelper.h"
 #include "update/InstallHelpers.h"
+#include "update/Package.h"
+#include "update/Version.h"
 
 #include <memory>
+#include <optional>
+#include <vector>
 
 #if defined(Q_OS_UNIX)
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#if defined(Q_OS_WIN)
+#include <tlhelp32.h>   // after <windows.h>, which TestProcessHelper.h includes
 #endif
 
 using namespace gitbolt::update;
@@ -114,6 +131,106 @@ bool powerShellLiterals(const QString& line, QStringList* literals) {
     }
     return true;
 }
+
+#if defined(Q_OS_WIN)
+// Windows PowerShell by absolute path, as Installer::launchHelper runs
+// it (CreateProcess looks in the application's folder first).
+QString windowsPowerShell() {
+    QString root = qEnvironmentVariable("SystemRoot");
+    if (root.isEmpty())
+        root = QStringLiteral("C:\\Windows");
+    return root + QStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+}
+
+// The ids of the running processes whose program is the file `image`.
+QList<DWORD> processesOf(const QString& image) {
+    QList<DWORD> found;
+    const QString wanted = QFileInfo(image).canonicalFilePath();
+    if (wanted.isEmpty())
+        return found;
+    const QString name = QFileInfo(image).fileName();
+    const HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return found;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = static_cast<DWORD>(sizeof(entry));
+    std::vector<wchar_t> program(32768);
+    for (BOOL more = Process32FirstW(snapshot, &entry); more; more = Process32NextW(snapshot, &entry)) {
+        if (QString::fromWCharArray(entry.szExeFile).compare(name, Qt::CaseInsensitive) != 0)
+            continue;
+        const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+        if (!process)
+            continue;
+        DWORD size = static_cast<DWORD>(program.size());
+        if (QueryFullProcessImageNameW(process, 0, program.data(), &size)) {
+            const QString file = QString::fromWCharArray(program.data(), static_cast<qsizetype>(size));
+            if (QFileInfo(file).canonicalFilePath().compare(wanted, Qt::CaseInsensitive) == 0)
+                found.append(entry.th32ProcessID);
+        }
+        CloseHandle(process);
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+struct WindowSearch {
+    DWORD pid = 0;
+    bool askToClose = false;
+    int visible = 0;
+};
+
+BOOL CALLBACK visitWindow(HWND window, LPARAM param) {
+    auto* search = reinterpret_cast<WindowSearch*>(param);
+    DWORD owner = 0;
+    GetWindowThreadProcessId(window, &owner);
+    if (owner == search->pid && IsWindowVisible(window)) {
+        ++search->visible;
+        if (search->askToClose)
+            PostMessageW(window, WM_CLOSE, 0, 0);
+    }
+    return TRUE;
+}
+
+// How many visible top-level windows `pid` has. With `askToClose`, each
+// is sent WM_CLOSE, as its close button would.
+int visibleWindows(DWORD pid, bool askToClose = false) {
+    WindowSearch search{pid, askToClose, 0};
+    EnumWindows(visitWindow, reinterpret_cast<LPARAM>(&search));
+    return search.visible;
+}
+
+// Ends `pid` outright and waits (a while) for it to be gone.
+void endProcess(DWORD pid) {
+    const HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, pid);
+    if (!process)
+        return;
+    TerminateProcess(process, 1);
+    WaitForSingleObject(process, 10000);
+    CloseHandle(process);
+}
+
+// Closes a GitBolt as a user would: WM_CLOSE to each of its windows
+// every half second (a dialog, then the main window), until it quits.
+// Ends it if it is still there after `timeoutMs`. True if it quit.
+bool closeGitBolt(DWORD pid, int timeoutMs) {
+    const HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!process)
+        return true;
+    const QDeadlineTimer deadline(timeoutMs);
+    bool quit = false;
+    for (;;) {
+        quit = WaitForSingleObject(process, 0) == WAIT_OBJECT_0;
+        if (quit || deadline.hasExpired())
+            break;
+        visibleWindows(pid, true);
+        WaitForSingleObject(process, 500);
+    }
+    CloseHandle(process);
+    if (!quit)
+        endProcess(pid);
+    return quit;
+}
+#endif
 
 } // namespace
 
@@ -848,6 +965,205 @@ private slots:
         QCOMPARE(args.at(5).toLatin1(), encoded);
         // Well under CreateProcess's 32767-character command line.
         QVERIFY(args.join(u' ').size() < 16000);
+    }
+
+    // ---------------------------------------------------------------
+    // Windows, for real (opt-in)
+    // ---------------------------------------------------------------
+
+    // A whole Windows update of a real install, which only CI's NSIS
+    // smoke test has: it installs the installer it just built, then
+    // names both (GITBOLT_TEST_NSIS_INSTALLER, GITBOLT_TEST_NSIS_DIR)
+    // and runs this function alone. The folder must be what
+    // detectPackage calls a WindowsInstall, and the installer must have
+    // the name the updater downloads. The helper is built and started as
+    // Installer::launchHelper does (hidden powershell.exe,
+    // -EncodedCommand, detached), for a stand-in GitBolt it must wait
+    // for. Given 2 seconds, it gives up while that still runs. Given
+    // enough, it waits; once the stand-in is gone, the installer runs
+    // elevated over the folder and exits 0, and the installed
+    // GitBolt.exe starts again and shows its window. That copy is a test
+    // session (an instance name of its own, so it sends and checks
+    // nothing and can't hand off to another GitBolt); the test closes it.
+    void windowsHelperUpdatesARealInstall() {
+#if !defined(Q_OS_WIN)
+        QSKIP("Windows only: runs a real NSIS installer");
+#else
+        const QString installer = qEnvironmentVariable("GITBOLT_TEST_NSIS_INSTALLER");
+        const QString installDir = qEnvironmentVariable("GITBOLT_TEST_NSIS_DIR");
+        if (installer.isEmpty() || installDir.isEmpty())
+            QSKIP("Runs only when GITBOLT_TEST_NSIS_INSTALLER and GITBOLT_TEST_NSIS_DIR name a GitBolt installer "
+                  "and a folder it installed into (CI's NSIS smoke test sets them)");
+        QVERIFY2(QFileInfo(installer).isFile(), qPrintable(installer));
+
+        // What the installed copy detects, from its own bin folder.
+        PackageProbe probe;
+        probe.appDirPath = QDir(installDir).filePath(QStringLiteral("bin"));
+        const PackageInfo package = detectPackage(probe);
+        QVERIFY2(package.kind == PackageKind::WindowsInstall && package.canInstall,
+                 qPrintable(installDir + QStringLiteral(" is no GitBolt install: ") + package.whyNot));
+        const QString app = QDir::toNativeSeparators(package.target) + QStringLiteral("\\bin\\GitBolt.exe");
+        QVERIFY2(QFileInfo(app).isFile(), qPrintable(app));
+        QVERIFY2(processesOf(app).isEmpty(), qPrintable(app + QStringLiteral(" is running already")));
+
+        // The installer where the Downloader leaves it,
+        // <updates>/<version>/<asset name>: a copy, since a helper that
+        // gives up deletes it.
+        const QString fileName = QFileInfo(installer).fileName();
+        static const QRegularExpression named(QStringLiteral("^GitBolt-([0-9.]+)-"));
+        const std::optional<Version> version = Version::parse(named.match(fileName).captured(1));
+        QVERIFY2(version.has_value(), qPrintable(fileName));
+        QCOMPARE(fileName, assetNameFor(PackageKind::WindowsInstall, *version));
+        const QString staged = path(QStringLiteral("updates/%1/%2").arg(version->toString(), fileName));
+        QVERIFY(QDir().mkpath(QFileInfo(staged).path()));
+        QVERIFY(QFile::copy(installer, staged));
+
+        // GitBolt, still running when the helper starts.
+        waited_ = std::make_unique<QProcess>();
+        waited_->start(windowsPowerShell(), {QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"),
+                                             QStringLiteral("-Command"), QStringLiteral("Start-Sleep -Seconds 300")});
+        QVERIFY(waited_->waitForStarted());
+        const qint64 gitBoltPid = waited_->processId();
+
+        // The helper passes its environment on to the GitBolt it starts:
+        // a test session's, without this run's Qt settings (the install
+        // has no offscreen plugin) and with a temporary folder of its own.
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        for (const QString& name :
+             {QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("QT_PLUGIN_PATH"), QStringLiteral("QML2_IMPORT_PATH"),
+              QStringLiteral("QT_QPA_PLATFORM_PLUGIN_PATH"), QStringLiteral("GITBOLT_TEST_BRIDGE"),
+              QStringLiteral("GITBOLT_TEST_UPDATE_FEED"), QStringLiteral("GITBOLT_TEST_APP_VERSION"),
+              QStringLiteral("GITBOLT_TEST_NSIS_INSTALLER"), QStringLiteral("GITBOLT_TEST_NSIS_DIR")})
+            env.remove(name);
+        env.insert(QStringLiteral("GITBOLT_INSTANCE_NAME"), kInstance + QStringLiteral("-nsis"));
+        env.insert(QStringLiteral("GITBOLT_TELEMETRY"), QStringLiteral("0"));
+        env.insert(QStringLiteral("GITBOLT_UPDATE_CHECK"), QStringLiteral("0"));
+        const QString temp = path(QStringLiteral("temp"));
+        QVERIFY(QDir().mkpath(temp));
+        env.insert(QStringLiteral("TEMP"), QDir::toNativeSeparators(temp));
+        env.insert(QStringLiteral("TMP"), QDir::toNativeSeparators(temp));
+
+        // Pass or fail, nothing this test started outlives it.
+        QList<qint64> helpers;
+        auto stopAll = qScopeGuard([&] {
+            for (const qint64 pid : helpers)
+                if (gitbolt::test::processAlive(pid))
+                    endProcess(static_cast<DWORD>(pid));
+            for (const QString& program : {app, staged})
+                for (const DWORD running : processesOf(program))
+                    endProcess(running);
+        });
+        // The helper, built and started as Installer::launchHelper does,
+        // on a fresh log. Its pid, or 0.
+        const auto launch = [&](int waitSeconds) {
+            HelperInputs in;
+            in.pid = gitBoltPid;
+            in.waitSeconds = waitSeconds;
+            in.logFile = log();
+            in.target = package.target;
+            in.staged = staged;
+            QFile::remove(log());
+            QProcess helper;
+            helper.setProgram(windowsPowerShell());
+            helper.setArguments(powerShellArguments(windowsHelperScript(in)));
+            helper.setWorkingDirectory(path(QStringLiteral("updates")));
+            helper.setStandardInputFile(QProcess::nullDevice());
+            helper.setProcessEnvironment(env);
+            qint64 pid = 0;
+            if (!helper.startDetached(&pid)) {
+                qWarning("couldn't start the helper: %s", qPrintable(helper.errorString()));
+                return qint64(0);
+            }
+            helpers.append(pid);
+            return pid;
+        };
+        const auto ended = [](qint64 pid, int timeoutMs) {
+            const QDeadlineTimer deadline(timeoutMs);
+            while (gitbolt::test::processAlive(pid) && !deadline.hasExpired())
+                QTest::qWait(250);
+            return !gitbolt::test::processAlive(pid);
+        };
+
+        // GitBolt doesn't quit in time: the helper gives up, deletes the
+        // download, and neither installs nor starts anything. (So
+        // Wait-Process's timeout is no terminating error.)
+        const qint64 givingUp = launch(2);
+        QVERIFY(givingUp > 0);
+        QVERIFY2(ended(givingUp, 60000), qPrintable(QStringLiteral("the helper didn't give up\n") + diagnostics()));
+        QVERIFY2(readFile(log()).contains(QLatin1String("did not quit within 2 seconds: giving up")),
+                 qPrintable(diagnostics()));
+        QVERIFY2(!readFile(log()).contains(QLatin1String(" running ")), qPrintable(diagnostics()));
+        QVERIFY(!QFileInfo::exists(staged));
+        QVERIFY(processesOf(app).isEmpty());
+        QCOMPARE(waited_->state(), QProcess::Running);
+
+        // Again, with time to wait. While GitBolt runs, the helper only
+        // waits.
+        QVERIFY(QFile::copy(installer, staged));
+        const qint64 helperPid = launch(120);
+        QVERIFY(helperPid > 0);
+        QVERIFY2(gitbolt::test::waitForLines(log(), 1, 60000), qPrintable(diagnostics()));
+        QTest::qWait(1000);
+        QVERIFY2(readFile(log()).contains(QStringLiteral("waiting for GitBolt (pid %1) to quit").arg(gitBoltPid)),
+                 qPrintable(diagnostics()));
+        QVERIFY2(!readFile(log()).contains(QLatin1String(" running ")), qPrintable(diagnostics()));
+        QVERIFY(gitbolt::test::processAlive(helperPid));
+
+        // GitBolt quits. The log's last line, once the installer is done:
+        // "starting <app>", or, after it, why that failed.
+        quitWaited();
+        const QString startingApp = QStringLiteral(" starting ") + app;
+        const auto lastLine = [this] {
+            const QStringList lines = readFile(log()).split(u'\n', Qt::SkipEmptyParts);
+            return lines.isEmpty() ? QString() : lines.constLast().trimmed();
+        };
+        const QDeadlineTimer installing(4 * 60 * 1000);
+        while (!lastLine().endsWith(startingApp) && !lastLine().contains(QLatin1String("could not start"))
+               && gitbolt::test::processAlive(helperPid) && !installing.hasExpired())
+            QTest::qWait(250);
+        const QDeadlineTimer ending(30000);
+        while (gitbolt::test::processAlive(helperPid) && !ending.hasExpired())
+            QTest::qWait(250);
+        QVERIFY2(!gitbolt::test::processAlive(helperPid),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        const QString story = readFile(log());
+        QVERIFY2(story.contains(QStringLiteral(" running ") + QDir::toNativeSeparators(staged)),
+                 qPrintable(diagnostics()));
+        // A number, and 0: Start-Process -Verb RunAs -Wait -PassThru
+        // gave the installer's exit code.
+        static const QRegularExpression exitedZero(QStringLiteral(" the installer exited with code 0\\r?$"),
+                                                   QRegularExpression::MultilineOption);
+        QVERIFY2(exitedZero.match(story).hasMatch(), qPrintable(diagnostics()));
+        QVERIFY2(lastLine().endsWith(startingApp), qPrintable(diagnostics()));
+
+        // The installed GitBolt runs again and shows a window, so it got
+        // past loading its DLLs and Qt's platform plugin, and past the
+        // single-instance check (a copy that handed off would exit
+        // without one).
+        DWORD relaunched = 0;
+        qsizetype copies = 0;
+        const QDeadlineTimer starting(60000);
+        while (relaunched == 0 && !starting.hasExpired()) {
+            const QList<DWORD> running = processesOf(app);
+            copies = running.size();
+            for (const DWORD id : running) {
+                if (visibleWindows(id) > 0) {
+                    relaunched = id;
+                    break;
+                }
+            }
+            if (relaunched == 0)
+                QTest::qWait(250);
+        }
+        QVERIFY2(relaunched != 0,
+                 qPrintable(QStringLiteral("after a minute, %1 copies of %2 run and none shows a window\n")
+                                .arg(QString::number(copies), app)
+                            + diagnostics()));
+        if (!closeGitBolt(relaunched, 30000))
+            qWarning("the relaunched GitBolt (pid %lu) didn't close within 30 s, so it was ended", relaunched);
+        // Anything else of it (a git askpass, say) goes with stopAll.
+        QVERIFY(QFileInfo(app).isFile());
+#endif
     }
 };
 

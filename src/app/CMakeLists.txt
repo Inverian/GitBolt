@@ -86,6 +86,7 @@ target_link_libraries(gitbolt PRIVATE
     gitbolt_conf
     gitbolt_watcher
     gitbolt_telemetry
+    gitbolt_update
     gitbolt_util
     gitbolt_instance
     Qt6::Widgets
@@ -153,6 +154,13 @@ target_compile_definitions(gitbolt PRIVATE
 configure_file(TelemetryEndpoints.h.in
     "${CMAKE_CURRENT_BINARY_DIR}/generated/TelemetryEndpoints.h" @ONLY)
 target_include_directories(gitbolt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+# In-app updates (cmake/Updates.cmake): official builds only, and on
+# this target only, which is where main() puts the official feed into
+# the updater's settings. No library or test binary names it.
+if(GITBOLT_UPDATES)
+    target_compile_definitions(gitbolt PRIVATE GITBOLT_UPDATES_ENABLED=1)
+endif()
 
 # Bundle the Qt runtime into the INSTALLED app. This runs at
 # `cmake --install` time — and therefore also inside CPack's own

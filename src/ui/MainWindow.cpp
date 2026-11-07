@@ -5,6 +5,8 @@
 
 #include "ui/InlineOpIndicator.h"
 #include "ui/RepoCommandController.h"
+#include "ui/UpdateController.h"
+#include "widgets/UpdateNoticeBar.h"
 
 #include <QFutureWatcher>
 #include <QtConcurrent>
@@ -206,11 +208,15 @@ MainWindow::MainWindow(QWidget* parent)
     gitNotice_ = new widgets::GitNoticeBar(this);
     connect(gitNotice_, &widgets::GitNoticeBar::dismissed, this,
             [this](const QString& key) { settingsService_->dismissGitNotice(key); });
+    // And the one about a newer GitBolt the daily check found
+    // (UpdateController, once setUpdates turns updates on).
+    updateNotice_ = new widgets::UpdateNoticeBar(this);
     auto* central = new QWidget(this);
     auto* column = new QVBoxLayout(central);
     column->setContentsMargins(0, 0, 0, 0);
     column->setSpacing(0);
     column->addWidget(gitNotice_);
+    column->addWidget(updateNotice_);
     column->addWidget(centralStack_, 1);
     setCentralWidget(central);
 
@@ -415,6 +421,12 @@ void MainWindow::createMenuBar()
         aboutAct->setObjectName(QStringLiteral("app.about"));
         aboutAct->setMenuRole(QAction::AboutRole);
         connect(aboutAct, &QAction::triggered, this, &MainWindow::showAbout);
+        // Under About, where Mac apps keep it. ApplicationSpecificRole
+        // hoists it into the Application menu as AboutRole does.
+        auto* updateAct = appMenu->addAction(tr("Check for Updates…"));
+        updateAct->setObjectName(QStringLiteral("help.check-for-updates-app-menu"));
+        updateAct->setMenuRole(QAction::ApplicationSpecificRole);
+        connect(updateAct, &QAction::triggered, this, &MainWindow::checkForUpdates);
     }
 #endif
     // Each top-level menu is built by its own function — pure
@@ -3969,20 +3981,14 @@ void MainWindow::buildHelpMenu()
         helpMenu->addAction(a);
     }
     {
-        // "Check for updates" — open the GitHub releases page in
-        // the user's browser. A future improvement is an in-app
-        // version check that compares the current build against
-        // the latest published tag, but the Sparkle-style
-        // self-updater that would imply is much bigger scope. The
-        // releases page covers the use case ("am I running the
-        // latest?") with zero maintenance burden today.
+        // "Check for updates": the in-app check (UpdateController) in
+        // an official build, the GitHub releases page in the browser
+        // in every other one (checkForUpdates). The objectName is what
+        // usage statistics count, from before the in-app check too.
         auto* a = new QAction(menuIcon(QStringLiteral("update")),
                               tr("&Check for updates"), this);
         a->setObjectName(QStringLiteral("help.check-for-updates"));
-        connect(a, &QAction::triggered, this, []() {
-            QDesktopServices::openUrl(QUrl(QStringLiteral(
-                "https://github.com/Inverian/GitBolt/releases")));
-        });
+        connect(a, &QAction::triggered, this, &MainWindow::checkForUpdates);
         helpMenu->addAction(a);
     }
     helpMenu->addSeparator();
@@ -5716,6 +5722,12 @@ void MainWindow::showSettingsDialog()
     if (telemetryGate_ == telemetry::Gate::EnvOff)
         usageLockedReason = tr("Turned off by the GITBOLT_TELEMETRY environment variable.");
     dlg.setUsageStatistics(telemetryGate_ != telemetry::Gate::CompiledOut, usageLockedReason);
+    // Updates: shown when the in-app check is on (official builds, and
+    // test sessions with a test feed).
+    QString updatesLockedReason;
+    if (updates_ && updates_->setup().envOptOut)
+        updatesLockedReason = tr("Turned off by the GITBOLT_UPDATE_CHECK environment variable.");
+    dlg.setUpdates(updates_ != nullptr, updatesLockedReason);
     dlg.exec();
 }
 
@@ -5750,6 +5762,41 @@ void MainWindow::setTelemetry(telemetry::TelemetryService* service, telemetry::G
 telemetry::Gate MainWindow::telemetryGate() const
 {
     return telemetryGate_;
+}
+
+// ---------------------------------------------------------------------------
+// In-app updates (ui/UpdateController.h)
+// ---------------------------------------------------------------------------
+
+void MainWindow::setUpdates(const UpdateSetup& setup)
+{
+    updateGate_ = setup.gate;
+    if (updates_ || !setup.on())
+        return;   // once only
+    updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
+}
+
+void MainWindow::startUpdates()
+{
+    if (updates_)
+        updates_->start();
+}
+
+UpdateGate MainWindow::updateGate() const
+{
+    return updateGate_;
+}
+
+void MainWindow::checkForUpdates()
+{
+    if (updates_) {
+        updates_->checkNow();
+        return;
+    }
+    // Source, fork and distribution builds: they have no feed, and
+    // their updates are their packager's business.
+    QDesktopServices::openUrl(QUrl(QStringLiteral(
+        "https://github.com/Inverian/GitBolt/releases")));
 }
 
 void MainWindow::instrumentActionsForTelemetry()

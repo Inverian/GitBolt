@@ -3,6 +3,7 @@
 #include "TelemetryEndpoints.h"
 #include "TestBridge.h"
 #include "ui/MainWindow.h"
+#include "ui/UpdateSetup.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
 #include "git/Askpass.h"
@@ -11,6 +12,8 @@
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
 #include "telemetry/TelemetryService.h"
+#include "update/Package.h"
+#include "update/UpdateConfig.h"
 #include "util/CrashHandler.h"
 #include "util/LockFiles.h"
 #include "util/LoginPath.h"
@@ -41,10 +44,13 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QLockFile>
+#include <QProcessEnvironment>
 #include <QScopeGuard>
+#include <QStandardPaths>
 #include <QStyleHints>
 #include <QTextStream>
 #include <QThreadPool>
+#include <QUrl>
 
 #include <git2.h>
 
@@ -541,9 +547,10 @@ int main(int argc, char* argv[]) {
     // The report is read here, before the telemetry service starts
     // below; the box that tells the user comes up once the window and
     // the hand-off listener are (see there).
-    const bool testSession = gitbolt::util::isTestSession(
+    const gitbolt::util::TestSessionKind testSessionKind =
         gitbolt::util::detectTestSession(QGuiApplication::platformName(),
-                                         app.arguments()));
+                                         app.arguments());
+    const bool testSession = gitbolt::util::isTestSession(testSessionKind);
     const bool crashBoxOptIn =
         qEnvironmentVariable("GITBOLT_TEST_CRASH_BOX") == QLatin1String("1");
     const bool crashPending = (!testSession || crashBoxOptIn)
@@ -561,6 +568,30 @@ int main(int argc, char* argv[]) {
             telemetryService && telemetryService->queueCrashReport(crashReport);
     }
 
+    // In-app updates (src/update, ui/UpdateSetup.h). One gate, evaluated
+    // once, here: only an official build (GITBOLT_UPDATES_ENABLED, this
+    // target's alone, so no library or test binary names the feed) asks
+    // GitHub, and never in a test session, which may point the updater
+    // at a loopback stub instead (GITBOLT_TEST_UPDATE_FEED). Nothing
+    // touches the network until the window is up (startUpdates below)
+    // and the first check is due.
+    gitbolt::ui::UpdateSetupInputs updateInputs;
+#ifdef GITBOLT_UPDATES_ENABLED
+    updateInputs.officialFeed = QUrl(QString::fromLatin1(gitbolt::update::kOfficialFeed));
+#endif
+    updateInputs.testSession = testSessionKind;
+    updateInputs.env = QProcessEnvironment::systemEnvironment();
+    updateInputs.appVersion = app.applicationVersion();
+    updateInputs.cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    updateInputs.tempDir = QDir::tempPath();
+    gitbolt::ui::UpdateSetup updateSetup = gitbolt::ui::setUpUpdates(updateInputs);
+    if (!updateSetup.problem.isEmpty())
+        qWarning("In-app updates: %s", qPrintable(updateSetup.problem));
+    // How this copy was installed decides what Install and Restart
+    // downloads, and whether it can (update/Package.h).
+    if (updateSetup.on())
+        updateSetup.package = gitbolt::update::detectPackage(gitbolt::update::currentProbe());
+
     // Create and show the main window. Inject the app-wide theme
     // service so the Settings dialog can list and switch themes
     // from one shared instance (rather than MainWindow creating a
@@ -568,6 +599,7 @@ int main(int argc, char* argv[]) {
     gitbolt::ui::MainWindow window;
     window.setThemeService(themeService);
     window.setTelemetry(telemetryService.get(), telemetryGate);
+    window.setUpdates(updateSetup);
 
     // Restore window geometry from previous session. (Dock/toolbar
     // state via QMainWindow::saveState is no longer persisted — the
@@ -585,6 +617,8 @@ int main(int argc, char* argv[]) {
         telemetryService->recordLaunch();
         telemetryService->start();
     }
+    // The same for update checks: the first one comes seconds later.
+    window.startUpdates();
 
     // The note about the git GitBolt runs, once the window is up: finding
     // git waits for the login shell's PATH.

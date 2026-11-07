@@ -62,6 +62,15 @@ public:
     /// before exec(); without it the group stays hidden.
     void setUsageStatistics(bool available, const QString& lockedReason);
 
+    /// Shows GitBolt › Updates when this session has the in-app update
+    /// check (official builds; ui/UpdateSetup.h), with the switch for
+    /// the daily check and what it sends. A non-empty `lockedReason`
+    /// (GITBOLT_UPDATE_CHECK turned the daily check off) disables the
+    /// switch and says why; Apply then leaves the stored preference
+    /// alone. Called by MainWindow before exec(); without it the page
+    /// stays hidden.
+    void setUpdates(bool available, const QString& lockedReason);
+
     explicit SettingsDialog(conf::SettingsService* settings,
                             conf::ThemeService* theme,
                             QWidget* parent = nullptr);
@@ -83,6 +92,7 @@ private:
     QWidget* createShortcutsPage();
     QWidget* createRecentReposPage();
     QWidget* createUsageStatisticsPage();
+    QWidget* createUpdatesPage();
     QWidget* createGitConfigPage();
     QWidget* createPluginsPage();
 
@@ -123,6 +133,15 @@ private:
     QLabel*      usageLockedNote_   = nullptr;
     bool         usageAvailable_    = false;
     bool         usageLocked_       = false;
+
+    // Updates page (setUpdates). Its row, updatesItem_, is hidden
+    // unless the session has the in-app update check.
+    QTreeWidgetItem* updatesItem_      = nullptr;
+    QGroupBox*   updatesGroup_         = nullptr;
+    QCheckBox*   autoUpdateCheck_      = nullptr;
+    QLabel*      updatesLockedNote_    = nullptr;
+    bool         updatesAvailable_     = false;
+    bool         updatesLocked_        = false;
 
     // UI Design page — the default vertical split between the
     // revision graph (top) and the inspector tabs (bottom). The

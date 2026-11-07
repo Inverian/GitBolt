@@ -92,6 +92,8 @@ include(CompilerWarnings)
 # Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
 # Empty, the default, compiles telemetry out.
 include(Telemetry)
+# In-app updates: GITBOLT_UPDATES, official builds only (OFF by default).
+include(Updates)
 
 if(GITBOLT_SANITIZERS)
     include(Sanitizers)
@@ -146,7 +148,7 @@ if(Qt6LinguistTools_FOUND AND Qt6_VERSION VERSION_GREATER_EQUAL 6.7)
         SOURCE_TARGETS
             gitbolt gitbolt_instance gitbolt_ui gitbolt_dialogs gitbolt_widgets
             gitbolt_editor gitbolt_services gitbolt_models gitbolt_git
-            gitbolt_telemetry gitbolt_watcher gitbolt_conf gitbolt_util
+            gitbolt_telemetry gitbolt_update gitbolt_watcher gitbolt_conf gitbolt_util
         PLURALS_TS_FILE ${CMAKE_SOURCE_DIR}/translations/gitbolt_en.ts
         RESOURCE_PREFIX /i18n
         QM_OUTPUT_DIRECTORY ${_gitbolt_util_bin}

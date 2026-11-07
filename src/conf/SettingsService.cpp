@@ -515,6 +515,60 @@ QString SettingsService::ensureTelemetryInstallId()
     return id;
 }
 
+// ---------------------------------------------------------------------------
+// In-app updates
+// ---------------------------------------------------------------------------
+
+bool SettingsService::updateAutoCheck() const
+{
+    return settings_.value(QStringLiteral("updates/autoCheck"), true).toBool();
+}
+
+void SettingsService::setUpdateAutoCheck(bool on)
+{
+    // As the usage statistics switch: an Apply that leaves it alone is
+    // no change.
+    if (updateAutoCheck() == on)
+        return;
+    settings_.setValue(QStringLiteral("updates/autoCheck"), on);
+    notifyChanged();
+}
+
+QDateTime SettingsService::updateLastCheck() const
+{
+    // Only what setUpdateLastCheck() wrote: a time with its zone (the
+    // "Z"). A hand-edited local time would be read as UTC or as this
+    // machine's zone depending on how it was written; invalid instead,
+    // which makes the next check due.
+    const QString text = settings_.value(QStringLiteral("updates/lastCheck")).toString();
+    const QDateTime when = QDateTime::fromString(text, Qt::ISODateWithMs);
+    if (!when.isValid() || when.timeSpec() == Qt::LocalTime)
+        return {};
+    return when.toUTC();
+}
+
+void SettingsService::setUpdateLastCheck(const QDateTime& when)
+{
+    if (!when.isValid()) {
+        settings_.remove(QStringLiteral("updates/lastCheck"));
+        return;
+    }
+    settings_.setValue(QStringLiteral("updates/lastCheck"), when.toUTC().toString(Qt::ISODateWithMs));
+}
+
+QString SettingsService::skippedUpdateVersion() const
+{
+    return settings_.value(QStringLiteral("updates/skippedVersion")).toString();
+}
+
+void SettingsService::setSkippedUpdateVersion(const QString& version)
+{
+    if (version.isEmpty())
+        settings_.remove(QStringLiteral("updates/skippedVersion"));
+    else
+        settings_.setValue(QStringLiteral("updates/skippedVersion"), version);
+}
+
 bool SettingsService::gitNoticeDismissed(const QString& key) const
 {
     return settings_.value(QStringLiteral("notices/gitDismissed")).toStringList().contains(key);

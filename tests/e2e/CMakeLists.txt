@@ -46,6 +46,8 @@ set(E2E_TESTS
     test_tags
     test_telemetry_inert
     test_theme_persistence
+    test_update_flow
+    test_update_inert
     test_watcher_external_commit
 )
 # Needs macOS's small unix-socket buffers to hold a hand-off line up
@@ -76,4 +78,21 @@ endforeach()
 
 if(APPLE)
     set_tests_properties(e2e_test_launchservices_open PROPERTIES SKIP_RETURN_CODE 77)
+endif()
+
+# A packaged GitBolt (a DMG on macOS, an AppImage on Linux) updates
+# itself in place: download, checks, the helper, the relaunch. It needs
+# that package, which only CI's packaging jobs (or a local cpack) make,
+# so it runs only when GITBOLT_E2E_INSTALL_APP names one, and is skipped
+# everywhere else. Its own longer TIMEOUT: hdiutil, codesign --deep
+# twice and a copy of the bundle take a minute or two.
+if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME e2e_test_update_install
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_update_install.py
+                $<TARGET_FILE:gitbolt>)
+    set_tests_properties(e2e_test_update_install PROPERTIES
+        LABELS "e2e"
+        TIMEOUT 420
+        RUN_SERIAL TRUE
+        SKIP_RETURN_CODE 77)
 endif()

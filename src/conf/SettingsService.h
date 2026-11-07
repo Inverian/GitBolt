@@ -147,6 +147,27 @@ public:
     /// geometry.
     QString ensureTelemetryInstallId();
 
+    // ----- In-app updates (ui/UpdateController.h) -----
+    //
+    /// Settings › Updates' "Check for updates automatically", on by
+    /// default: the daily check asks GitHub only while it is on (and
+    /// GITBOLT_UPDATE_CHECK doesn't turn it off). Help › Check for
+    /// Updates asks either way. settingsChanged when it changes.
+    bool updateAutoCheck() const;
+    void setUpdateAutoCheck(bool on);
+    /// When GitHub last answered an update check (UTC, saved as ISO
+    /// 8601), or invalid: never, or not a time GitBolt wrote. The daily
+    /// check asks again once it is a day old (update::dueForAutoCheck).
+    /// No settingsChanged: nothing shows it.
+    QDateTime updateLastCheck() const;
+    void setUpdateLastCheck(const QDateTime& when);
+    /// The version Skip This Version was clicked for, or empty: the
+    /// automatic check says nothing about it or anything older, only
+    /// about a newer one. A manual check still shows it. No
+    /// settingsChanged.
+    QString skippedUpdateVersion() const;
+    void setSkippedUpdateVersion(const QString& version);
+
     // ----- The note about the git GitBolt runs (widgets::GitNoticeBar) -----
     //
     /// Whether the user dismissed the note `key` names

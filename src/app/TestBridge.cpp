@@ -1,10 +1,13 @@
 #include "TestBridge.h"
 
 #include "conf/SettingsService.h"
+#include "dialogs/UpdateDialog.h"
 #include "models/CommitLogModel.h"
 #include "services/GitService.h"
 #include "telemetry/TelemetryGate.h"
 #include "ui/MainWindow.h"
+#include "ui/UpdateSetup.h"
+#include "widgets/UpdateNoticeBar.h"
 
 #ifdef Q_OS_MACOS
 #include "platform/macos/MacServices.h"
@@ -687,8 +690,11 @@ QByteArray TestBridge::cmdFireTimer(const QString& name)
     if (!timer)
         return errLine(QStringLiteral("no timer named: ") + name);
     // A stopped timer never fires: firing it anyway would test a state
-    // the app can't be in (the feature switched off).
-    if (!timer->isActive())
+    // the app can't be in (the feature switched off). Unless the timer
+    // says so: a test session's update check timer is never started
+    // (no automatic check in tests), yet tests fire it to see what an
+    // automatic find does (UpdateController).
+    if (!timer->isActive() && !timer->property("fireWhileStopped").toBool())
         return errLine(QStringLiteral("timer not running: ") + name);
 
     // timeout() is a private signal, emitted here through the meta-
@@ -786,6 +792,23 @@ QByteArray TestBridge::cmdDumpState()
         .arguments = QCoreApplication::arguments(),
         .settingOn = !settings || settings->usageStatisticsEnabled(),
     }));
+    // In-app updates: the gate main() evaluated ("off:test-session"
+    // unless a test feed is set), whether the daily check is scheduled
+    // (never in a test session), and what the dialog and the notice bar
+    // say while they are up.
+    state[QStringLiteral("updates")] = ui::updateGateName(window_->updateGate());
+    if (auto* timer = window_->findChild<QTimer*>(QStringLiteral("updateCheckTimer")))
+        state[QStringLiteral("updateTimerActive")] = timer->isActive();
+    if (auto* dialog = window_->findChild<dialogs::UpdateDialog*>(); dialog && dialog->isVisible()) {
+        state[QStringLiteral("updateDialog")] = dialogs::UpdateDialog::stateName(dialog->state());
+        state[QStringLiteral("updateDialogText")] = dialog->shownText();
+    }
+    if (auto* notice = window_->findChild<widgets::UpdateNoticeBar*>(); notice && notice->isVisible())
+        state[QStringLiteral("updateNotice")] = notice->text();
+    // Which process answers, from where: an update test tells the
+    // relaunched copy from the one it replaced.
+    state[QStringLiteral("pid")] = QCoreApplication::applicationPid();
+    state[QStringLiteral("appPath")] = QCoreApplication::applicationFilePath();
     // The *effective* palette, not the stored preference: a startup-
     // ordering bug once left the INI saying Dark while the window
     // rendered light, and only this distinction can catch that.

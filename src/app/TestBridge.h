@@ -46,7 +46,10 @@ namespace gitbolt::app {
 ///                                    multi-line commit message
 ///   fire-timer <objectName>          queue a running QTimer's timeout
 ///                                    (periodic work without waiting
-///                                    out its interval)
+///                                    out its interval), or a stopped
+///                                    one's that has the property
+///                                    fireWhileStopped (a test session's
+///                                    updateCheckTimer)
 ///   file-open <path…>                send qApp the QFileOpenEvent a
 ///                                    Dock drop or `open -a GitBolt
 ///                                    <folder>` gives (queued open)
@@ -58,7 +61,9 @@ namespace gitbolt::app {
 ///   dump-state                       repo path/state/branch/headOid,
 ///                                    conflict count, theme, log row
 ///                                    count, status-bar message, windows,
-///                                    usage statistics gate
+///                                    usage statistics gate, the update
+///                                    gate, dialog state and notice, pid
+///                                    and app path
 ///   screenshot <path>                grab() active window to PNG
 ///   quit                             queue MainWindow::close() (runs
 ///                                    closeEvent, persists geometry —

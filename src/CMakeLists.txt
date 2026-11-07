@@ -16,8 +16,8 @@
 #   services → git, models, util, watcher
 #   editor → models
 #   widgets → models, services, editor
-#   dialogs → widgets, services, conf
-#   ui → widgets, editor, services, conf, dialogs, telemetry
+#   dialogs → widgets, services, conf, update
+#   ui → widgets, editor, services, conf, dialogs, telemetry, update
 #        (MainWindow opens AboutDialog etc., and feeds usage statistics)
 #   plugins → git (loaded by app, depends only on core)
 #   app → everything

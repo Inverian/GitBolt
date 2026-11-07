@@ -4,6 +4,7 @@
 #include "git/Commit.h"
 #include "git/Status.h"
 #include "telemetry/TelemetryGate.h"
+#include "ui/UpdateSetup.h"
 
 #include <QElapsedTimer>
 #include <QFuture>
@@ -29,7 +30,7 @@ class QTimer;
 namespace gitbolt::models   { class CommitLogModel; }
 namespace gitbolt::services { class GitService;     }
 namespace gitbolt::services { struct StopFacts;     }
-namespace gitbolt::widgets  { class RepoOperationBar; class GitNoticeBar; }
+namespace gitbolt::widgets  { class RepoOperationBar; class GitNoticeBar; class UpdateNoticeBar; }
 namespace gitbolt::git      { struct GitProbe; }
 namespace gitbolt::conf     { class SettingsService;}
 namespace gitbolt::conf     { class ThemeService;   }
@@ -43,6 +44,7 @@ class RepositoryView;
 class DashboardView;
 class InlineOpIndicator;
 class RepoCommandController;
+class UpdateController;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -77,6 +79,18 @@ public:
     /// reports it in dump-state.
     telemetry::Gate telemetryGate() const;
 
+    /// Hand over main()'s in-app updates setup (UpdateSetup.h). Call
+    /// once, before show(). When it is on(), Help › Check for Updates
+    /// (and on macOS the app menu's Check for Updates…) asks GitHub, the
+    /// notice bar shows automatic finds, and Settings has an Updates
+    /// page; otherwise Check for Updates opens the releases page.
+    void setUpdates(const UpdateSetup& setup);
+    /// Once the window is up, as main() starts telemetry: clears old
+    /// downloads and schedules the daily check (UpdateController).
+    void startUpdates();
+    /// The gate main() evaluated, for the test bridge's dump-state.
+    UpdateGate updateGate() const;
+
     /// Probes the git GitBolt runs on a worker (git::probeGit()), then
     /// shows what there is to say about it (showGitNotice).
     void checkGitVersion();
@@ -104,6 +118,9 @@ private:
     /// Tools › GitK in the open repository, with `childPath` as its PATH
     /// (util::pathForChildren()).
     void launchGitk(const QString& childPath);
+    /// Help › Check for Updates and the macOS app menu's item: the
+    /// in-app check when updates are on, the releases page otherwise.
+    void checkForUpdates();
     /// Paints the inline toolbar label / status bar / clear-timer
     /// after a fetch-pull-push worker finishes.
     void finishRemoteOpFeedback(const QString& successMsg);
@@ -366,6 +383,8 @@ private:
     DashboardView*  dashboardView_ = nullptr;
     RepositoryView* repoView_      = nullptr;
     widgets::GitNoticeBar* gitNotice_ = nullptr;
+    // "GitBolt <v> is available." above the views (UpdateController).
+    widgets::UpdateNoticeBar* updateNotice_ = nullptr;
 
     // Modeless commit dialog — lazily constructed on first use and
     // then cached. Never deleted before the window closes.
@@ -560,6 +579,10 @@ private:
     // before the window, so it outlives this pointer.
     telemetry::TelemetryService* telemetry_ = nullptr;
     telemetry::Gate telemetryGate_ = telemetry::Gate::CompiledOut;
+
+    // In-app updates (setUpdates): null unless they are on.
+    UpdateController* updates_ = nullptr;
+    UpdateGate updateGate_ = UpdateGate::CompiledOut;
 };
 
 } // namespace gitbolt::ui
