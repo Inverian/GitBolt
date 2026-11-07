@@ -22,27 +22,6 @@ constexpr int kVersionTimeoutMs = 10000;
 std::mutex probeMutex;
 std::optional<GitProbe> lastProbe;
 
-#ifdef Q_OS_MACOS
-// /usr/bin/git is a stand-in that runs the git of the developer tools
-// xcode-select picked, and asks to install the Command Line Tools when
-// there are none: a window that a version check, at launch, had no
-// business opening. Any of the places it would look will do.
-bool appleDeveloperToolsInstalled() {
-    QStringList dirs;
-    if (const QString chosen = qEnvironmentVariable("DEVELOPER_DIR"); !chosen.isEmpty())
-        dirs << chosen;
-    if (const QString selected =
-            QFileInfo(QStringLiteral("/var/db/xcode_select_link")).symLinkTarget();
-        !selected.isEmpty())
-        dirs << selected;
-    dirs << QStringLiteral("/Library/Developer/CommandLineTools")
-         << QStringLiteral("/Applications/Xcode.app/Contents/Developer");
-    return std::any_of(dirs.cbegin(), dirs.cend(), [](const QString& dir) {
-        return QFileInfo(dir + QStringLiteral("/usr/bin/git")).isExecutable();
-    });
-}
-#endif
-
 } // namespace
 
 std::optional<GitVersion> parseGitVersion(const QString& output) {
@@ -192,13 +171,47 @@ GitAssessment assessGitVersion(const GitVersion& version, GitPlatform platform,
     return assessment;
 }
 
+namespace detail {
+
+bool appleToolsMissing(const QString& gitPath, const QStringList& toolDirs)
+{
+    if (gitPath != QLatin1String("/usr/bin/git"))
+        return false;
+    return std::none_of(toolDirs.cbegin(), toolDirs.cend(), [](const QString& dir) {
+        return QFileInfo(dir + QStringLiteral("/usr/bin/git")).isExecutable();
+    });
+}
+
+} // namespace detail
+
+// /usr/bin/git is a stand-in that runs the git of the developer tools
+// xcode-select picked, and asks to install the Command Line Tools when
+// there are none: a window that a version check, at launch, or a read of
+// the identity in Settings had no business opening. Any of the places it
+// would look will do.
+bool appleToolsMissing(const QString& gitPath)
+{
+#ifdef Q_OS_MACOS
+    QStringList dirs;
+    if (const QString chosen = qEnvironmentVariable("DEVELOPER_DIR"); !chosen.isEmpty())
+        dirs << chosen;
+    if (const QString selected =
+            QFileInfo(QStringLiteral("/var/db/xcode_select_link")).symLinkTarget();
+        !selected.isEmpty())
+        dirs << selected;
+    dirs << QStringLiteral("/Library/Developer/CommandLineTools")
+         << QStringLiteral("/Applications/Xcode.app/Contents/Developer");
+    return detail::appleToolsMissing(gitPath, dirs);
+#else
+    Q_UNUSED(gitPath);
+    return false;
+#endif
+}
+
 GitProbe probeGit() {
     GitProbe probe;
     probe.path = QString::fromStdString(GitProcess::findGitExecutable());
-#ifdef Q_OS_MACOS
-    probe.appleToolsMissing = probe.path == QLatin1String("/usr/bin/git")
-                              && !appleDeveloperToolsInstalled();
-#endif
+    probe.appleToolsMissing = appleToolsMissing(probe.path);
     if (!probe.path.isEmpty() && !probe.appleToolsMissing) {
         // In the home folder: no repository's config comes into it.
         const auto said = GitProcess(QDir::homePath().toStdString())

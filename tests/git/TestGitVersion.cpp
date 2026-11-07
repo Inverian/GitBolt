@@ -5,6 +5,9 @@
 // GitBolt against the gits users have (Apple Git-154, Git for Windows).
 //
 
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QTest>
 
 #include "git/GitVersion.h"
@@ -196,6 +199,34 @@ private slots:
                     .contains(QStringLiteral("CVE-2026-105803")));
         QVERIFY(!ids("git version 2.56.0.windows.3", GitPlatform::Windows)
                      .contains(QStringLiteral("CVE-2026-105803")));
+    }
+
+    // Apple's /usr/bin/git counts as no git while none of the folders it
+    // runs the tools' git from has one: run, it would only ask to install
+    // the Command Line Tools. Any other git is run.
+    void appleStandInNeedsTheTools() {
+        using gitbolt::git::detail::appleToolsMissing;
+        QTemporaryDir none, tools;
+        QVERIFY(none.isValid() && tools.isValid());
+        QVERIFY(QDir(tools.path()).mkpath(QStringLiteral("usr/bin")));
+        QFile git(tools.filePath(QStringLiteral("usr/bin/git")));
+        QVERIFY(git.open(QIODevice::WriteOnly));
+        git.close();
+        const QString standIn = QStringLiteral("/usr/bin/git");
+
+        QVERIFY(appleToolsMissing(standIn, {none.path()}));
+        QVERIFY(appleToolsMissing(standIn, {}));
+#ifndef Q_OS_WIN  // where an executable is one by its extension
+        // Not executable: the stand-in couldn't run it either.
+        QVERIFY(appleToolsMissing(standIn, {none.path(), tools.path()}));
+        QVERIFY(git.setPermissions(git.permissions() | QFile::ExeOwner));
+        QVERIFY(!appleToolsMissing(standIn, {none.path(), tools.path()}));
+#endif
+        QVERIFY(!appleToolsMissing(QStringLiteral("/opt/homebrew/bin/git"), {none.path()}));
+        QVERIFY(!appleToolsMissing(QString(), {none.path()}));
+#ifndef Q_OS_MACOS
+        QVERIFY(!gitbolt::git::appleToolsMissing(standIn));
+#endif
     }
 };
 

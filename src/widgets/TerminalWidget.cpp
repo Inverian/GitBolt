@@ -98,6 +98,19 @@ constexpr int kSwitchCheckMs = 250;
 constexpr int kMaxUnreadWaits = 8;
 
 #ifndef Q_OS_WIN
+// The longest line, with its Enter, a terminal in its line mode takes:
+// MAX_CANON on macOS (1024 bytes), the 4096-byte line buffer on Linux
+// (MAX_CANON there says 255, which no line is held to). Past it macOS
+// drops the rest, the Enter too, and Linux keeps the Enter but not what
+// came before it: the shell gets the line cut short, in an open quote.
+#ifdef Q_OS_LINUX
+constexpr qsizetype kMaxLineModeBytes = 4095;
+#else
+constexpr qsizetype kMaxLineModeBytes = MAX_CANON;
+#endif
+#endif
+
+#ifndef Q_OS_WIN
 // The most onPtyReadable() reads, and draws in one appendOutput(), before
 // it goes back to the event loop. Drawing costs by the line, not the
 // byte: tens of milliseconds for ordinary lines, a few hundred for a
@@ -562,6 +575,7 @@ void TerminalWidget::stopShell()
     commandRan_ = false;
     waitForTick_ = false;
     unreadWaits_ = 0;
+    lineModeWaits_ = 0;
 #ifdef Q_OS_WIN
     if (conpty_) {
         // Returns at once: ConPtyProcess finishes the hang-up on its
@@ -628,6 +642,12 @@ void TerminalWidget::changeRepository(const QString& path, const QString& gitDir
 //   more (commandRan_), and a Ctrl+C also while the terminal holds a whole
 //   line unread behind a slow prompt (lineUnread), kMaxUnreadWaits ticks
 //   at most: a command typed ahead gets to run rather than dropped unread.
+// - A line longer than the terminal takes in its line mode
+//   (kMaxLineModeBytes: a long path outside ASCII, which goes as printf's
+//   escapes, twice with a GIT_DIR) waits for the line editor to take the
+//   terminal, as it does once a slow prompt hook is done, kMaxUnreadWaits
+//   ticks at most; then, or for a shell with no line editor, the shell is
+//   started again instead.
 // - Started again instead, once no command runs, where the line can't be
 //   typed: a GIT_DIR gitDirCommand has no line for, a folder cdTypeable
 //   turns down, any program but a shell takesTypedSwitches knows.
@@ -675,6 +695,22 @@ void TerminalWidget::switchWhenIdle()
                 return;
             }
 #endif
+        }
+        const QByteArray line =
+            typeIt ? toTerminalBytes(gitDirLine + cdCommand(pendingCwd_)) : QByteArray();
+#ifndef Q_OS_WIN
+        if (typeIt && line.size() >= kMaxLineModeBytes && inLineMode()) {
+            if (lineModeWaits_ < kMaxUnreadWaits) {
+                ++lineModeWaits_;
+                waitForTick_ = true;
+                switchTimer_->start();
+                return;
+            }
+            typeIt = false;  // started again, below
+        }
+        lineModeWaits_ = 0;
+#endif
+        if (typeIt) {
             commandRan_ = false;
             if (switchTimer_->isActive()) {
                 switchTimer_->stop();
@@ -684,7 +720,7 @@ void TerminalWidget::switchWhenIdle()
             }
             // A whole line, so the shell's is empty again once it has
             // read it: lineEmpty_ stays set.
-            writeToPty(toTerminalBytes(gitDirLine + cdCommand(pendingCwd_)));
+            writeToPty(line);
             shellGitDir_ = gitDir_;
             return;
         }
@@ -758,18 +794,41 @@ void TerminalWidget::switchWhenIdle()
 // from the terminal's own side, which the master's FIONREAD isn't.
 bool TerminalWidget::lineUnread() const
 {
-    if (masterFd_ < 0)
-        return false;
-    const char* name = ::ptsname(masterFd_);
-    if (!name)
-        return false;
-    const int fd = ::open(name, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
+    const int fd = openShellTerminal();
     if (fd < 0)
         return false;
     int unread = 0;
     const bool ok = ::ioctl(fd, FIONREAD, &unread) == 0;
     ::close(fd);
     return ok && unread > 0;
+}
+
+// Whether the shell's terminal is in its line mode, where it holds a line
+// to kMaxLineModeBytes: while the shell runs something, a prompt hook
+// say, until its line editor takes the terminal, and all the time in a
+// shell with none (dash). Read from the terminal's own side: on Linux the
+// master has settings of its own.
+bool TerminalWidget::inLineMode() const
+{
+    const int fd = openShellTerminal();
+    if (fd < 0)
+        return false;
+    termios settings{};
+    const bool ok = ::tcgetattr(fd, &settings) == 0;
+    ::close(fd);
+    return ok && (settings.c_lflag & ICANON);
+}
+
+// The shell's end of the PTY, opened anew, without becoming GitBolt's
+// controlling terminal; -1 if it can't be.
+int TerminalWidget::openShellTerminal() const
+{
+    if (masterFd_ < 0)
+        return -1;
+    const char* name = ::ptsname(masterFd_);
+    if (!name)
+        return -1;
+    return ::open(name, O_RDWR | O_NOCTTY | O_NONBLOCK | O_CLOEXEC);
 }
 #endif
 
