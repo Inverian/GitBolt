@@ -1353,9 +1353,10 @@ jobs:
 
   # ==========================================================================
   # Release: push to main only, every build/test/package/smoke test green,
-  # and the version has no tag yet. Creates tag v<version> at this commit
-  # plus the GitHub Release with every installer and the CHANGELOG section
-  # as notes. Dry runs never get here, on any branch, including main.
+  # and the version has no tag yet. Attests each installer's build, creates
+  # tag v<version> at this commit plus the GitHub Release with every
+  # installer and the CHANGELOG section as notes, then checks the release
+  # as it's served. Dry runs never get here, on any branch, including main.
   # ==========================================================================
   release:
     name: release ${{ needs.version.outputs.tag }}
@@ -1367,7 +1368,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: write   # create the tag + release, upload assets
+      contents: write       # create the tag + release, upload assets
+      id-token: write       # the Sigstore certificate the attestation is signed with
+      attestations: write   # store the attestation with the repository
     # Serialize releases across runs; the re-check below runs inside the
     # lock, so two quick pushes can't both create the same release.
     concurrency:
@@ -1432,6 +1435,18 @@ jobs:
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # Build provenance for each installer listed in SHA256SUMS.txt, signed
+      # through Sigstore with this workflow's identity and kept by GitHub.
+      # The installers have no Developer ID or Authenticode signature, so
+      # this is how a download shows it was built by ci.yml on main:
+      #   gh attestation verify <file> --repo Inverian/GitBolt
+      # Before the release exists, so a failure here publishes nothing.
+      - name: Attest the installers
+        if: steps.recheck.outputs.go == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/SHA256SUMS.txt
+
       # gh (preinstalled) instead of a Node action: it creates the release
       # as a draft, uploads every file, and only then publishes, so a failed
       # upload leaves no tag and the next push to main simply tries again.
@@ -1455,3 +1470,45 @@ jobs:
           tagged=$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq .object.sha)
           [ "$tagged" = "$GITHUB_SHA" ] || { echo "::error::$TAG points at $tagged, expected $GITHUB_SHA"; exit 1; }
           echo "### Released [$TAG]($GITHUB_SERVER_URL/$GH_REPO/releases/tag/$TAG) at \`$GITHUB_SHA\`" >> "$GITHUB_STEP_SUMMARY"
+
+      # The release as users get it: published, not a pre-release, Latest,
+      # the CHANGELOG section as notes, exactly the files checked above,
+      # each downloading intact and with an attestation that verifies.
+      # The release is public by now, so a failure here doesn't take it
+      # back: it fails the run (GitHub's email) for a fix by hand.
+      - name: Check the published release
+        if: steps.recheck.outputs.go == 'true'
+        env:
+          NOTES: ${{ needs.version.outputs.notes }}
+        run: |
+          set -euo pipefail
+          err() { echo "::error::$*"; exit 1; }
+          rel=$(gh api "repos/$GH_REPO/releases/tags/$TAG")
+          jq -e '.draft == false and .prerelease == false' <<<"$rel" > /dev/null \
+            || err "$TAG is a draft or a pre-release"
+          # /releases/latest can trail the publish by a moment.
+          latest=
+          for _ in 1 2 3 4 5 6; do
+            latest=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name) && [ "$latest" = "$TAG" ] && break
+            sleep 10
+          done
+          [ "$latest" = "$TAG" ] || err "Latest is '$latest', not $TAG"
+          [ "$(jq -r .body <<<"$rel" | tr -d '\r')" = "$(printf '%s\n' "$NOTES" | tr -d '\r')" ] \
+            || err "the release notes differ from CHANGELOG.md's [$VERSION] section"
+          diff <(jq -r '.assets[].name' <<<"$rel" | sort) <(cd dist && printf '%s\n' * | sort) \
+            || err "the release's files differ from the installers checked above"
+          out="$RUNNER_TEMP/published"
+          mkdir "$out"
+          gh release download "$TAG" --dir "$out"
+          cmp "$out/SHA256SUMS.txt" dist/SHA256SUMS.txt || err "the published SHA256SUMS.txt differs"
+          (cd "$out" && sha256sum --strict -c SHA256SUMS.txt) || err "a published file doesn't match SHA256SUMS.txt"
+          n=0
+          for f in "$out"/*; do
+            [ "${f##*/}" = SHA256SUMS.txt ] && continue
+            gh attestation verify "$f" --repo "$GH_REPO" \
+              --signer-workflow "$GH_REPO/.github/workflows/ci.yml" \
+              --source-ref refs/heads/main --deny-self-hosted-runners \
+              || err "${f##*/}: its attestation doesn't verify"
+            n=$((n + 1))
+          done
+          echo "Checked the published $TAG: Latest, notes, checksums, and $n attested installers" >> "$GITHUB_STEP_SUMMARY"
