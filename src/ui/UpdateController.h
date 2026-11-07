@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QString>
 
+#include <functional>
 #include <optional>
 
 class QTimer;
@@ -44,20 +45,55 @@ namespace gitbolt::ui {
 ///     dismissed the bar for it this session. Failures go to the log
 ///     only.
 ///
+/// What it acts on: the release the dialog shows. A find that comes
+/// while the dialog shows something else (the user reading an earlier
+/// one) leaves Install and Skip alone, and goes to the bar once the
+/// dialog closes.
+///
 /// Installing, after Install and Restart: the Downloader fetches the
 /// package's asset (assetNameFor) and checks it, into <cache>/updates/
-/// <version>/ (a test session: its temporary folder's gitbolt-updates;
-/// an AppImage: next to the running one, where the helper renames it
-/// over it); the Installer checks and stages it; its helper
-/// is started with this process's pid, and GitBolt quits, which the
-/// helper waits for. Cancel, closing the dialog, a failure, or quitting
-/// first stops wherever it is and deletes what was downloaded: nothing
-/// is left beside the AppImage, nothing installs later.
+/// <version>/ (a test session: its private gitbolt-updates-XXXXXX in
+/// the temporary folder, UpdateSetup.h; an AppImage: next to the
+/// running one, where the helper renames it over it); the Installer
+/// checks and stages it; its helper is started with this process's
+/// pid, and GitBolt quits, which the helper waits for. Cancel, closing
+/// the dialog, a failure, or quitting first stops wherever it is and
+/// deletes what was downloaded: nothing is left beside the AppImage,
+/// nothing installs later. Once the helper runs there is nothing left
+/// to cancel: the dialog says GitBolt restarts, and if GitBolt is still
+/// running kQuitGraceMs later (the quit was refused), that it has to
+/// quit for the update to go in.
+///
+/// After an install: every helper leaves <downloads>/install-result,
+/// one line "<status> <version> <reason>" (status ok, declined, failed
+/// or gave-up), before it relaunches GitBolt or gives up. start() reads
+/// it once and deletes it: ok says so in the status bar (statusMessage);
+/// anything else, for a version newer than this one, opens the dialog
+/// on why, the end of install.log, and how to install by hand.
 class UpdateController : public QObject {
     Q_OBJECT
 public:
     static constexpr int kFirstCheckDelayMs = 15 * 1000;
     static constexpr int kCheckIntervalMs = 60 * 60 * 1000;
+    /// How long after asking to quit, with the helper running, GitBolt
+    /// counts the quit as refused.
+    static constexpr int kQuitGraceMs = 5 * 1000;
+    /// The helper's outcome and log, in the downloads folder (the
+    /// Installer's workDir, never version-named, so removeOldDownloads
+    /// keeps them).
+    static constexpr char kInstallResultFile[] = "install-result";
+    static constexpr char kInstallLogFile[] = "install.log";
+
+    /// How this process steps aside for the helper. Tests replace them,
+    /// to get as far as the helper without quitting themselves or having
+    /// it wait for them.
+    struct RestartHooks {
+        /// The pid the helper waits for; null: this process's.
+        std::function<qint64()> pid;
+        /// Asks GitBolt to quit; null: a queued QCoreApplication::quit().
+        std::function<void()> quit;
+        int quitGraceMs = kQuitGraceMs;
+    };
 
     /// `setup` is on(). `settings` and `bar` are the window's, and live
     /// as long as it; so does this (its parent is `window`).
@@ -67,7 +103,10 @@ public:
 
     const UpdateSetup& setup() const { return setup_; }
 
-    /// Once the window is up: deletes the installers of this version
+    void setRestartHooks(RestartHooks hooks);
+
+    /// Once the window is up: says how the last install went (the
+    /// helper's install-result), deletes the installers of this version
     /// and older ones (update::removeOldDownloads), and schedules the
     /// daily check if the setup does.
     void start();
@@ -78,19 +117,31 @@ public:
     /// The dialog, once it has been shown; null before.
     dialogs::UpdateDialog* dialog() const;
 
+signals:
+    /// A line for the window's status bar: "GitBolt was updated to <v>."
+    void statusMessage(const QString& text);
+
 private:
     void tick();
     void onUpToDate(const update::Version& latest, bool manual);
     void onAvailable(const update::Release& release, bool manual);
     void onCheckFailed(const QString& message, bool manual);
-    /// The dialog's Available or NotInstallable state for release_.
-    void showRelease();
-    /// Why this copy can't install release_, or empty.
-    QString whyNotInstallable() const;
+    /// The notice bar for `release`, unless (automatic) it was skipped
+    /// or its bar dismissed.
+    void offerInBar(const update::Release& release, bool manual);
+    /// The dialog's Available or NotInstallable state for `release`,
+    /// which Install and Skip then act on. Not while installing.
+    void showRelease(const update::Release& release);
+    /// Why this copy can't install `release`, or empty.
+    QString whyNotInstallable(const update::Release& release) const;
     void install();
     void onDownloaded(const QString& path);
     void onPrepared();
+    /// Asks GitBolt to quit, and says so if it is still here later.
+    void quitForHelper();
     void failInstall(const QString& message);
+    /// start(): reads and deletes the helper's install-result.
+    void reportEarlierInstall();
     /// Stops the download or the preparation, and deletes what was
     /// downloaded. Never after the helper was launched.
     void stopInstall();
@@ -105,10 +156,20 @@ private:
     update::Downloader* downloader_ = nullptr;
     update::Installer* installer_ = nullptr;   ///< while preparing; one per install
     QTimer* timer_ = nullptr;
+    QTimer* quitGrace_ = nullptr;   ///< after the quit request: was it refused?
     QPointer<dialogs::UpdateDialog> dialog_;
+    RestartHooks hooks_;
 
-    /// The newest release the feed offered this session.
+    /// The newest release the feed offered this session (the bar's).
     std::optional<update::Release> release_;
+    /// The release the dialog last showed: what Install, Skip and Try
+    /// Again act on.
+    std::optional<update::Release> shownRelease_;
+    /// A newer find that came while the dialog was up with something
+    /// else, for the bar once it closes; and whether a manual check
+    /// found it.
+    std::optional<update::Release> pendingRelease_;
+    bool pendingManual_ = false;
     /// The checked installer, from the Downloader's finished() until
     /// the helper takes it over (or it is deleted).
     QString downloaded_;
@@ -120,6 +181,8 @@ private:
     std::optional<update::Version> dismissed_;
     /// The helper runs: GitBolt is quitting, and it owns the download.
     bool launched_ = false;
+    /// The quit went through (aboutToQuit): GitBolt is on its way out.
+    bool quitting_ = false;
 };
 
 } // namespace gitbolt::ui

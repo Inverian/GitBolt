@@ -128,9 +128,56 @@ endpoints compiled in. Neither is ever `on` under the bridge
 (`tests/e2e/test_telemetry_inert.py`). Address the Settings switch as
 `settings.usage-statistics`.
 
+In-app updates (`src/update`, `src/ui/UpdateController.h`, PRIVACY.md's
+"Update checks") never reach GitHub from a test session. `dump-state`
+reports `updates`, the gate main() evaluated: `compiled-out` (no
+official feed: any build configured without `GITBOLT_UPDATES=ON`),
+`off:test-session` (a test session without a test feed, even in an
+official build), `off:test-feed-refused` (the test variables below
+didn't pass; the log says why), `test-feed`, and `on` (an official
+build outside a test session; never under the bridge). Two variables,
+read only in a test session, point the updater at a loopback stub
+(`tests/e2e/update_stub.py`):
+
+- `GITBOLT_TEST_UPDATE_FEED`: the feed URL, plain `http://` to
+  `127.0.0.1` or `[::1]` only (not `localhost`, not https); it turns
+  the updater on, with loopback downloads allowed.
+- `GITBOLT_TEST_APP_VERSION`: the version the updater takes the running
+  app to be, e.g. `0.1.0`.
+
+A `test-feed` session downloads into a folder of its own in its
+`TMPDIR`, `gitbolt-updates-XXXXXX` (0700, never the shared
+`gitbolt-updates`), which `dump-state`'s `updateDir` names: the
+download, the staging, `install-helper.sh`, `install.log` and the
+helper's `install-result` go there. The app hands it on in
+`GITBOLT_TEST_UPDATE_DIR`, so the copy the install helper relaunches
+uses the same folder (and reads `install-result` from it once, at
+startup); a folder handed on that isn't a private one of this user's
+in `TMPDIR` is ignored and a new one made.
+
+The rest of `dump-state`'s update keys: `updateTimerActive` (the daily
+check is scheduled: never in a test session), `updateDialog` (while
+the dialog is up: `checking`, `up-to-date`, `available`,
+`not-installable`, `downloading`, `preparing`, `failed`, `restarting`
+or `quit-needed`) with `updateDialogText` (every line it shows but the
+notes), `updateNotice` (the notice bar's text while it shows), and
+`pid` and `appPath` (which process answers, from where: an install test
+tells the relaunched copy from the one it replaced). After an update,
+`statusMessage` is "GitBolt was updated to <v>.". The dialog's buttons
+are `updateDialog.install`, `.skip`, `.later`, `.viewOnGitHub`,
+`.openReleasePage`, `.close`, `.cancel`, `.retry` and `.quit`; the bar's
+`updateNotice.view` and `updateNotice.dismiss`; the Settings switch
+`settings.check-for-updates`.
+
 `fire-timer` emits a running `QTimer`'s timeout (found by
-`objectName`; a stopped timer is an error, since it could never fire).
-It's how a test reaches work the app only does every few minutes.
+`objectName`; a stopped timer is an error, since it could never fire,
+unless the timer has the `fireWhileStopped` property). It's how a test
+reaches work the app only does every few minutes. The one timer with
+`fireWhileStopped` is a `test-feed` session's `updateCheckTimer`: a
+test session never schedules the daily update check, yet a test fires
+it to see what an automatic find does (the notice bar). It asks only
+when the last answer is a day old, so a second fire the same day asks
+nothing.
 
 The "Crash Detected" box that a crash leaves for the next launch never
 shows in a test session (bridge, instance name, offscreen or CI):

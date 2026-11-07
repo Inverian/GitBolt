@@ -5,17 +5,32 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QOperatingSystemVersion>
 #include <QProcess>
+#include <QRandomGenerator>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QVersionNumber>
 #include <QtGlobal>
 
 #include <memory>
+#include <optional>
 #include <utility>
+
+#if defined(Q_OS_UNIX)
+#include <unistd.h>   // getuid
+#endif
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>  // CREATE_NO_WINDOW
+#endif
 
 namespace gitbolt::update {
 
@@ -69,6 +84,75 @@ bool samePath(const QString& a, const QString& b) {
     return !ca.isEmpty() && ca == QFileInfo(b).canonicalFilePath();
 }
 
+// A volume is mounted right at `path` (not merely somewhere above it).
+bool isMountPoint(const QString& path) {
+    const QString canonical = QFileInfo(path).canonicalFilePath();
+    if (canonical.isEmpty())
+        return false;
+    const QStorageInfo volume(canonical);
+    return volume.isValid() && QFileInfo(volume.rootPath()).canonicalFilePath() == canonical;
+}
+
+#if defined(Q_OS_UNIX)
+// What a detached process of ours starts with: a session of its own
+// (startDetached also double-forks, so it outlives GitBolt), default
+// signal dispositions, and none of GitBolt's descriptors (the instance
+// lock and its socket must die with GitBolt).
+void detachFromGitBolt(QProcess& process) {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    process.setUnixProcessParameters(QProcess::UnixProcessFlag::ResetSignalHandlers
+                                     | QProcess::UnixProcessFlag::CloseFileDescriptors
+                                     | QProcess::UnixProcessFlag::CreateNewSession);
+#elif QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    process.setUnixProcessParameters(QProcess::UnixProcessFlag::ResetSignalHandlers
+                                     | QProcess::UnixProcessFlag::CloseFileDescriptors);
+#else
+    Q_UNUSED(process)
+#endif
+}
+#endif
+
+#if defined(Q_OS_MACOS)
+/// What cancel() leaves to a detached /bin/sh -c (arguments: the pid
+/// of the step it killed or 0, the mount point or "", the staged copy,
+/// already renamed out of the way, or ""). It waits for the killed step
+/// to be gone (a zombie is gone: GitBolt reaps it later), so nothing is
+/// still writing into what it removes; detaches the image (a killed
+/// attach may only mount a moment later, so it looks a few times, and
+/// forces the last tries); removes the mount point only if it is
+/// empty; and removes the copy. BSD stat: macOS only.
+constexpr char kCleanupScript[] =
+    "pid=$1 mnt=$2 doomed=$3\n"
+    "n=0\n"
+    "while [ \"$pid\" -gt 0 ] && [ $n -lt 100 ] && kill -0 \"$pid\" 2>/dev/null; do\n"
+    "    case $(ps -o stat= -p \"$pid\" 2>/dev/null) in\n"
+    "    Z*) break ;;\n"
+    "    esac\n"
+    "    sleep 0.1\n"
+    "    n=$((n + 1))\n"
+    "done\n"
+    "if [ -n \"$mnt\" ]; then\n"
+    "    i=1\n"
+    "    while [ $i -le 8 ]; do\n"
+    "        if [ -d \"$mnt\" ] && [ \"$(stat -f %d \"$mnt\")\" != \"$(stat -f %d \"$mnt/..\")\" ]; then\n"
+    "            if [ $i -le 4 ]; then\n"
+    "                /usr/bin/hdiutil detach \"$mnt\"\n"
+    "            else\n"
+    "                /usr/bin/hdiutil detach -force \"$mnt\"\n"
+    "            fi\n"
+    "        elif [ $i -ge 3 ]; then\n"
+    "            break\n"
+    "        fi\n"
+    "        sleep 1\n"
+    "        i=$((i + 1))\n"
+    "    done\n"
+    "    rmdir \"$mnt\"\n"
+    "fi\n"
+    "if [ -n \"$doomed\" ]; then\n"
+    "    rm -rf \"$doomed\"\n"
+    "fi\n";
+#endif
+
 #if defined(Q_OS_WIN)
 // By absolute path: CreateProcess looks in the application's folder
 // before System32.
@@ -86,7 +170,7 @@ Installer::Installer(PackageInfo package, Version current, QString workDir, QObj
     : QObject(parent), package_(std::move(package)), current_(current), workDir_(std::move(workDir)) {}
 
 Installer::~Installer() {
-    cancel();
+    cancelNow();
 }
 
 bool Installer::busy() const {
@@ -99,6 +183,10 @@ QString Installer::helperScriptPath() const {
 
 QString Installer::logPath() const {
     return QDir(workDir_).filePath(QStringLiteral("install.log"));
+}
+
+QString Installer::resultPath() const {
+    return QDir(workDir_).filePath(QStringLiteral("install-result"));
 }
 
 void Installer::finishLater(const std::function<void()>& emitter) {
@@ -214,6 +302,25 @@ void Installer::cancel() {
     if (launched_)
         return;
     ++run_;
+    // Nothing here may wait: killed, not waited for; a detach (seconds,
+    // more with a busy volume) and a removal of a ~100 MB copy run in
+    // a process of their own.
+    const qint64 killed = abandonProcess();
+    if ((attached_ || stagedCreated_) && !cleanUpInBackground(killed)) {
+        if (attached_)
+            detachNow();
+        removeStaged();
+    }
+    removeMountPoint();
+    staged_.clear();
+    busy_ = false;
+    ready_ = false;
+}
+
+void Installer::cancelNow() {
+    if (launched_)
+        return;
+    ++run_;
     if (QProcess* process = std::exchange(process_, nullptr)) {
         process->kill();
         process->waitForFinished(5000);
@@ -225,6 +332,74 @@ void Installer::cancel() {
     staged_.clear();
     busy_ = false;
     ready_ = false;
+}
+
+qint64 Installer::abandonProcess() {
+    QProcess* process = std::exchange(process_, nullptr);
+    if (!process)
+        return 0;
+    const qint64 pid = process->processId();
+    // Its outcome no longer matters, and it mustn't go with this
+    // Installer: QProcess's destructor waits for a running process.
+    process->disconnect(this);
+    process->setParent(nullptr);
+    connect(process, &QProcess::finished, process, &QObject::deleteLater);
+    connect(process, &QProcess::errorOccurred, process, [process](QProcess::ProcessError error) {
+        if (error == QProcess::FailedToStart)
+            process->deleteLater();
+    });
+    if (process->state() == QProcess::NotRunning)
+        process->deleteLater();
+    else
+        process->kill();
+    return pid;
+}
+
+bool Installer::cleanUpInBackground(qint64 killedPid) {
+#if defined(Q_OS_MACOS)
+    // The staged copy out of the way first, by a rename within its
+    // folder: a new prepare() of the same version stages under the same
+    // name, which this cleanup's rm must never reach. The new name is
+    // still one removeStaleInstallFiles knows (.GitBolt-*.app).
+    QString doomed;
+    if (stagedCreated_ && !staged_.isEmpty()) {
+        const QFileInfo staged(staged_);
+        if (staged.exists() || staged.isSymLink()) {
+            const QString aside = QDir(staged.absolutePath())
+                                      .filePath(QStringLiteral(".GitBolt-%1-cancelled-%2.app")
+                                                    .arg(version_.toString())
+                                                    .arg(QRandomGenerator::global()->generate(), 8, 16, u'0'));
+            if (QFileInfo::exists(aside) || QFileInfo(aside).isSymLink() || !QDir().rename(staged_, aside))
+                return false;
+            doomed = aside;
+        }
+    }
+    const QString mount = attached_ ? mountPoint_ : QString();
+    if (!doomed.isEmpty() || !mount.isEmpty()) {
+        QProcess cleanup;
+        cleanup.setProgram(QStringLiteral("/bin/sh"));
+        cleanup.setArguments({QStringLiteral("-c"), QString::fromLatin1(kCleanupScript),
+                              QStringLiteral("gitbolt-update-cleanup"), QString::number(killedPid), mount, doomed});
+        cleanup.setStandardInputFile(QProcess::nullDevice());
+        cleanup.setStandardOutputFile(QProcess::nullDevice());
+        cleanup.setStandardErrorFile(QProcess::nullDevice());
+        detachFromGitBolt(cleanup);
+        if (!cleanup.startDetached()) {
+            // Done here after all, the renamed copy included.
+            if (!doomed.isEmpty())
+                staged_ = doomed;
+            return false;
+        }
+    }
+    stagedCreated_ = false;
+    attached_ = false;
+    if (!mount.isEmpty())
+        mountPoint_.clear();   // the cleanup's to remove
+    return true;
+#else
+    Q_UNUSED(killedPid)
+    return false;
+#endif
 }
 
 void Installer::runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done) {
@@ -399,6 +574,22 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
     const QString shortVersion = info.value(QStringLiteral("CFBundleShortVersionString")).toString();
     if (shortVersion != version_.toString())
         return tr("GitBolt.app %1 is version %2, not %3.").arg(where, quoted(shortVersion), version_.toString());
+    // LaunchServices won't start an app that needs a newer macOS, and by
+    // then the helper has swapped it in and the old copy is in the
+    // Trash: refuse here, while GitBolt still runs. (A release built
+    // against a newer SDK raises it: CMAKE_OSX_DEPLOYMENT_TARGET.)
+    // Normalised, so 14.4 and 14.4.0 are the same.
+    const QString minimum = info.value(QStringLiteral("LSMinimumSystemVersion")).toString().trimmed();
+    const QVersionNumber needs = QVersionNumber::fromString(minimum).normalized();
+    const QOperatingSystemVersion os = QOperatingSystemVersion::current();
+    const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
+    if (!needs.isNull() && running.normalized() < needs) {
+        const QString shown = running.microVersion() > 0 ? running.toString()
+                                                         : QStringLiteral("%1.%2").arg(running.majorVersion())
+                                                               .arg(running.minorVersion());
+        return tr("GitBolt %1 needs macOS %2 or later, and this Mac has macOS %3, so it can't be installed here.")
+            .arg(version_.toString(), quoted(minimum), shown);
+    }
     const QString executable = info.value(QStringLiteral("CFBundleExecutable")).toString();
     if (executable.isEmpty() || executable.contains(u'/') || executable == QLatin1String(".")
         || executable == QLatin1String("..")
@@ -413,13 +604,7 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
 }
 
 bool Installer::mounted() const {
-    if (mountPoint_.isEmpty())
-        return false;
-    const QString mount = QFileInfo(mountPoint_).canonicalFilePath();
-    if (mount.isEmpty())
-        return false;
-    const QStorageInfo volume(mountPoint_);
-    return volume.isValid() && QFileInfo(volume.rootPath()).canonicalFilePath() == mount;
+    return !mountPoint_.isEmpty() && isMountPoint(mountPoint_);
 }
 
 void Installer::detach(int attempt, const std::function<void()>& then) {
@@ -505,6 +690,8 @@ QString Installer::helperScript(qint64 pid) const {
     in.logFile = logPath();
     in.target = package_.target;
     in.staged = staged_;
+    in.newVersion = version_.toString();
+    in.resultFile = resultPath();
     switch (package_.kind) {
     case PackageKind::MacBundle:
         in.oldVersion = current_.toString();
@@ -515,6 +702,8 @@ QString Installer::helperScript(qint64 pid) const {
         in.execDirectly = !qEnvironmentVariable("GITBOLT_INSTANCE_NAME").isEmpty();
         return macHelperScript(in);
     case PackageKind::AppImage:
+        in.extractAndRun = appImageRunsExtracted(qEnvironmentVariable("APPDIR"),
+                                                 qEnvironmentVariableIsSet("APPIMAGE_EXTRACT_AND_RUN"));
         return appImageHelperScript(in);
     case PackageKind::Deb:
         in.pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
@@ -547,6 +736,8 @@ bool Installer::launchHelper(qint64 pid) {
     // otherwise append to all of that.)
     if (QFile logFile(logPath()); logFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         logFile.close();
+    // An earlier update's result would pass for this one's.
+    QFile::remove(resultPath());
     QProcess helper;
     helper.setWorkingDirectory(workDir_);
     helper.setStandardInputFile(QProcess::nullDevice());
@@ -555,6 +746,14 @@ bool Installer::launchHelper(qint64 pid) {
     // writing (ours) would make every Add-Content a sharing violation.
     helper.setProgram(windowsPowerShell());
     helper.setArguments(powerShellArguments(script));
+    // No console window at all, not one that flashes until -WindowStyle
+    // Hidden takes effect: CREATE_NO_WINDOW gives powershell.exe a
+    // console nobody sees. Windows ignores it beside CREATE_NEW_CONSOLE
+    // or DETACHED_PROCESS, so those go.
+    helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+        args->flags |= CREATE_NO_WINDOW;
+    });
 #else
     QSaveFile file(helperScriptPath());
     if (!file.open(QIODevice::WriteOnly) || file.write(script.toUtf8()) < 0 || !file.commit()) {
@@ -566,17 +765,7 @@ bool Installer::launchHelper(qint64 pid) {
     helper.setStandardErrorFile(logPath(), QIODevice::Append);
     helper.setProgram(QStringLiteral("/bin/sh"));
     helper.setArguments({helperScriptPath()});
-    // A session of its own (startDetached also double-forks, so it
-    // outlives GitBolt), default signal dispositions, none of GitBolt's
-    // descriptors: the instance lock and its socket die with GitBolt.
-#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-    helper.setUnixProcessParameters(QProcess::UnixProcessFlag::ResetSignalHandlers
-                                    | QProcess::UnixProcessFlag::CloseFileDescriptors
-                                    | QProcess::UnixProcessFlag::CreateNewSession);
-#elif QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-    helper.setUnixProcessParameters(QProcess::UnixProcessFlag::ResetSignalHandlers
-                                    | QProcess::UnixProcessFlag::CloseFileDescriptors);
-#endif
+    detachFromGitBolt(helper);
 #endif
     if (!helper.startDetached()) {
         emit failed(tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
@@ -585,6 +774,115 @@ bool Installer::launchHelper(qint64 pid) {
     launched_ = true;
     ready_ = false;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Leftovers
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The entries of `folder` whose name `pattern` matches in full: real
+// files and folders only (no link, whatever it points at), hidden ones
+// included.
+QFileInfoList ownEntries(const QString& folder, const QRegularExpression& pattern, QDir::Filters kinds) {
+    QFileInfoList found;
+    const QFileInfoList entries = QDir(folder).entryInfoList(kinds | QDir::Hidden | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+    for (const QFileInfo& entry : entries) {
+        if (entry.isSymLink() || entry.isJunction() || !pattern.match(entry.fileName()).hasMatch())
+            continue;
+        found << entry;
+    }
+    return found;
+}
+
+// `entry` is `target`, by either spelling.
+bool isTarget(const QFileInfo& entry, const QString& target) {
+    return QDir::cleanPath(entry.absoluteFilePath()) == QDir::cleanPath(QFileInfo(target).absoluteFilePath())
+           || samePath(entry.absoluteFilePath(), target);
+}
+
+#if defined(Q_OS_MACOS)
+// A forced detach of a mount nothing of ours uses any more, bounded.
+void forceDetach(const QString& mountPoint) {
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.setStandardInputFile(QProcess::nullDevice());
+    process.start(hdiutil(), {QStringLiteral("detach"), QStringLiteral("-force"), mountPoint});
+    if (!process.waitForFinished(15000)) {
+        process.kill();
+        process.waitForFinished(1000);
+    }
+}
+#endif
+
+} // namespace
+
+void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir, const Version& current) {
+    if (package.kind == PackageKind::MacBundle && !package.target.isEmpty()) {
+        // Staged copies (.GitBolt-<v>.app, and .GitBolt-<v>-cancelled-…
+        // .app, which cancel() renamed for its cleanup) and swapped-aside
+        // old ones (.GitBolt-<old>.app.old). At startup nothing of ours
+        // still needs them. Only a helper uses a staged copy or an aside
+        // one, and it is done with both by the time it starts GitBolt,
+        // its last step. While it waits, the GitBolt it waits for still
+        // runs and holds the instance lock, so a GitBolt started then is
+        // folded into that one long before it gets here; only in the
+        // instant between that GitBolt's exit and the helper's swap could
+        // one get this far, and the helper would then start the old copy
+        // and report failed, nothing lost. No Installer of this process
+        // exists yet. Another user's GitBolt (fast user switching) can
+        // run from the same folder, with a helper of its own waiting
+        // and its own staged copy: that one isn't ours, so only this
+        // user's go.
+        static const QRegularExpression staged(QStringLiteral("^\\.GitBolt-.+\\.app(\\.old)?$"));
+        const QFileInfo target(package.target);
+        for (const QFileInfo& entry : ownEntries(target.absolutePath(), staged, QDir::Dirs)) {
+            if (isTarget(entry, package.target))
+                continue;
+#if defined(Q_OS_UNIX)
+            if (entry.ownerId() != ::getuid())
+                continue;
+#endif
+            if (!QDir(entry.absoluteFilePath()).removeRecursively())
+                qWarning("update: couldn't remove %s", qPrintable(entry.absoluteFilePath()));
+        }
+    }
+
+    // Disk image mount points (macOS's prepare()), mounted or not: no
+    // Installer exists yet to use one. A mounted one is detached first;
+    // the folder goes only if empty, so never what was mounted there.
+    if (!workDir.isEmpty() && QDir::isAbsolutePath(workDir)) {
+        static const QRegularExpression mount(QStringLiteral("^mount-.+$"));
+        for (const QFileInfo& entry : ownEntries(workDir, mount, QDir::Dirs)) {
+#if defined(Q_OS_MACOS)
+            if (isMountPoint(entry.absoluteFilePath()))
+                forceDetach(entry.absoluteFilePath());
+#endif
+            if (!isMountPoint(entry.absoluteFilePath()))
+                QDir().rmdir(entry.absoluteFilePath());
+        }
+    }
+
+    if (package.kind == PackageKind::AppImage && !package.target.isEmpty()) {
+        // Beside the AppImage: an unfinished download, and checked
+        // downloads no newer than this one (an update that stopped after
+        // the download). Never this AppImage itself, whatever its name.
+        static const QRegularExpression part(QStringLiteral("^\\.GitBolt-.+-x86_64\\.AppImage\\.part$"));
+        static const QRegularExpression image(QStringLiteral("^GitBolt-(.+)-x86_64\\.AppImage$"));
+        const QString folder = QFileInfo(package.target).absolutePath();
+        for (const QFileInfo& entry : ownEntries(folder, part, QDir::Files)) {
+            if (!isTarget(entry, package.target))
+                QFile::remove(entry.absoluteFilePath());
+        }
+        for (const QFileInfo& entry : ownEntries(folder, image, QDir::Files)) {
+            const QString named = image.match(entry.fileName()).captured(1);
+            const std::optional<Version> version = Version::parse(named);
+            if (!version || version->toString() != named || *version > current || isTarget(entry, package.target))
+                continue;
+            QFile::remove(entry.absoluteFilePath());
+        }
+    }
 }
 
 } // namespace gitbolt::update

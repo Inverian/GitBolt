@@ -5774,6 +5774,14 @@ void MainWindow::setUpdates(const UpdateSetup& setup)
     if (updates_ || !setup.on())
         return;   // once only
     updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
+    // "GitBolt was updated to <v>.", at startup after an update.
+    connect(updates_, &UpdateController::statusMessage, this,
+            [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+}
+
+QString MainWindow::updateDownloadDir() const
+{
+    return updates_ ? updates_->setup().config.downloadDir : QString();
 }
 
 void MainWindow::startUpdates()

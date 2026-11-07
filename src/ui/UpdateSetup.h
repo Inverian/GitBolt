@@ -37,6 +37,12 @@ enum class UpdateGate { CompiledOut, TestSession, TestFeedRefused, TestFeed, Act
 /// "test-feed" or "on": for the test bridge's dump-state.
 QString updateGateName(UpdateGate gate);
 
+/// The variable a test-feed session's downloads folder is handed on
+/// in: main() sets it in its own environment, so the install helper
+/// and the copy it relaunches inherit it, and that copy finds the
+/// helper's install-result where its predecessor left it.
+inline constexpr char kTestUpdateDirEnv[] = "GITBOLT_TEST_UPDATE_DIR";
+
 struct UpdateSetupInputs {
     /// update::kOfficialFeed in an official build (GITBOLT_UPDATES_ENABLED,
     /// which only main() sees), empty otherwise: no library names it.
@@ -50,11 +56,12 @@ struct UpdateSetupInputs {
     QString appVersion;
     /// QStandardPaths::CacheLocation; downloads go in its "updates".
     QString cacheDir;
-    /// QDir::tempPath(): a test session's downloads go in its
-    /// "gitbolt-updates" instead, never in the user's cache. macOS's
-    /// CacheLocation ignores HOME, so a test's private HOME wouldn't
-    /// keep them out of ~/Library/Caches; the e2e harness gives each app
-    /// a TMPDIR of its own, and removes it afterwards.
+    /// QDir::tempPath(): a test session's downloads go in a folder of
+    /// its own in here instead (gitbolt-updates-XXXXXX, see
+    /// setUpUpdates), never in the user's cache. macOS's CacheLocation
+    /// ignores HOME, so a test's private HOME wouldn't keep them out of
+    /// ~/Library/Caches; the e2e harness gives each app a TMPDIR of its
+    /// own, and removes it afterwards.
     QString tempDir;
 };
 
@@ -86,6 +93,16 @@ struct UpdateSetup {
 
 /// The gate and the Config, by the rules above. The User-Agent is
 /// telemetry's (telemetry::userAgent), with the running version.
+///
+/// Pure but for one thing: a TestFeed session's downloads folder is
+/// made here, a fresh tempDir/gitbolt-updates-XXXXXX that only this
+/// user can enter (0700, an unguessable name). QDir::tempPath() is the
+/// shared /tmp on Linux without TMPDIR, and a fixed name there could
+/// be made first by another user, who could then swap the helper
+/// script or the package it installs. The folder kTestUpdateDirEnv
+/// names is used instead when it is still that: directly in tempDir,
+/// named so, a real folder (no link) of this user's that nobody else
+/// may write to. If none can be made, the session is TestFeedRefused.
 UpdateSetup setUpUpdates(const UpdateSetupInputs& inputs);
 
 } // namespace gitbolt::ui

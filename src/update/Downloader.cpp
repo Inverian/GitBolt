@@ -194,9 +194,22 @@ void Downloader::onChecksumsFinished(QNetworkReply* reply) {
 }
 
 void Downloader::fetchAsset() {
+    // A file of our own, made here: whatever has the .part's name goes
+    // first (a leftover, or a link someone planted; remove() unlinks a
+    // link itself, never what it points to), and the open is NewOnly
+    // (O_CREAT|O_EXCL, CREATE_NEW on Windows), which fails on any
+    // existing name, a link included, rather than follow it. For an
+    // AppImage the .part is in the AppImage's folder, which others may
+    // be able to write to. If the name can't be freed, the download
+    // fails rather than write anywhere else.
+    QFile::remove(partPath_);
     file_ = std::make_unique<QFile>(partPath_);
-    if (!file_->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        fail(tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString()));
+    if (!file_->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        const QString why = file_->errorString();
+        // Not discardPart's remove(): what is there isn't ours.
+        file_.reset();
+        partPath_.clear();
+        fail(tr("Couldn't save %1: %2.").arg(asset_.name, why));
         return;
     }
     hash_ = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);

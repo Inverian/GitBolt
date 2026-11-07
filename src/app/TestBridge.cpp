@@ -805,6 +805,11 @@ QByteArray TestBridge::cmdDumpState()
     }
     if (auto* notice = window_->findChild<widgets::UpdateNoticeBar*>(); notice && notice->isVisible())
         state[QStringLiteral("updateNotice")] = notice->text();
+    // Where the downloads, install.log and install-result go: a test
+    // feed's folder is the session's own (gitbolt-updates-XXXXXX), and
+    // the relaunched copy goes on using it.
+    if (const QString dir = window_->updateDownloadDir(); !dir.isEmpty())
+        state[QStringLiteral("updateDir")] = dir;
     // Which process answers, from where: an update test tells the
     // relaunched copy from the one it replaced.
     state[QStringLiteral("pid")] = QCoreApplication::applicationPid();

@@ -39,6 +39,7 @@
 #include <QCommandLineParser>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QInputDialog>
@@ -587,6 +588,11 @@ int main(int argc, char* argv[]) {
     gitbolt::ui::UpdateSetup updateSetup = gitbolt::ui::setUpUpdates(updateInputs);
     if (!updateSetup.problem.isEmpty())
         qWarning("In-app updates: %s", qPrintable(updateSetup.problem));
+    // A test feed's downloads folder is this session's own (setUpUpdates):
+    // handed on to the install helper and the copy it relaunches, which
+    // reads the helper's install-result there.
+    if (updateSetup.gate == gitbolt::ui::UpdateGate::TestFeed)
+        qputenv(gitbolt::ui::kTestUpdateDirEnv, QFile::encodeName(updateSetup.config.downloadDir));
     // How this copy was installed decides what Install and Restart
     // downloads, and whether it can (update/Package.h).
     if (updateSetup.on())

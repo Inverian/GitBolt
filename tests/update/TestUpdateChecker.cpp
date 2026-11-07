@@ -271,14 +271,24 @@ private slots:
                  qPrintable(failed.at(0).at(0).toString()));
     }
 
+    // A closed port: "Couldn't reach GitHub:" and the system's reason.
+    // The reason's wording is the platform's ("Connection refused" here;
+    // Windows retries a refused connect for about two seconds first, so
+    // the timeout is long enough for it to be refused, not timed out).
     void refusedConnection() {
         Config config = this->config();
         config.feedUrl = QUrl(QStringLiteral("http://127.0.0.1:%1/latest").arg(closedPort()));
+        config.requestTimeoutMs = 15000;
         Checker checker(config);
         QSignalSpy failed(&checker, &Checker::failed);
         checker.check(true);
-        QTRY_COMPARE(failed.count(), 1);
-        QCOMPARE(failed.at(0).at(0).toString(), QStringLiteral("Couldn't reach GitHub: Connection refused."));
+        QTRY_COMPARE_WITH_TIMEOUT(failed.count(), 1, 20000);
+        const QString message = failed.at(0).at(0).toString();
+        QVERIFY2(message.startsWith(QStringLiteral("Couldn't reach GitHub: ")), qPrintable(message));
+        QVERIFY2(!message.contains(QStringLiteral("timed out"), Qt::CaseInsensitive), qPrintable(message));
+#ifndef Q_OS_WIN
+        QCOMPARE(message, QStringLiteral("Couldn't reach GitHub: Connection refused."));
+#endif
     }
 
     void redirectsAreNotFollowed() {

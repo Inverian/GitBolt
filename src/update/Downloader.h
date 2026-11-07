@@ -35,9 +35,12 @@ namespace gitbolt::update {
 ///
 /// The file is written as `.<name>.part` in the target folder, hashed
 /// as it arrives, and renamed to `<name>` only once it has passed: the
-/// final name never holds a partial or unchecked file. A failure or
-/// cancel() deletes the .part; a file already at the final name is
-/// replaced only by one that passed.
+/// final name never holds a partial or unchecked file. The .part is
+/// always a new file: anything already at its name is removed first
+/// (a link itself, not what it points to) and it is created
+/// exclusively, so a planted link can't send the bytes elsewhere. A
+/// failure or cancel() deletes the .part; a file already at the final
+/// name is replaced only by one that passed.
 class Downloader : public QObject {
     Q_OBJECT
 public:

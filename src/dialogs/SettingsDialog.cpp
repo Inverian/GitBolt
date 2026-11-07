@@ -419,6 +419,19 @@ QWidget* SettingsDialog::createUpdatesPage()
     conf::ThemeService::keepMutedText(note, QStringLiteral("QLabel { color: %1; }"));
     form->addRow(QString(), note);
 
+    // The whole story, as the Usage Statistics page links its own:
+    // GitHub's anchor for PRIVACY.md's "## Update checks".
+    auto* privacyLink = new QLabel(
+        QStringLiteral("<a href=\"%1#update-checks\">%2</a>")
+            .arg(QString::fromLatin1(kPrivacyPolicyUrl),
+                 tr("What's sent, and what's checked before installing").toHtmlEscaped()),
+        updatesGroup_);
+    privacyLink->setObjectName(QStringLiteral("settings.updates-privacy-link"));
+    privacyLink->setTextFormat(Qt::RichText);
+    privacyLink->setOpenExternalLinks(true);
+    privacyLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    form->addRow(QString(), privacyLink);
+
     layout->addWidget(updatesGroup_);
     layout->addStretch(1);
     return page;

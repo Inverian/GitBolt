@@ -12,8 +12,9 @@ namespace gitbolt::update {
 ///
 /// Every helper waits for `pid` to exit (at most `waitSeconds`, then
 /// it gives up, removes `staged` and changes nothing), appends what it
-/// does to `logFile`, and starts GitBolt again whether the install
-/// worked or not: the new copy, or the old one. GitBolt may only start
+/// does to `logFile`, writes the install result (below) to
+/// `resultFile`, and starts GitBolt again whether the install worked or
+/// not: the new copy, or the old one. GitBolt may only start
 /// once the old process is gone, because the single-instance lock dies
 /// with it (a copy started earlier is folded into the old one and
 /// exits). The helper inherits GitBolt's environment and passes it on,
@@ -53,7 +54,37 @@ struct HelperInputs {
     /// Deb: pkexec's absolute path, which asks for root through the
     /// desktop's polkit agent.
     QString pkexec;
+    /// The version being installed, x.y.z: the install result names it,
+    /// and on Windows the installed GitBolt.exe must say it afterwards.
+    QString newVersion;
+    /// Where the helper writes the install result (Installer::resultPath,
+    /// <workDir>/install-result): see "The install result" below. Empty:
+    /// none is written.
+    QString resultFile;
+    /// AppImage: this GitBolt runs extracted (the runtime's
+    /// --appimage-extract-and-run, for want of FUSE), which the runtime
+    /// doesn't pass on to the next start; the new one is started with
+    /// APPIMAGE_EXTRACT_AND_RUN=1 so it comes up the same way. See
+    /// appImageRunsExtracted.
+    bool extractAndRun = false;
 };
+
+/// The install result. Every helper writes `resultFile` once, just
+/// before it starts GitBolt again or gives up: one UTF-8 line,
+///   <status> <version> <reason>
+/// and a newline. `version` is HelperInputs::newVersion; `reason` is
+/// short plain English, possibly empty, never with a newline (it never
+/// quotes a path or a tool's output). `status` is one of:
+///   - ok: the new version is in place;
+///   - declined: the user refused the administrator prompt (Windows'
+///     UAC, pkexec's polkit dialog dismissed);
+///   - failed: anything else that left the old version in place (the
+///     installer or apt-get failed, the files couldn't be swapped and
+///     were put back, the installed version isn't the new one, no
+///     polkit agent to ask with);
+///   - gave-up: GitBolt didn't quit within waitSeconds.
+/// The GitBolt that starts next reads it and deletes it, and tells the
+/// user when status isn't ok and the version is newer than itself.
 
 /// macOS: after GitBolt quits, move the old bundle aside within its
 /// folder, rename the staged one into its place (both on one volume,
@@ -64,20 +95,58 @@ QString macHelperScript(const HelperInputs& in);
 /// AppImage: after GitBolt quits, rename the new file over $APPIMAGE
 /// (same path, so desktop entries and launchers keep working; the
 /// running runtime held the old file open, so this was safe all along)
-/// and start it.
+/// and start it, extracted again if this one was (`extractAndRun`).
 QString appImageHelperScript(const HelperInputs& in);
 /// Deb: after GitBolt quits, `pkexec /usr/bin/apt-get install -y` the
 /// .deb (apt-get, not dpkg -i, so new dependencies are resolved), log
-/// apt's status, and start /usr/bin/gitbolt either way.
+/// apt's status, and start /usr/bin/gitbolt either way. pkexec's 126
+/// (its dialog dismissed) is "declined"; its 127 (no polkit agent to
+/// ask with) and anything else is "failed".
 QString debHelperScript(const HelperInputs& in);
-/// Windows (PowerShell): after GitBolt quits, run the NSIS installer
-/// elevated (UAC asks) and silently over the same install folder, wait
-/// for it, log its exit code, and start <target>\bin\GitBolt.exe
-/// either way. The installer is started as
-///   Start-Process -FilePath '<exe>' -ArgumentList '/S /D=<dir>' -Verb RunAs -Wait -PassThru
-/// with /D= last and unquoted, as NSIS requires: it takes the rest of
-/// the command line as the folder, spaces and all.
+/// Windows (PowerShell): after GitBolt quits, run windowsElevatedScript
+/// as an administrator (UAC asks: a second powershell.exe, started with
+/// Start-Process -Verb RunAs -Wait -PassThru and -EncodedCommand), log
+/// what its exit code means, write the install result, and start
+/// <target>\bin\GitBolt.exe either way (the old copy if nothing was
+/// installed). The elevated script travels inside this one as text and
+/// is encoded where it runs, so it is base64'd once, not twice: both
+/// command lines stay well within CreateProcess's 32767 characters.
 QString windowsHelperScript(const HelperInputs& in);
+/// The administrator part of the Windows helper. Elevated, it can see
+/// every session's processes and open files a filtered token can't, so
+/// only here can it tell whether the install is in use: another user's
+/// GitBolt (fast user switching, RDS), or one reopened while UAC asked.
+/// For up to kWindowsInUseSeconds it waits until no GitBolt but `pid`
+/// runs from the install folder and bin\GitBolt.exe can be opened with
+/// no sharing (a running image can't be); the NSIS installer would
+/// otherwise uninstall around the locked files and install a mix. Then
+/// it runs the installer silently over the folder, already elevated,
+///   Start-Process -FilePath $installer -ArgumentList '/S /D=<dir>' -Wait -PassThru
+/// with /D= last and unquoted, as NSIS requires (it takes the rest of
+/// the command line as the folder, spaces and all), and checks that
+/// bin\GitBolt.exe's ProductVersion (the version resource's, x.y.z) is
+/// now `newVersion`. Its exit code is 0 for that, or one of the
+/// kWindowsExit* codes, or the installer's own when it failed.
+QString windowsElevatedScript(const HelperInputs& in);
+
+/// How long the elevated Windows helper waits for the install to be
+/// free before it gives up and installs nothing.
+inline constexpr int kWindowsInUseSeconds = 60;
+/// The elevated Windows helper's exit codes beside 0 (installed and
+/// checked) and the installer's own (NSIS: 1 cancelled, 2 aborted).
+inline constexpr int kWindowsExitInUse = 1001;         ///< still in use after kWindowsInUseSeconds
+inline constexpr int kWindowsExitNoInstaller = 1002;   ///< the installer didn't start
+inline constexpr int kWindowsExitWrongVersion = 1003;  ///< installed, but GitBolt.exe isn't newVersion
+inline constexpr int kWindowsExitError = 1004;         ///< the script itself failed
+
+/// Whether an AppImage runs extracted rather than from its FUSE mount:
+/// the runtime was asked to (APPIMAGE_EXTRACT_AND_RUN set, any value,
+/// as the runtime's own test is), or $APPDIR (`appDir`) is an existing
+/// folder that isn't a mount point (the runtime's
+/// <tmp>/appimage_extracted_<hash>), as after --appimage-extract-and-run,
+/// which the runtime consumes without setting the variable. False for
+/// an empty or missing `appDir`.
+bool appImageRunsExtracted(const QString& appDir, bool extractAndRunSet);
 
 /// `text` as one POSIX shell word: in single quotes, each ' written as
 /// '\''. Safe for any text, newlines included.
@@ -94,5 +163,7 @@ QByteArray powerShellEncodedCommand(const QString& script);
 /// powershell.exe's arguments for the Windows helper: no profile, no
 /// prompts, no window, and the script by -EncodedCommand.
 QStringList powerShellArguments(const QString& script);
+/// What CreateProcess allows on a command line, the program included.
+inline constexpr int kWindowsCommandLineLimit = 32767;
 
 } // namespace gitbolt::update

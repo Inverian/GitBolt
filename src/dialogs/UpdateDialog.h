@@ -1,5 +1,6 @@
 #pragma once
 
+#include "update/Package.h"
 #include "update/Release.h"
 #include "update/Version.h"
 
@@ -26,8 +27,9 @@ namespace gitbolt::dialogs {
 /// and HTML included, and every label is plain text. The headline names
 /// the version the updater parsed, not the release's title. The only
 /// links followed are the release's page (View on GitHub, Open Release
-/// Page), which parseRelease checked is under GitBolt's releases, or
-/// the releases page itself.
+/// Page), which parseRelease checked is under GitBolt's releases, the
+/// releases page itself, or (an earlier install that failed) the page
+/// of a version's tag there.
 class UpdateDialog : public QDialog {
     Q_OBJECT
 public:
@@ -38,13 +40,16 @@ public:
         NotInstallable,  ///< notes and why this copy can't install it; Open Release Page, Skip, Later
         Downloading,     ///< progress with sizes; Cancel
         Preparing,       ///< Installer::status() text; Cancel
-        Failed,          ///< the message; Try Again, Open Release Page, Close
+        Failed,          ///< the message (and an earlier install's log); Try Again, Open Release Page, Close
+        Restarting,      ///< the helper runs and GitBolt quits; no buttons: nothing is left to cancel
+        QuitNeeded,      ///< GitBolt didn't quit: quit to finish; Quit GitBolt, Close
     };
 
     /// The releases page, for Open Release Page before a release is known.
     static QUrl releasesPageUrl();
     /// "checking", "up-to-date", "available", "not-installable",
-    /// "downloading", "preparing", "failed": for the test bridge.
+    /// "downloading", "preparing", "failed", "restarting",
+    /// "quit-needed": for the test bridge.
     static QString stateName(State state);
 
     explicit UpdateDialog(QWidget* parent = nullptr);
@@ -56,11 +61,15 @@ public:
     /// which may be newer (a development build).
     void showUpToDate(const update::Version& latest, const update::Version& current);
     /// The release with its notes. An empty `whyNot`: Available, with
-    /// Install and Restart. Otherwise NotInstallable: `whyNot` says why
-    /// this copy can't install it and what to do, and Open Release Page
-    /// takes Install's place.
+    /// Install and Restart, and a word on the prompt this `kind` of
+    /// install brings up once GitBolt has quit (UAC on Windows, polkit's
+    /// password for a deb), so that it doesn't come out of nowhere.
+    /// Otherwise NotInstallable: `whyNot` says why this copy can't
+    /// install it and what to do, and Open Release Page takes Install's
+    /// place.
     void showAvailable(const update::Release& release, const update::Version& current,
-                       const QString& whyNot = {});
+                       const QString& whyNot = {},
+                       update::PackageKind kind = update::PackageKind::Unknown);
     /// The installer of the release last shown, `received` bytes of
     /// `total` so far. Call again as bytes arrive.
     void showDownloading(qint64 received, qint64 total);
@@ -71,6 +80,19 @@ public:
     void showCheckFailed(const QString& message);
     /// Downloading or installing failed: `message` says why.
     void showInstallFailed(const QString& message);
+    /// The update to `version` that an earlier GitBolt left to its
+    /// helper didn't happen (UpdateController reads the helper's
+    /// install-result at startup): `message` says why and what to do
+    /// instead, and `log`, the end of the helper's install.log, is
+    /// shown as written where the notes go (hidden when empty). Open
+    /// Release Page goes to that version's release.
+    void showEarlierInstallFailed(const QString& version, const QString& message, const QString& log);
+    /// The helper is running and GitBolt quits: nothing can be
+    /// cancelled any more, so no button is offered.
+    void showRestarting();
+    /// GitBolt was asked to quit and didn't (a dialog refused to close,
+    /// work still running): the update goes in once it does.
+    void showQuitNeeded();
 
     /// What the dialog says, every visible line of it but the notes:
     /// for tests and the test bridge.
@@ -84,6 +106,9 @@ signals:
     void cancelClicked();
     /// Try Again, after a failure.
     void retryClicked();
+    /// Quit GitBolt, when it didn't quit by itself after the helper
+    /// started.
+    void quitClicked();
 
 private:
     void enterState(State state);
@@ -92,6 +117,8 @@ private:
     State state_ = State::Checking;
     QUrl pageUrl_;
     QString version_;   ///< of the release last shown
+    /// The Failed state shows an earlier install's log in the notes.
+    bool showsLog_ = false;
 
     QBoxLayout* top_ = nullptr;      ///< icon | column
     QBoxLayout* column_ = nullptr;   ///< the texts, the bar, the notes
@@ -112,6 +139,7 @@ private:
     QPushButton* cancel_ = nullptr;
     QPushButton* retry_ = nullptr;
     QPushButton* close_ = nullptr;
+    QPushButton* quit_ = nullptr;
 };
 
 } // namespace gitbolt::dialogs

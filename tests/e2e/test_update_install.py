@@ -25,8 +25,11 @@ touched (no /Applications, no real Trash, no installed GitBolt).
 5. The relaunched app answers the same bridge (the helper keeps
    GITBOLT_INSTANCE_NAME and the bridge's variables), from the same
    path, as a new process. The download, the staging and the helper's
-   log were in the session's TMPDIR (a test session's), not the user's
-   cache.
+   log were in the session's own folder in its TMPDIR
+   (gitbolt-updates-XXXXXX, dump-state's updateDir), not the user's
+   cache, and the relaunched copy goes on using that folder
+   (GITBOLT_TEST_UPDATE_DIR, inherited through the helper), where the
+   helper leaves its install-result.
 
 The packaged app has no offscreen platform plugin (macdeployqt and
 linuxdeploy ship none), so it runs on the real one: cocoa on macOS, and
@@ -35,6 +38,7 @@ on Linux whatever QT_QPA_PLATFORM says (xcb under xvfb-run in CI).
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import plistlib
@@ -167,15 +171,21 @@ class AppImageInstall:
 
 
 def install_log(app: App | None) -> str:
-    """The helper's log: a test session downloads into its TMPDIR."""
+    """The helper's log: a test session downloads into a folder of its
+    own in its TMPDIR."""
     if app is None:
         return ""
-    path = os.path.join(app.runtime_dir, "gitbolt-updates", "install.log")
-    try:
-        with open(path, errors="replace") as fh:
-            return f"\n--- {path}:\n" + fh.read()[-4000:]
-    except OSError:
-        return f"\n(no {path})"
+    paths = sorted(glob.glob(os.path.join(app.runtime_dir, "gitbolt-updates-*", "install.log")))
+    if not paths:
+        return f"\n(no gitbolt-updates-*/install.log in {app.runtime_dir})"
+    out = ""
+    for path in paths:
+        try:
+            with open(path, errors="replace") as fh:
+                out += f"\n--- {path}:\n" + fh.read()[-4000:]
+        except OSError as error:
+            out += f"\n(can't read {path}: {error})"
+    return out
 
 
 def test(_binary: str, scratch: str, apps: list) -> None:
@@ -201,6 +211,11 @@ def test(_binary: str, scratch: str, apps: list) -> None:
         old_pid = state.get("pid")
         if state.get("updates") != "test-feed":
             raise Failure(f"updates gate {state.get('updates')!r}")
+        update_dir = state.get("updateDir", "")
+        if os.path.realpath(os.path.dirname(update_dir)) != os.path.realpath(app.runtime_dir) \
+                or not os.path.basename(update_dir).startswith("gitbolt-updates-"):
+            raise Failure(f"downloads go to {update_dir!r}, not a folder of the session's own "
+                          f"in its TMPDIR {app.runtime_dir!r}")
 
         app.ok("trigger help.check-for-updates")
         state = app.wait_until(lambda s: s.get("updateDialog") in ("available", "not-installable"),
@@ -244,10 +259,27 @@ def test(_binary: str, scratch: str, apps: list) -> None:
             raise Failure(f"the relaunched copy runs from {new_state.get('appPath')!r}, "
                           f"not {install.binary!r}")
         install.check_replaced(home)
-        # Downloaded, staged and logged in the session's own TMPDIR, never
-        # in the user's cache (macOS's CacheLocation ignores HOME).
-        if not os.path.isfile(os.path.join(app.runtime_dir, "gitbolt-updates", "install.log")):
-            raise Failure("no install.log in the session's TMPDIR")
+        # Downloaded, staged and logged in the session's own folder in
+        # its TMPDIR, never in the user's cache (macOS's CacheLocation
+        # ignores HOME); the relaunched copy uses the same folder.
+        if not os.path.isfile(os.path.join(update_dir, "install.log")):
+            raise Failure(f"no install.log in {update_dir}")
+        if new_state.get("updateDir") != update_dir:
+            raise Failure(f"the relaunched copy downloads into {new_state.get('updateDir')!r}, "
+                          f"not {update_dir!r}: it can't read the helper's install-result")
+        # The helper's install-result, read at start: the new copy says
+        # the update went through (the status bar; dump-state's
+        # statusMessage), and the result is gone, said once.
+        want = f"GitBolt was updated to {install.version}."
+        deadline = time.monotonic() + 15
+        said = new_state.get("statusMessage")
+        while said != want and time.monotonic() < deadline:
+            time.sleep(0.3)
+            said = app.cmd("dump-state", timeout=5).get("statusMessage")
+        if said != want:
+            raise Failure(f"the relaunched copy's status bar says {said!r}, not {want!r}")
+        if os.path.exists(os.path.join(update_dir, "install-result")):
+            raise Failure("install-result is still there after the relaunched copy read it")
 
         app.cmd("quit")
         deadline = time.monotonic() + 30

@@ -359,6 +359,37 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # The cache saying GITBOLT_UPDATES=ON (Check update wiring) doesn't
+      # show that GITBOLT_UPDATES_ENABLED reached main.cpp: its #ifdef is
+      # compiled in official builds only, so no pull request ever builds
+      # that line. A renamed or misplaced definition would ship a release
+      # with the feed compiled out, which could never offer the next one.
+      # The app binary names the feed in an official build and in no
+      # other. The app only: the update tests name it too. One leg is
+      # enough, as it is the same target's definition on every platform.
+      - name: Check the update feed is compiled in (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          OFFICIAL: ${{ github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          app=build/src/app/gitbolt
+          feed='https://api.github.com/repos/Inverian/GitBolt/releases/latest'
+          [ -f "$app" ] || { echo "::error::no $app to look in (renamed in CMake?)"; exit 1; }
+          # grep -c counts the binary's "lines" that name it, and exits 1
+          # when none do: an answer here, not an error.
+          count=$(LC_ALL=C grep -a -c -F -- "$feed" "$app" || true)
+          count=${count:-0}
+          if [ "$OFFICIAL" = true ]; then
+            [ "$count" -ge 1 ] || { echo "::error::official build, but $app doesn't name the update feed: GITBOLT_UPDATES_ENABLED never reached main.cpp"; exit 1; }
+            echo "Official build; $app names the update feed"
+          elif [ "$count" -ne 0 ]; then
+            echo "::error::$app names the update feed in a non-official build ($GITHUB_EVENT_NAME, $GITHUB_REPOSITORY, $GITHUB_REF)"
+            exit 1
+          else
+            echo "Not an official build: $app doesn't name the update feed"
+          fi
+
       # Every %n text needs its English singular and plural in
       # translations/gitbolt_en.ts (util::installEnglishPlurals), or the
       # app shows "1 file(s)". update_translations re-reads the sources

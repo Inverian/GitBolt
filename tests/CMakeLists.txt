@@ -154,9 +154,11 @@ target_link_libraries(test_update_package PRIVATE gitbolt_update)
 # on scratch folders with HOME a scratch folder too: macOS's (on macOS)
 # and the AppImage's under /bin/sh and dash, the deb's with a stand-in
 # pkexec; the Windows PowerShell one as text (quoting, /D= last, the
-# -EncodedCommand round trip), and for real against the NSIS installer
-# CI just built when GITBOLT_TEST_NSIS_INSTALLER/_DIR name it (the
-# Windows smoke step does; skipped otherwise).
+# -EncodedCommand round trip, the elevated wrapper that waits for the
+# install folder to be free), and for real against the NSIS installer CI
+# just built when GITBOLT_TEST_NSIS_INSTALLER/_DIR name it (the Windows
+# smoke step does; skipped otherwise): give up, another GitBolt running
+# from the install, then a clean update.
 gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
 target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_helpers PRIVATE gitbolt_update)

@@ -17,6 +17,10 @@
 //   - the final name only ever holds a checked file: never the .part's
 //     bytes, and an earlier file there is replaced only by one that
 //     passed
+//   - the .part is always a new file: a link planted at its name is
+//     removed, never written through (nor is a file created where a
+//     dangling one points), and something there that can't be removed
+//     fails the download
 //   - removeOldDownloads: the folders of the running version and older
 //     ones go, anything else stays, and a link is never followed
 //
@@ -571,6 +575,51 @@ private slots:
         QCOMPARE(run(downloader, release), QString());
         QCOMPARE(contentsOf(finalPath()), file);
         QVERIFY(!QFileInfo::exists(partPath()));
+    }
+
+    // A link planted at the .part's name (an AppImage's folder may be
+    // writable by others: a shared, sticky group folder) sends nothing
+    // through it: the link goes, the .part is a new file, and the file
+    // it pointed at is as it was. The final name holds a real file.
+    void aLinkAtThePartsNameIsNeverFollowed() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a .lnk shortcut on Windows, which no open follows");
+#else
+        const QString victim = dir_->path() + QStringLiteral("/home/.ssh/authorized_keys");
+        QVERIFY(writeFile(victim, "ssh-ed25519 AAAA mine\n"));
+        QVERIFY(QDir().mkpath(versionDir()));
+        QVERIFY(QFile::link(victim, partPath()));
+        const QByteArray file = payload(20 * 1024);
+        const Release release = publish(file);
+        Downloader downloader(config());
+        QCOMPARE(run(downloader, release), QString());
+        QCOMPARE(contentsOf(victim), QByteArray("ssh-ed25519 AAAA mine\n"));
+        QVERIFY(!QFileInfo(finalPath()).isSymLink());
+        QCOMPARE(contentsOf(finalPath()), file);
+        QCOMPARE(entriesOf(versionDir()), QStringList{kAsset});
+
+        // A dangling link, to where a file would be created: none is.
+        const QString nowhere = dir_->path() + QStringLiteral("/created-by-the-link");
+        QVERIFY(QFile::remove(finalPath()));
+        QVERIFY(QFile::link(nowhere, partPath()));
+        QCOMPARE(run(downloader, release), QString());
+        QVERIFY(!QFileInfo::exists(nowhere));
+        QCOMPARE(contentsOf(finalPath()), file);
+#endif
+    }
+
+    // Something at the .part's name that can't be removed (here a
+    // folder with something in it): the download fails, writes nowhere
+    // else, and leaves that thing alone.
+    void aPartThatCantBeReplacedFailsTheDownload() {
+        QVERIFY(writeFile(partPath() + QStringLiteral("/inside.txt"), "not ours"));
+        const Release release = publish(payload(1000));
+        Downloader downloader(config());
+        const QString why = run(downloader, release);
+        QVERIFY2(why.startsWith(QStringLiteral("Couldn't save %1").arg(kAsset)), qPrintable(why));
+        QCOMPARE(contentsOf(partPath() + QStringLiteral("/inside.txt")), QByteArray("not ours"));
+        QVERIFY(!QFileInfo::exists(finalPath()));
+        QVERIFY(!downloader.busy());
     }
 
     // ---- calling it -------------------------------------------------------

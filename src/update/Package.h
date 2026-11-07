@@ -3,6 +3,7 @@
 #include "update/Version.h"
 
 #include <QString>
+#include <QStringList>
 
 #include <functional>
 
@@ -38,10 +39,21 @@ struct PackageProbe {
     /// $APPIMAGE, which the AppImage runtime sets to the .AppImage
     /// file's absolute path. Empty when unset.
     QString appImage;
+    /// $APPDIR, which the runtime sets beside $APPIMAGE: where it
+    /// mounted (or extracted) that image. Both are inherited by every
+    /// process an AppImage starts, a terminal's shell too, so only a
+    /// binary inside $APPDIR is that AppImage's. Empty when unset.
+    QString appDir;
     /// Where dpkg lists the files of each installed package.
     QString dpkgInfoDir = QStringLiteral("/var/lib/dpkg/info");
     /// pkexec's absolute path, found on PATH, or empty.
     QString pkexec;
+    /// Windows: the UninstallString values (as stored, quotes and all)
+    /// of HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GitBolt
+    /// in the 32- and 64-bit registry views: where the installed GitBolt
+    /// is, which is the one the NSIS installer uninstalls before it
+    /// installs. Empty when there is none.
+    QStringList registeredUninstallers;
     /// Whether a path may be written; null means QFileInfo::isWritable.
     std::function<bool(const QString&)> writable;
 };
@@ -56,21 +68,32 @@ struct PackageProbe {
 ///     copy, and only if both the bundle and its folder are writable:
 ///     the swap renames the bundle within its folder.
 ///   - WindowsInstall: appDirPath is …\bin and ..\Uninstall.exe exists
-///     (the NSIS installer's). Always installable: the installer asks
-///     for elevation itself (UAC).
-///   - Deb: appDirPath ends in /lib/gitbolt, dpkg lists the package
-///     (gitbolt.list), and $APPIMAGE is unset. Installable when pkexec
-///     is there to ask for root; otherwise whyNot gives the command.
-///   - AppImage: $APPIMAGE names an existing file and appDirPath ends
-///     in /usr/bin (inside the mounted image). Installable when the
-///     AppImage's folder is writable: the new file is written next to
-///     it and renamed over it.
+///     (the NSIS installer's). Installable (the installer asks for
+///     elevation itself, UAC) unless the registry names another
+///     install: a copied install folder isn't the registered one, and
+///     the installer would uninstall that one and move it here.
+///   - Deb: appDirPath ends in /lib/gitbolt and dpkg lists the package
+///     (gitbolt.list). Installable when pkexec is there to ask for
+///     root; otherwise whyNot gives the command. (An inherited
+///     $APPIMAGE doesn't matter: a deb's binary is never in $APPDIR.)
+///   - AppImage: $APPIMAGE names an existing file and appDirPath is
+///     $APPDIR/usr/bin (canonically: inside that image's mount or
+///     extraction). Installable when the AppImage's folder is writable:
+///     the new file is written next to it and renamed over it. A
+///     hand-extracted squashfs-root started from another AppImage's
+///     terminal inherits that one's $APPIMAGE and $APPDIR, and is
+///     Unknown: its $APPIMAGE is another application.
 ///   - Unknown: anything else.
 PackageInfo detectPackage(const PackageProbe& probe);
 
-/// The running process's probe: applicationDirPath, $APPIMAGE, and
-/// pkexec on PATH (Linux only).
+/// The running process's probe: applicationDirPath, $APPIMAGE,
+/// $APPDIR, pkexec on PATH (Linux only), and the registered
+/// uninstallers (Windows only).
 PackageProbe currentProbe();
+
+/// Windows: PackageProbe::registeredUninstallers, read from the
+/// registry. Empty elsewhere.
+QStringList registeredWindowsUninstallers();
 
 /// The release asset each kind installs from, as CI names them:
 /// GitBolt-<v>-Darwin-arm64.dmg, GitBolt-<v>-Windows-AMD64.exe,

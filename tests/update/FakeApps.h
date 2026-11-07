@@ -44,15 +44,28 @@ inline QString readFile(const QString& path) {
 
 /// A GitBolt that only says it ran: one line per start, appended to
 /// $GITBOLT_TEST_MARKER, "<label> pid=<pid> pgid=<group> instance=<name>".
+/// When $GITBOLT_TEST_RESULT names a file, it also copies that file, as
+/// it is when this copy starts, to $GITBOLT_TEST_MARKER.result: what the
+/// relaunched GitBolt would read (the helpers' install result).
 inline QByteArray fakeAppScript(const QString& label) {
     return QByteArrayLiteral("#!/bin/sh\n"
                              "printf '%s pid=%s pgid=%s instance=%s\\n' '")
            + label.toUtf8()
            + QByteArrayLiteral("' \"$$\" \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"${GITBOLT_INSTANCE_NAME:-}\" "
-                               ">>\"$GITBOLT_TEST_MARKER\"\n");
+                               ">>\"$GITBOLT_TEST_MARKER\"\n"
+                               "if [ -n \"${GITBOLT_TEST_RESULT:-}\" ]; then\n"
+                               "    cat \"$GITBOLT_TEST_RESULT\" >\"$GITBOLT_TEST_MARKER.result\" 2>/dev/null\n"
+                               "fi\n");
 }
 
-inline QByteArray infoPlist(const QString& id, const QString& version) {
+/// `minimumSystem`: LSMinimumSystemVersion, as the release's bundle has
+/// (CMAKE_OSX_DEPLOYMENT_TARGET); empty, none.
+inline QByteArray infoPlist(const QString& id, const QString& version,
+                            const QString& minimumSystem = QStringLiteral("11.0")) {
+    const QString minimum = minimumSystem.isEmpty()
+                                ? QString()
+                                : QStringLiteral("  <key>LSMinimumSystemVersion</key><string>%1</string>\n")
+                                      .arg(minimumSystem);
     return QStringLiteral("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                           "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
                           "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
@@ -63,8 +76,9 @@ inline QByteArray infoPlist(const QString& id, const QString& version) {
                           "  <key>CFBundlePackageType</key><string>APPL</string>\n"
                           "  <key>CFBundleShortVersionString</key><string>%2</string>\n"
                           "  <key>CFBundleVersion</key><string>%2</string>\n"
+                          "%3"
                           "</dict>\n</plist>\n")
-        .arg(id, version)
+        .arg(id, version, minimum)
         .toUtf8();
 }
 
@@ -73,12 +87,13 @@ inline QByteArray infoPlist(const QString& id, const QString& version) {
 /// detectPackage looks for), and Contents/Resources/copy.txt saying
 /// which copy it is. `label` defaults to the version.
 inline bool makeBundle(const QString& bundle, const QString& version,
-                       const QString& id = QStringLiteral("com.gitbolt.app"), QString label = {}) {
+                       const QString& id = QStringLiteral("com.gitbolt.app"), QString label = {},
+                       const QString& minimumSystem = QStringLiteral("11.0")) {
     if (label.isEmpty())
         label = version;
     const QDir contents(bundle + QStringLiteral("/Contents"));
     return QDir().mkpath(contents.filePath(QStringLiteral("Frameworks")))
-           && writeFile(contents.filePath(QStringLiteral("Info.plist")), infoPlist(id, version))
+           && writeFile(contents.filePath(QStringLiteral("Info.plist")), infoPlist(id, version, minimumSystem))
            && writeFile(contents.filePath(QStringLiteral("MacOS/GitBolt")), fakeAppScript(label), true)
            && writeFile(contents.filePath(QStringLiteral("Resources/copy.txt")), label.toUtf8() + '\n');
 }

@@ -90,6 +90,9 @@ public:
     void startUpdates();
     /// The gate main() evaluated, for the test bridge's dump-state.
     UpdateGate updateGate() const;
+    /// Where downloads, the helper's log and its install-result go
+    /// while updates are on; empty otherwise. For the test bridge.
+    QString updateDownloadDir() const;
 
     /// Probes the git GitBolt runs on a worker (git::probeGit()), then
     /// shows what there is to say about it (showGitNotice).

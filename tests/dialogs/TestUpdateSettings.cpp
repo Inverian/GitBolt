@@ -13,7 +13,8 @@
 //     the session has the in-app check, and a hidden row shows
 //     nothing; shown, the switch reflects the setting, Apply writes it
 //     once, Cancel writes nothing, and GITBOLT_UPDATE_CHECK's lock
-//     disables it and says why; the note says what the check sends.
+//     disables it and says why; the note says what the check sends,
+//     and a link goes to PRIVACY.md's Update checks section.
 //
 // Settings live in a folder of the test's own (QSettings::setPath), and
 // Apply's git config writes go to a temporary global config.
@@ -21,7 +22,9 @@
 
 #include <QCheckBox>
 #include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QGroupBox>
 #include <QLabel>
 #include <QSettings>
@@ -34,6 +37,8 @@
 
 #include "conf/SettingsService.h"
 #include "dialogs/SettingsDialog.h"
+
+#include <algorithm>
 
 using gitbolt::conf::SettingsService;
 using gitbolt::dialogs::SettingsDialog;
@@ -187,6 +192,38 @@ private slots:
         SettingsDialog reopened(&settings, nullptr);
         reopened.setUpdates(true, QString());
         QVERIFY(child<QCheckBox>(reopened, "settings.check-for-updates")->isChecked());
+    }
+
+    // As the Usage Statistics page links its section: PRIVACY.md's
+    // "## Update checks", by the anchor GitHub gives that heading.
+    void linksThePrivacySection() {
+        SettingsService settings;
+        SettingsDialog dialog(&settings, nullptr);
+        dialog.setUpdates(true, QString());
+        auto* group = child<QGroupBox>(dialog, "settings.updates-group");
+        auto* link = child<QLabel>(dialog, "settings.updates-privacy-link");
+        QVERIFY(group && link);
+        QVERIFY(group->isAncestorOf(link));
+        QCOMPARE(link->textFormat(), Qt::RichText);
+        QVERIFY(link->openExternalLinks());
+        QVERIFY2(link->text().contains(
+                     QStringLiteral("href=\"https://github.com/Inverian/GitBolt/blob/main/PRIVACY.md#update-checks\"")),
+                 qPrintable(link->text()));
+        QVERIFY2(link->text().contains(QStringLiteral(">What's sent, and what's checked before installing</a>")),
+                 qPrintable(link->text()));
+
+        // The heading is there to link to, and is the only one GitHub
+        // would give that anchor (a second one would be update-checks-1).
+        QFile privacy(QFileInfo(QStringLiteral(__FILE__)).dir().filePath(QStringLiteral("../../PRIVACY.md")));
+        QVERIFY2(privacy.open(QIODevice::ReadOnly), qPrintable(privacy.fileName()));
+        const QList<QByteArray> lines = privacy.readAll().split('\n');
+        QCOMPARE(std::count_if(lines.cbegin(), lines.cend(),
+                               [](const QByteArray& line) {
+                                   return line.startsWith('#') && line.contains(" Update checks")
+                                          && line.trimmed().endsWith("Update checks");
+                               }),
+                 1);
+        QVERIFY(lines.contains("## Update checks"));
     }
 
     void applyWritesTheSwitchOnce() {

@@ -14,12 +14,20 @@
 //     is non-modal;
 //   - sizes read as the platforms count them, and the bar can't
 //     overflow;
-//   - it fits what it says: without the notes it is shorter.
+//   - it fits what it says: without the notes it is shorter, and a
+//     long message leaves no gap under it;
+//   - Available warns of the system's prompt where one comes (Windows'
+//     UAC, a deb's administrator password), and only there;
+//   - once the helper runs nothing can be cancelled: Restarting has no
+//     button, and QuitNeeded offers Quit GitBolt and Close;
+//   - an earlier GitBolt's failed install shows its log where the notes
+//     go, as written, and links that version's release.
 //
 
 #include <QApplication>
 #include <QDesktopServices>
 #include <QLabel>
+#include <QLayout>
 #include <QLocale>
 #include <QPlainTextEdit>
 #include <QProgressBar>
@@ -29,10 +37,14 @@
 #include <QUrl>
 
 #include "dialogs/UpdateDialog.h"
+#include "update/Package.h"
 #include "update/Release.h"
 #include "update/Version.h"
 
+#include <algorithm>
+
 using gitbolt::dialogs::UpdateDialog;
+using gitbolt::update::PackageKind;
 using gitbolt::update::Release;
 using gitbolt::update::Version;
 using State = UpdateDialog::State;
@@ -127,6 +139,129 @@ private slots:
         QCOMPARE(UpdateDialog::stateName(State::Downloading), QStringLiteral("downloading"));
         QCOMPARE(UpdateDialog::stateName(State::Preparing), QStringLiteral("preparing"));
         QCOMPARE(UpdateDialog::stateName(State::Failed), QStringLiteral("failed"));
+        QCOMPARE(UpdateDialog::stateName(State::Restarting), QStringLiteral("restarting"));
+        QCOMPARE(UpdateDialog::stateName(State::QuitNeeded), QStringLiteral("quit-needed"));
+    }
+
+    // The prompt comes from the system once GitBolt has quit: Available
+    // says so beforehand, for the kinds that bring one up.
+    void availableWarnsOfTheSystemsPrompt_data() {
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<QString>("warning");
+        QTest::newRow("Windows") << int(PackageKind::WindowsInstall)
+                                 << "Windows will ask for permission to install it.";
+        QTest::newRow("deb") << int(PackageKind::Deb) << "You'll be asked for an administrator's password.";
+        QTest::newRow("macOS") << int(PackageKind::MacBundle) << "";
+        QTest::newRow("AppImage") << int(PackageKind::AppImage) << "";
+        QTest::newRow("unknown") << int(PackageKind::Unknown) << "";
+    }
+    void availableWarnsOfTheSystemsPrompt() {
+        QFETCH(int, kind);
+        QFETCH(QString, warning);
+        UpdateDialog dialog;
+        dialog.showAvailable(release(), v(0, 1, 0), {}, PackageKind(kind));
+        const QString message = child<QLabel>(dialog, "updateDialog.message")->text();
+        const QString base = QStringLiteral("You have 0.1.0. Install and Restart downloads the new version, "
+                                            "checks it, and restarts GitBolt with it.");
+        QCOMPARE(message, warning.isEmpty() ? base : base + QLatin1Char(' ') + warning);
+        // Nothing to warn of when it can't be installed here.
+        dialog.showAvailable(release(), v(0, 1, 0), QStringLiteral("Not here."), PackageKind(kind));
+        QCOMPARE(child<QLabel>(dialog, "updateDialog.message")->text(), QStringLiteral("You have 0.1.0."));
+    }
+
+    // The helper runs, GitBolt quits: no button, nothing to cancel.
+    void restartingOffersNothingToCancel() {
+        UpdateDialog dialog;
+        dialog.showAvailable(release(), v(0, 1, 0));
+        dialog.showPreparing(QStringLiteral("Copying GitBolt…"));
+        dialog.showRestarting();
+        QCOMPARE(dialog.state(), State::Restarting);
+        QCOMPARE(dialog.property("updateState").toString(), QStringLiteral("restarting"));
+        QCOMPARE(headline(dialog), QStringLiteral("Restarting GitBolt to finish the update…"));
+        QVERIFY(dialog.shownText().contains(QStringLiteral("GitBolt 0.1.1 is put in place")));
+        QCOMPARE(shownButtons(dialog), QStringList{});
+        QVERIFY(!defaultButton(dialog));
+        auto* progress = child<QProgressBar>(dialog, "updateDialog.progress");
+        QVERIFY(!progress->isHidden());
+        QCOMPARE(progress->maximum(), 0);
+        QVERIFY(child<QPlainTextEdit>(dialog, "updateDialog.notes")->isHidden());
+    }
+
+    // GitBolt didn't quit: quit it, or close this and quit later.
+    void quitNeededOffersQuit() {
+        UpdateDialog dialog;
+        QSignalSpy quit(&dialog, &UpdateDialog::quitClicked);
+        dialog.showAvailable(release(), v(0, 1, 0));
+        dialog.showRestarting();
+        dialog.showQuitNeeded();
+        QCOMPARE(dialog.state(), State::QuitNeeded);
+        QCOMPARE(headline(dialog), QStringLiteral("Quit GitBolt to finish installing 0.1.1."));
+        QVERIFY(dialog.shownText().contains(QStringLiteral("within 10 minutes")));
+        QCOMPARE(shownButtons(dialog),
+                 (QStringList{QStringLiteral("updateDialog.close"), QStringLiteral("updateDialog.quit")}));
+        QCOMPARE(defaultButton(dialog)->objectName(), QStringLiteral("updateDialog.quit"));
+        QCOMPARE(child<QPushButton>(dialog, "updateDialog.quit")->text(), QStringLiteral("Quit GitBolt"));
+        QVERIFY(child<QProgressBar>(dialog, "updateDialog.progress")->isHidden());
+        child<QPushButton>(dialog, "updateDialog.quit")->click();
+        QCOMPARE(quit.count(), 1);
+    }
+
+    // A state without the notes is as tall as its text at the width it
+    // has: a long message (QuitNeeded's wraps over lines) leaves no gap
+    // under it. adjustSize alone sized it for its labels' narrower hint.
+    void aLongMessageLeavesNoGap() {
+        UpdateDialog dialog;
+        dialog.showAvailable(release(), v(0, 1, 0));
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        dialog.showRestarting();
+        dialog.showQuitNeeded();
+        const int fits = std::max(dialog.minimumSizeHint().height(),
+                                  dialog.layout()->totalHeightForWidth(dialog.width()));
+        QVERIFY2(dialog.height() <= fits, qPrintable(QStringLiteral("%1 > %2").arg(dialog.height()).arg(fits)));
+        dialog.showCheckFailed(QStringLiteral("GitHub is limiting requests from your network; try again later. "
+                                              "Again and again, at length, so that this wraps over lines."));
+        QVERIFY(dialog.height() <= std::max(dialog.minimumSizeHint().height(),
+                                            dialog.layout()->totalHeightForWidth(dialog.width())));
+    }
+
+    // An earlier GitBolt's install that didn't go in: its log where the
+    // notes go, as written; that version's release page.
+    void earlierInstallFailedShowsTheLog() {
+        UrlCatcher catcher;
+        UpdateDialog dialog;
+        const QString log = QStringLiteral("10:00:01 <b>waiting</b>\n10:00:02 apt-get failed with status 100");
+        dialog.showEarlierInstallFailed(QStringLiteral("0.1.2"), QStringLiteral("It failed.\n\nDo this instead."), log);
+        QCOMPARE(dialog.state(), State::Failed);
+        QCOMPARE(headline(dialog), QStringLiteral("Couldn't install GitBolt 0.1.2"));
+        QCOMPARE(child<QLabel>(dialog, "updateDialog.message")->text(), QStringLiteral("It failed.\n\nDo this instead."));
+        auto* notes = child<QPlainTextEdit>(dialog, "updateDialog.notes");
+        auto* notesLabel = child<QLabel>(dialog, "updateDialog.notesLabel");
+        QVERIFY(!notes->isHidden());
+        QCOMPARE(notes->toPlainText(), log);
+        QCOMPARE(notesLabel->text(), QStringLiteral("The end of the installer's log:"));
+        QCOMPARE(shownButtons(dialog),
+                 (QStringList{QStringLiteral("updateDialog.close"), QStringLiteral("updateDialog.openReleasePage"),
+                              QStringLiteral("updateDialog.retry")}));
+        QCOMPARE(defaultButton(dialog)->objectName(), QStringLiteral("updateDialog.retry"));
+        child<QPushButton>(dialog, "updateDialog.openReleasePage")->click();
+        QCOMPARE(catcher.urls,
+                 QList<QUrl>{QUrl(QStringLiteral("https://github.com/Inverian/GitBolt/releases/tag/v0.1.2"))});
+
+        // Without a log, no box for it.
+        dialog.showEarlierInstallFailed(QStringLiteral("0.1.2"), QStringLiteral("It failed."), {});
+        QVERIFY(notes->isHidden());
+        // The next states are the usual ones: no log, then the notes.
+        dialog.showEarlierInstallFailed(QStringLiteral("0.1.2"), QStringLiteral("It failed."), log);
+        dialog.showChecking();
+        QVERIFY(notes->isHidden());
+        dialog.showCheckFailed(QStringLiteral("Couldn't reach GitHub."));
+        QVERIFY(notes->isHidden());
+        dialog.showAvailable(release(), v(0, 1, 0));
+        QCOMPARE(notesLabel->text(), QStringLiteral("What's new:"));
+        QCOMPARE(notes->toPlainText(), release().notes);
+        dialog.showInstallFailed(QStringLiteral("The download didn't match its checksum."));
+        QVERIFY(notes->isHidden());
     }
 
     void upToDate() {

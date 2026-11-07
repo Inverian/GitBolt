@@ -64,6 +64,8 @@ QString UpdateDialog::stateName(State state)
     case State::Downloading: return QStringLiteral("downloading");
     case State::Preparing: return QStringLiteral("preparing");
     case State::Failed: return QStringLiteral("failed");
+    case State::Restarting: return QStringLiteral("restarting");
+    case State::QuitNeeded: return QStringLiteral("quit-needed");
     }
     return {};
 }
@@ -178,7 +180,8 @@ UpdateDialog::UpdateDialog(QWidget* parent)
     cancel_ = button(this, tr("Cancel"), "updateDialog.cancel");
     retry_ = button(this, tr("Try Again"), "updateDialog.retry");
     install_ = button(this, tr("Install and Restart"), "updateDialog.install");
-    for (QPushButton* b : {skip_, later_, openReleasePage_, close_, cancel_, retry_, install_})
+    quit_ = button(this, tr("Quit GitBolt"), "updateDialog.quit");
+    for (QPushButton* b : {skip_, later_, openReleasePage_, close_, cancel_, retry_, install_, quit_})
         buttons->addWidget(b);
     root->addLayout(buttons);
 
@@ -193,6 +196,7 @@ UpdateDialog::UpdateDialog(QWidget* parent)
     connect(close_, &QPushButton::clicked, this, &QDialog::reject);
     connect(cancel_, &QPushButton::clicked, this, &UpdateDialog::cancelClicked);
     connect(retry_, &QPushButton::clicked, this, &UpdateDialog::retryClicked);
+    connect(quit_, &QPushButton::clicked, this, &UpdateDialog::quitClicked);
 
     setMinimumWidth(560);
     showChecking();
@@ -205,13 +209,16 @@ void UpdateDialog::enterState(State state)
     // For the test bridge's dump-state, without it knowing this class.
     setProperty("updateState", stateName(state));
 
+    // The release's notes, or (Failed after an earlier GitBolt's
+    // install) the end of the helper's log.
     const bool withRelease = state == State::Available || state == State::NotInstallable
-                             || state == State::Downloading || state == State::Preparing;
+                             || state == State::Downloading || state == State::Preparing
+                             || (state == State::Failed && showsLog_);
     notesLabel_->setVisible(withRelease);
     notes_->setVisible(withRelease);
     reason_->setVisible(state == State::NotInstallable);
     progress_->setVisible(state == State::Checking || state == State::Downloading
-                          || state == State::Preparing);
+                          || state == State::Preparing || state == State::Restarting);
     progressText_->setVisible(state == State::Downloading || state == State::Preparing);
     message_->setVisible(true);
 
@@ -219,10 +226,12 @@ void UpdateDialog::enterState(State state)
     skip_->setVisible(state == State::Available || state == State::NotInstallable);
     later_->setVisible(state == State::Available || state == State::NotInstallable);
     openReleasePage_->setVisible(state == State::NotInstallable || state == State::Failed);
-    close_->setVisible(state == State::Checking || state == State::UpToDate || state == State::Failed);
+    close_->setVisible(state == State::Checking || state == State::UpToDate || state == State::Failed
+                       || state == State::QuitNeeded);
     cancel_->setVisible(state == State::Downloading || state == State::Preparing);
     retry_->setVisible(state == State::Failed);
     install_->setVisible(state == State::Available);
+    quit_->setVisible(state == State::QuitNeeded);
 
     // Enter does the state's main action.
     QPushButton* primary = close_;
@@ -234,8 +243,10 @@ void UpdateDialog::enterState(State state)
     case State::Downloading:
     case State::Preparing: primary = cancel_; break;
     case State::Failed: primary = retry_; break;
+    case State::Restarting: primary = nullptr; break;   // nothing to do but wait
+    case State::QuitNeeded: primary = quit_; break;
     }
-    for (QPushButton* b : {skip_, later_, openReleasePage_, close_, cancel_, retry_, install_}) {
+    for (QPushButton* b : {skip_, later_, openReleasePage_, close_, cancel_, retry_, install_, quit_}) {
         b->setAutoDefault(b == primary);
         b->setDefault(b == primary);
     }
@@ -249,6 +260,11 @@ void UpdateDialog::enterState(State state)
         column_->invalidate();
         top_->invalidate();
         adjustSize();
+        // adjustSize takes the height for the width of the wrapped
+        // labels' own hint, narrower than the dialog's minimum: a long
+        // message would leave a gap under it at the width it gets.
+        if (!withRelease && layout()->hasHeightForWidth())
+            resize(width(), std::max(minimumSizeHint().height(), layout()->totalHeightForWidth(width())));
     }
 }
 
@@ -259,6 +275,7 @@ void UpdateDialog::setProgressText(const QString& text)
 
 void UpdateDialog::showChecking()
 {
+    showsLog_ = false;
     headline_->setText(tr("Checking for updates…"));
     message_->setText(tr("GitBolt is asking GitHub for its latest release."));
     progress_->setRange(0, 0);   // busy, no end known
@@ -267,6 +284,7 @@ void UpdateDialog::showChecking()
 
 void UpdateDialog::showUpToDate(const update::Version& latest, const update::Version& current)
 {
+    showsLog_ = false;
     headline_->setText(tr("GitBolt is up to date"));
     QString text = tr("GitBolt %1 is the latest version.").arg(latest.toString());
     if (current > latest)
@@ -276,18 +294,28 @@ void UpdateDialog::showUpToDate(const update::Version& latest, const update::Ver
 }
 
 void UpdateDialog::showAvailable(const update::Release& release, const update::Version& current,
-                                 const QString& whyNot)
+                                 const QString& whyNot, update::PackageKind kind)
 {
+    showsLog_ = false;
     version_ = release.version.toString();
     pageUrl_ = release.pageUrl.isValid() ? release.pageUrl : releasesPageUrl();
     headline_->setText(tr("GitBolt %1 is available").arg(version_));
-    if (whyNot.isEmpty())
-        message_->setText(tr("You have %1. Install and Restart downloads the new version, checks it, "
-                             "and restarts GitBolt with it.")
-                              .arg(current.toString()));
-    else
+    if (whyNot.isEmpty()) {
+        QString text = tr("You have %1. Install and Restart downloads the new version, checks it, "
+                          "and restarts GitBolt with it.")
+                           .arg(current.toString());
+        // The system's prompt comes once GitBolt has quit: said here, it
+        // doesn't come out of nowhere.
+        if (kind == update::PackageKind::WindowsInstall)
+            text += QLatin1Char(' ') + tr("Windows will ask for permission to install it.");
+        else if (kind == update::PackageKind::Deb)
+            text += QLatin1Char(' ') + tr("You'll be asked for an administrator's password.");
+        message_->setText(text);
+    } else {
         message_->setText(tr("You have %1.").arg(current.toString()));
+    }
     reason_->setText(whyNot);
+    notesLabel_->setText(tr("What's new:"));
     // setPlainText keeps every character as GitHub sent it.
     notes_->setPlainText(release.notes.trimmed());
     enterState(whyNot.isEmpty() ? State::Available : State::NotInstallable);
@@ -317,6 +345,7 @@ void UpdateDialog::showPreparing(const QString& status)
 
 void UpdateDialog::showCheckFailed(const QString& message)
 {
+    showsLog_ = false;
     headline_->setText(tr("Couldn't check for updates"));
     message_->setText(message);
     pageUrl_ = releasesPageUrl();
@@ -325,11 +354,50 @@ void UpdateDialog::showCheckFailed(const QString& message)
 
 void UpdateDialog::showInstallFailed(const QString& message)
 {
+    showsLog_ = false;
     headline_->setText(tr("Couldn't install GitBolt %1").arg(version_));
     message_->setText(message + QLatin1Char('\n') + QLatin1Char('\n')
                       + tr("GitBolt wasn't changed. You can try again, or download the new version "
                            "from the release page."));
     enterState(State::Failed);
+}
+
+void UpdateDialog::showEarlierInstallFailed(const QString& version, const QString& message,
+                                            const QString& log)
+{
+    version_ = version;
+    // That version's own release page. Built here, from a version
+    // Version::parse accepted: no text from GitHub goes into it.
+    pageUrl_ = QUrl(releasesPageUrl().toString() + QStringLiteral("/tag/v") + version);
+    headline_->setText(tr("Couldn't install GitBolt %1").arg(version_));
+    message_->setText(message);
+    showsLog_ = !log.isEmpty();
+    notesLabel_->setText(tr("The end of the installer's log:"));
+    // As written: the log quotes what the system's tools said.
+    notes_->setPlainText(log);
+    enterState(State::Failed);
+}
+
+void UpdateDialog::showRestarting()
+{
+    showsLog_ = false;
+    headline_->setText(tr("Restarting GitBolt to finish the update…"));
+    message_->setText(tr("GitBolt %1 is put in place once GitBolt has quit, and then it starts.")
+                          .arg(version_));
+    progress_->setRange(0, 0);   // busy, no end known
+    enterState(State::Restarting);
+}
+
+void UpdateDialog::showQuitNeeded()
+{
+    showsLog_ = false;
+    headline_->setText(tr("Quit GitBolt to finish installing %1.").arg(version_));
+    message_->setText(tr("GitBolt was asked to quit and is still running: something it is doing, or a "
+                         "window that is still open, kept it. GitBolt %1 is put in place when GitBolt "
+                         "quits, if that is within 10 minutes; after that the update is abandoned and "
+                         "nothing changes.")
+                          .arg(version_));
+    enterState(State::QuitNeeded);
 }
 
 QString UpdateDialog::shownText() const
