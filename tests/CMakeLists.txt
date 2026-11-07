@@ -143,6 +143,30 @@ target_sources(test_crash_log_parser PRIVATE telemetry/CrashHeader.h)
 target_link_libraries(test_crash_log_parser PRIVATE gitbolt_telemetry)
 target_compile_definitions(test_crash_log_parser PRIVATE
     GITBOLT_CRASH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crash")
+
+# update/ — the installer side of in-app updates. What kind of install
+# the running copy is and whether the updater may replace it, from
+# folders laid out like each package, every kind on every OS.
+gitbolt_add_test(test_update_package update/TestPackage.cpp)
+target_sources(test_update_package PRIVATE update/FakeApps.h)
+target_link_libraries(test_update_package PRIVATE gitbolt_update)
+# The helpers that finish an update once GitBolt has quit, run for real
+# on scratch folders with HOME a scratch folder too: macOS's (on macOS)
+# and the AppImage's under /bin/sh and dash, the deb's with a stand-in
+# pkexec; the Windows PowerShell one as text (quoting, /D= last, the
+# -EncodedCommand round trip).
+gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
+target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
+target_link_libraries(test_update_helpers PRIVATE gitbolt_update)
+# Installer::prepare for each package, and whole updates through a real
+# detached helper: an AppImage on any Unix; on macOS real disk images,
+# made here with hdiutil from fake ad-hoc-signed bundles, including a
+# wrong bundle id, a wrong version and a broken seal. About a minute on
+# macOS (each hdiutil create takes seconds), hence the longer TIMEOUT.
+gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
+target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
+target_link_libraries(test_update_installer PRIVATE gitbolt_update)
+set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
 if(NOT WIN32)
     add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
     # dladdr, as for gitbolt_util: in libdl before glibc 2.34
@@ -155,6 +179,32 @@ if(NOT WIN32)
     target_compile_definitions(test_crash_log_parser PRIVATE
         GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
 endif()
+
+# update/ — the in-app updater's rules, no network: Version, the feed's
+# and the downloads' URL allowlists, the daily schedule, the
+# GITBOLT_UPDATE_CHECK opt-out, SHA256SUMS.txt lines, and every release
+# the feed's answer can't be (fixtures/update: drafts, pre-releases, bad
+# tags, a page outside the repository).
+gitbolt_add_test(test_update_rules update/TestUpdateRules.cpp)
+target_link_libraries(test_update_rules PRIVATE gitbolt_update)
+target_compile_definitions(test_update_rules PRIVATE
+    GITBOLT_UPDATE_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/update")
+# The update check against a loopback stub (update/HttpServer.h), never
+# GitHub: test binaries don't define GITBOLT_UPDATES_ENABLED and the
+# stub listens on 127.0.0.1. Newer, same and older releases, GitHub's
+# rate limit, a hung server, bad answers, no redirects followed, and an
+# automatic check upgraded to a manual one.
+gitbolt_add_test(test_update_checker update/TestUpdateChecker.cpp)
+target_sources(test_update_checker PRIVATE update/HttpServer.h)
+target_link_libraries(test_update_checker PRIVATE gitbolt_update Qt6::Network)
+# The installer download against the same stub: a file reaches its final
+# name only once its size and SHA-256 (SHA256SUMS.txt, and the API's
+# digest) check out; a redirect to a host not on the list is never
+# followed; a mismatch, a stall or cancel() leaves nothing behind; old
+# versions' folders are cleared.
+gitbolt_add_test(test_update_downloader update/TestUpdateDownloader.cpp)
+target_sources(test_update_downloader PRIVATE update/HttpServer.h)
+target_link_libraries(test_update_downloader PRIVATE gitbolt_update Qt6::Network)
 
 # models/ tests — exercise the Qt model layer (the log model from in-memory
 # data, the branch model from what a temp repo reports)

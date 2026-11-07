@@ -5,11 +5,28 @@
 #
 # In-app updates: asking GitHub for the latest release, downloading
 # and checking its installer, and installing it over the running copy.
-# No feed address here: main() decides whether this build checks at all
-# (GITBOLT_UPDATES, official builds only) and fills Config; tests use a
-# loopback stub. Network is PRIVATE, as in telemetry.
+# Nothing here asks the official feed by itself: UpdateConfig.h names it,
+# but only main() uses it, when this build checks at all (GITBOLT_UPDATES,
+# official builds only); tests use a loopback stub. Network is PRIVATE,
+# as in telemetry.
 set(SOURCES
+    Checker.cpp
+    Downloader.cpp
+    InstallHelpers.cpp
+    Installer.cpp
+    Package.cpp
+    Release.cpp
+    Request.cpp
+    UpdateConfig.cpp
     Version.cpp
+    Checker.h
+    Downloader.h
+    InstallHelpers.h
+    Installer.h
+    Package.h
+    Release.h
+    Request.h
+    UpdateConfig.h
     Version.h
 )
 add_library(gitbolt_update STATIC ${SOURCES})

@@ -1,0 +1,356 @@
+#include "update/Downloader.h"
+
+#include "update/Request.h"
+
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QRegularExpression>
+#include <QTimer>
+
+#include <utility>
+
+namespace gitbolt::update {
+
+namespace {
+
+// SHA256SUMS.txt lists four installers in under 400 bytes.
+constexpr qint64 kMaxChecksumsBytes = 64 * 1024;
+// github.com answers browser_download_url with one redirect to its
+// asset host; a few more leave room without allowing a loop.
+constexpr int kMaxRedirects = 5;
+
+// A name to put into a folder as it is: no separator, no "..", no
+// leading dot (that is the .part's), nothing a shell or a file system
+// treats specially.
+bool isPlainFileName(const QString& name) {
+    static const QRegularExpression plain(QStringLiteral("^[A-Za-z0-9][A-Za-z0-9._+-]*$"));
+    return plain.match(name).hasMatch() && !name.contains(QLatin1String(".."));
+}
+
+// Scheme, host and port: enough to say where, without a path or query
+// from GitHub's answer.
+QString origin(const QUrl& url) {
+    return url.toDisplayString(QUrl::RemoveUserInfo | QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
+}
+
+} // namespace
+
+Downloader::Downloader(Config config, QObject* parent) : QObject(parent), config_(std::move(config)) {}
+
+Downloader::~Downloader() {
+    cancel();
+}
+
+const Config& Downloader::config() const {
+    return config_;
+}
+
+bool Downloader::busy() const {
+    return busy_;
+}
+
+void Downloader::start(const Release& release, const QString& assetName, const QString& dir) {
+    if (busy_)
+        return;
+    busy_ = true;
+    ++run_;
+    const QString why = prepare(release, assetName, dir);
+    if (!why.isEmpty()) {
+        failLater(why);
+        return;
+    }
+    fetchChecksums();
+}
+
+void Downloader::cancel() {
+    if (!busy_)
+        return;
+    dropReply();
+    discardPart();
+    reset();
+}
+
+QString Downloader::prepare(const Release& release, const QString& assetName, const QString& dir) {
+    const QString sumsName = QString::fromLatin1(kChecksumsAsset);
+    if (!config_.isUsable())
+        return tr("Updates aren't set up in this copy of GitBolt.");
+    if (!isPlainFileName(assetName))
+        return tr("“%1” isn't a file GitBolt downloads.").arg(assetName);
+    const ReleaseAsset* asset = release.asset(assetName);
+    if (!asset)
+        return tr("GitBolt %1 has no %2.").arg(release.version.toString(), assetName);
+    const ReleaseAsset* sums = release.asset(sumsName);
+    if (!sums)
+        return tr("GitBolt %1 has no %2, so its download can't be checked.")
+            .arg(release.version.toString(), sumsName);
+    if (asset->size <= 0)
+        return tr("GitHub lists %1 as empty.").arg(assetName);
+    if (asset->size > config_.maxDownloadBytes)
+        return tr("%1 is larger than GitBolt downloads (%2 MiB).")
+            .arg(assetName)
+            .arg(config_.maxDownloadBytes / (1024 * 1024));
+    if (sums->size <= 0 || sums->size > kMaxChecksumsBytes)
+        return tr("GitHub lists %1 with a size it can't have.").arg(sumsName);
+    for (const QUrl& url : {sums->downloadUrl, asset->downloadUrl}) {
+        if (!config_.isAllowedDownloadUrl(url))
+            return tr("GitBolt doesn't download from %1.").arg(origin(url));
+    }
+
+    const QString target = dir.isEmpty() ? QDir(config_.downloadDir).filePath(release.version.toString()) : dir;
+    if (!QDir::isAbsolutePath(target))
+        return tr("GitBolt can't download into %1.").arg(QDir::toNativeSeparators(target));
+    if (!QDir().mkpath(target))
+        return tr("Couldn't create the folder %1.").arg(QDir::toNativeSeparators(target));
+
+    asset_ = *asset;
+    checksums_ = *sums;
+    finalPath_ = QDir(target).filePath(assetName);
+    partPath_ = QDir(target).filePath(QLatin1Char('.') + assetName + QStringLiteral(".part"));
+    return {};
+}
+
+QNetworkReply* Downloader::get(const QUrl& url) {
+    if (!network_) {
+        network_ = new QNetworkAccessManager(this);
+        network_->setRedirectPolicy(QNetworkRequest::UserVerifiedRedirectPolicy);
+    }
+    QNetworkRequest request = updateRequest(url, config_);
+    request.setRawHeader(QByteArrayLiteral("Accept"), QByteArrayLiteral("application/octet-stream"));
+    // UserVerified, not NoLessSafeRedirectPolicy: with that one Qt
+    // follows on its own, and only an abort() from redirected() stops
+    // it, which Qt 6.11 honours but documents nowhere. UserVerified is
+    // the documented veto: nothing goes to the new URL until
+    // redirectAllowed(). The allowlist (https only, but for the tests'
+    // loopback) is at least as strict as "no less safe".
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::UserVerifiedRedirectPolicy);
+    request.setMaximumRedirectsAllowed(kMaxRedirects);
+
+    QNetworkReply* reply = network_->get(request);
+    reply_ = reply;
+    connect(reply, &QNetworkReply::redirected, this, [this, reply](const QUrl& to) {
+        if (reply != reply_)
+            return;
+        if (!config_.isAllowedDownloadUrl(to)) {
+            fail(tr("The download was sent on to %1, which GitBolt doesn't download from.").arg(origin(to)));
+            return;
+        }
+        emit reply->redirectAllowed();
+    });
+    return reply;
+}
+
+void Downloader::fetchChecksums() {
+    checksumsBody_.clear();
+    QNetworkReply* reply = get(checksums_.downloadUrl);
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply] {
+        if (reply != reply_)
+            return;
+        // A redirect's body, or an error page's: never part of the file.
+        if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
+            reply->readAll();
+            return;
+        }
+        checksumsBody_ += reply->readAll();
+        if (checksumsBody_.size() > checksums_.size)
+            fail(tr("%1 is larger than GitHub lists.").arg(QString::fromLatin1(kChecksumsAsset)));
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply] { onChecksumsFinished(reply); });
+}
+
+void Downloader::onChecksumsFinished(QNetworkReply* reply) {
+    reply->deleteLater();
+    if (reply != reply_)
+        return;
+    reply_ = nullptr;
+    const QString sumsName = QString::fromLatin1(kChecksumsAsset);
+    if (const QString why = replyProblem(reply, sumsName); !why.isEmpty()) {
+        fail(why);
+        return;
+    }
+    checksumsBody_ += reply->readAll();
+    if (checksumsBody_.size() != checksums_.size) {
+        fail(tr("%1 arrived with %2 bytes; GitHub lists %3.")
+                 .arg(sumsName)
+                 .arg(checksumsBody_.size())
+                 .arg(checksums_.size));
+        return;
+    }
+    expected_ = checksumFor(checksumsBody_, asset_.name);
+    if (expected_.isEmpty()) {
+        fail(tr("%1 has no checksum for %2.").arg(sumsName, asset_.name));
+        return;
+    }
+    // Both are GitHub's word for the same file: if they disagree, no
+    // download can match both, so don't fetch it.
+    if (!asset_.sha256.isEmpty() && asset_.sha256 != expected_) {
+        fail(tr("GitHub's checksum for %1 differs from the one in %2.").arg(asset_.name, sumsName));
+        return;
+    }
+    fetchAsset();
+}
+
+void Downloader::fetchAsset() {
+    file_ = std::make_unique<QFile>(partPath_);
+    if (!file_->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        fail(tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString()));
+        return;
+    }
+    hash_ = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
+    received_ = 0;
+    QNetworkReply* reply = get(asset_.downloadUrl);
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply] {
+        if (reply != reply_)
+            return;
+        const qint64 before = received_;
+        if (const QString why = consume(reply); !why.isEmpty()) {
+            fail(why);
+            return;
+        }
+        if (received_ != before)
+            emit progress(received_, asset_.size);
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply] { onAssetFinished(reply); });
+}
+
+QString Downloader::consume(QNetworkReply* reply) {
+    if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
+        reply->readAll();
+        return {};
+    }
+    const QByteArray chunk = reply->readAll();
+    if (chunk.isEmpty())
+        return {};
+    if (received_ + chunk.size() > asset_.size)
+        return tr("%1 is larger than GitHub lists (%2 bytes).").arg(asset_.name).arg(asset_.size);
+    if (file_->write(chunk) != chunk.size())
+        return tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString());
+    hash_->addData(chunk);
+    received_ += chunk.size();
+    return {};
+}
+
+void Downloader::onAssetFinished(QNetworkReply* reply) {
+    reply->deleteLater();
+    if (reply != reply_)
+        return;
+    reply_ = nullptr;
+    if (const QString why = replyProblem(reply, asset_.name); !why.isEmpty()) {
+        fail(why);
+        return;
+    }
+    if (const QString why = consume(reply); !why.isEmpty()) {
+        fail(why);
+        return;
+    }
+    if (!file_->flush()) {
+        fail(tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString()));
+        return;
+    }
+    file_->close();
+    file_.reset();
+    if (received_ != asset_.size) {
+        fail(tr("%1 arrived with %2 bytes; GitHub lists %3.").arg(asset_.name).arg(received_).arg(asset_.size));
+        return;
+    }
+    const QByteArray actual = hash_->result().toHex();
+    if (actual != expected_) {
+        fail(tr("%1 doesn't match its checksum in %2, so it was deleted.")
+                 .arg(asset_.name, QString::fromLatin1(kChecksumsAsset)));
+        return;
+    }
+    if (!asset_.sha256.isEmpty() && actual != asset_.sha256) {
+        fail(tr("%1 doesn't match the checksum GitHub lists for it, so it was deleted.").arg(asset_.name));
+        return;
+    }
+
+    // Into place. QFile::rename never overwrites, so an earlier copy
+    // at the final name goes first; it is replaced by a checked one.
+    if (QFileInfo::exists(finalPath_) && !QFile::remove(finalPath_)) {
+        fail(tr("Couldn't replace %1.").arg(QDir::toNativeSeparators(finalPath_)));
+        return;
+    }
+    QFile part(partPath_);
+    if (!part.rename(finalPath_)) {
+        fail(tr("Couldn't move %1 into place: %2.").arg(asset_.name, part.errorString()));
+        return;
+    }
+    const QString path = finalPath_;
+    reset();
+    emit finished(path);
+}
+
+QString Downloader::replyProblem(QNetworkReply* reply, const QString& name) const {
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    if (status > 0 && status != 200)
+        return tr("Couldn't download %1: GitHub answered HTTP %2.").arg(name).arg(status);
+    // No status: no answer. A 200 with an error: cut off midway.
+    if (status != 200 || reply->error() != QNetworkReply::NoError)
+        return tr("Couldn't download %1: %2.").arg(name, reply->errorString());
+    return {};
+}
+
+void Downloader::failLater(const QString& message) {
+    QTimer::singleShot(0, this, [this, run = run_, message] {
+        if (run == run_)
+            fail(message);
+    });
+}
+
+void Downloader::fail(const QString& message) {
+    dropReply();
+    discardPart();
+    reset();
+    emit failed(message);
+}
+
+void Downloader::dropReply() {
+    // Disconnect BEFORE abort(): it emits finished() synchronously.
+    if (QNetworkReply* reply = std::exchange(reply_, nullptr)) {
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
+}
+
+void Downloader::discardPart() {
+    if (file_) {
+        file_->close();
+        file_.reset();
+    }
+    if (!partPath_.isEmpty())
+        QFile::remove(partPath_);
+}
+
+void Downloader::reset() {
+    busy_ = false;
+    ++run_;
+    asset_ = {};
+    checksums_ = {};
+    partPath_.clear();
+    finalPath_.clear();
+    checksumsBody_.clear();
+    expected_.clear();
+    hash_.reset();
+    received_ = 0;
+}
+
+void removeOldDownloads(const QString& downloadDir, const Version& current) {
+    if (downloadDir.isEmpty() || !QDir::isAbsolutePath(downloadDir))
+        return;
+    const QFileInfoList entries =
+        QDir(downloadDir).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::NoSymLinks);
+    for (const QFileInfo& entry : entries) {
+        if (entry.isSymLink() || entry.isJunction())
+            continue;
+        const std::optional<Version> version = Version::parse(entry.fileName());
+        if (!version || version->toString() != entry.fileName() || *version > current)
+            continue;
+        QDir(entry.absoluteFilePath()).removeRecursively();
+    }
+}
+
+} // namespace gitbolt::update
