@@ -1,0 +1,31 @@
+GitBolt's Windows installer puts these files of the Microsoft Visual C++
+runtime (v14) in bin\, unmodified, as Visual Studio's VC\Redist folder holds
+them; GitBolt's Windows release is built with Visual Studio Enterprise 2026:
+
+  vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll, msvcp140_1.dll,
+  msvcp140_2.dll, msvcp140_atomic_wait.dll, msvcp140_codecvt_ids.dll,
+  concrt140.dll
+
+They are Microsoft Corporation's software, not part of GitBolt, and not under
+GitBolt's licence. GitBolt redistributes them under the Distributable Code
+section of Microsoft's licence terms for Visual Studio Enterprise 2026:
+https://visualstudio.microsoft.com/license-terms/vs2026-ga-pro-enterprise/
+(they are on its Distributable List, https://aka.ms/vs/18/redistribution, as
+Visual C++ Runtime Files).
+
+As those terms require, you receive the files on these terms:
+  - Microsoft licenses these files; it does not sell them, and it keeps all
+    rights in them that are not expressly given.
+  - You may use them only with GitBolt, and copy and distribute them only as
+    part of GitBolt and on these same terms.
+  - You may not modify them; reverse engineer, decompile or disassemble them,
+    except as far as applicable law expressly permits despite this limitation;
+    work around any technical limitations in them; remove, minimize, block or
+    modify any notices of Microsoft or its suppliers in them; share, publish,
+    rent or lease them apart from GitBolt, or offer them on their own; or use
+    them in any way that is against the law.
+  - Microsoft provides them "as is". As far as your local law allows,
+    Microsoft gives no express warranties, guarantees or conditions for them,
+    excludes the implied warranties of merchantability, fitness for a
+    particular purpose and non-infringement, and neither Microsoft nor its
+    suppliers are liable for any damages arising from them.

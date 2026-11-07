@@ -8,37 +8,58 @@ semver once 1.0 lands.
 
 ### Fixed
 
-- **The downloads didn't include GitBolt's licence**, nor those of Qt
-  and libgit2, which they include: since 0.9.0 only the Windows
-  installer showed the GPL, on its licence page, and none left a copy.
-  Each now has GitBolt's licence and a THIRD-PARTY-NOTICES.txt with
-  Qt's (LGPL-3.0) and libgit2's: in GitBolt.app's Contents/Resources on
-  macOS, in the installation folder on Windows (LICENSE.txt), and
-  together in /usr/share/doc/gitbolt/copyright in the .deb and the
-  AppImage.
+- **The packages didn't include the licences of what they hold**:
+  since 0.9.0 only the Windows installer showed GitBolt's GPL, on its
+  licence page, and none left a copy, nor of the licences of the
+  software of others they include. Each now has GitBolt's licence and a
+  THIRD-PARTY-NOTICES.txt with those: of Qt (LGPL-3.0) and the code of
+  others in Qt's libraries; of libgit2 and the code in it, LibXDiff
+  (LGPL-2.1) among it; of the Material Symbols GitBolt's menu icons come
+  from (Apache-2.0); on Linux of ICU; on Windows of Microsoft's C++
+  runtime and NSIS; and in the AppImage of the Ubuntu libraries and the
+  AppImage runtime it bundles. They are in GitBolt.app's
+  Contents/Resources on macOS, in the installation folder on Windows
+  (LICENSE.txt and THIRD-PARTY-NOTICES.txt), and together in
+  usr/share/doc/gitbolt/copyright in the .deb (/usr/share/doc/gitbolt
+  once installed) and the AppImage. Help › About GitBolt names Qt,
+  libgit2 and LibXDiff, opens those licences, and shows About Qt.
 - **Settings on a Mac without Apple's Command Line Tools** asked to
-  install them as it opened, and its git name and email fields saved
-  nothing. They now say that git needs the Command Line Tools, as the
-  note at launch does.
+  install them as it opened, and the user.name and user.email fields on
+  its Git › Git Config page saved nothing. They are now disabled and say
+  that git needs the Command Line Tools, as the note at launch does.
 - **Console**: opening a repository whose path is long and outside
   ASCII, about 80 Chinese or Japanese characters on macOS (half that
   for a bare repository), while the shell's prompt ran something slow
-  (a git prompt, say) left the shell waiting in an open quote, with its
-  `cd` cut short. The switch now waits for the prompt; a shell with no
-  line editor, which can't take a line that long, is started again in
-  the repository.
+  (a git prompt, say), or at any time in a shell with no line editor,
+  cut the switch's `cd` short: the shell was left in an open quote, or
+  with the cut line at its prompt. The switch now waits up to two
+  seconds for the prompt; past that, or in a shell with no line editor,
+  which can't take a line that long, the shell is started again in the
+  repository.
 - **The AppImage lacked Qt's SVG icon engine**, which the .deb and the
-  Windows installer have, and which draws the Commands menu's icons.
+  Windows installer have, and which draws the menus' icons at the size
+  they are shown.
 - **The .deb shipped parts of Qt's Wayland support** it couldn't use,
   without the Wayland platform plugin (GitBolt runs through XWayland in
   a Wayland session, as the AppImage does), and depended on
   libwayland-client0, libwayland-cursor0 and libwayland-egl1 for them.
   Both are gone. Its Installed-Size also said about twice the space it
-  takes; it is now within a few percent.
+  takes; it is now some 7% over, as the link /usr/bin/gitbolt counts the
+  program twice.
+- **The Windows installer no longer installs what GitBolt never
+  loads**, 47 MB of the 84 MB 0.9.9 took: the software OpenGL
+  (opengl32sw.dll), the Direct3D and DXC shader compilers
+  (d3dcompiler_47.dll, dxcompiler.dll, dxil.dll) and Qt's translations.
 - **Windows**: GitBolt.exe and the installer have version details
   (Properties › Details), and GitBolt.exe's manifest names it
   com.gitbolt.app, where 0.9.9's had Qt's placeholder
   com.yourcompany.gitbolt.
+- Development: `resources/licenses/` holds the licence texts the
+  packages ship, with where each comes from (`SOURCES.md`);
+  `tools/update-qt-notices.py` writes Qt's from its metadata, and CI
+  fails while a text for the Qt, libgit2 or ICU it builds with is
+  missing. `resources/icons/menu/README.md` says where the icons come
+  from and how they were changed.
 - Development: 0.9.9's source held a stray `{{pkgetc}}/cert.pem`, a
   link to a file on the maintainer's machine. It is gone.
 

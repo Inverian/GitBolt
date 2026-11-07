@@ -164,15 +164,27 @@ if(APPLE OR WIN32)
         BUNDLE DESTINATION .
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
+    # windeployqt would otherwise copy the ~25 MB vc_redist.x64.exe into
+    # bin/ for Release builds, and nothing runs it. The MSVC runtime DLLs
+    # go in app-local via InstallRequiredSystemLibraries
+    # (cmake/Packaging.cmake). Only affects the windeployqt branch.
+    set(_gitbolt_deploy_args NO_COMPILER_RUNTIME NO_UNSUPPORTED_PLATFORM_ERROR)
+    # Nor what GitBolt never loads, 47 MB of the 84 MB 0.9.9 installed:
+    # the software OpenGL (opengl32sw.dll, Mesa) and the D3D and DXC shader
+    # compilers (d3dcompiler_47, dxcompiler, dxil), which only Qt's RHI and
+    # OpenGL use, and GitBolt draws its widgets without either; and Qt's own
+    # translations (qt_*.qm), which GitBolt doesn't load (its English plural
+    # forms are compiled in, src/util/Translations.h). Each would also have
+    # needed its licence in the notices (cmake/Notices.cmake). WIN32 only:
+    # Qt passes DEPLOY_TOOL_OPTIONS to macdeployqt as well.
+    if(WIN32)
+        list(APPEND _gitbolt_deploy_args NO_TRANSLATIONS
+            DEPLOY_TOOL_OPTIONS --no-opengl-sw --no-system-d3d-compiler --no-system-dxc-compiler)
+    endif()
     qt_generate_deploy_app_script(
         TARGET gitbolt
         OUTPUT_SCRIPT gitbolt_deploy_script
-        # windeployqt would otherwise copy the ~25 MB vc_redist.x64.exe
-        # into bin/ for Release builds, and nothing runs it. The MSVC
-        # runtime DLLs go in app-local via InstallRequiredSystemLibraries
-        # (cmake/Packaging.cmake). Only affects the windeployqt branch.
-        NO_COMPILER_RUNTIME
-        NO_UNSUPPORTED_PLATFORM_ERROR
+        ${_gitbolt_deploy_args}
     )
     install(SCRIPT ${gitbolt_deploy_script})
 else()

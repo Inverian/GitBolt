@@ -13,6 +13,7 @@ Everything here is optional — the main build and run instructions in [`docs/BU
 | [`run-dev.sh`](#run-devsh) | macOS | Kill + rebuild + launch GitBolt in one command |
 | [`click.py`](#clickpy) | macOS | Synthetic mouse click via Quartz CGEvents (bypasses overlay apps) |
 | [`check-ci-pins.py`](#check-ci-pinspy) | any | Find newer releases of what the builds pin, and advisories against them or the git GitBolt runs |
+| [`update-qt-notices.py`](#update-qt-noticespy) | any | Write the licences of the code of others in the Qt that GitBolt ships, for its packages' notices |
 
 ---
 
@@ -164,3 +165,20 @@ If you write a helper that makes development, debugging, or testing easier, cons
 - **No shipped behavior.** Tools here are for developers. They don't become part of the installed GitBolt application.
 
 <!-- End-to-end commit workflow test marker -->
+
+---
+
+## `update-qt-notices.py`
+
+Writes `resources/licenses/qt-<version>-third-party.txt`: the copyright notices and licence texts of the code of others compiled into the Qt libraries and plugins that GitBolt's packages ship, from Qt's own `qt_attribution.json` files (and one `REUSE.toml`) at the version's tag of qt/qtbase and qt/qtsvg. `cmake/Notices.cmake` puts the file in every package's notices, and CI configures with `GITBOLT_STRICT_NOTICES=ON`, so a Qt update fails until the file for its version is there.
+
+### Usage
+
+```bash
+python3 tools/update-qt-notices.py 6.11.3            # write the file for Qt 6.11.3
+python3 tools/update-qt-notices.py 6.11.3 --check    # exit 1 if the committed file is out of date
+```
+
+It exits 1 when Qt's metadata needs a look: a component it lists is gone, or a new one turned up in a folder that goes into a shipped library. Add the new one to `SHIPPED` (with what it is used in) or `NOT_SHIPPED` (with why), then run it again. Standard library only; set `GITHUB_TOKEN` if the GitHub API's rate limit gets in the way.
+
+The other texts in `resources/licenses/` are fetched by hand at a pinned version; `resources/licenses/SOURCES.md` says from where.
