@@ -167,18 +167,23 @@ QString windowsElevatedScript(const HelperInputs& in);
 /// logTail) never stand in the way. A line that meets the other part's,
 /// or anything else holding the log, is tried again for at most
 /// kWindowsLogPatienceSeconds and, if it still can't go in, kept and
-/// written with the next one; Write-Log '' writes only what is kept
-/// (each part's last step). Write-Result writes the install result,
+/// written with the next one; Write-Log '' writes only what is kept,
+/// with the full patience (each part's last steps; what it still can't
+/// write is lost). Write-Result writes the install result,
 /// with `onlyFirst` (the helper's) only if there is none yet. Exposed
 /// so that the tests can run Write-Log for real.
 QString windowsScriptPreamble(const HelperInputs& in, bool onlyFirst);
 
 /// How long one Write-Log in a Windows part waits, at most, for the log
 /// to take its line. Once one has waited that long in vain, the next
-/// ones try once only, until a line goes in again: a log that stays
-/// busy costs a part this much in all, not this much a line. Well under
-/// kWindowsHelperExtraSeconds, so that the helper still gives up after
-/// the administrator part.
+/// ones with a line try once only, until a line goes in again; Write-Log
+/// '' (a part's flush of what is kept) always waits this long while
+/// anything is kept. So a log that stays busy costs the helper at most
+/// twice this (its first line, its last flush) and the administrator
+/// part three times (its first line, its flushes before and after its
+/// result), not this much a line. Three times it is under
+/// kWindowsHelperExtraSeconds, so that the administrator part still
+/// gives up, and writes its result, before the helper gives up.
 inline constexpr int kWindowsLogPatienceSeconds = 3;
 
 /// How long the elevated Windows helper waits for the install to be

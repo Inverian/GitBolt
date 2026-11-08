@@ -49,13 +49,14 @@
 //     even with long paths, and -EncodedCommand's UTF-16LE base64
 //     decoding back to each script, and the one Write-Log both share
 //     (Out-File, never Add-Content; a refused line tried again a few
-//     seconds at most, then kept for the next; each part's last step
-//     writes what was kept);
+//     seconds at most, then kept for the next; each part's last steps
+//     try again, with the full patience, to write what was kept);
 //   - that Write-Log for real, on Windows, in every run: three
 //     powershell.exe (one in Constrained Language mode) on one log,
 //     first busy (held as the old Add-Content left it), then writing
 //     into each other, keep every line, once, in order; a log busy for
-//     longer costs a part a few seconds once, and no line;
+//     longer costs a part a few seconds, and no line if it is free
+//     again before the part's last flush;
 //   - and for real, on Windows, when GITBOLT_TEST_NSIS_INSTALLER and
 //     GITBOLT_TEST_NSIS_DIR name a GitBolt installer and a folder it
 //     installed into (CI's NSIS smoke test sets them; skipped
@@ -1565,7 +1566,7 @@ private slots:
             "    }\n"
             "}\n"
             "function Write-Result(").arg(kWindowsLogPatienceSeconds);
-        QVERIFY(kWindowsLogPatienceSeconds > 0 && 2 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds);
+        QVERIFY(kWindowsLogPatienceSeconds > 0 && 3 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds);
         for (const QString& text : {script, elevated}) {
             QVERIFY2(text.contains(writeLog), qPrintable(text));
             QCOMPARE(text.count(QLatin1String("function Write-Log(")), 1);
@@ -1675,7 +1676,7 @@ private slots:
     // second and dropped the line): every writer's first line waits and
     // goes in. Then they all write at once, into each other: every line
     // is there exactly once, whole, in its writer's order, and no
-    // Write-Log took longer than its patience.
+    // Write-Log took more than 1.5 s past its patience.
     //
     // Every wait in these two tests stays well inside ctest's 60 s a
     // function (QTEST_FUNCTION_TIMEOUT), about 47 s at the very worst, so
@@ -1710,8 +1711,10 @@ private slots:
         // call was refused), then waits for the go, so that all of them
         // start writing together, into the busy log. Warm on purpose:
         // so that what their first lines meet is the held log, not
-        // their own start. Two cold first lines, as CI lost, are the
-        // real-install test's (windowsHelperUpdatesARealInstall, case 1).
+        // their own start. Two cold first lines meeting, as on CI (where
+        // the helper's first line and, about 2 s later, the administrator
+        // part's give-up line were lost), are the real-install test's
+        // (windowsHelperUpdatesARealInstall, case 1).
         for (int i = 1; i <= kWriters; ++i) {
             const QString body =
                 QStringLiteral("$ready = %1\n"
@@ -1807,7 +1810,8 @@ private slots:
     }
 
     // A log that stays busy past Write-Log's patience costs a part that
-    // much once, and none of its lines: the first Write-Log waits
+    // much for its lines, not that much a line, and none of them if it
+    // is free before the part's last flush: the first Write-Log waits
     // kWindowsLogPatienceSeconds and no longer, the next one tries once,
     // and both lines are kept, to go in, in order, with the next one
     // once the log is free.
@@ -2082,8 +2086,9 @@ private slots:
         QVERIFY2(bothStarted(givingUp), qPrintable(givingUp.error + QLatin1Char('\n') + diagnostics()));
         QVERIFY2(ended(givingUp.elevatedPid, 60000),
                  qPrintable(QStringLiteral("the administrator part didn't give up\n") + diagnostics()));
-        // Its result, written last: the helper, which would write the
-        // same words, can't for another kWindowsHelperExtraSeconds.
+        // Its result, written before its last flush of the log: the
+        // helper, which would write the same words, can't for another
+        // kWindowsHelperExtraSeconds.
         QVERIFY2(QFileInfo::exists(result()),
                  qPrintable(QStringLiteral("the administrator part wrote no result\n") + diagnostics()));
         QVERIFY2(ended(givingUp.helperPid, (2 + kWindowsHelperExtraSeconds + 60) * 1000),

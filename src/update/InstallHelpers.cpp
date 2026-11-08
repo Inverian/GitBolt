@@ -263,8 +263,13 @@ QString debHelperScript(const HelperInputs& in) {
 
 namespace {
 
-static_assert(kWindowsLogPatienceSeconds > 0 && 2 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds,
-              "each part's first Write-Log may wait this long before its deadline starts");
+// The administrator part gives up, and writes its result, before the
+// helper gives up: its deadline starts after its first Write-Log (at
+// most one patience late), and after the deadline come its give-up
+// line and the flush before its result (at most one patience each).
+static_assert(kWindowsLogPatienceSeconds > 0 && 3 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds,
+              "the administrator part's first line, give-up line and flush before its result must fit in the "
+              "helper's extra wait");
 
 // What both Windows parts start with: the values they share, the log,
 // and the install result (windowsScriptPreamble in InstallHelpers.h).
@@ -287,10 +292,12 @@ static_assert(kWindowsLogPatienceSeconds > 0 && 2 * kWindowsLogPatienceSeconds <
 // Write-Log, which writes everything queued in one go, in order and
 // with each line's own time. After a wait in vain $logPatience is 0
 // (one try a call) until a write goes in. Write-Log '' writes only the
-// queue, always waiting the full patience: each part's last steps. A
-// line that can't be written is never dropped unsaid: it stays queued,
-// and each wait in vain warns on stderr. -NoNewline: the queue ends
-// each line with CR LF itself.
+// queue, always waiting the full patience: each part's last steps (the
+// administrator part's before and after its result). What is still
+// queued when a part's last Write-Log '' waits in vain is lost; each
+// wait in vain prints a warning (Write-Warning: on the console host's
+// standard output, which only the tests read). -NoNewline: the queue
+// ends each line with CR LF itself.
 //
 // The result goes through Set-Content as ASCII (every reason is plain
 // English, and the version x.y.z), so there is no BOM. `onlyFirst`:
@@ -451,8 +458,8 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("    Write-Log ('the administrator part failed: ' + $_.Exception.Message)"),
         QStringLiteral("}"),
         // What the code means, for the log and the GitBolt that starts
-        // next; the result last of all: the helper starts GitBolt once
-        // it is there.
+        // next; then the result, followed only by a last flush of the
+        // log: the helper starts GitBolt once the result is there.
         QStringLiteral("$status = 'failed'"),
         QStringLiteral("$reason = ''"),
         QStringLiteral("if ($code -eq 0) {"),
@@ -516,7 +523,8 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("}"),
         QStringLiteral("Write-Log ('GitBolt has quit: waiting for the administrator part (pid ' + $elevatedPid + "
                        "') to install GitBolt ' + $version)"),
-        // The administrator part writes the result last. No result, and
+        // The administrator part's result is its last step but a flush
+        // of the log. No result, and
         // that part gone a few seconds (it may still be writing), or no
         // result in installSeconds: it says so itself.
         QStringLiteral("$deadline = (Get-Date).AddSeconds($installSeconds)"),
