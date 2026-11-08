@@ -13,9 +13,9 @@ QString shellLine(const char* name, const QString& value) {
     return QLatin1String(name) + u'=' + shellQuote(value) + u'\n';
 }
 
-// The start every Unix helper shares: its values, its log, and `say`.
-// Everything the helper and the shell print goes to the log, whose
-// folder GitBolt created; stdin is nothing, so no step can wait on it.
+// The start every Unix helper shares: its values, `say` and `report`.
+// All output goes to the log, and stdin is /dev/null, so no step can
+// wait on it.
 QString shellPreamble(const char* kind, const HelperInputs& in, const QString& values) {
     return QStringLiteral("#!/bin/sh\n"
                           "# GitBolt's update helper (%1), written by GitBolt\n"
@@ -45,12 +45,9 @@ QString shellPreamble(const char* kind, const HelperInputs& in, const QString& v
                             "\n");
 }
 
-// Waits for GitBolt to exit, at most wait_seconds; then runs
-// `giveUp` and ends the helper with nothing changed. A zombie has
-// exited (its parent hasn't reaped it yet), so it counts as gone:
-// kill -0 alone would wait the full time for it. A fractional sleep
-// isn't POSIX, but every sh this runs under has one; where it fails
-// the loop polls every second.
+// Waits for GitBolt to exit, at most wait_seconds, else runs `giveUp`,
+// reports gave-up and exits. A zombie counts as gone (kill -0 alone
+// would wait for it); where sleep 0.2 fails (not POSIX), it sleeps 1.
 QString shellWait(const QString& giveUp) {
     return QStringLiteral("say \"waiting for GitBolt (pid $pid) to quit\"\n"
                           "deadline=$(( $(date +%s) + $wait_seconds ))\n"
@@ -263,17 +260,21 @@ QString debHelperScript(const HelperInputs& in) {
 
 namespace {
 
-// What both Windows parts start with: the values they share, the log,
-// and the install result. Cmdlets and core types only (Add-Content,
-// Set-Content, Test-Path, Get-Date, [char]), so they work in
-// Constrained Language mode too, where a .NET static call outside a try
-// would end the script. Two processes append to the log, each opening
-// it only for a line: a line that meets the other's is tried again.
-// The result goes through Set-Content as ASCII (every reason is plain
-// English, and the version x.y.z), so there is no BOM. `onlyFirst`:
-// written only if there is none yet (the helper's, which never
-// replaces what the administrator part said).
-QStringList windowsPreamble(const HelperInputs& in, bool onlyFirst) {
+// The administrator part must give up, and write its result, before the
+// helper gives up: its first line, give-up line and flush before the
+// result can each wait one patience.
+static_assert(kWindowsLogPatienceSeconds > 0 && 3 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds,
+              "the administrator part's first line, give-up line and flush before its result must fit in the "
+              "helper's extra wait");
+
+// Shared start of both Windows parts: their values, Write-Log and
+// Write-Result, cmdlets and core types only (Constrained Language).
+// Write-Log uses Out-File, not Add-Content, whose 5.1 retry leaks a
+// handle that blocks later writes (PowerShell#27947). A refused line
+// is retried for up to $logPatience s, then kept for the next call.
+// onlyFirst: Write-Result writes only if there is no result yet.
+QStringList windowsPreambleLines(const HelperInputs& in, bool onlyFirst) {
+    const QString patience = QString::number(kWindowsLogPatienceSeconds);
     return {
         QStringLiteral("$ErrorActionPreference = 'Stop'"),
         QStringLiteral("$log = ") + powerShellQuote(windowsPath(in.logFile)),
@@ -282,14 +283,31 @@ QStringList windowsPreamble(const HelperInputs& in, bool onlyFirst) {
         // $pid is PowerShell's own (read-only): this process's id.
         QStringLiteral("$appPid = %1").arg(in.pid),
         QStringLiteral("$waitSeconds = %1").arg(in.waitSeconds),
+        // script: here and in Write-Log, so both share them in any scope.
+        QStringLiteral("$script:logPending = ''"),
+        QStringLiteral("$script:logPatience = ") + patience,
         QStringLiteral("function Write-Log([string]$text) {"),
-        QStringLiteral("    $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $text"),
-        QStringLiteral("    for ($i = 0; $i -lt 5; $i++) {"),
+        QStringLiteral("    $patience = ") + patience,
+        QStringLiteral("    if ($text -ne '') {"),
+        QStringLiteral("        $script:logPending += (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $text + [char]13 + [char]10"),
+        QStringLiteral("        $patience = $script:logPatience"),
+        QStringLiteral("    }"),
+        QStringLiteral("    $until = (Get-Date).AddSeconds($patience)"),
+        QStringLiteral("    while ($script:logPending) {"),
         QStringLiteral("        try {"),
-        QStringLiteral("            Add-Content -LiteralPath $log -Encoding UTF8 -Value $line"),
-        QStringLiteral("            return"),
+        QStringLiteral("            Out-File -LiteralPath $log -Append -Encoding UTF8 -NoNewline -InputObject $script:logPending"),
+        QStringLiteral("            $script:logPending = ''"),
+        QStringLiteral("            $script:logPatience = ") + patience,
         QStringLiteral("        } catch {"),
-        QStringLiteral("            Start-Sleep -Milliseconds 100"),
+        QStringLiteral("            if ((Get-Date) -ge $until) {"),
+        QStringLiteral("                $script:logPatience = 0"),
+        QStringLiteral("                try {"),
+        QStringLiteral("                    Write-Warning ('install.log: ' + $_.Exception.Message)"),
+        QStringLiteral("                } catch {"),
+        QStringLiteral("                }"),
+        QStringLiteral("                return"),
+        QStringLiteral("            }"),
+        QStringLiteral("            Start-Sleep -Milliseconds (Get-Random -Minimum 10 -Maximum 100)"),
         QStringLiteral("        }"),
         QStringLiteral("    }"),
         QStringLiteral("}"),
@@ -299,6 +317,7 @@ QStringList windowsPreamble(const HelperInputs& in, bool onlyFirst) {
         QStringLiteral("        return"),
         QStringLiteral("    }"),
         QStringLiteral("    try {"),
+        // Ascii for no BOM, so every reason must be ASCII (else '?').
         QStringLiteral("        Set-Content -LiteralPath $result -Encoding Ascii -NoNewline -Value "
                        "($status + ' ' + $version + ' ' + ($reason -replace '[\\r\\n]+', ' ') + [char]10)"),
         QStringLiteral("    } catch {"),
@@ -316,13 +335,16 @@ QString windowsApp(const QString& dir) {
 
 } // namespace
 
+QString windowsScriptPreamble(const HelperInputs& in, bool onlyFirst) {
+    return windowsPreambleLines(in, onlyFirst).join(u'\n');
+}
+
 QString windowsElevatedScript(const HelperInputs& in) {
     const QString dir = windowsPath(in.target);
     const QString prefix = dir.endsWith(u'\\') ? dir : dir + u'\\';
-    // No comments (they would lengthen the command line, three bytes
-    // of base64 for each character) and no double quotes, so nothing in
-    // it is ever expanded.
-    QStringList lines = windowsPreamble(in, false);
+    // No comments (each character costs ~3 of the command line's 32767)
+    // and no double quotes, so nothing in it is ever expanded.
+    QStringList lines = windowsPreambleLines(in, false);
     lines << QStringList{
         QStringLiteral("$prefix = ") + powerShellQuote(prefix),
         QStringLiteral("$app = ") + powerShellQuote(windowsApp(dir)),
@@ -330,9 +352,8 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("Write-Log ('administrator part: waiting for GitBolt (pid ' + $appPid + ') to quit')"),
         QStringLiteral("$code = 0"),
         QStringLiteral("try {"),
-        // By polling the process list, which shows another user's
-        // processes too: an over-the-shoulder administrator may not be
-        // allowed to open the user's GitBolt, so Wait-Process could fail.
+        // Polls the process list, not Wait-Process: an over-the-shoulder
+        // administrator may not be allowed to open the user's GitBolt.
         QStringLiteral("    $deadline = (Get-Date).AddSeconds($waitSeconds)"),
         QStringLiteral("    while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {"),
         QStringLiteral("        if ((Get-Date) -ge $deadline) {"),
@@ -344,16 +365,15 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("    if ($code -eq 0) {"),
         QStringLiteral("        $deadline = (Get-Date).AddSeconds(%1)").arg(kWindowsInUseSeconds),
         QStringLiteral("        while ($true) {"),
-        // A case-insensitive prefix by string methods and -eq alone
-        // (no [StringComparison], which Constrained Language refuses).
+        // A case-insensitive prefix by -eq: Constrained Language refuses
+        // [StringComparison].
         QStringLiteral("            $inUse = @(Get-Process -Name GitBolt -ErrorAction SilentlyContinue | Where-Object {"),
         QStringLiteral("                try { $_.Id -ne $appPid -and $_.Path -and $_.Path.Length -ge $prefix.Length -and "
                        "$_.Path.Substring(0, $prefix.Length) -eq $prefix } catch { $false }"),
         QStringLiteral("            }).Count -gt 0"),
         QStringLiteral("            if (-not $inUse -and (Test-Path -LiteralPath $app)) {"),
-        // In use only for a sharing or lock violation (32, 33): a check
-        // that can't run (Constrained Language refuses [IO.File]) leaves
-        // the process list's answer.
+        // In use only on a sharing or lock violation (32, 33). Where
+        // Constrained Language refuses [IO.File], the process list decides.
         QStringLiteral("                try {"),
         QStringLiteral("                    [IO.File]::Open($app, 'Open', 'ReadWrite', 'None').Dispose()"),
         QStringLiteral("                } catch {"),
@@ -374,9 +394,7 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("            Start-Sleep -Seconds 1"),
         QStringLiteral("        }"),
         QStringLiteral("    }"),
-        // /D= last and unquoted: NSIS takes the rest of the command line
-        // as the folder. Silent (/S), over the same folder; elevated
-        // already, so no second prompt.
+        // /D= last and unquoted: NSIS takes the rest as the folder.
         QStringLiteral("    if ($code -eq 0) {"),
         QStringLiteral("        Write-Log ('running ' + $installer)"),
         QStringLiteral("        try {"),
@@ -404,9 +422,7 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("    $code = %1").arg(kWindowsExitError),
         QStringLiteral("    Write-Log ('the administrator part failed: ' + $_.Exception.Message)"),
         QStringLiteral("}"),
-        // What the code means, for the log and the GitBolt that starts
-        // next; the result last of all: the helper starts GitBolt once
-        // it is there.
+        // What the code means, for the log and the install result.
         QStringLiteral("$status = 'failed'"),
         QStringLiteral("$reason = ''"),
         QStringLiteral("if ($code -eq 0) {"),
@@ -431,7 +447,11 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("if ($status -eq 'failed') {"),
         QStringLiteral("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)"),
         QStringLiteral("}"),
+        // Flush before the result: once it exists, the helper starts GitBolt.
+        QStringLiteral("Write-Log ''"),
         QStringLiteral("Write-Result $status $reason"),
+        // And what Write-Result may have logged.
+        QStringLiteral("Write-Log ''"),
         QStringLiteral("exit $code"),
     };
     return lines.join(u'\n');
@@ -444,29 +464,28 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("# Windows let the administrator part (windowsElevatedScript) run. It starts"),
         QStringLiteral("# GitBolt again when that part is done, not elevated."),
     };
-    lines << windowsPreamble(in, true);
+    lines << windowsPreambleLines(in, true);
     lines << QStringList{
         QStringLiteral("$elevatedPid = %1").arg(in.elevatedPid),
         QStringLiteral("$installSeconds = %1").arg(in.installSeconds),
         QStringLiteral("$app = ") + powerShellQuote(windowsApp(windowsPath(in.target))),
         QStringLiteral("Write-Log ('GitBolt update helper: waiting for GitBolt (pid ' + $appPid + ') to quit')"),
-        // A little longer than the administrator part, which started
-        // first: whatever it decided, GitBolt that quits in time is
-        // started again.
+        // Longer than the administrator part waits: whatever that part
+        // decided, a GitBolt that quits in time is started again.
         QStringLiteral("$deadline = (Get-Date).AddSeconds($waitSeconds + %1)").arg(kWindowsHelperExtraSeconds),
         QStringLiteral("while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {"),
         QStringLiteral("    if ((Get-Date) -ge $deadline) {"),
         QStringLiteral("        Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: it is not started again')"),
         QStringLiteral("        Write-Result 'gave-up' ('GitBolt did not quit within ' + $waitSeconds + ' seconds')"),
+        QStringLiteral("        Write-Log ''"),
         QStringLiteral("        exit 1"),
         QStringLiteral("    }"),
         QStringLiteral("    Start-Sleep -Milliseconds 250"),
         QStringLiteral("}"),
         QStringLiteral("Write-Log ('GitBolt has quit: waiting for the administrator part (pid ' + $elevatedPid + "
                        "') to install GitBolt ' + $version)"),
-        // The administrator part writes the result last. No result, and
-        // that part gone a few seconds (it may still be writing), or no
-        // result in installSeconds: it says so itself.
+        // 5 s of grace once the administrator part has gone: its result
+        // is its last step but a flush, so it can come just as it ends.
         QStringLiteral("$deadline = (Get-Date).AddSeconds($installSeconds)"),
         QStringLiteral("$endedBy = $null"),
         QStringLiteral("while (-not ($result -ne '' -and (Test-Path -LiteralPath $result))) {"),
@@ -494,6 +513,8 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("} catch {"),
         QStringLiteral("    Write-Log ('could not start GitBolt: ' + $_.Exception.Message)"),
         QStringLiteral("}"),
+        // Anything the log refused so far.
+        QStringLiteral("Write-Log ''"),
     };
     return lines.join(u'\n') + u'\n';
 }
@@ -506,9 +527,8 @@ bool appImageRunsExtracted(const QString& appDir, bool extractAndRunSet) {
     const QString canonical = QFileInfo(appDir).canonicalFilePath();
     if (canonical.isEmpty() || !QFileInfo(canonical).isDir())
         return false;
-    // The FUSE runtime mounts the image at $APPDIR (/tmp/.mount_X);
-    // extracted, $APPDIR is a plain folder on some other mount
-    // (<tmp>/appimage_extracted_<hash>).
+    // Mounted, $APPDIR is a mount point (/tmp/.mount_X); extracted, a
+    // plain folder (<tmp>/appimage_extracted_<hash>).
     const QStorageInfo volume(canonical);
     return volume.isValid() && QFileInfo(volume.rootPath()).canonicalFilePath() != canonical;
 }

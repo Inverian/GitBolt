@@ -142,6 +142,12 @@ GitBolt follows consistent C++20 style across the codebase. Please match the exi
 
 Run `clang-format -i path/to/file.cpp` to format a file.
 
+### Comments
+
+- Say what the code does and the key *why*, in plain English: usually 1–3 lines for a function, up to about 6 for a non-obvious constraint, a workaround for a platform bug (link the issue) or a security reason.
+- Leave out history, step-by-step narration and anything the code already says. Say each thing once, where it belongs: the contract at the declaration, implementation details in the `.cpp`, and in a test only what it proves.
+- Keep comments true: when you change the code, update or delete its comment.
+
 ### Headers
 
 - Use `#pragma once` instead of include guards
