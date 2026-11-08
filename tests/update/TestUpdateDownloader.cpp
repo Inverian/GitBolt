@@ -21,6 +21,9 @@
 //     removed, never written through (nor is a file created where a
 //     dangling one points), and something there that can't be removed
 //     fails the download
+//   - the final name is taken by a rename alone: a link planted there
+//     is replaced, never written through (nor is a file created where
+//     a dangling one points), and a folder there fails the download
 //   - removeOldDownloads: the folders of the running version and older
 //     ones go, anything else stays, and a link is never followed
 //
@@ -606,6 +609,52 @@ private slots:
         QVERIFY(!QFileInfo::exists(nowhere));
         QCOMPARE(contentsOf(finalPath()), file);
 #endif
+    }
+
+    // A link planted at the final name (another user, in a shared,
+    // sticky folder an AppImage is in), dangling to where a new file
+    // would do harm, or to a file: the checked download replaces the
+    // link itself. Nothing is created or written where it points, as
+    // QFile::rename's copy (which follows the link) would.
+    void aLinkAtTheFinalNameIsReplacedNotFollowed() {
+#ifdef Q_OS_WIN
+        QSKIP("QFile::link makes a .lnk shortcut on Windows, which no open follows");
+#else
+        const QByteArray file = payload(20 * 1024);
+        const Release release = publish(file);
+        Downloader downloader(config());
+        const QString nowhere = dir_->path() + QStringLiteral("/victim/.gitconfig");
+        QVERIFY(QDir().mkpath(dir_->path() + QStringLiteral("/victim")));
+        QVERIFY(QDir().mkpath(versionDir()));
+        QVERIFY(QFile::link(nowhere, finalPath()));
+        QCOMPARE(run(downloader, release), QString());
+        QVERIFY(!QFileInfo::exists(nowhere));
+        QVERIFY(!QFileInfo(finalPath()).isSymLink());
+        QCOMPARE(contentsOf(finalPath()), file);
+        QCOMPARE(entriesOf(versionDir()), QStringList{kAsset});
+
+        const QString precious = dir_->path() + QStringLiteral("/victim/notes.txt");
+        QVERIFY(writeFile(precious, "mine\n"));
+        QVERIFY(QFile::remove(finalPath()));
+        QVERIFY(QFile::link(precious, finalPath()));
+        QCOMPARE(run(downloader, release), QString());
+        QCOMPARE(contentsOf(precious), QByteArray("mine\n"));
+        QVERIFY(!QFileInfo(finalPath()).isSymLink());
+        QCOMPARE(contentsOf(finalPath()), file);
+#endif
+    }
+
+    // A folder at the final name: the rename fails, and so does the
+    // download, with nothing written anywhere (no copy into it).
+    void aFolderAtTheFinalNameFailsTheDownload() {
+        QVERIFY(writeFile(finalPath() + QStringLiteral("/inside.txt"), "not ours"));
+        const Release release = publish(payload(1000));
+        Downloader downloader(config());
+        const QString why = run(downloader, release);
+        QVERIFY2(why.startsWith(QStringLiteral("Couldn't move %1 into place").arg(kAsset)), qPrintable(why));
+        QCOMPARE(entriesOf(finalPath()), QStringList{QStringLiteral("inside.txt")});
+        QVERIFY(!QFileInfo::exists(partPath()));
+        QVERIFY(!downloader.busy());
     }
 
     // Something at the .part's name that can't be removed (here a

@@ -871,7 +871,7 @@ jobs:
       # Install the real installer silently, then prove the INSTALLED app
       # starts. Then update that install in place twice, as the in-app
       # updater does: once with its exact command line, once through its
-      # own helper script (test_update_helpers). timeout-minutes:
+      # own two parts (test_update_helpers). timeout-minutes:
       # Start-Process -Wait is unbounded, and NSIS shows any MessageBox
       # lacking /SD even under /S.
       - name: Smoke-test NSIS installer (Windows)
@@ -1027,11 +1027,12 @@ jobs:
           }
           Assert-InstalledVersion 'installed'
 
-          # 5) Update in place exactly as the in-app updater's helper runs
-          #    the installer (windowsHelperScript, src/update/
-          #    InstallHelpers.cpp): over the install's own folder, with
-          #    /S /D=<dir> as one ArgumentList string, /D= last and
-          #    unquoted, elevated through ShellExecute's RunAs (no prompt
+          # 5) Update in place exactly as the in-app updater runs the
+          #    installer (windowsElevatedScript, src/update/
+          #    InstallHelpers.cpp, which GitBolt starts through
+          #    ShellExecuteExW's runas): over the install's own folder,
+          #    with /S /D=<dir> as one ArgumentList string, /D= last and
+          #    unquoted, elevated through ShellExecute's runas (no prompt
           #    with the runner's UAC off). The installer's .onInit runs
           #    the installed copy's uninstaller first
           #    (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL). LICENSE.txt,
@@ -1086,12 +1087,16 @@ jobs:
               Write-Host ($line -f $when, $k.Location, $k.DisplayName, $k.DisplayVersion, $k.UninstallString, $k.Values)
             }
             # An entry Windows lists (Apps & features) has a DisplayName and
-            # an UninstallString. A GitBolt key with neither is no second
-            # install (dry run 3 found an empty one in the 64-bit view, with
-            # the real one in WOW6432Node): reported, not failed.
+            # an UninstallString. A GitBolt key with neither fails: dry run 3
+            # found an empty one in the 64-bit view, which GitBolt itself had
+            # made (registeredWindowsUninstallers read it through QSettings,
+            # which creates a missing key when it may, and test_update_package
+            # ran as an administrator before this step). It reads with
+            # RegOpenKeyExW/RegGetValueW now, which create nothing, so such a
+            # key is a regression.
             $keys = @($all | Where-Object { $_.DisplayName -and $_.UninstallString })
             foreach ($k in @($all | Where-Object { -not ($_.DisplayName -and $_.UninstallString) })) {
-              Write-Host "::warning::${when}: a GitBolt Uninstall key that lists nothing: $($k.Location) (values: $($k.Values))"
+              $bad += "a GitBolt Uninstall key that lists nothing: $($k.Location) (values: $($k.Values))"
             }
             if ($keys.Count -ne 1) {
               $bad += "$($keys.Count) GitBolt Uninstall entries with a DisplayName and an UninstallString, expected exactly one"
@@ -1111,16 +1116,20 @@ jobs:
           $update = Start-Process -FilePath $setup[0].FullName -ArgumentList "/S /D=$dest" -Verb RunAs -Wait -PassThru
           if ($update.ExitCode -ne 0) { throw "updating in place: the installer exited with '$($update.ExitCode)'" }
           Assert-Updated 'updated in place'
-          Write-Host "::notice::GitBolt's Uninstall key, after an update in place: $(@(Get-UninstallKeys)[0].Location)"
+          $listedKeys = @(Get-UninstallKeys | Where-Object { $_.DisplayName -and $_.UninstallString })
+          Write-Host "::notice::GitBolt's Uninstall key, after an update in place: $($listedKeys[0].Location)"
 
-          # 6) The updater's own Windows helper, for real: test_update_helpers'
+          # 6) The updater's own Windows update, for real: test_update_helpers'
           #    windowsHelperUpdatesARealInstall (tests/update/
-          #    TestInstallHelpers.cpp) builds the script with
-          #    windowsHelperScript and starts it as Installer::launchHelper
-          #    does (hidden powershell.exe -EncodedCommand, detached) for a
-          #    stand-in GitBolt. With a 2 s timeout it must give up and
-          #    change nothing; with time, it must wait, run the installer
-          #    over $dest, log its exit code 0 and start the installed
+          #    TestInstallHelpers.cpp) starts both parts through
+          #    launchWindowsUpdate, as Installer::launchHelper does: the
+          #    administrator part by ShellExecuteExW runas (granted with no
+          #    prompt: UAC is off here), then the helper that starts
+          #    GitBolt again (hidden powershell.exe -EncodedCommand,
+          #    detached), for a stand-in GitBolt. With a 2 s timeout they
+          #    must give up and change nothing; with another GitBolt
+          #    running from $dest, install nothing; with time, wait, run
+          #    the installer over $dest, write "ok" and start the installed
           #    GitBolt.exe again (a test session, with an instance name of
           #    its own; the test closes it). It runs only when these
           #    variables name the installer and the install. The binary

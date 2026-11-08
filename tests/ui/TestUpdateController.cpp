@@ -13,32 +13,47 @@
 //     or anything with the switch off or GITBOLT_UPDATE_CHECK=0;
 //   - only an official build's setup schedules the timer; a test
 //     session's exists, stopped, and may be fired; start() clears old
-//     downloads;
-//   - Install and Restart downloads into the AppImage's folder; Cancel,
-//     closing the dialog, a failed download and a download abandoned
-//     after it finished all leave nothing there but the running AppImage,
-//     and never start the helper; on macOS, a disk image that won't
-//     attach is deleted too;
+//     downloads, and beside the AppImage only what GitBolt left there
+//     (a .part, the download it recorded), never the user's AppImages;
+//   - Install and Restart downloads into the AppImage's folder, and
+//     records the download until the helper takes it; Cancel, closing
+//     the dialog, a failed download and a download abandoned after it
+//     finished all leave nothing there but the running AppImage, and
+//     never start the helper; on macOS, a disk image that won't attach
+//     is deleted too, and one for a newer macOS is remembered: shown as
+//     not installable with why, never downloaded again, until a newer
+//     release or another system version;
 //   - what Install and Skip act on is the release the dialog shows: a
-//     newer one found meanwhile waits for the bar, and a manual check
-//     whose dialog was taken over by the bar's View doesn't replace the
-//     install screen with its late answer;
+//     newer one found meanwhile waits for the bar (unless a later
+//     answer says GitHub took it down), and a manual check whose dialog
+//     was taken over by the bar's View doesn't replace the install
+//     screen with its late answer;
 //   - once the helper runs (a real one, against a stand-in AppImage
 //     and a child process for it to wait for; the quit is caught, never
 //     done), the dialog has nothing to cancel, says so when GitBolt
-//     doesn't quit, and the download is the helper's;
+//     doesn't quit, and the download is the helper's; once the helper
+//     has given up (a short deadline here), the install is over and
+//     failed, and checks and Install work again;
 //   - after an install, start() reads the helper's install-result
 //     once: ok goes to the status bar; declined, failed or gave-up for
 //     a newer version open the dialog on why, the end of install.log
 //     and how to install by hand for this kind of package; a stale or
 //     unreadable one is dropped;
+//   - Windows' UAC refusing (a No, or an error), which comes back while
+//     GitBolt runs (the launch hook stands in for the prompt): GitBolt
+//     doesn't quit, the dialog says how to install it by hand, and
+//     after a No, Try Again asks again for the same checked download;
 //   - MainWindow: without the in-app check (a source build, or a test
 //     session with no test feed) Help › Check for Updates opens the
-//     releases page; with it, it asks the feed.
+//     releases page; with it, it asks the feed; on macOS the
+//     application menu's About GitBolt and Check for Updates… have
+//     their roles as they join their placeholder menu, which then
+//     doesn't show in the menu bar.
 //
 
 #include <QAbstractButton>
 #include <QAction>
+#include <QActionEvent>
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
@@ -48,6 +63,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QMenu>
+#include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QProcess>
 #include <QPushButton>
@@ -55,11 +72,13 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStatusBar>
+#include <QSysInfo>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "../update/FakeApps.h"
 #include "../update/HttpServer.h"
 #include "conf/SettingsService.h"
 #include "dialogs/UpdateDialog.h"
@@ -68,6 +87,7 @@
 #include "ui/UpdateSetup.h"
 #include "update/Checker.h"
 #include "update/Downloader.h"
+#include "update/Installer.h"
 #include "update/Package.h"
 #include "widgets/UpdateNoticeBar.h"
 
@@ -464,21 +484,30 @@ private slots:
     }
 
     // What an update that crashed left beside the AppImage goes at the
-    // next start (removeStaleInstallFiles); the running copy and a newer
-    // release's AppImage stay.
+    // next start (removeStaleInstallFiles): its .part, and the download
+    // it recorded. The running copy and the user's own AppImages stay,
+    // named as the release names them or not, older than this one or
+    // newer: the one they keep to go back to, say.
     void startClearsWhatACrashedUpdateLeftBehind() {
         HttpServer server;
         const QString apps = appImageFolder();
-        for (const char* name : {".GitBolt-0.1.1-x86_64.AppImage.part", "GitBolt-0.0.9-x86_64.AppImage",
-                                 "GitBolt-0.1.2-x86_64.AppImage"}) {
-            QFile file(QDir(apps).filePath(QString::fromLatin1(name)));
-            QVERIFY(file.open(QIODevice::WriteOnly));
-            file.write("x");
-        }
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        const QStringList left{QStringLiteral(".GitBolt-0.1.1-x86_64.AppImage.part"),
+                               QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
+                               QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
+                               QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), kAppImageAsset};
+        for (const QString& name : left)
+            QVERIFY(writeFile(QDir(apps).filePath(name), "x"));
+        UpdateSetup setup = testSetup(server, cache_->path(), appImage(apps));
+        const QString record = QDir(setup.config.downloadDir).filePath(QLatin1String(gitbolt::update::kPendingDownloadFile));
+        // The checked download of 0.1.1, which no helper took over.
+        QVERIFY(writeFile(record, QDir(apps).filePath(kAppImageAsset).toUtf8() + '\n'));
+        Harness h(setup);
         h.controller->start();
-        QCOMPARE(entries(apps), (QStringList{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"),
+        QCOMPARE(entries(apps), (QStringList{QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
+                                             QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
+                                             QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"),
                                              QStringLiteral("GitBolt.AppImage")}));
+        QVERIFY(!QFileInfo::exists(record));
     }
 
     // ---- installing ---------------------------------------------------------
@@ -534,12 +563,17 @@ private slots:
         QTRY_COMPARE(h.dialog()->state(), State::Available);
 
         // Right after the controller takes the download (it connected
-        // first), before the Installer's queued outcome.
+        // first), before the Installer's queued outcome. Until a helper
+        // takes it over, it is recorded as GitBolt's: a crash now would
+        // leave it to the next start to remove.
+        const QString updates = h.controller->setup().config.downloadDir;
+        const QString record = QDir(updates).filePath(QLatin1String(gitbolt::update::kPendingDownloadFile));
         bool abandoned = false;
         connect(h.downloader(), &gitbolt::update::Downloader::finished, this,
                 [&](const QString& path) {
                     QCOMPARE(path, QDir(apps).filePath(kAppImageAsset));
                     QVERIFY(QFile::exists(path));
+                    QCOMPARE(contents(record), path.toUtf8() + '\n');
                     h.dialog()->reject();
                     abandoned = true;
                 });
@@ -548,7 +582,7 @@ private slots:
         QTest::qWait(300);   // anything queued has run
         QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
         QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
-        const QString updates = h.controller->setup().config.downloadDir;
+        QVERIFY(!QFile::exists(record));
         QVERIFY(!QFile::exists(QDir(updates).filePath(QStringLiteral("install-helper.sh"))));
         QVERIFY(!QFile::exists(QDir(updates).filePath(QStringLiteral("install.log"))));
     }
@@ -629,6 +663,99 @@ private slots:
                  qPrintable(h.dialog()->shownText()));
     }
 
+    // A release Install found this system too old for (macOS's minimum,
+    // remembered in updates/incompatible*): shown as one this copy can't
+    // install, with why, and not downloaded again; with the system
+    // changed since (an upgrade may be enough), installable again; and
+    // forgotten once a newer one comes out.
+    void aReleaseThisSystemIsTooOldForIsntDownloadedAgain_data() {
+        QTest::addColumn<bool>("sameSystem");
+        QTest::newRow("this system") << true;
+        QTest::newRow("the system changed since") << false;
+    }
+    void aReleaseThisSystemIsTooOldForIsntDownloadedAgain() {
+        QFETCH(bool, sameSystem);
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        Harness h(testSetup(server, cache_->path(), appImage(appImageFolder())));
+        const QString why = QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this Mac has macOS 15.6, "
+                                           "so it can't be installed here.");
+        h.settings.setIncompatibleUpdate(QStringLiteral("0.1.1"), why,
+                                         sameSystem ? QSysInfo::productVersion() : QStringLiteral("0.0.1"));
+        h.controller->checkNow();
+        QTRY_VERIFY(h.dialog()->state() != State::Checking);
+        if (!sameSystem) {
+            QCOMPARE(h.dialog()->state(), State::Available);
+            QVERIFY(h.settings.incompatibleUpdateVersion().isEmpty());
+            return;
+        }
+        QCOMPARE(h.dialog()->state(), State::NotInstallable);
+        QVERIFY2(h.dialog()->shownText().contains(why), qPrintable(h.dialog()->shownText()));
+        QVERIFY(h.button("updateDialog.install")->isHidden());
+        QCOMPARE(server.hits(QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8()), 0);
+        QCOMPARE(h.settings.incompatibleUpdateVersion(), QStringLiteral("0.1.1"));
+
+        // A newer release is news again: installable, and the refusal
+        // is forgotten.
+        h.dialog()->reject();
+        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), "newer"}});
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.2 is available"));
+        QVERIFY(h.settings.incompatibleUpdateVersion().isEmpty());
+        QVERIFY(h.settings.incompatibleUpdateReason().isEmpty());
+    }
+
+    // macOS, end to end: a disk image whose app needs a newer macOS than
+    // this one. Install downloads and attaches it, the Installer refuses
+    // it, and the dialog says why, as for a release this copy can't
+    // install, with nothing left behind. It is remembered: the next
+    // check shows the same without downloading it again.
+    void aDiskImageForANewerMacOSIsRemembered() {
+#ifndef Q_OS_MACOS
+        QSKIP("macOS: hdiutil");
+#else
+        QTemporaryDir images;
+        const QString content = images.filePath(QStringLiteral("content"));
+        QVERIFY(gitbolt::test::makeBundle(content + QStringLiteral("/GitBolt.app"), QStringLiteral("0.1.1"),
+                                          QStringLiteral("com.gitbolt.app"), {}, QStringLiteral("99.0")));
+        const QString dmgName = QStringLiteral("GitBolt-0.1.1-Darwin-arm64.dmg");
+        const QString dmgPath = images.filePath(dmgName);
+        QVERIFY(gitbolt::test::makeDiskImage(content, dmgPath));
+        QFile dmgFile(dmgPath);
+        QVERIFY(dmgFile.open(QIODevice::ReadOnly));
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{dmgName, dmgFile.readAll()}});
+        QTemporaryDir apps;
+        QVERIFY(gitbolt::test::makeBundle(apps.filePath(QStringLiteral("GitBolt.app")), QStringLiteral("0.1.0")));
+        PackageInfo bundle{PackageKind::MacBundle, apps.filePath(QStringLiteral("GitBolt.app")), true, {}};
+        Harness h(testSetup(server, cache_->path(), bundle));
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_VERIFY_WITH_TIMEOUT(h.dialog()->state() != State::Downloading && h.dialog()->state() != State::Preparing,
+                                 30000);
+        QCOMPARE(h.dialog()->state(), State::NotInstallable);
+        const QString shown = h.dialog()->shownText();
+        QVERIFY2(shown.contains(QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this Mac has macOS ")),
+                 qPrintable(shown));
+        QCOMPARE(h.settings.incompatibleUpdateVersion(), QStringLiteral("0.1.1"));
+        QCOMPARE(h.settings.incompatibleUpdateSystem(), QSysInfo::productVersion());
+        const QString version = QDir(h.controller->setup().config.downloadDir).filePath(QStringLiteral("0.1.1"));
+        QCOMPARE(entries(version), QStringList{});
+        QCOMPARE(entries(apps.path()), QStringList{QStringLiteral("GitBolt.app")});
+
+        const QByteArray dmgUrl = QStringLiteral("/download/v0.1.1/%1").arg(dmgName).toUtf8();
+        QCOMPARE(server.hits(dmgUrl), 1);
+        h.dialog()->reject();
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::NotInstallable);
+        QVERIFY2(h.dialog()->shownText().contains(QStringLiteral("needs macOS 99.0 or later")),
+                 qPrintable(h.dialog()->shownText()));
+        QCOMPARE(server.hits(dmgUrl), 1);
+#endif
+    }
+
     // macOS: the download passes its checksum, but isn't a disk image
     // hdiutil attaches. The preparation fails, and the download goes.
     void aDiskImageThatWontAttachIsDeleted() {
@@ -650,6 +777,99 @@ private slots:
         QCOMPARE(entries(version), QStringList{});
         QCOMPARE(entries(apps.path()), QStringList{QStringLiteral("GitBolt.app")});
 #endif
+    }
+
+    // Windows asks UAC while GitBolt runs, and a No (or a refusal of
+    // another kind, as a standard user may get at once) comes back to
+    // it: GitBolt doesn't quit, and the dialog says nothing was
+    // installed and how to install it by hand. After a No, Try Again
+    // asks again for the same checked download; closing the dialog
+    // deletes it. The launch hook stands in for the prompt, which only
+    // Windows with UAC on has.
+    void aRefusedPromptKeepsGitBoltRunning_data() {
+        QTest::addColumn<bool>("declined");
+        QTest::newRow("declined") << true;
+        QTest::newRow("failed") << false;
+    }
+    void aRefusedPromptKeepsGitBoltRunning() {
+        QFETCH(bool, declined);
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        const QByteArray exePath = "/download/v0.1.1/GitBolt-0.1.1-Windows-AMD64.exe";
+        UrlCatcher catcher;
+        // A Windows install stages nothing: prepare() checks the name.
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        const QString byHand = QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
+                                              "the release page and run it as an administrator.");
+        int quits = 0;
+        QList<qint64> launched;
+        QString downloaded;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64 pid) {
+            launched << pid;
+            downloaded = QDir(h.controller->setup().config.downloadDir)
+                             .filePath(QStringLiteral("0.1.1/GitBolt-0.1.1-Windows-AMD64.exe"));
+            if (declined)
+                emit installer.declined(byHand);
+            else
+                emit installer.failed(QStringLiteral("Windows couldn't start GitBolt's installer as an "
+                                                     "administrator: Access is denied. ")
+                                      + byHand);
+            return false;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        QVERIFY2(h.dialog()->shownText().contains(
+                     QStringLiteral("Windows will ask for permission for Windows PowerShell to install it.")),
+                 qPrintable(h.dialog()->shownText()));
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE(launched.size(), 1);
+        QCOMPARE(launched.first(), qint64(4321));
+        QTest::qWait(400);   // past the quit grace: nothing asked to quit
+        QCOMPARE(quits, 0);
+        QVERIFY(h.dialog()->isVisible());
+        const QString shown = h.dialog()->shownText();
+        QVERIFY2(shown.contains(byHand), qPrintable(shown));
+        QCOMPARE(shownButtons(h.dialog()),
+                 (QStringList{QStringLiteral("updateDialog.close"), QStringLiteral("updateDialog.openReleasePage"),
+                              QStringLiteral("updateDialog.retry")}));
+        h.button("updateDialog.openReleasePage")->click();
+        QCOMPARE(catcher.urls,
+                 QList<QUrl>{QUrl(QStringLiteral("https://github.com/Inverian/GitBolt/releases/tag/v0.1.1"))});
+
+        if (declined) {
+            QCOMPARE(h.dialog()->state(), State::Declined);
+            QCOMPARE(h.dialog()->property("updateState").toString(), QStringLiteral("declined"));
+            QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.1 wasn't installed"));
+            QVERIFY2(shown.contains(QStringLiteral("Windows didn't give permission, so nothing was installed.")),
+                     qPrintable(shown));
+            // Still checked and ready: Try Again asks Windows again,
+            // with no second download.
+            QVERIFY(QFile::exists(downloaded));
+            h.button("updateDialog.retry")->click();
+            QCOMPARE(launched.size(), 2);
+            QCOMPARE(server.hits(exePath), 1);
+            QCOMPARE(h.dialog()->state(), State::Declined);
+            // A check meanwhile leaves it be.
+            h.controller->checkNow();
+            QCOMPARE(h.dialog()->state(), State::Declined);
+            // Closed: the download goes, and still nothing quits.
+            h.dialog()->reject();
+            QVERIFY(!QFile::exists(downloaded));
+        } else {
+            QCOMPARE(h.dialog()->state(), State::Failed);
+            QCOMPARE(headline(h.dialog()), QStringLiteral("Couldn't install GitBolt 0.1.1"));
+            QVERIFY2(shown.contains(QStringLiteral("Access is denied.")), qPrintable(shown));
+            QVERIFY(!QFile::exists(downloaded));
+            // Try Again starts over: downloaded again, asked again.
+            h.button("updateDialog.retry")->click();
+            QTRY_COMPARE(launched.size(), 2);
+            QCOMPARE(server.hits(exePath), 2);
+        }
+        QTest::qWait(400);
+        QCOMPARE(quits, 0);
     }
 
     // ---- what the dialog shows is what is acted on ----------------------------
@@ -746,6 +966,47 @@ private slots:
         QCOMPARE(h.bar->version(), QStringLiteral("0.1.2"));
     }
 
+    // As above, but GitHub then takes 0.1.2 down: the next answer, 0.1.1
+    // (the release on screen), says the newer one is gone, and the bar
+    // doesn't offer it once the dialog closes. Whether that answer is a
+    // manual check's or the daily one's.
+    void aWithdrawnReleaseIsntOfferedOnceTheDialogCloses_data() {
+        QTest::addColumn<bool>("manual");
+        QTest::newRow("Check for Updates") << true;
+        QTest::newRow("the daily check") << false;
+    }
+    void aWithdrawnReleaseIsntOfferedOnceTheDialogCloses() {
+        QFETCH(bool, manual);
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        Harness h(testSetup(server, cache_->path(), appImage(appImageFolder())));
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+
+        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), "newer"}});
+        h.settings.setUpdateLastCheck({});
+        h.fire();
+        QTRY_COMPARE(server.hits(kFeedPath), 2);
+        QTRY_VERIFY(!h.checker()->busy());
+
+        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        if (manual) {
+            h.controller->checkNow();
+        } else {
+            h.settings.setUpdateLastCheck({});
+            h.fire();
+        }
+        QTRY_COMPARE(server.hits(kFeedPath), 3);
+        QTRY_VERIFY(!h.checker()->busy());
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.1 is available"));
+
+        h.button("updateDialog.later")->click();
+        QVERIFY(!h.dialog()->isVisible());
+        QTest::qWait(50);
+        QVERIFY2(h.bar->isHidden(), qPrintable(h.bar->text()));
+    }
+
     // ---- once the helper runs ------------------------------------------------
 
     // A real helper for a stand-in AppImage, waiting on a child process
@@ -782,6 +1043,12 @@ private slots:
             const QDir downloads(h.controller->setup().config.downloadDir);
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install-helper.sh"))));
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install.log"))));
+            // The download is the helper's now, no crash's to clear up.
+            QVERIFY(!QFile::exists(downloads.filePath(QLatin1String(gitbolt::update::kPendingDownloadFile))));
+            // Watched until the helper's own wait is over, and a margin.
+            auto* deadline = h.window.findChild<QTimer*>(QStringLiteral("updateHelperDeadline"));
+            QVERIFY(deadline && deadline->isActive());
+            QCOMPARE(deadline->interval(), (gitbolt::update::Installer::kHelperWaitSeconds + 60) * 1000);
 
             // Still here after the grace time: the quit was refused.
             QTRY_COMPARE(h.dialog()->state(), State::QuitNeeded);
@@ -815,6 +1082,76 @@ private slots:
 #endif
     }
 
+    // GitBolt didn't quit (refused, then the user went on working), and
+    // the helper's wait ran out: it gave up and changed nothing. The
+    // dialog no longer says that quitting installs the update; it says
+    // it was abandoned, and checking and installing work again. The
+    // deadline here is short (the helper's own wait isn't), so the real
+    // helper still waits when it passes: once "GitBolt" does quit, it
+    // finds no download any more and changes nothing either.
+    void anUpdateTheHelperGaveUpOnIsOver() {
+#if defined(Q_OS_WIN)
+        QSKIP("the AppImage helper is a /bin/sh script");
+#else
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "#!/bin/sh\nexit 0\n"}});
+        const QString apps = appImageFolder();
+        QProcess stand;
+        stand.start(QStringLiteral("/bin/sleep"), {QStringLiteral("120")});
+        QVERIFY(stand.waitForStarted());
+        auto standDown = qScopeGuard([&] {
+            stand.kill();
+            stand.waitForFinished();
+        });
+        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        int quits = 0;
+        h.controller->setRestartHooks({[&] { return stand.processId(); }, [&] { ++quits; }, 300, 1500});
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::QuitNeeded, 15000);
+        // Closed, as a user who went on working would.
+        h.dialog()->reject();
+        // What the helper writes as it gives up.
+        const QDir downloads(h.controller->setup().config.downloadDir);
+        QVERIFY(writeFile(downloads.filePath(QStringLiteral("install-result")),
+                          "gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n"));
+
+        QTRY_COMPARE(h.dialog()->state(), State::Failed);
+        QVERIFY(h.dialog()->isVisible());
+        QCOMPARE(headline(h.dialog()), QStringLiteral("Couldn't install GitBolt 0.1.1"));
+        QVERIFY2(h.dialog()->shownText().contains(
+                     QStringLiteral("GitBolt didn't quit within 10 minutes of Install and Restart, so the update "
+                                    "was abandoned.")),
+                 qPrintable(h.dialog()->shownText()));
+        QCOMPARE(shownButtons(h.dialog()), (QStringList{QStringLiteral("updateDialog.close"),
+                                                         QStringLiteral("updateDialog.openReleasePage"),
+                                                         QStringLiteral("updateDialog.retry")}));
+        QCOMPARE(quits, 1);
+        // Nothing of it is left, and the next start doesn't say it again.
+        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QVERIFY(!QFile::exists(downloads.filePath(QStringLiteral("install-result"))));
+
+        // A check asks GitHub again, and offers the release again.
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        QCOMPARE(server.hits(kFeedPath), 2);
+        // So does the daily one.
+        h.dialog()->reject();
+        h.settings.setUpdateLastCheck({});
+        h.fire();
+        QTRY_COMPARE(server.hits(kFeedPath), 3);
+
+        // The late helper: "GitBolt" quits, and nothing changes.
+        stand.kill();
+        stand.waitForFinished();
+        QTRY_VERIFY_WITH_TIMEOUT(contents(downloads.filePath(QStringLiteral("install-result"))).startsWith("failed 0.1.1 "),
+                                 15000);
+        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
+        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+#endif
+    }
+
     // ---- after an install: the helper's install-result -----------------------
 
     void anEarlierFailureIsShown_data() {
@@ -829,21 +1166,25 @@ private slots:
                                           "exited with code 2."),
                            QStringLiteral("download GitBolt-0.1.1-Windows-AMD64.exe from the release page and run "
                                           "it as an administrator.")}
-            << "Windows will ask for permission to install it.";
+            << "Windows will ask for permission for Windows PowerShell to install it.";
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
             << QByteArray("\xEF\xBB\xBF" "declined 0.1.1 the request for permission was cancelled\r\n")
             << int(PackageKind::WindowsInstall)
             << QStringList{QStringLiteral("needs an administrator's permission, and it wasn't given: the request "
                                           "for permission was cancelled.")}
-            << "Windows will ask for permission to install it.";
+            << "Windows will ask for permission for Windows PowerShell to install it.";
         QTest::newRow("deb: polkit dismissed") << QByteArray("declined 0.1.1\n") << int(PackageKind::Deb)
                                                << QStringList{QStringLiteral("and it wasn't given."),
                                                               QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
                                                << "You'll be asked for an administrator's password.";
-        QTest::newRow("deb: no polkit agent")
-            << QByteArray("failed 0.1.1 no polkit authentication agent is running\n") << int(PackageKind::Deb)
-            << QStringList{QStringLiteral("failed after GitBolt quit: no polkit authentication agent is running."),
+        QTest::newRow("deb: pkexec couldn't authenticate")
+            << QByteArray("failed 0.1.1 pkexec couldn't authenticate (no polkit authentication agent is running, or "
+                          "polkit isn't set up to allow it)\n")
+            << int(PackageKind::Deb)
+            << QStringList{QStringLiteral("\nInstalling GitBolt 0.1.1 failed after GitBolt quit: pkexec couldn't "
+                                          "authenticate (no polkit authentication agent is running, or polkit isn't "
+                                          "set up to allow it). GitBolt wasn't changed.\n"),
                            QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
             << "You'll be asked for an administrator's password.";
         QTest::newRow("macOS: rolled back")
@@ -853,10 +1194,13 @@ private slots:
                            QStringLiteral("download GitBolt-0.1.1-Darwin-arm64.dmg from the release page, open it, "
                                           "and drag GitBolt into your Applications folder.")}
             << "restarts GitBolt with it.";
-        QTest::newRow("AppImage: gave up") << QByteArray("gave-up 0.1.1 ") << int(PackageKind::AppImage)
-                                           << QStringList{QStringLiteral("GitBolt didn't quit within 10 minutes"),
-                                                          QStringLiteral("download GitBolt-0.1.1-x86_64.AppImage")}
-                                           << "restarts GitBolt with it.";
+        // What the helpers write: the reason, in seconds, isn't repeated.
+        QTest::newRow("AppImage: gave up")
+            << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::AppImage)
+            << QStringList{QStringLiteral("\nGitBolt 0.1.1 wasn't installed: GitBolt didn't quit within 10 minutes "
+                                          "of Install and Restart. GitBolt wasn't changed.\n"),
+                           QStringLiteral("download GitBolt-0.1.1-x86_64.AppImage")}
+            << "restarts GitBolt with it.";
     }
     void anEarlierFailureIsShown() {
         QFETCH(QByteArray, result);
@@ -1063,6 +1407,70 @@ private slots:
         // The daily check's timer, for the bridge.
         auto* timer = window.findChild<QTimer*>(QStringLiteral("updateCheckTimer"));
         QVERIFY(timer && !timer->isActive());
+    }
+
+    // macOS: About GitBolt and Check for Updates… reach the application
+    // menu (GitBolt's, beside the Apple menu) through a placeholder menu
+    // of a parentless menu bar, by their role. Each must have it as it
+    // joins the placeholder: one that joins as a plain item (the default
+    // role, whose guess from the text "Check for Updates…" is none) is
+    // put in the placeholder by Cocoa, and the menu bar then shows the
+    // placeholder, empty, as "App", even once the role has moved the
+    // item out. About relies on that guess ("About …" is AboutRole).
+    void theApplicationMenusItemsJoinWithTheirRoles() {
+#ifndef Q_OS_MACOS
+        QSKIP("macOS: the application menu");
+#else
+        struct Joined {
+            QString text;
+            QAction::MenuRole role;
+        };
+        class Watcher : public QObject {
+        public:
+            QList<Joined> joined;
+        protected:
+            bool eventFilter(QObject* watched, QEvent* event) override {
+                if (event->type() == QEvent::ActionAdded) {
+                    auto* menu = qobject_cast<QMenu*>(watched);
+                    auto* bar = menu ? qobject_cast<QMenuBar*>(menu->parentWidget()) : nullptr;
+                    if (bar && !bar->parentWidget()) {
+                        const QAction* action = static_cast<QActionEvent*>(event)->action();
+                        joined.append({action->text(), action->menuRole()});
+                    }
+                }
+                return false;
+            }
+        } watcher;
+        qApp->installEventFilter(&watcher);
+        {
+            gitbolt::ui::MainWindow window;
+        }
+        qApp->removeEventFilter(&watcher);
+
+        QStringList texts;
+        for (const Joined& item : std::as_const(watcher.joined)) {
+            texts << item.text;
+            const bool guessed = item.role == QAction::TextHeuristicRole && item.text.startsWith(QLatin1String("About "));
+            QVERIFY2(guessed || (item.role != QAction::TextHeuristicRole && item.role != QAction::NoRole),
+                     qPrintable(item.text));
+        }
+        QCOMPARE(texts, (QStringList{QStringLiteral("About GitBolt"), QStringLiteral("Check for Updates…")}));
+        // Both are named for the bridge, and do what they say.
+        QAction* about = nullptr;
+        QAction* check = nullptr;
+        for (QWidget* widget : QApplication::topLevelWidgets()) {
+            if (auto* bar = qobject_cast<QMenuBar*>(widget); bar && !bar->parentWidget()) {
+                for (QAction* action : bar->findChildren<QAction*>()) {
+                    if (action->objectName() == QLatin1String("app.about"))
+                        about = action;
+                    else if (action->objectName() == QLatin1String("help.check-for-updates-app-menu"))
+                        check = action;
+                }
+            }
+        }
+        QVERIFY(about && about->menuRole() == QAction::AboutRole);
+        QVERIFY(check && check->menuRole() == QAction::ApplicationSpecificRole);
+#endif
     }
 
 private:

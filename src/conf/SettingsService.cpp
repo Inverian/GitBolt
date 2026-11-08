@@ -569,6 +569,34 @@ void SettingsService::setSkippedUpdateVersion(const QString& version)
         settings_.setValue(QStringLiteral("updates/skippedVersion"), version);
 }
 
+QString SettingsService::incompatibleUpdateVersion() const
+{
+    return settings_.value(QStringLiteral("updates/incompatibleVersion")).toString();
+}
+
+QString SettingsService::incompatibleUpdateReason() const
+{
+    return settings_.value(QStringLiteral("updates/incompatibleReason")).toString();
+}
+
+QString SettingsService::incompatibleUpdateSystem() const
+{
+    return settings_.value(QStringLiteral("updates/incompatibleSystem")).toString();
+}
+
+void SettingsService::setIncompatibleUpdate(const QString& version, const QString& reason, const QString& system)
+{
+    if (version.isEmpty()) {
+        settings_.remove(QStringLiteral("updates/incompatibleVersion"));
+        settings_.remove(QStringLiteral("updates/incompatibleReason"));
+        settings_.remove(QStringLiteral("updates/incompatibleSystem"));
+        return;
+    }
+    settings_.setValue(QStringLiteral("updates/incompatibleVersion"), version);
+    settings_.setValue(QStringLiteral("updates/incompatibleReason"), reason);
+    settings_.setValue(QStringLiteral("updates/incompatibleSystem"), system);
+}
+
 bool SettingsService::gitNoticeDismissed(const QString& key) const
 {
     return settings_.value(QStringLiteral("notices/gitDismissed")).toStringList().contains(key);

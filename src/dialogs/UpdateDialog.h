@@ -43,13 +43,14 @@ public:
         Failed,          ///< the message (and an earlier install's log); Try Again, Open Release Page, Close
         Restarting,      ///< the helper runs and GitBolt quits; no buttons: nothing is left to cancel
         QuitNeeded,      ///< GitBolt didn't quit: quit to finish; Quit GitBolt, Close
+        Declined,        ///< Windows' UAC said no; nothing installed; Try Again, Open Release Page, Close
     };
 
     /// The releases page, for Open Release Page before a release is known.
     static QUrl releasesPageUrl();
     /// "checking", "up-to-date", "available", "not-installable",
     /// "downloading", "preparing", "failed", "restarting",
-    /// "quit-needed": for the test bridge.
+    /// "quit-needed", "declined": for the test bridge.
     static QString stateName(State state);
 
     explicit UpdateDialog(QWidget* parent = nullptr);
@@ -62,8 +63,10 @@ public:
     void showUpToDate(const update::Version& latest, const update::Version& current);
     /// The release with its notes. An empty `whyNot`: Available, with
     /// Install and Restart, and a word on the prompt this `kind` of
-    /// install brings up once GitBolt has quit (UAC on Windows, polkit's
-    /// password for a deb), so that it doesn't come out of nowhere.
+    /// install brings up (Windows' UAC once the download is checked,
+    /// naming Windows PowerShell, which runs the installer; polkit's
+    /// password for a deb once GitBolt has quit), so that it doesn't
+    /// come out of nowhere.
     /// Otherwise NotInstallable: `whyNot` says why this copy can't
     /// install it and what to do, and Open Release Page takes Install's
     /// place.
@@ -93,6 +96,11 @@ public:
     /// GitBolt was asked to quit and didn't (a dialog refused to close,
     /// work still running): the update goes in once it does.
     void showQuitNeeded();
+    /// Windows didn't let the installer run as an administrator (UAC's
+    /// No): nothing was installed and GitBolt goes on running.
+    /// `howToInstall` says how to install the release by hand. Try
+    /// Again asks Windows again; Open Release Page goes to the release.
+    void showDeclined(const QString& howToInstall);
 
     /// What the dialog says, every visible line of it but the notes:
     /// for tests and the test bridge.
@@ -104,7 +112,7 @@ signals:
     void skipClicked();
     /// Cancel, while downloading or preparing.
     void cancelClicked();
-    /// Try Again, after a failure.
+    /// Try Again, after a failure or Windows' No.
     void retryClicked();
     /// Quit GitBolt, when it didn't quit by itself after the helper
     /// started.

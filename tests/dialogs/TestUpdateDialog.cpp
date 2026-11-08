@@ -17,7 +17,9 @@
 //   - it fits what it says: without the notes it is shorter, and a
 //     long message leaves no gap under it;
 //   - Available warns of the system's prompt where one comes (Windows'
-//     UAC, a deb's administrator password), and only there;
+//     UAC, which names Windows PowerShell; a deb's administrator
+//     password), and only there; Windows' No (Declined) says nothing
+//     was installed and how to install by hand, with Try Again;
 //   - once the helper runs nothing can be cancelled: Restarting has no
 //     button, and QuitNeeded offers Quit GitBolt and Close;
 //   - an earlier GitBolt's failed install shows its log where the notes
@@ -141,15 +143,17 @@ private slots:
         QCOMPARE(UpdateDialog::stateName(State::Failed), QStringLiteral("failed"));
         QCOMPARE(UpdateDialog::stateName(State::Restarting), QStringLiteral("restarting"));
         QCOMPARE(UpdateDialog::stateName(State::QuitNeeded), QStringLiteral("quit-needed"));
+        QCOMPARE(UpdateDialog::stateName(State::Declined), QStringLiteral("declined"));
     }
 
-    // The prompt comes from the system once GitBolt has quit: Available
-    // says so beforehand, for the kinds that bring one up.
+    // The prompt comes from the system (Windows': naming Windows
+    // PowerShell, which runs the installer, not GitBolt): Available says
+    // so beforehand, for the kinds that bring one up.
     void availableWarnsOfTheSystemsPrompt_data() {
         QTest::addColumn<int>("kind");
         QTest::addColumn<QString>("warning");
         QTest::newRow("Windows") << int(PackageKind::WindowsInstall)
-                                 << "Windows will ask for permission to install it.";
+                                 << "Windows will ask for permission for Windows PowerShell to install it.";
         QTest::newRow("deb") << int(PackageKind::Deb) << "You'll be asked for an administrator's password.";
         QTest::newRow("macOS") << int(PackageKind::MacBundle) << "";
         QTest::newRow("AppImage") << int(PackageKind::AppImage) << "";
@@ -167,6 +171,35 @@ private slots:
         // Nothing to warn of when it can't be installed here.
         dialog.showAvailable(release(), v(0, 1, 0), QStringLiteral("Not here."), PackageKind(kind));
         QCOMPARE(child<QLabel>(dialog, "updateDialog.message")->text(), QStringLiteral("You have 0.1.0."));
+    }
+
+    // Windows' UAC said no: nothing installed, GitBolt still runs. It
+    // says so and how to install by hand; Try Again asks again, and
+    // Open Release Page goes to the release.
+    void declinedSaysHowToInstallByHand() {
+        UrlCatcher catcher;
+        UpdateDialog dialog;
+        QSignalSpy retry(&dialog, &UpdateDialog::retryClicked);
+        dialog.showAvailable(release(), v(0, 1, 0), {}, PackageKind::WindowsInstall);
+        dialog.showPreparing(QStringLiteral("Checking the download…"));
+        const QString byHand = QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
+                                              "the release page and run it as an administrator.");
+        dialog.showDeclined(byHand);
+        QCOMPARE(dialog.state(), State::Declined);
+        QCOMPARE(dialog.property("updateState").toString(), QStringLiteral("declined"));
+        QCOMPARE(headline(dialog), QStringLiteral("GitBolt 0.1.1 wasn't installed"));
+        QCOMPARE(child<QLabel>(dialog, "updateDialog.message")->text(),
+                 QStringLiteral("Windows didn't give permission, so nothing was installed.\n\n") + byHand);
+        QCOMPARE(shownButtons(dialog),
+                 (QStringList{QStringLiteral("updateDialog.close"), QStringLiteral("updateDialog.openReleasePage"),
+                              QStringLiteral("updateDialog.retry")}));
+        QCOMPARE(defaultButton(dialog)->objectName(), QStringLiteral("updateDialog.retry"));
+        QVERIFY(child<QProgressBar>(dialog, "updateDialog.progress")->isHidden());
+        QVERIFY(child<QPlainTextEdit>(dialog, "updateDialog.notes")->isHidden());
+        child<QPushButton>(dialog, "updateDialog.retry")->click();
+        QCOMPARE(retry.count(), 1);
+        child<QPushButton>(dialog, "updateDialog.openReleasePage")->click();
+        QCOMPARE(catcher.urls, QList<QUrl>{release().pageUrl});
     }
 
     // The helper runs, GitBolt quits: no button, nothing to cancel.

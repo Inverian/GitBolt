@@ -158,9 +158,10 @@ in `TMPDIR` is ignored and a new one made.
 The rest of `dump-state`'s update keys: `updateTimerActive` (the daily
 check is scheduled: never in a test session), `updateDialog` (while
 the dialog is up: `checking`, `up-to-date`, `available`,
-`not-installable`, `downloading`, `preparing`, `failed`, `restarting`
-or `quit-needed`) with `updateDialogText` (every line it shows but the
-notes), `updateNotice` (the notice bar's text while it shows), and
+`not-installable`, `downloading`, `preparing`, `failed`, `restarting`,
+`quit-needed` or `declined`, Windows' UAC having said no) with
+`updateDialogText` (every line it shows but the notes), `updateNotice`
+(the notice bar's text while it shows), and
 `pid` and `appPath` (which process answers, from where: an install test
 tells the relaunched copy from the one it replaced). After an update,
 `statusMessage` is "GitBolt was updated to <v>.". The dialog's buttons

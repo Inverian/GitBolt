@@ -29,9 +29,14 @@
 //     (/Volumes/…) is refused by detectPackage;
 //   - removeStaleInstallFiles: staged and swapped-aside copies beside
 //     the bundle, mount points in the work folder (a disk image still
-//     mounted there detached), and AppImage downloads up to the running
-//     version go; the running copy, anything not named exactly so, and
-//     links (and what they point to) stay.
+//     mounted there detached), the AppImage's .part files, and the one
+//     AppImage download GitBolt recorded (recordPendingDownload) while
+//     it is still that file, go; the user's own GitBolt AppImages of
+//     any version, the running copy, anything not named exactly so,
+//     and links (and what they point to) stay;
+//   - a release that needs a newer macOS than this one is refused, and
+//     needsNewerSystem() says so (the UI then doesn't download it
+//     again).
 //
 // Nothing here touches /Applications, the real Trash or an installed
 // GitBolt: every bundle is in a temporary folder, and HOME is one too.
@@ -493,6 +498,8 @@ private slots:
         const Outcome outcome = prepareAndWait(installer, dmg, kNew);
         QVERIFY(!outcome.prepared);
         QVERIFY2(outcome.failed.contains(reason), qPrintable(outcome.failed));
+        // Only the minimum macOS would refuse the same download again.
+        QCOMPARE(installer.needsNewerSystem(), minimumSystem == QLatin1String("99.0"));
         // Nothing staged, nothing left mounted, the installed copy as
         // it was.
         QCOMPARE(QDir(path(QStringLiteral("Applications")))
@@ -758,7 +765,7 @@ private slots:
         QVERIFY(QFile::link(precious, apps + QStringLiteral("/.GitBolt-0.1.3.app")));
         QVERIFY(QFile::link(precious, apps + QStringLiteral("/.GitBolt-0.1.4.app.old")));
 
-        removeStaleInstallFiles(package, workDir(), kOld);
+        removeStaleInstallFiles(package, workDir());
         QStringList left = QDir(apps).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
         left.sort();
         QCOMPARE(left, (QStringList{QStringLiteral(".GitBolt-0.1.1.application"), QStringLiteral(".GitBolt-0.1.2.app"),
@@ -772,7 +779,7 @@ private slots:
         // A bundle that is itself named like a staged copy stays.
         const QString odd = apps + QStringLiteral("/.GitBolt-0.1.0.app");
         QVERIFY(makeBundle(odd, kOld.toString()));
-        removeStaleInstallFiles({PackageKind::MacBundle, odd, true, {}}, workDir(), kOld);
+        removeStaleInstallFiles({PackageKind::MacBundle, odd, true, {}}, workDir());
         QCOMPARE(copyOf(odd), QStringLiteral("0.1.0"));
 #endif
     }
@@ -794,14 +801,14 @@ private slots:
         QVERIFY(QFile::link(elsewhere, workDir() + QStringLiteral("/mount-link")));
         expected << QStringLiteral("mount-link");
 #endif
-        removeStaleInstallFiles(PackageInfo{}, workDir(), kOld);
+        removeStaleInstallFiles(PackageInfo{}, workDir());
         QStringList left = QDir(workDir()).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
         left.sort();
         QCOMPARE(left, expected);
         QVERIFY(QFileInfo::exists(workDir() + QStringLiteral("/mount-XyZ789/keep.txt")));
         // Nothing for a work folder that isn't there, or a relative one.
-        removeStaleInstallFiles(PackageInfo{}, path(QStringLiteral("missing")), kOld);
-        removeStaleInstallFiles(PackageInfo{}, QStringLiteral("relative"), kOld);
+        removeStaleInstallFiles(PackageInfo{}, path(QStringLiteral("missing")));
+        removeStaleInstallFiles(PackageInfo{}, QStringLiteral("relative"));
     }
 
     // macOS: a disk image still attached at a mount point of ours (the
@@ -832,7 +839,7 @@ private slots:
         });
         QVERIFY(QFileInfo::exists(mount + QStringLiteral("/GitBolt.app")));
 
-        removeStaleInstallFiles(installedBundle(), workDir(), kOld);
+        removeStaleInstallFiles(installedBundle(), workDir());
         QVERIFY(!QFileInfo::exists(mount));
         QVERIFY(mountPoints().isEmpty());
         QVERIFY(nothingMountedUnder(workDir()));
@@ -841,26 +848,33 @@ private slots:
     }
 
     // Beside the AppImage: the Downloader's .part files (of any
-    // version) and checked downloads of versions up to this one go.
-    // Newer ones (an update not yet installed), names that aren't
-    // exactly the release's, other files, folders and links stay, and
-    // so does the running AppImage, whatever its name.
-    void removesAppImageDownloadsLeftBesideIt() {
+    // version) go, and so does the one checked download GitBolt
+    // recorded and no helper took over (a crash's). Every other
+    // GitBolt-<v>-x86_64.AppImage stays, whatever its version: that is
+    // the name users keep their AppImages under, an older one kept to
+    // go back to, or their main copy, which an update leaves under the
+    // old version's name. So do names that aren't the release's, other
+    // files, folders and links, and the running AppImage.
+    void removesOnlyTheAppImageDownloadsGitBoltLeft() {
         const QString apps = path(QStringLiteral("My Apps"));
         const QString target = apps + QStringLiteral("/GitBolt.AppImage");
         QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.1")), true));
         for (const QString& name :
              {QStringLiteral(".GitBolt-0.1.1-x86_64.AppImage.part"), QStringLiteral(".GitBolt-0.1.2-x86_64.AppImage.part"),
               QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
-              QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"),
-              QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"), QStringLiteral("GitBolt-01.1.0-x86_64.AppImage"),
-              QStringLiteral("GitBolt-0.1.0-x86_64.AppImage.zsync"), QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"),
-              QStringLiteral("notes.txt")})
+              QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"),
+              QStringLiteral("GitBolt-01.1.0-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage.zsync"),
+              QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"), QStringLiteral("notes.txt")})
             QVERIFY(writeFile(apps + u'/' + name, "x"));
+        // What a GitBolt that crashed after its download left: recorded.
+        const QString download = apps + QStringLiteral("/GitBolt-0.1.2-x86_64.AppImage");
+        QVERIFY(writeFile(download, "checked download"));
+        recordPendingDownload(workDir(), download);
         QVERIFY(QDir().mkpath(apps + QStringLiteral("/GitBolt-0.0.7-x86_64.AppImage")));
-        QStringList expected{QStringLiteral("GitBolt-0.0.7-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"),
+        QStringList expected{QStringLiteral("GitBolt-0.0.7-x86_64.AppImage"), QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
+                             QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
                              QStringLiteral("GitBolt-0.1.0-x86_64.AppImage.zsync"),
-                             QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"),
+                             QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"),
                              QStringLiteral("GitBolt-01.1.0-x86_64.AppImage"), QStringLiteral("GitBolt.AppImage"),
                              QStringLiteral("notes.txt")};
 #if defined(Q_OS_UNIX)
@@ -872,25 +886,119 @@ private slots:
 #endif
         expected.sort();
 
-        removeStaleInstallFiles({PackageKind::AppImage, target, true, {}}, workDir(), kNew);
+        removeStaleInstallFiles({PackageKind::AppImage, target, true, {}}, workDir());
         QStringList left = QDir(apps).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
         left.sort();
         QCOMPARE(left, expected);
+        QCOMPARE(readFile(apps + QStringLiteral("/GitBolt-0.0.9-x86_64.AppImage")), QStringLiteral("x"));
+        QVERIFY(!QFileInfo::exists(workDir() + u'/' + QLatin1String(kPendingDownloadFile)));
 #if defined(Q_OS_UNIX)
         QCOMPARE(readFile(precious), QStringLiteral("mine"));
 #endif
 
-        // The running AppImage named as the release names it, at this
-        // very version: never removed.
+        // The running AppImage named as the release names it: never
+        // removed. Nor does any other package's cleanup touch this
+        // folder.
         const QString named = apps + QStringLiteral("/GitBolt-0.1.1-x86_64.AppImage");
         QVERIFY(writeFile(named, fakeAppScript(QStringLiteral("0.1.1")), true));
-        removeStaleInstallFiles({PackageKind::AppImage, named, true, {}}, workDir(), kNew);
+        removeStaleInstallFiles({PackageKind::AppImage, named, true, {}}, workDir());
         QVERIFY(QFileInfo(named).isFile());
-        // Nor does any other package's cleanup touch this folder.
-        QVERIFY(writeFile(apps + QStringLiteral("/GitBolt-0.1.0-x86_64.AppImage"), "x"));
-        removeStaleInstallFiles({PackageKind::Deb, apps, true, {}}, workDir(), kNew);
-        removeStaleInstallFiles({PackageKind::WindowsInstall, apps, true, {}}, workDir(), kNew);
+        QVERIFY(writeFile(apps + QStringLiteral("/.GitBolt-0.1.3-x86_64.AppImage.part"), "x"));
+        removeStaleInstallFiles({PackageKind::Deb, apps, true, {}}, workDir());
+        removeStaleInstallFiles({PackageKind::WindowsInstall, apps, true, {}}, workDir());
+        QVERIFY(QFileInfo::exists(apps + QStringLiteral("/.GitBolt-0.1.3-x86_64.AppImage.part")));
         QVERIFY(QFileInfo::exists(apps + QStringLiteral("/GitBolt-0.1.0-x86_64.AppImage")));
+    }
+
+    // The record of a download (recordPendingDownload): the file it
+    // names goes at the next start only while it is still the download
+    // GitBolt left, and the record goes whatever it names.
+    void aRecordedDownloadGoesOnlyWhileItIsGitBolts_data() {
+        QTest::addColumn<QString>("what");
+        QTest::addColumn<bool>("removed");
+        QTest::newRow("the download") << QStringLiteral("download") << true;
+        QTest::newRow("gone already") << QStringLiteral("missing") << false;
+        QTest::newRow("the running AppImage") << QStringLiteral("target") << false;
+        QTest::newRow("a name not the release's") << QStringLiteral("other name") << false;
+        QTest::newRow("a folder") << QStringLiteral("folder") << false;
+        QTest::newRow("a link") << QStringLiteral("link") << false;
+        QTest::newRow("a relative path") << QStringLiteral("relative") << false;
+        QTest::newRow("too long to be a record") << QStringLiteral("too long") << false;
+        QTest::newRow("two lines") << QStringLiteral("two lines") << false;
+        QTest::newRow("another package starts") << QStringLiteral("deb") << false;
+    }
+    void aRecordedDownloadGoesOnlyWhileItIsGitBolts() {
+        QFETCH(QString, what);
+        QFETCH(bool, removed);
+#if !defined(Q_OS_UNIX)
+        if (what == QLatin1String("link"))
+            QSKIP("QFile::link makes a .lnk shortcut on Windows");
+#endif
+        const QString apps = path(QStringLiteral("My Apps"));
+        const QString download = apps + QStringLiteral("/GitBolt-0.1.2-x86_64.AppImage");
+        const QString precious = path(QStringLiteral("precious.AppImage"));
+        QVERIFY(writeFile(precious, "mine"));
+        QString target = apps + QStringLiteral("/GitBolt.AppImage");
+        QString recorded = download;
+        if (what == QLatin1String("target")) {
+            target = download;
+            QVERIFY(writeFile(download, fakeAppScript(QStringLiteral("0.1.2")), true));
+        } else if (what == QLatin1String("other name")) {
+            recorded = apps + QStringLiteral("/GitBolt-0.1.2-aarch64.AppImage");
+            QVERIFY(writeFile(recorded, "x"));
+        } else if (what == QLatin1String("folder")) {
+            QVERIFY(QDir().mkpath(download));
+        } else if (what == QLatin1String("link")) {
+            QVERIFY(QDir().mkpath(apps));
+            QVERIFY(QFile::link(precious, download));
+        } else if (what != QLatin1String("missing")) {
+            QVERIFY(writeFile(download, "checked download"));
+        }
+        if (target != download)
+            QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.1")), true));
+        recordPendingDownload(workDir(), recorded);
+        const QString record = workDir() + u'/' + QLatin1String(kPendingDownloadFile);
+        QCOMPARE(readFile(record), recorded + u'\n');
+        if (what == QLatin1String("relative"))
+            QVERIFY(writeFile(record, "My Apps/GitBolt-0.1.2-x86_64.AppImage\n"));
+        else if (what == QLatin1String("too long"))
+            QVERIFY(writeFile(record, (download + u'\n').toUtf8() + QByteArray(70 * 1024, ' ')));
+        else if (what == QLatin1String("two lines"))
+            QVERIFY(writeFile(record, (download + u'\n' + download + u'\n').toUtf8()));
+
+        const PackageInfo package = what == QLatin1String("deb")
+                                        ? PackageInfo{PackageKind::Deb, QStringLiteral("/usr/lib/gitbolt"), true, {}}
+                                        : PackageInfo{PackageKind::AppImage, target, true, {}};
+        removeStaleInstallFiles(package, workDir());
+        QVERIFY(!QFileInfo::exists(record) && !QFileInfo(record).isSymLink());
+        QCOMPARE(QFileInfo::exists(recorded) || QFileInfo(recorded).isSymLink(),
+                 !removed && what != QLatin1String("missing"));
+        QCOMPARE(readFile(precious), QStringLiteral("mine"));
+        QVERIFY(QFileInfo(target).isFile());
+    }
+
+    // The record is a file of its own, made anew: a link planted at its
+    // name is replaced, never written through; forgetting it removes it.
+    void recordsAndForgetsADownload() {
+        const QString record = workDir() + u'/' + QLatin1String(kPendingDownloadFile);
+        const QString download = path(QStringLiteral("My Apps/GitBolt-0.1.2-x86_64.AppImage"));
+        recordPendingDownload(workDir(), download);
+        QCOMPARE(readFile(record), download + u'\n');
+        forgetPendingDownload(workDir());
+        QVERIFY(!QFileInfo::exists(record));
+        forgetPendingDownload(workDir());   // nothing to forget: fine
+#if defined(Q_OS_UNIX)
+        const QString precious = path(QStringLiteral("precious.txt"));
+        QVERIFY(writeFile(precious, "mine"));
+        QVERIFY(QFile::link(precious, record));
+        recordPendingDownload(workDir(), download);
+        QVERIFY(!QFileInfo(record).isSymLink());
+        QCOMPARE(readFile(record), download + u'\n');
+        QCOMPARE(readFile(precious), QStringLiteral("mine"));
+#endif
+        // No folder to record in: nothing written anywhere.
+        recordPendingDownload(QStringLiteral("relative"), download);
+        QVERIFY(!QFileInfo::exists(QStringLiteral("relative")));
     }
 };
 

@@ -116,6 +116,10 @@ QStringList powerShellArguments(const QString& script) {
             QStringLiteral("-EncodedCommand"), QString::fromLatin1(powerShellEncodedCommand(script))};
 }
 
+QString powerShellParameters(const QString& script) {
+    return powerShellArguments(script).join(u' ');
+}
+
 QString macHelperScript(const HelperInputs& in) {
     const QString folder = QFileInfo(QDir::cleanPath(in.target)).path();
     const QString oldName = in.oldVersion.isEmpty() ? QStringLiteral("GitBolt")
@@ -230,10 +234,11 @@ QString debHelperScript(const HelperInputs& in) {
                "say \"running apt-get through pkexec\"\n"
                "\"$pkexec\" /usr/bin/apt-get install -y -o DPkg::Lock::Timeout=60 \"$deb\"\n"
                "status=$?\n"
-               "# pkexec's own: 126, its dialog was dismissed (or the user isn't\n"
-               "# allowed); 127, it couldn't ask (no polkit agent runs in this\n"
-               "# session: a bare window manager, a remote X session). apt-get's\n"
-               "# failures are 100.\n"
+               "# pkexec's own: 126, its dialog was dismissed; 127, it couldn't\n"
+               "# authenticate (no polkit agent runs in this session: a bare\n"
+               "# window manager, a remote X session; or polkit doesn't allow\n"
+               "# this user, or isn't set up), or another error of its own,\n"
+               "# whose line is in the log above. apt-get's failures are 100.\n"
                "case $status in\n"
                "0)\n"
                "    say \"installed $deb\"\n"
@@ -244,8 +249,8 @@ QString debHelperScript(const HelperInputs& in) {
                "    report declined \"the administrator password prompt was dismissed\"\n"
                "    ;;\n"
                "127)\n"
-               "    say \"pkexec couldn't ask for permission (status 127): no polkit authentication agent? The old version stays\"\n"
-               "    report failed \"no polkit authentication agent is running\"\n"
+               "    say \"pkexec couldn't authenticate (status 127): no polkit authentication agent, or polkit isn't set up to allow it. The old version stays\"\n"
+               "    report failed \"pkexec couldn't authenticate (no polkit authentication agent is running, or polkit isn't set up to allow it)\"\n"
                "    ;;\n"
                "*)\n"
                "    say \"apt-get (or pkexec) failed with status $status: the old version stays\"\n"
@@ -256,77 +261,20 @@ QString debHelperScript(const HelperInputs& in) {
                "exec \"$relaunch\"\n");
 }
 
-// The install folder's GitBolt.exe, in Windows form; a folder at a
-// drive's root keeps one backslash.
-QString windowsApp(const QString& dir) {
-    return (dir.endsWith(u'\\') ? dir : dir + u'\\') + QStringLiteral("bin\\GitBolt.exe");
-}
+namespace {
 
-QString windowsElevatedScript(const HelperInputs& in) {
-    const QString dir = windowsPath(in.target);
-    const QString prefix = dir.endsWith(u'\\') ? dir : dir + u'\\';
-    // No comments and no double quotes: it travels inside
-    // windowsHelperScript as single-quoted literals, a line each.
-    const QStringList lines = {
-        QStringLiteral("$ErrorActionPreference = 'Stop'"),
-        QStringLiteral("$appPid = %1").arg(in.pid),
-        QStringLiteral("$prefix = ") + powerShellQuote(prefix),
-        QStringLiteral("$app = ") + powerShellQuote(windowsApp(dir)),
-        QStringLiteral("$installer = ") + powerShellQuote(windowsPath(in.staged)),
-        QStringLiteral("$version = ") + powerShellQuote(in.newVersion),
-        QStringLiteral("try {"),
-        QStringLiteral("    $deadline = (Get-Date).AddSeconds(%1)").arg(kWindowsInUseSeconds),
-        QStringLiteral("    while ($true) {"),
-        QStringLiteral("        $inUse = @(Get-Process -Name GitBolt -ErrorAction SilentlyContinue | Where-Object {"),
-        QStringLiteral("            try { $_.Id -ne $appPid -and $_.Path -and "
-                       "$_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) } catch { $false }"),
-        QStringLiteral("        }).Count -gt 0"),
-        QStringLiteral("        if (-not $inUse -and (Test-Path -LiteralPath $app)) {"),
-        QStringLiteral("            try {"),
-        QStringLiteral("                [IO.File]::Open($app, 'Open', 'ReadWrite', 'None').Dispose()"),
-        QStringLiteral("            } catch {"),
-        QStringLiteral("                $inUse = $true"),
-        QStringLiteral("            }"),
-        QStringLiteral("        }"),
-        QStringLiteral("        if (-not $inUse) {"),
-        QStringLiteral("            break"),
-        QStringLiteral("        }"),
-        QStringLiteral("        if ((Get-Date) -ge $deadline) {"),
-        QStringLiteral("            exit %1").arg(kWindowsExitInUse),
-        QStringLiteral("        }"),
-        QStringLiteral("        Start-Sleep -Seconds 1"),
-        QStringLiteral("    }"),
-        // /D= last and unquoted: NSIS takes the rest of the command line
-        // as the folder. Silent (/S), over the same folder; elevated
-        // already, so no second prompt.
-        QStringLiteral("    try {"),
-        QStringLiteral("        $setup = Start-Process -FilePath $installer -ArgumentList ")
-            + powerShellQuote(QStringLiteral("/S /D=") + dir) + QStringLiteral(" -Wait -PassThru"),
-        QStringLiteral("    } catch {"),
-        QStringLiteral("        exit %1").arg(kWindowsExitNoInstaller),
-        QStringLiteral("    }"),
-        // No exit code at all: the version below decides.
-        QStringLiteral("    $code = $setup.ExitCode"),
-        QStringLiteral("    if ($null -ne $code -and $code -ne 0) {"),
-        QStringLiteral("        exit $code"),
-        QStringLiteral("    }"),
-        QStringLiteral("    $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion"),
-        QStringLiteral("    if ($found.Trim() -ne $version) {"),
-        QStringLiteral("        exit %1").arg(kWindowsExitWrongVersion),
-        QStringLiteral("    }"),
-        QStringLiteral("    exit 0"),
-        QStringLiteral("} catch {"),
-        QStringLiteral("    exit %1").arg(kWindowsExitError),
-        QStringLiteral("}"),
-    };
-    return lines.join(u'\n');
-}
-
-QString windowsHelperScript(const HelperInputs& in) {
-    const QString app = windowsApp(windowsPath(in.target));
-    QStringList lines = {
-        QStringLiteral("# GitBolt's update helper (Windows), written by GitBolt"),
-        QStringLiteral("# (src/update/InstallHelpers.cpp) and started hidden just before it quits."),
+// What both Windows parts start with: the values they share, the log,
+// and the install result. Cmdlets and core types only (Add-Content,
+// Set-Content, Test-Path, Get-Date, [char]), so they work in
+// Constrained Language mode too, where a .NET static call outside a try
+// would end the script. Two processes append to the log, each opening
+// it only for a line: a line that meets the other's is tried again.
+// The result goes through Set-Content as ASCII (every reason is plain
+// English, and the version x.y.z), so there is no BOM. `onlyFirst`:
+// written only if there is none yet (the helper's, which never
+// replaces what the administrator part said).
+QStringList windowsPreamble(const HelperInputs& in, bool onlyFirst) {
+    return {
         QStringLiteral("$ErrorActionPreference = 'Stop'"),
         QStringLiteral("$log = ") + powerShellQuote(windowsPath(in.logFile)),
         QStringLiteral("$result = ") + powerShellQuote(windowsPath(in.resultFile)),
@@ -334,98 +282,211 @@ QString windowsHelperScript(const HelperInputs& in) {
         // $pid is PowerShell's own (read-only): this process's id.
         QStringLiteral("$appPid = %1").arg(in.pid),
         QStringLiteral("$waitSeconds = %1").arg(in.waitSeconds),
-        QStringLiteral("$installer = ") + powerShellQuote(windowsPath(in.staged)),
-        QStringLiteral("$app = ") + powerShellQuote(app),
         QStringLiteral("function Write-Log([string]$text) {"),
-        QStringLiteral("    try {"),
-        QStringLiteral("        Add-Content -LiteralPath $log -Encoding UTF8 -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $text)"),
-        QStringLiteral("    } catch {"),
+        QStringLiteral("    $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $text"),
+        QStringLiteral("    for ($i = 0; $i -lt 5; $i++) {"),
+        QStringLiteral("        try {"),
+        QStringLiteral("            Add-Content -LiteralPath $log -Encoding UTF8 -Value $line"),
+        QStringLiteral("            return"),
+        QStringLiteral("        } catch {"),
+        QStringLiteral("            Start-Sleep -Milliseconds 100"),
+        QStringLiteral("        }"),
         QStringLiteral("    }"),
         QStringLiteral("}"),
-        // The install result (InstallHelpers.h): one line, UTF-8 with no
-        // BOM (WriteAllText's default), for the GitBolt that starts next.
         QStringLiteral("function Write-Result([string]$status, [string]$reason) {"),
-        QStringLiteral("    if ($result -eq '') {"),
+        onlyFirst ? QStringLiteral("    if ($result -eq '' -or (Test-Path -LiteralPath $result)) {")
+                  : QStringLiteral("    if ($result -eq '') {"),
         QStringLiteral("        return"),
         QStringLiteral("    }"),
         QStringLiteral("    try {"),
-        QStringLiteral("        [IO.File]::WriteAllText($result, $status + ' ' + $version + ' ' + "
-                       "($reason -replace '[\\r\\n]+', ' ') + [char]10)"),
+        QStringLiteral("        Set-Content -LiteralPath $result -Encoding Ascii -NoNewline -Value "
+                       "($status + ' ' + $version + ' ' + ($reason -replace '[\\r\\n]+', ' ') + [char]10)"),
         QStringLiteral("    } catch {"),
         QStringLiteral("        Write-Log ('could not write the install result: ' + $_.Exception.Message)"),
         QStringLiteral("    }"),
         QStringLiteral("}"),
-        QStringLiteral("Write-Log ('GitBolt update helper: waiting for GitBolt (pid ' + $appPid + ') to quit')"),
-        QStringLiteral("try {"),
-        QStringLiteral("    Wait-Process -Id $appPid -Timeout $waitSeconds -ErrorAction SilentlyContinue"),
-        QStringLiteral("} catch {"),
-        QStringLiteral("}"),
-        QStringLiteral("if (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {"),
-        QStringLiteral("    Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: giving up, nothing was changed')"),
-        QStringLiteral("    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue"),
-        QStringLiteral("    Write-Result 'gave-up' ('GitBolt did not quit within ' + $waitSeconds + ' seconds')"),
-        QStringLiteral("    exit 1"),
-        QStringLiteral("}"),
-        QStringLiteral("# The administrator part: it waits until no other GitBolt uses the"),
-        QStringLiteral("# install folder, runs the installer over it and checks the version."),
-        QStringLiteral("$elevated = ("),
     };
-    // windowsElevatedScript, a literal per line, encoded where it runs:
-    // base64 once, not a base64 inside a base64.
-    const QStringList elevated = windowsElevatedScript(in).split(u'\n');
-    for (qsizetype i = 0; i < elevated.size(); ++i)
-        lines << QStringLiteral("    ") + powerShellQuote(elevated.at(i))
-                     + (i + 1 < elevated.size() ? QStringLiteral(",") : QString());
+}
+
+// The install folder's GitBolt.exe, in Windows form; a folder at a
+// drive's root keeps one backslash.
+QString windowsApp(const QString& dir) {
+    return (dir.endsWith(u'\\') ? dir : dir + u'\\') + QStringLiteral("bin\\GitBolt.exe");
+}
+
+} // namespace
+
+QString windowsElevatedScript(const HelperInputs& in) {
+    const QString dir = windowsPath(in.target);
+    const QString prefix = dir.endsWith(u'\\') ? dir : dir + u'\\';
+    // No comments (they would lengthen the command line, three bytes
+    // of base64 for each character) and no double quotes, so nothing in
+    // it is ever expanded.
+    QStringList lines = windowsPreamble(in, false);
     lines << QStringList{
-        QStringLiteral(") -join [char]10"),
-        QStringLiteral("$encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($elevated))"),
+        QStringLiteral("$prefix = ") + powerShellQuote(prefix),
+        QStringLiteral("$app = ") + powerShellQuote(windowsApp(dir)),
+        QStringLiteral("$installer = ") + powerShellQuote(windowsPath(in.staged)),
+        QStringLiteral("Write-Log ('administrator part: waiting for GitBolt (pid ' + $appPid + ') to quit')"),
+        QStringLiteral("$code = 0"),
+        QStringLiteral("try {"),
+        // By polling the process list, which shows another user's
+        // processes too: an over-the-shoulder administrator may not be
+        // allowed to open the user's GitBolt, so Wait-Process could fail.
+        QStringLiteral("    $deadline = (Get-Date).AddSeconds($waitSeconds)"),
+        QStringLiteral("    while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {"),
+        QStringLiteral("        if ((Get-Date) -ge $deadline) {"),
+        QStringLiteral("            $code = %1").arg(kWindowsExitGaveUp),
+        QStringLiteral("            break"),
+        QStringLiteral("        }"),
+        QStringLiteral("        Start-Sleep -Milliseconds 250"),
+        QStringLiteral("    }"),
+        QStringLiteral("    if ($code -eq 0) {"),
+        QStringLiteral("        $deadline = (Get-Date).AddSeconds(%1)").arg(kWindowsInUseSeconds),
+        QStringLiteral("        while ($true) {"),
+        // A case-insensitive prefix by string methods and -eq alone
+        // (no [StringComparison], which Constrained Language refuses).
+        QStringLiteral("            $inUse = @(Get-Process -Name GitBolt -ErrorAction SilentlyContinue | Where-Object {"),
+        QStringLiteral("                try { $_.Id -ne $appPid -and $_.Path -and $_.Path.Length -ge $prefix.Length -and "
+                       "$_.Path.Substring(0, $prefix.Length) -eq $prefix } catch { $false }"),
+        QStringLiteral("            }).Count -gt 0"),
+        QStringLiteral("            if (-not $inUse -and (Test-Path -LiteralPath $app)) {"),
+        // In use only for a sharing or lock violation (32, 33): a check
+        // that can't run (Constrained Language refuses [IO.File]) leaves
+        // the process list's answer.
+        QStringLiteral("                try {"),
+        QStringLiteral("                    [IO.File]::Open($app, 'Open', 'ReadWrite', 'None').Dispose()"),
+        QStringLiteral("                } catch {"),
+        QStringLiteral("                    $e = $_.Exception"),
+        QStringLiteral("                    while ($e.InnerException) {"),
+        QStringLiteral("                        $e = $e.InnerException"),
+        QStringLiteral("                    }"),
+        QStringLiteral("                    $inUse = @(32, 33) -contains ($e.HResult -band 0xFFFF)"),
+        QStringLiteral("                }"),
+        QStringLiteral("            }"),
+        QStringLiteral("            if (-not $inUse) {"),
+        QStringLiteral("                break"),
+        QStringLiteral("            }"),
+        QStringLiteral("            if ((Get-Date) -ge $deadline) {"),
+        QStringLiteral("                $code = %1").arg(kWindowsExitInUse),
+        QStringLiteral("                break"),
+        QStringLiteral("            }"),
+        QStringLiteral("            Start-Sleep -Seconds 1"),
+        QStringLiteral("        }"),
+        QStringLiteral("    }"),
+        // /D= last and unquoted: NSIS takes the rest of the command line
+        // as the folder. Silent (/S), over the same folder; elevated
+        // already, so no second prompt.
+        QStringLiteral("    if ($code -eq 0) {"),
+        QStringLiteral("        Write-Log ('running ' + $installer)"),
+        QStringLiteral("        try {"),
+        QStringLiteral("            $setup = Start-Process -FilePath $installer -ArgumentList ")
+            + powerShellQuote(QStringLiteral("/S /D=") + dir) + QStringLiteral(" -Wait -PassThru"),
+        QStringLiteral("        } catch {"),
+        QStringLiteral("            $code = %1").arg(kWindowsExitNoInstaller),
+        QStringLiteral("            Write-Log ('the installer could not be started: ' + $_.Exception.Message)"),
+        QStringLiteral("        }"),
+        QStringLiteral("    }"),
+        // No exit code at all: the version below decides.
+        QStringLiteral("    if ($code -eq 0) {"),
+        QStringLiteral("        $setupCode = $setup.ExitCode"),
+        QStringLiteral("        if ($null -ne $setupCode -and $setupCode -ne 0) {"),
+        QStringLiteral("            $code = $setupCode"),
+        QStringLiteral("        }"),
+        QStringLiteral("    }"),
+        QStringLiteral("    if ($code -eq 0) {"),
+        QStringLiteral("        $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion"),
+        QStringLiteral("        if ($found.Trim() -ne $version) {"),
+        QStringLiteral("            $code = %1").arg(kWindowsExitWrongVersion),
+        QStringLiteral("        }"),
+        QStringLiteral("    }"),
+        QStringLiteral("} catch {"),
+        QStringLiteral("    $code = %1").arg(kWindowsExitError),
+        QStringLiteral("    Write-Log ('the administrator part failed: ' + $_.Exception.Message)"),
+        QStringLiteral("}"),
+        // What the code means, for the log and the GitBolt that starts
+        // next; the result last of all: the helper starts GitBolt once
+        // it is there.
         QStringLiteral("$status = 'failed'"),
         QStringLiteral("$reason = ''"),
-        QStringLiteral("Write-Log ('running ' + $installer)"),
-        // Elevated (UAC asks: ShellExecute's runas verb is the only way
-        // to ask), hidden, and waited for.
-        QStringLiteral("try {"),
-        QStringLiteral("    $setup = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList "
-                       "('-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $encoded) "
-                       "-Verb RunAs -WindowStyle Hidden -Wait -PassThru"),
-        QStringLiteral("    $code = $setup.ExitCode"),
-        QStringLiteral("    if ($null -eq $code) {"),
-        QStringLiteral("        $reason = 'the installer finished, but its exit code is unknown'"),
-        QStringLiteral("    } elseif ($code -eq 0) {"),
-        QStringLiteral("        $status = 'ok'"),
-        QStringLiteral("        Write-Log ('the installer exited with code 0, and GitBolt.exe is now version ' + $version)"),
-        QStringLiteral("    } elseif ($code -eq %1) {").arg(kWindowsExitInUse),
-        QStringLiteral("        $reason = 'another GitBolt kept running from the install folder'"),
-        QStringLiteral("    } elseif ($code -eq %1) {").arg(kWindowsExitNoInstaller),
-        QStringLiteral("        $reason = 'the installer could not be started'"),
-        QStringLiteral("    } elseif ($code -eq %1) {").arg(kWindowsExitWrongVersion),
-        QStringLiteral("        $reason = 'the installer ran, but GitBolt.exe is not version ' + $version"),
-        QStringLiteral("    } elseif ($code -eq %1) {").arg(kWindowsExitError),
-        QStringLiteral("        $reason = 'the administrator part of the update failed'"),
-        QStringLiteral("    } else {"),
-        QStringLiteral("        $reason = 'the installer exited with code ' + $code"),
-        QStringLiteral("    }"),
-        QStringLiteral("    if ($status -ne 'ok') {"),
-        QStringLiteral("        Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)"),
-        QStringLiteral("    }"),
-        QStringLiteral("} catch {"),
-        // UAC's No (or no administrator to give): ERROR_CANCELLED, 1223,
-        // a Win32Exception under Start-Process's own; the English text
-        // too, in case it comes without one.
-        QStringLiteral("    $e = $_.Exception"),
-        QStringLiteral("    while ($e.InnerException -and -not ($e -is [ComponentModel.Win32Exception])) {"),
-        QStringLiteral("        $e = $e.InnerException"),
-        QStringLiteral("    }"),
-        QStringLiteral("    if (($e -is [ComponentModel.Win32Exception] -and $e.NativeErrorCode -eq 1223) "
-                       "-or $_.Exception.Message -match 'canceled by the user') {"),
-        QStringLiteral("        $status = 'declined'"),
-        QStringLiteral("        $reason = 'the administrator prompt was declined'"),
-        QStringLiteral("    } else {"),
-        QStringLiteral("        $reason = 'the installer did not run'"),
-        QStringLiteral("    }"),
-        QStringLiteral("    Write-Log ('the installer did not run: ' + $_.Exception.Message)"),
+        QStringLiteral("if ($code -eq 0) {"),
+        QStringLiteral("    $status = 'ok'"),
+        QStringLiteral("    Write-Log ('the installer exited with code 0, and GitBolt.exe is now version ' + $version)"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitGaveUp),
+        QStringLiteral("    $status = 'gave-up'"),
+        QStringLiteral("    $reason = 'GitBolt did not quit within ' + $waitSeconds + ' seconds'"),
+        QStringLiteral("    Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: giving up, nothing was changed')"),
+        QStringLiteral("    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitInUse),
+        QStringLiteral("    $reason = 'another GitBolt kept running from the install folder'"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitNoInstaller),
+        QStringLiteral("    $reason = 'the installer could not be started'"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitWrongVersion),
+        QStringLiteral("    $reason = 'the installer ran, but GitBolt.exe is not version ' + $version"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitError),
+        QStringLiteral("    $reason = 'the administrator part of the update failed'"),
+        QStringLiteral("} else {"),
+        QStringLiteral("    $reason = 'the installer exited with code ' + $code"),
+        QStringLiteral("}"),
+        QStringLiteral("if ($status -eq 'failed') {"),
+        QStringLiteral("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)"),
         QStringLiteral("}"),
         QStringLiteral("Write-Result $status $reason"),
+        QStringLiteral("exit $code"),
+    };
+    return lines.join(u'\n');
+}
+
+QString windowsHelperScript(const HelperInputs& in) {
+    QStringList lines = {
+        QStringLiteral("# GitBolt's update helper (Windows), written by GitBolt"),
+        QStringLiteral("# (src/update/InstallHelpers.cpp) and started hidden just before it quits, once"),
+        QStringLiteral("# Windows let the administrator part (windowsElevatedScript) run. It starts"),
+        QStringLiteral("# GitBolt again when that part is done, not elevated."),
+    };
+    lines << windowsPreamble(in, true);
+    lines << QStringList{
+        QStringLiteral("$elevatedPid = %1").arg(in.elevatedPid),
+        QStringLiteral("$installSeconds = %1").arg(in.installSeconds),
+        QStringLiteral("$app = ") + powerShellQuote(windowsApp(windowsPath(in.target))),
+        QStringLiteral("Write-Log ('GitBolt update helper: waiting for GitBolt (pid ' + $appPid + ') to quit')"),
+        // A little longer than the administrator part, which started
+        // first: whatever it decided, GitBolt that quits in time is
+        // started again.
+        QStringLiteral("$deadline = (Get-Date).AddSeconds($waitSeconds + %1)").arg(kWindowsHelperExtraSeconds),
+        QStringLiteral("while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {"),
+        QStringLiteral("    if ((Get-Date) -ge $deadline) {"),
+        QStringLiteral("        Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: it is not started again')"),
+        QStringLiteral("        Write-Result 'gave-up' ('GitBolt did not quit within ' + $waitSeconds + ' seconds')"),
+        QStringLiteral("        exit 1"),
+        QStringLiteral("    }"),
+        QStringLiteral("    Start-Sleep -Milliseconds 250"),
+        QStringLiteral("}"),
+        QStringLiteral("Write-Log ('GitBolt has quit: waiting for the administrator part (pid ' + $elevatedPid + "
+                       "') to install GitBolt ' + $version)"),
+        // The administrator part writes the result last. No result, and
+        // that part gone a few seconds (it may still be writing), or no
+        // result in installSeconds: it says so itself.
+        QStringLiteral("$deadline = (Get-Date).AddSeconds($installSeconds)"),
+        QStringLiteral("$endedBy = $null"),
+        QStringLiteral("while (-not ($result -ne '' -and (Test-Path -LiteralPath $result))) {"),
+        QStringLiteral("    if ((Get-Date) -ge $deadline) {"),
+        QStringLiteral("        Write-Log ('the administrator part did not finish within ' + $installSeconds + ' seconds')"),
+        QStringLiteral("        Write-Result 'failed' ('the administrator part of the update did not finish within ' + "
+                       "$installSeconds + ' seconds')"),
+        QStringLiteral("        break"),
+        QStringLiteral("    }"),
+        QStringLiteral("    if ($elevatedPid -gt 0 -and -not (Get-Process -Id $elevatedPid -ErrorAction SilentlyContinue)) {"),
+        QStringLiteral("        if ($null -eq $endedBy) {"),
+        QStringLiteral("            $endedBy = (Get-Date).AddSeconds(5)"),
+        QStringLiteral("        } elseif ((Get-Date) -ge $endedBy) {"),
+        QStringLiteral("            Write-Log ('the administrator part (pid ' + $elevatedPid + ') ended without an install result')"),
+        QStringLiteral("            Write-Result 'failed' 'the administrator part of the update ended without a result'"),
+        QStringLiteral("            break"),
+        QStringLiteral("        }"),
+        QStringLiteral("    }"),
+        QStringLiteral("    Start-Sleep -Milliseconds 250"),
+        QStringLiteral("}"),
         // Either way: the new copy, or the old one if it didn't install.
         QStringLiteral("Write-Log ('starting ' + $app)"),
         QStringLiteral("try {"),

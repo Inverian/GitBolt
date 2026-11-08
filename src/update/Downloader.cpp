@@ -11,6 +11,8 @@
 #include <QRegularExpression>
 #include <QTimer>
 
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 namespace gitbolt::update {
@@ -280,15 +282,18 @@ void Downloader::onAssetFinished(QNetworkReply* reply) {
         return;
     }
 
-    // Into place. QFile::rename never overwrites, so an earlier copy
-    // at the final name goes first; it is replaced by a checked one.
-    if (QFileInfo::exists(finalPath_) && !QFile::remove(finalPath_)) {
-        fail(tr("Couldn't replace %1.").arg(QDir::toNativeSeparators(finalPath_)));
-        return;
-    }
-    QFile part(partPath_);
-    if (!part.rename(finalPath_)) {
-        fail(tr("Couldn't move %1 into place: %2.").arg(asset_.name, part.errorString()));
+    // Into place, by the system's rename alone (rename(2); MoveFileExW
+    // with MOVEFILE_REPLACE_EXISTING on Windows): it replaces whatever
+    // has the final name, an earlier copy or a link (the link itself,
+    // which another user may have planted in an AppImage's folder), in
+    // one step, and never writes through a link. Not QFile::rename: it
+    // never replaces, and when the rename fails it copies instead,
+    // through a link at the final name to wherever it points.
+    std::error_code error;
+    std::filesystem::rename(std::filesystem::path(partPath_.toStdU16String()),
+                            std::filesystem::path(finalPath_.toStdU16String()), error);
+    if (error) {
+        fail(tr("Couldn't move %1 into place: %2.").arg(asset_.name, QString::fromLocal8Bit(error.message())));
         return;
     }
     const QString path = finalPath_;

@@ -66,6 +66,7 @@ QString UpdateDialog::stateName(State state)
     case State::Failed: return QStringLiteral("failed");
     case State::Restarting: return QStringLiteral("restarting");
     case State::QuitNeeded: return QStringLiteral("quit-needed");
+    case State::Declined: return QStringLiteral("declined");
     }
     return {};
 }
@@ -225,11 +226,12 @@ void UpdateDialog::enterState(State state)
     viewOnGitHub_->setVisible(state == State::Available);
     skip_->setVisible(state == State::Available || state == State::NotInstallable);
     later_->setVisible(state == State::Available || state == State::NotInstallable);
-    openReleasePage_->setVisible(state == State::NotInstallable || state == State::Failed);
+    openReleasePage_->setVisible(state == State::NotInstallable || state == State::Failed
+                                 || state == State::Declined);
     close_->setVisible(state == State::Checking || state == State::UpToDate || state == State::Failed
-                       || state == State::QuitNeeded);
+                       || state == State::QuitNeeded || state == State::Declined);
     cancel_->setVisible(state == State::Downloading || state == State::Preparing);
-    retry_->setVisible(state == State::Failed);
+    retry_->setVisible(state == State::Failed || state == State::Declined);
     install_->setVisible(state == State::Available);
     quit_->setVisible(state == State::QuitNeeded);
 
@@ -242,7 +244,8 @@ void UpdateDialog::enterState(State state)
     case State::NotInstallable: primary = openReleasePage_; break;
     case State::Downloading:
     case State::Preparing: primary = cancel_; break;
-    case State::Failed: primary = retry_; break;
+    case State::Failed:
+    case State::Declined: primary = retry_; break;
     case State::Restarting: primary = nullptr; break;   // nothing to do but wait
     case State::QuitNeeded: primary = quit_; break;
     }
@@ -304,10 +307,12 @@ void UpdateDialog::showAvailable(const update::Release& release, const update::V
         QString text = tr("You have %1. Install and Restart downloads the new version, checks it, "
                           "and restarts GitBolt with it.")
                            .arg(current.toString());
-        // The system's prompt comes once GitBolt has quit: said here, it
-        // doesn't come out of nowhere.
+        // The system's prompt: said here, it doesn't come out of nowhere.
+        // Windows' comes once the download is checked, and names the
+        // program that runs the installer, Windows PowerShell (from
+        // Microsoft), not GitBolt; a deb's once GitBolt has quit.
         if (kind == update::PackageKind::WindowsInstall)
-            text += QLatin1Char(' ') + tr("Windows will ask for permission to install it.");
+            text += QLatin1Char(' ') + tr("Windows will ask for permission for Windows PowerShell to install it.");
         else if (kind == update::PackageKind::Deb)
             text += QLatin1Char(' ') + tr("You'll be asked for an administrator's password.");
         message_->setText(text);
@@ -398,6 +403,17 @@ void UpdateDialog::showQuitNeeded()
                          "nothing changes.")
                           .arg(version_));
     enterState(State::QuitNeeded);
+}
+
+void UpdateDialog::showDeclined(const QString& howToInstall)
+{
+    showsLog_ = false;
+    headline_->setText(tr("GitBolt %1 wasn't installed").arg(version_));
+    QString text = tr("Windows didn't give permission, so nothing was installed.");
+    if (!howToInstall.isEmpty())
+        text += QStringLiteral("\n\n") + howToInstall;
+    message_->setText(text);
+    enterState(State::Declined);
 }
 
 QString UpdateDialog::shownText() const

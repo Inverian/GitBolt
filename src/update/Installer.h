@@ -1,9 +1,11 @@
 #pragma once
 
+#include "update/InstallHelpers.h"
 #include "update/Package.h"
 #include "update/Version.h"
 
 #include <QObject>
+#include <QProcessEnvironment>
 #include <QString>
 #include <QStringList>
 
@@ -16,7 +18,8 @@ namespace gitbolt::update {
 /// Puts a downloaded, checksum-verified installer in place over the
 /// running copy, in two steps: prepare() checks and stages it while
 /// GitBolt runs, and launchHelper() starts a detached helper (see
-/// InstallHelpers.h) that finishes once GitBolt has quit. The UI calls
+/// InstallHelpers.h) that finishes once GitBolt has quit (on Windows,
+/// once UAC has let its administrator part run). The UI calls
 /// qApp->quit() after launchHelper() returns true.
 ///
 /// Trust (no Developer ID, no Authenticode, so no publisher check is
@@ -43,6 +46,10 @@ namespace gitbolt::update {
 class Installer : public QObject {
     Q_OBJECT
 public:
+    /// How long a helper waits for GitBolt to quit (~MainWindow waits
+    /// for running git work) before it gives up and changes nothing.
+    static constexpr int kHelperWaitSeconds = 10 * 60;
+
     /// `workDir`: the downloads folder (<cache>/updates), where the
     /// mount point, the helper script, install.log and install-result
     /// go.
@@ -72,10 +79,24 @@ public:
     /// `pid` (this process's, QCoreApplication::applicationPid()) to
     /// exit before it touches anything. False, with failed(), if it
     /// couldn't be started; nothing was changed then.
-    bool launchHelper(qint64 pid);
+    ///
+    /// Windows asks for an administrator here, while GitBolt still runs
+    /// (launchWindowsUpdate): UAC's prompt belongs to `window`, the
+    /// native window in front (the update dialog's), so that it comes up
+    /// over it. A No: false with declined(), and the update stays
+    /// prepared, so launchHelper() may be called again. Any other
+    /// refusal or failure: false with failed(). Both say how to install
+    /// it by hand. GitBolt goes on running either way. Elsewhere
+    /// `window` is unused.
+    bool launchHelper(qint64 pid, quintptr window = 0);
 
     /// prepare() is running.
     bool busy() const;
+    /// The last prepare() failed because the release needs a newer
+    /// system than this one (macOS: its app's LSMinimumSystemVersion is
+    /// above the running macOS): downloaded again, it would be refused
+    /// again.
+    bool needsNewerSystem() const;
     /// The helper's script and log, in workDir: install-helper.sh (or
     /// none on Windows, where the script is passed on the command line)
     /// and install.log.
@@ -91,6 +112,12 @@ public:
 signals:
     void prepared();
     void failed(const QString& message);
+    /// launchHelper() on Windows: UAC's prompt was answered No
+    /// (ERROR_CANCELLED). Nothing was started and GitBolt keeps running.
+    /// `howToInstall` says how to install the update by hand (as
+    /// failed()'s message does when Windows refused another way, as it
+    /// may for a standard user where elevation is denied outright).
+    void declined(const QString& howToInstall);
     /// What prepare() is doing, for the dialog: "Checking the
     /// download…", "Copying GitBolt…".
     void status(const QString& text);
@@ -141,6 +168,7 @@ private:
     QString staged_;          ///< the new copy prepared() leaves for the helper
     bool stagedCreated_ = false;  ///< staged_ is a copy this Installer made (macOS)
     QString executable_;      ///< macOS: Contents/MacOS/<CFBundleExecutable> of the staged copy
+    bool needsNewerSystem_ = false;   ///< macOS: refused for its minimum macOS (checkBundle)
 
     QProcess* process_ = nullptr;
     quint64 run_ = 0;         ///< bumped by every prepare() and cancel(); stale callbacks see a new one
@@ -148,6 +176,39 @@ private:
     bool ready_ = false;      ///< prepared() was emitted, launchHelper() not yet called
     bool launched_ = false;
 };
+
+/// How launchWindowsUpdate went.
+struct WindowsLaunch {
+    enum class Outcome {
+        Started,    ///< both parts run; GitBolt may quit now
+        Declined,   ///< UAC: No (ERROR_CANCELLED); nothing started
+        Failed,     ///< the administrator part couldn't be started (`error` says why); nothing started
+    };
+    Outcome outcome = Outcome::Failed;
+    /// Failed: the system's own words for why. Started: why the helper
+    /// that starts GitBolt again couldn't be started, if it couldn't
+    /// (the update still goes in once GitBolt quits; GitBolt just isn't
+    /// started again by itself); otherwise empty.
+    QString error;
+    qint64 elevatedPid = 0;   ///< Started: the administrator part's, or 0 if Windows didn't say
+    qint64 helperPid = 0;     ///< Started: the helper's, or 0 if it couldn't be started
+};
+
+/// Windows: starts an update's two parts (InstallHelpers.h), as
+/// launchHelper() does. First the administrator part,
+/// windowsElevatedScript(in), with ShellExecuteExW: verb runas, `window`
+/// as the owner of UAC's prompt (a window of the foreground process, so
+/// that the prompt comes up in front, not as a flashing taskbar
+/// button), SEE_MASK_NOCLOSEPROCESS for its pid, and
+/// %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe with
+/// powerShellParameters, hidden. It returns once UAC was answered. A No
+/// is GetLastError() == ERROR_CANCELLED, in any language. Then, only if
+/// that part runs, the helper, windowsHelperScript(in) with that part's
+/// pid, not elevated: powershell.exe with no console window at all
+/// (CREATE_NO_WINDOW), detached, in `environment`, which it hands on to
+/// the GitBolt it starts again. Neither is handed a handle of the
+/// other's. Elsewhere: Failed.
+WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment);
 
 /// At startup, removes what an update that never finished left behind:
 /// a crash, a force quit or a logout during prepare() or while the
@@ -160,13 +221,32 @@ private:
 ///     (mount-XXXXXX), detached first (forced) if still mounted, then
 ///     removed only if empty;
 ///   - AppImage: in the AppImage's folder, the Downloader's
-///     .GitBolt-<v>-x86_64.AppImage.part files, and the
-///     GitBolt-<v>-x86_64.AppImage files of versions up to `current`,
-///     never the running AppImage (package.target);
+///     .GitBolt-<v>-x86_64.AppImage.part files that this user owns, and
+///     the download recordPendingDownload() named, if it is still a
+///     file of this user's named as the release names an AppImage
+///     (GitBolt-<v>-x86_64.AppImage); never the running AppImage
+///     (package.target), and never any other GitBolt-<v>-x86_64.AppImage:
+///     that is the name users keep their AppImages under (an update
+///     keeps the old one's name, too);
 ///   - nothing for the other packages: their downloads are in
 ///     workDir/<v>/, which removeOldDownloads clears.
-/// Synchronous (a forced detach is bounded); the app calls it once,
-/// before any Installer exists.
-void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir, const Version& current);
+/// The record itself goes, whatever the package. Synchronous (a forced
+/// detach is bounded); the app calls it once, before any Installer
+/// exists.
+void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir);
+
+/// <workDir>/pending-download: the absolute path of an AppImage's
+/// checked download (beside the AppImage, outside GitBolt's folders)
+/// that no helper has taken over yet.
+inline constexpr char kPendingDownloadFile[] = "pending-download";
+/// UpdateController records the download when the Downloader finishes
+/// one for an AppImage, and forgets it once the helper takes the file
+/// over or the download is deleted. A record still there at the next
+/// start is a crash's (or a kill's) in between, and the next start
+/// removes that file (removeStaleInstallFiles): it is the one
+/// GitBolt-<v>-x86_64.AppImage beside the AppImage that GitBolt knows
+/// is its own.
+void recordPendingDownload(const QString& workDir, const QString& file);
+void forgetPendingDownload(const QString& workDir);
 
 } // namespace gitbolt::update
