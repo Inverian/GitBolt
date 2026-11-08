@@ -4,6 +4,33 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [0.9.11] — 2026-11-07
+
+### Added
+
+- **GitBolt updates itself**, from this version on: once a day it asks
+  GitHub whether a newer release is out and, if one is, a bar says so;
+  Help › Check for updates (on macOS also GitBolt › Check for
+  Updates…) asks at once. The update window shows what's new and
+  installs it when you choose Install and Restart (or says why it
+  can't): GitBolt downloads the right installer, checks that it came
+  from GitHub and matches the release's checksums, quits, installs it
+  and starts again. On macOS GitBolt.app is replaced; Windows asks for
+  permission first (the prompt names Windows PowerShell, which runs the
+  installer); a .deb install asks for an administrator's password; and
+  an AppImage replaces itself. If it can't install or the
+  install fails, GitBolt says why. Tools › Settings › Updates turns the
+  daily check off, and PRIVACY.md says what a check sends. Copies built
+  from source don't check: there Help › Check for updates opens the
+  releases page, as before.
+- **Checking a download yourself**: since 0.9.10 each installer has a
+  build attestation, which shows GitBolt's CI built it:
+  `gh attestation verify <file> --repo Inverian/GitBolt`.
+- Development: the CMake option `GITBOLT_UPDATES` (off by default; also
+  read from the environment) builds in-app updates in; CI turns it on
+  for official builds only. `GITBOLT_UPDATE_CHECK=0` turns the daily
+  check off.
+
 ## [0.9.10] — 2026-11-07
 
 ### Fixed

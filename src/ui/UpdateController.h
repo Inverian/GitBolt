@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/UpdateSetup.h"
+#include "update/Installer.h"
 #include "update/Release.h"
 #include "update/Version.h"
 
@@ -56,13 +57,23 @@ namespace gitbolt::ui {
 /// the temporary folder, UpdateSetup.h; an AppImage: next to the
 /// running one, where the helper renames it over it); the Installer
 /// checks and stages it; its helper is started with this process's
-/// pid, and GitBolt quits, which the helper waits for. Cancel, closing
+/// pid, and GitBolt quits, which the helper waits for. (Windows asks
+/// UAC first, over the dialog: a No leaves GitBolt running, the dialog
+/// Declined, and the update ready for Try Again.) Cancel, closing
 /// the dialog, a failure, or quitting first stops wherever it is and
 /// deletes what was downloaded: nothing is left beside the AppImage,
 /// nothing installs later. Once the helper runs there is nothing left
 /// to cancel: the dialog says GitBolt restarts, and if GitBolt is still
 /// running kQuitGraceMs later (the quit was refused), that it has to
-/// quit for the update to go in.
+/// quit for the update to go in; still running kHelperDeadlineMs after
+/// the helper started, when the helper has given up, that the update
+/// was abandoned, and checks and Install work again.
+///
+/// A release this system is too old for (Installer::needsNewerSystem:
+/// macOS's minimum, which only the downloaded disk image says) is
+/// remembered with why (updates/incompatibleVersion): shown again, it
+/// is one this copy can't install, without being downloaded again,
+/// until a newer one comes out or the system's version changes.
 ///
 /// After an install: every helper leaves <downloads>/install-result,
 /// one line "<status> <version> <reason>" (status ok, declined, failed
@@ -78,6 +89,10 @@ public:
     /// How long after asking to quit, with the helper running, GitBolt
     /// counts the quit as refused.
     static constexpr int kQuitGraceMs = 5 * 1000;
+    /// How long after starting the helper GitBolt, still running, takes
+    /// it to have given up: its wait for GitBolt to quit
+    /// (Installer::kHelperWaitSeconds), and a minute for it to start.
+    static constexpr int kHelperDeadlineMs = (update::Installer::kHelperWaitSeconds + 60) * 1000;
     /// The helper's outcome and log, in the downloads folder (the
     /// Installer's workDir, never version-named, so removeOldDownloads
     /// keeps them).
@@ -93,6 +108,7 @@ public:
         /// Asks GitBolt to quit; null: a queued QCoreApplication::quit().
         std::function<void()> quit;
         int quitGraceMs = kQuitGraceMs;
+        int helperDeadlineMs = kHelperDeadlineMs;
     };
 
     /// `setup` is on(). `settings` and `bar` are the window's, and live
@@ -104,6 +120,13 @@ public:
     const UpdateSetup& setup() const { return setup_; }
 
     void setRestartHooks(RestartHooks hooks);
+    /// Starts the helper for `pid` in installer.launchHelper's place
+    /// (null, the default: that, with the dialog's window for Windows'
+    /// UAC prompt). Tests stand in for that prompt with it: they emit
+    /// the Installer's declined() or failed() and return false, as a No
+    /// does.
+    using LaunchHook = std::function<bool(update::Installer& installer, qint64 pid)>;
+    void setLaunchHook(LaunchHook hook);
 
     /// Once the window is up: says how the last install went (the
     /// helper's install-result), deletes the installers of this version
@@ -137,8 +160,21 @@ private:
     void install();
     void onDownloaded(const QString& path);
     void onPrepared();
+    /// Windows' UAC said no: GitBolt stays, the update stays prepared
+    /// for Try Again, and the dialog says how to install it by hand.
+    void onDeclined(const QString& howToInstall);
     /// Asks GitBolt to quit, and says so if it is still here later.
     void quitForHelper();
+    /// The helper was started: the download is its, and GitBolt watches
+    /// for the time it gives up.
+    void helperTookOver();
+    /// GitBolt is still running when the helper has given up (the quit
+    /// was refused, and the user went on working): the install is over,
+    /// and failed; checks and installs work again.
+    void helperGaveUp();
+    /// Why `version` was refused on this system before (needs a newer
+    /// system, Installer::needsNewerSystem), or empty.
+    QString refusedForThisSystem(const update::Version& version) const;
     void failInstall(const QString& message);
     /// start(): reads and deletes the helper's install-result.
     void reportEarlierInstall();
@@ -157,8 +193,10 @@ private:
     update::Installer* installer_ = nullptr;   ///< while preparing; one per install
     QTimer* timer_ = nullptr;
     QTimer* quitGrace_ = nullptr;   ///< after the quit request: was it refused?
+    QTimer* helperDeadline_ = nullptr;   ///< after the helper started: has it given up? (made then)
     QPointer<dialogs::UpdateDialog> dialog_;
     RestartHooks hooks_;
+    LaunchHook launchHook_;
 
     /// The newest release the feed offered this session (the bar's).
     std::optional<update::Release> release_;
@@ -177,6 +215,8 @@ private:
     bool dialogWaits_ = false;
     /// What Try Again does: check again, or install again.
     bool retryChecks_ = false;
+    /// Windows said no to the prepared update: Try Again asks again.
+    bool declined_ = false;
     /// The bar was dismissed for this version (and older) this session.
     std::optional<update::Version> dismissed_;
     /// The helper runs: GitBolt is quitting, and it owns the download.

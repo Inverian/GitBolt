@@ -22,7 +22,9 @@
 //   - anything else (a build tree, a cmake --install prefix, a
 //     hand-extracted AppImage) is Unknown, never installable;
 //   - the release's asset name for each kind, and the probe of this
-//     very test binary (a build tree: Unknown).
+//     very test binary (a build tree: Unknown);
+//   - Windows: reading the registered uninstallers creates no key, in
+//     either registry view, even with administrator rights.
 //
 
 #include <QCoreApplication>
@@ -33,6 +35,18 @@
 
 #include "FakeApps.h"
 #include "update/Package.h"
+
+#if defined(Q_OS_WIN)
+#include <QDateTime>
+#include <QScopeGuard>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <string>
+#endif
 
 using namespace gitbolt::update;
 using gitbolt::test::writeFile;
@@ -361,6 +375,60 @@ private slots:
         QFETCH(PackageKind, kind);
         QFETCH(QString, name);
         QCOMPARE(assetNameFor(kind, Version{0, 1, 10}), name);
+    }
+
+    // Reading the registry writes nothing to it, even with
+    // administrator rights (CI's runner has them): no key that wasn't
+    // there is there afterwards, in either view. QSettings made an empty
+    // one; the 32-bit NSIS uninstaller never removed the 64-bit view's.
+    // Checked on a key of this test's own (no other test can have made
+    // it first, as one may GitBolt's own, which is checked too).
+    void readingTheRegistryCreatesNothing() {
+#if !defined(Q_OS_WIN)
+        QVERIFY(registeredWindowsUninstallers().isEmpty());
+        QSKIP("Windows only: reads the registry");
+#else
+        const QString own = QStringLiteral("SOFTWARE\\GitBolt-test-%1-%2")
+                                .arg(QCoreApplication::applicationPid())
+                                .arg(QDateTime::currentMSecsSinceEpoch());
+        const QString gitBolt = QStringLiteral("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GitBolt");
+        const auto exists = [](const QString& key, REGSAM view) {
+            HKEY opened = nullptr;
+            const std::wstring path = key.toStdWString();
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ | view, &opened) != ERROR_SUCCESS)
+                return false;
+            RegCloseKey(opened);
+            return true;
+        };
+        const QList<REGSAM> views{REGSAM(KEY_WOW64_32KEY), REGSAM(KEY_WOW64_64KEY)};
+        // Should the test fail, what it made goes (it is the test's own).
+        auto removeOwn = qScopeGuard([&] {
+            for (const REGSAM view : views)
+                RegDeleteKeyExW(HKEY_LOCAL_MACHINE, own.toStdWString().c_str(), view, 0);
+        });
+        QList<bool> gitBoltBefore;
+        for (const REGSAM view : views) {
+            QVERIFY(!exists(own, view));
+            gitBoltBefore << exists(gitBolt, view);
+        }
+        HANDLE token = nullptr;
+        TOKEN_ELEVATION elevation = {};
+        DWORD size = 0;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            GetTokenInformation(token, TokenElevation, &elevation, static_cast<DWORD>(sizeof(elevation)), &size);
+            CloseHandle(token);
+        }
+        qInfo("elevated: %s (without it, nothing could be created anyway)", elevation.TokenIsElevated ? "yes" : "no");
+
+        QVERIFY(registeredWindowsUninstallers(own).isEmpty());
+        const QStringList registered = registeredWindowsUninstallers();
+        QCOMPARE(currentProbe().registeredUninstallers, registered);
+        for (qsizetype i = 0; i < views.size(); ++i) {
+            QVERIFY2(!exists(own, views.at(i)), qPrintable(own + QStringLiteral(" was created")));
+            if (!gitBoltBefore.at(i))
+                QVERIFY2(!exists(gitBolt, views.at(i)), qPrintable(gitBolt + QStringLiteral(" was created")));
+        }
+#endif
     }
 
     // This binary runs from the build tree, which is no package.

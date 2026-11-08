@@ -167,6 +167,18 @@ public:
     /// settingsChanged.
     QString skippedUpdateVersion() const;
     void setSkippedUpdateVersion(const QString& version);
+    /// The release Install found this system too old for (macOS's
+    /// minimum: Installer::needsNewerSystem), why (the Installer's
+    /// message), and the system's version then (QSysInfo::
+    /// productVersion()); an empty version: none. That release is shown
+    /// as one this copy can't install, with that reason, until a newer
+    /// one comes out or the system changes (ui/UpdateController.h).
+    /// setIncompatibleUpdate with an empty version forgets it. No
+    /// settingsChanged.
+    QString incompatibleUpdateVersion() const;
+    QString incompatibleUpdateReason() const;
+    QString incompatibleUpdateSystem() const;
+    void setIncompatibleUpdate(const QString& version, const QString& reason, const QString& system);
 
     // ----- The note about the git GitBolt runs (widgets::GitNoticeBar) -----
     //

@@ -68,8 +68,8 @@ struct PackageProbe {
 ///     copy, and only if both the bundle and its folder are writable:
 ///     the swap renames the bundle within its folder.
 ///   - WindowsInstall: appDirPath is …\bin and ..\Uninstall.exe exists
-///     (the NSIS installer's). Installable (the installer asks for
-///     elevation itself, UAC) unless the registry names another
+///     (the NSIS installer's). Installable (UAC is asked to let it run,
+///     while GitBolt is still open) unless the registry names another
 ///     install: a copied install folder isn't the registered one, and
 ///     the installer would uninstall that one and move it here.
 ///   - Deb: appDirPath ends in /lib/gitbolt and dpkg lists the package
@@ -92,8 +92,11 @@ PackageInfo detectPackage(const PackageProbe& probe);
 PackageProbe currentProbe();
 
 /// Windows: PackageProbe::registeredUninstallers, read from the
-/// registry. Empty elsewhere.
-QStringList registeredWindowsUninstallers();
+/// registry, which this only reads: it never creates a key, even with
+/// administrator rights. `key` is under HKEY_LOCAL_MACHINE, in both
+/// views (a test names one of its own). Empty elsewhere.
+QStringList registeredWindowsUninstallers(
+    const QString& key = QStringLiteral("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GitBolt"));
 
 /// The release asset each kind installs from, as CI names them:
 /// GitBolt-<v>-Darwin-arm64.dmg, GitBolt-<v>-Windows-AMD64.exe,

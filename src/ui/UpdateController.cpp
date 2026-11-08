@@ -13,6 +13,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSysInfo>
 #include <QTimer>
 #include <QWidget>
 
@@ -185,6 +186,11 @@ void UpdateController::setRestartHooks(RestartHooks hooks)
     hooks_ = std::move(hooks);
 }
 
+void UpdateController::setLaunchHook(LaunchHook hook)
+{
+    launchHook_ = std::move(hook);
+}
+
 dialogs::UpdateDialog* UpdateController::dialog() const
 {
     return dialog_;
@@ -199,7 +205,7 @@ void UpdateController::start()
     // so is whatever an update that crashed or was killed left beside
     // this copy (a staged bundle, a part-downloaded AppImage, a mount).
     update::removeOldDownloads(setup_.config.downloadDir, setup_.config.current);
-    update::removeStaleInstallFiles(setup_.package, setup_.config.downloadDir, setup_.config.current);
+    update::removeStaleInstallFiles(setup_.package, setup_.config.downloadDir);
     if (setup_.schedulesChecks())
         timer_->start(kFirstCheckDelayMs);
 }
@@ -247,9 +253,10 @@ void UpdateController::reportEarlierInstall()
         why = withReason(tr("Installing GitBolt %1 needs an administrator's permission, and it wasn't given")
                              .arg(version));
     else if (result->status == QLatin1String("gave-up"))
-        why = withReason(tr("GitBolt %1 wasn't installed: GitBolt didn't quit within 10 minutes of Install "
-                            "and Restart")
-                             .arg(version));
+        // Not the helper's reason: it says the same, in seconds.
+        why = tr("GitBolt %1 wasn't installed: GitBolt didn't quit within %2 minutes of Install and Restart.")
+                  .arg(version)
+                  .arg(update::Installer::kHelperWaitSeconds / 60);
     else
         why = withReason(tr("Installing GitBolt %1 failed after GitBolt quit").arg(version));
 
@@ -338,6 +345,16 @@ void UpdateController::onUpToDate(const update::Version& latest, bool manual)
 void UpdateController::onAvailable(const update::Release& release, bool manual)
 {
     settings_->setUpdateLastCheck(QDateTime::currentDateTimeUtc());
+    // Every answer says what the newest release is: one the bar was to
+    // offer that is newer than this is gone (GitHub took it down), as
+    // in onUpToDate, whatever the dialog shows now.
+    if (pendingRelease_ && pendingRelease_->version > release.version)
+        pendingRelease_.reset();
+    // A release this system was too old for stays refused until a newer
+    // one comes out, or the system changes (it may be new enough now).
+    if (const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
+        refused && (release.version > *refused || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion()))
+        settings_->setIncompatibleUpdate({}, {}, {});
     // An automatic check that ran on while an install started: the
     // install keeps the release it started with.
     if (installing() || launched_) {
@@ -407,6 +424,9 @@ QString UpdateController::whyNotInstallable(const update::Release& release) cons
                                   "from the release page.")
                              : why;
     }
+    // Said again without downloading it again.
+    if (const QString why = refusedForThisSystem(release.version); !why.isEmpty())
+        return why;
     const QString assetName = update::assetNameFor(package.kind, release.version);
     if (!release.asset(assetName))
         return tr("This release has no installer for this system (%1). Download GitBolt from the "
@@ -462,6 +482,11 @@ void UpdateController::install()
 void UpdateController::onDownloaded(const QString& path)
 {
     downloaded_ = path;
+    // Beside the AppImage, under the name users keep theirs under: if
+    // this GitBolt dies before the helper takes it over, the next start
+    // knows it is GitBolt's to remove (removeStaleInstallFiles).
+    if (setup_.package.kind == update::PackageKind::AppImage)
+        update::recordPendingDownload(setup_.config.downloadDir, path);
     // workDir is the downloads folder: its mount point, helper script,
     // install.log and install-result are never version-named, so
     // removeOldDownloads leaves them alone.
@@ -472,6 +497,7 @@ void UpdateController::onDownloaded(const QString& path)
     });
     connect(installer_, &update::Installer::prepared, this, &UpdateController::onPrepared);
     connect(installer_, &update::Installer::failed, this, &UpdateController::failInstall);
+    connect(installer_, &update::Installer::declined, this, &UpdateController::onDeclined);
     if (dialog_)
         dialog_->showPreparing(tr("Checking the download…"));
     // shownRelease_ is what install() started with: nothing replaces it
@@ -484,16 +510,31 @@ void UpdateController::onPrepared()
     // The helper waits for this pid to exit before it touches anything:
     // the instance lock goes with this process, so the new copy can't
     // be folded into this one (SingleInstance.h). A false says why
-    // through failed() (failInstall) already.
+    // through failed() (failInstall) or declined() (onDeclined) already.
+    // Windows' UAC prompt comes up now, owned by the dialog, which is
+    // in front: the user just chose Install and Restart in it.
     const qint64 pid = hooks_.pid ? hooks_.pid() : QCoreApplication::applicationPid();
-    if (!installer_->launchHelper(pid))
+    declined_ = false;
+    const bool started = launchHook_ ? launchHook_(*installer_, pid)
+                                     : installer_->launchHelper(pid, dialog_ ? quintptr(dialog_->winId()) : 0);
+    if (!started)
         return;
     launched_ = true;
+    helperTookOver();
     // Nothing is left to cancel: the helper installs once GitBolt has
     // quit, whatever this process does now.
     if (dialog_)
         dialog_->showRestarting();
     quitForHelper();
+}
+
+void UpdateController::onDeclined(const QString& howToInstall)
+{
+    // Nothing was started: GitBolt doesn't quit, and the checked
+    // download stays for Try Again (closing the dialog deletes it).
+    declined_ = true;
+    if (dialog_)
+        dialog_->showDeclined(howToInstall);
 }
 
 void UpdateController::quitForHelper()
@@ -507,8 +548,69 @@ void UpdateController::quitForHelper()
     quitGrace_->start(hooks_.quitGraceMs);
 }
 
+void UpdateController::helperTookOver()
+{
+    // No longer a download a crash would leave beside the AppImage: the
+    // helper renames it, or deletes it as it gives up.
+    update::forgetPendingDownload(setup_.config.downloadDir);
+    if (!helperDeadline_) {
+        helperDeadline_ = new QTimer(this);
+        helperDeadline_->setObjectName(QStringLiteral("updateHelperDeadline"));
+        helperDeadline_->setSingleShot(true);
+        connect(helperDeadline_, &QTimer::timeout, this, &UpdateController::helperGaveUp);
+    }
+    helperDeadline_->start(hooks_.helperDeadlineMs);
+}
+
+void UpdateController::helperGaveUp()
+{
+    if (quitting_ || !launched_)
+        return;
+    // Quitting now would install nothing and start nothing again, so
+    // the dialog mustn't go on asking for it, and nothing is left to
+    // wait for: checks and Install work again.
+    quitGrace_->stop();
+    launched_ = false;
+    // The helper deleted the download as it gave up (and the staged
+    // bundle beside the installed one, which the next start removes
+    // too, should it still be there); what is still there goes.
+    stopInstall();
+    // Its result says what the dialog says now: the next start needn't
+    // say it again.
+    const QString resultPath = QDir(setup_.config.downloadDir).filePath(QLatin1String(kInstallResultFile));
+    std::optional<InstallResult> result;
+    if (QFile file(resultPath); file.open(QIODevice::ReadOnly))
+        result = parseInstallResult(file.read(kMaxResultBytes + 1));
+    if (result && result->status == QLatin1String("gave-up") && shownRelease_
+        && result->version == shownRelease_->version)
+        QFile::remove(resultPath);
+    retryChecks_ = false;
+    openDialog()->showInstallFailed(
+        tr("GitBolt didn't quit within %1 minutes of Install and Restart, so the update was abandoned.")
+            .arg(update::Installer::kHelperWaitSeconds / 60));
+}
+
+QString UpdateController::refusedForThisSystem(const update::Version& version) const
+{
+    const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
+    if (!refused || *refused != version || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion())
+        return {};
+    return settings_->incompatibleUpdateReason();
+}
+
 void UpdateController::failInstall(const QString& message)
 {
+    // A release that needs a newer system than this one (macOS's
+    // minimum, which only the disk image says): remembered, and shown
+    // as one this copy can't install, with why (whyNotInstallable),
+    // which it says again later without downloading it again.
+    if (installer_ && installer_->needsNewerSystem() && shownRelease_) {
+        settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message, QSysInfo::productVersion());
+        stopInstall();
+        retryChecks_ = false;
+        showRelease(*shownRelease_);
+        return;
+    }
     stopInstall();
     retryChecks_ = false;
     if (dialog_)
@@ -532,6 +634,7 @@ void UpdateController::stopInstall()
     if (!downloaded_.isEmpty()) {
         QFile::remove(downloaded_);
         downloaded_.clear();
+        update::forgetPendingDownload(setup_.config.downloadDir);
     }
 }
 
@@ -559,6 +662,12 @@ dialogs::UpdateDialog* UpdateController::openDialog()
                 showRelease(*shownRelease_);
         });
         connect(dialog_, &dialogs::UpdateDialog::retryClicked, this, [this] {
+            // After Windows' No: ask it again, for the update that is
+            // still prepared.
+            if (declined_ && installer_) {
+                onPrepared();
+                return;
+            }
             if (retryChecks_ || !shownRelease_)
                 checkNow();
             else

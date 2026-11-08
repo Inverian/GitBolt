@@ -30,6 +30,12 @@
 #define NOMINMAX
 #endif
 #include <windows.h>  // CREATE_NO_WINDOW
+#include <objbase.h>  // CoInitializeEx
+#include <shellapi.h> // ShellExecuteExW
+
+#include <QDateTime>
+
+#include <string>
 #endif
 
 namespace gitbolt::update {
@@ -47,9 +53,6 @@ constexpr int kAttachTimeoutMs = 3 * 60 * 1000;
 constexpr int kCodesignTimeoutMs = 5 * 60 * 1000;
 constexpr int kDittoTimeoutMs = 10 * 60 * 1000;
 constexpr int kDetachTimeoutMs = 60 * 1000;
-/// How long a helper waits for GitBolt to quit (~MainWindow waits for
-/// running git work) before it gives up and changes nothing.
-constexpr int kHelperWaitSeconds = 10 * 60;
 /// The longest tool output a message quotes.
 constexpr qsizetype kMaxQuoted = 400;
 
@@ -177,6 +180,10 @@ bool Installer::busy() const {
     return busy_;
 }
 
+bool Installer::needsNewerSystem() const {
+    return needsNewerSystem_;
+}
+
 QString Installer::helperScriptPath() const {
     return QDir(workDir_).filePath(QStringLiteral("install-helper.sh"));
 }
@@ -208,6 +215,7 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
     busy_ = true;
     file_ = QFileInfo(downloadedFile).absoluteFilePath();
     version_ = version;
+    needsNewerSystem_ = false;
 
     if (!package_.canInstall) {
         fail(package_.whyNot.isEmpty() ? tr("This copy of GitBolt can't install updates.") : package_.whyNot);
@@ -587,6 +595,7 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
         const QString shown = running.microVersion() > 0 ? running.toString()
                                                          : QStringLiteral("%1.%2").arg(running.majorVersion())
                                                                .arg(running.minorVersion());
+        needsNewerSystem_ = true;
         return tr("GitBolt %1 needs macOS %2 or later, and this Mac has macOS %3, so it can't be installed here.")
             .arg(version_.toString(), quoted(minimum), shown);
     }
@@ -717,7 +726,7 @@ QString Installer::helperScript(qint64 pid) const {
     return {};
 }
 
-bool Installer::launchHelper(qint64 pid) {
+bool Installer::launchHelper(qint64 pid, quintptr window) {
     if (!ready_ || launched_ || pid <= 0) {
         emit failed(tr("There's no update ready to install."));
         return false;
@@ -730,7 +739,6 @@ bool Installer::launchHelper(qint64 pid) {
         emit failed(tr("Couldn't create %1.").arg(workDir_));
         return false;
     }
-    const QString script = helperScript(pid);
     // One update's story per log. (A relaunched AppImage or deb copy
     // keeps writing its own output to it, and the next update would
     // otherwise append to all of that.)
@@ -738,23 +746,52 @@ bool Installer::launchHelper(qint64 pid) {
         logFile.close();
     // An earlier update's result would pass for this one's.
     QFile::remove(resultPath());
+#if defined(Q_OS_WIN)
+    if (package_.kind != PackageKind::WindowsInstall) {
+        emit failed(tr("This copy of GitBolt can't install updates."));
+        return false;
+    }
+    // Both parts start now, while GitBolt is still in front for UAC's
+    // prompt, and only once Windows has said yes may GitBolt quit.
+    HelperInputs in;
+    in.pid = pid;
+    in.waitSeconds = kHelperWaitSeconds;
+    in.logFile = logPath();
+    in.target = package_.target;
+    in.staged = staged_;
+    in.newVersion = version_.toString();
+    in.resultFile = resultPath();
+    const WindowsLaunch launch = launchWindowsUpdate(in, window, QProcessEnvironment::systemEnvironment());
+    // Where Windows won't elevate at all (a standard user under "deny
+    // elevation requests" gets an answer at once), only an
+    // administrator can install it.
+    const QString byHand = tr("To install it yourself, download %1 from the release page and run it as an "
+                              "administrator.")
+                               .arg(assetNameFor(package_.kind, version_));
+    switch (launch.outcome) {
+    case WindowsLaunch::Outcome::Started:
+        if (!launch.error.isEmpty())
+            qWarning("update: GitBolt won't be started again after the update: %s", qPrintable(launch.error));
+        break;
+    case WindowsLaunch::Outcome::Declined:
+        emit declined(byHand);
+        return false;
+    case WindowsLaunch::Outcome::Failed: {
+        // The system's own sentence ("Access is denied."), in its language.
+        QString why = launch.error.trimmed();
+        if (!why.endsWith(u'.'))
+            why += u'.';
+        emit failed(tr("Windows couldn't start GitBolt's installer as an administrator: %1").arg(why)
+                    + QLatin1Char(' ') + byHand);
+        return false;
+    }
+    }
+#else
+    Q_UNUSED(window)
+    const QString script = helperScript(pid);
     QProcess helper;
     helper.setWorkingDirectory(workDir_);
     helper.setStandardInputFile(QProcess::nullDevice());
-#if defined(Q_OS_WIN)
-    // Not into the log: the script appends to it, and a handle open for
-    // writing (ours) would make every Add-Content a sharing violation.
-    helper.setProgram(windowsPowerShell());
-    helper.setArguments(powerShellArguments(script));
-    // No console window at all, not one that flashes until -WindowStyle
-    // Hidden takes effect: CREATE_NO_WINDOW gives powershell.exe a
-    // console nobody sees. Windows ignores it beside CREATE_NEW_CONSOLE
-    // or DETACHED_PROCESS, so those go.
-    helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
-        args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
-        args->flags |= CREATE_NO_WINDOW;
-    });
-#else
     QSaveFile file(helperScriptPath());
     if (!file.open(QIODevice::WriteOnly) || file.write(script.toUtf8()) < 0 || !file.commit()) {
         emit failed(tr("Couldn't write the installer helper, %1.").arg(helperScriptPath()));
@@ -766,14 +803,98 @@ bool Installer::launchHelper(qint64 pid) {
     helper.setProgram(QStringLiteral("/bin/sh"));
     helper.setArguments({helperScriptPath()});
     detachFromGitBolt(helper);
-#endif
     if (!helper.startDetached()) {
         emit failed(tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
         return false;
     }
+#endif
     launched_ = true;
     ready_ = false;
     return true;
+}
+
+WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment) {
+    WindowsLaunch launch;
+#if defined(Q_OS_WIN)
+    // The administrator part. ShellExecuteExW may hand the verb to a
+    // shell extension, which needs COM on this thread: GitBolt's GUI
+    // thread has it already (S_FALSE), a test's may not.
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const std::wstring file = windowsPowerShell().toStdWString();
+    const std::wstring parameters = powerShellParameters(windowsElevatedScript(in)).toStdWString();
+    SHELLEXECUTEINFOW info = {};
+    info.cbSize = static_cast<DWORD>(sizeof(info));
+    // Its pid, for the helper; and done before this returns, since
+    // GitBolt quits right after.
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    // UAC's prompt is this window's: in front of it, on the secure
+    // desktop. A caller with no window in front (a hidden helper once
+    // GitBolt has quit) gets only a flashing taskbar button.
+    info.hwnd = reinterpret_cast<HWND>(window);
+    info.lpVerb = L"runas";
+    info.lpFile = file.c_str();
+    info.lpParameters = parameters.c_str();
+    info.nShow = SW_HIDE;
+    const BOOL started = ShellExecuteExW(&info);
+    const DWORD error = started ? DWORD(ERROR_SUCCESS) : GetLastError();
+    if (SUCCEEDED(com))
+        CoUninitialize();
+    if (!started) {
+        // UAC's No, by its code, so in any language (the text is the
+        // user's language's).
+        if (error == ERROR_CANCELLED) {
+            launch.outcome = WindowsLaunch::Outcome::Declined;
+            return launch;
+        }
+        launch.error = qt_error_string(static_cast<int>(error));
+        return launch;
+    }
+    // Only its pid: the helper watches the process list for it, and is
+    // handed no handle (one of an over-the-shoulder administrator's
+    // process might not be the user's to have anyway).
+    if (info.hProcess) {
+        launch.elevatedPid = static_cast<qint64>(GetProcessId(info.hProcess));
+        CloseHandle(info.hProcess);
+    }
+    launch.outcome = WindowsLaunch::Outcome::Started;
+
+    // The helper that starts GitBolt again, not elevated, in GitBolt's
+    // environment. Not into the log: both parts append to it, and a
+    // handle open for writing (ours) would make every Add-Content a
+    // sharing violation.
+    in.elevatedPid = launch.elevatedPid;
+    QProcess helper;
+    helper.setProgram(windowsPowerShell());
+    helper.setArguments(powerShellArguments(windowsHelperScript(in)));
+    helper.setWorkingDirectory(QFileInfo(in.logFile).absolutePath());
+    helper.setStandardInputFile(QProcess::nullDevice());
+    helper.setProcessEnvironment(environment);
+    // No console window at all, not one that flashes until -WindowStyle
+    // Hidden takes effect: CREATE_NO_WINDOW gives powershell.exe a
+    // console nobody sees. Windows ignores it beside CREATE_NEW_CONSOLE
+    // or DETACHED_PROCESS, so those go.
+    helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+        args->flags |= CREATE_NO_WINDOW;
+    });
+    if (!helper.startDetached(&launch.helperPid)) {
+        // Too late to stop: the administrator part installs once
+        // GitBolt quits. Only the restart is lost, and the log says so.
+        launch.helperPid = 0;
+        launch.error = helper.errorString();
+        if (QFile log(in.logFile); log.open(QIODevice::WriteOnly | QIODevice::Append))
+            log.write((QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                       + QStringLiteral(" couldn't start the helper that starts GitBolt again (")
+                       + launch.error + QStringLiteral("): start GitBolt yourself once it has quit\n"))
+                          .toUtf8());
+    }
+#else
+    Q_UNUSED(in)
+    Q_UNUSED(window)
+    Q_UNUSED(environment)
+    launch.error = QStringLiteral("Only Windows has an administrator part.");
+#endif
+    return launch;
 }
 
 // ---------------------------------------------------------------------------
@@ -816,9 +937,76 @@ void forceDetach(const QString& mountPoint) {
 }
 #endif
 
+// A path, and a newline: anything longer isn't a record of ours.
+constexpr qint64 kMaxPendingRecordBytes = 64 * 1024;
+
+QString pendingRecordPath(const QString& workDir) {
+    return QDir(workDir).filePath(QLatin1String(kPendingDownloadFile));
+}
+
+// An AppImage download that recordPendingDownload() named and no helper
+// took over: the GitBolt that made it crashed, or was killed, first.
+// Removed if it is still what GitBolt left there: a regular file of
+// this user's, named as the release names an AppImage, and not the
+// AppImage that runs (the user may have started that very file).
+// The record goes either way.
+void removePendingDownload(const PackageInfo& package, const QString& workDir) {
+    const QString record = pendingRecordPath(workDir);
+    const QFileInfo recordInfo(record);
+    if (!recordInfo.exists() && !recordInfo.isSymLink())
+        return;
+    QByteArray bytes;
+    if (QFile file(record); !recordInfo.isSymLink() && file.open(QIODevice::ReadOnly))
+        bytes = file.read(kMaxPendingRecordBytes + 1);
+    if (!QFile::remove(record))
+        qWarning("update: couldn't remove %s", qPrintable(record));
+    if (package.kind != PackageKind::AppImage || package.target.isEmpty() || bytes.size() > kMaxPendingRecordBytes)
+        return;
+    const QString path = QString::fromUtf8(bytes).trimmed();
+    if (path.isEmpty() || path.contains(u'\n') || !QDir::isAbsolutePath(path))
+        return;
+    const QFileInfo entry(path);
+    static const QRegularExpression image(QStringLiteral("^GitBolt-(.+)-x86_64\\.AppImage$"));
+    const QRegularExpressionMatch named = image.match(entry.fileName());
+    const std::optional<Version> version = named.hasMatch() ? Version::parse(named.captured(1)) : std::nullopt;
+    if (!version || assetNameFor(PackageKind::AppImage, *version) != entry.fileName())
+        return;
+    if (entry.isSymLink() || entry.isJunction() || !entry.isFile() || isTarget(entry, package.target))
+        return;
+#if defined(Q_OS_UNIX)
+    if (entry.ownerId() != ::getuid())
+        return;
+#endif
+    if (!QFile::remove(path))
+        qWarning("update: couldn't remove %s", qPrintable(path));
+}
+
 } // namespace
 
-void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir, const Version& current) {
+void recordPendingDownload(const QString& workDir, const QString& file) {
+    if (workDir.isEmpty() || !QDir::isAbsolutePath(workDir) || !QDir().mkpath(workDir)) {
+        qWarning("update: no folder to record the download %s in", qPrintable(file));
+        return;
+    }
+    // A new file of its own: whatever has the name goes first (a link
+    // itself, never what it points to).
+    forgetPendingDownload(workDir);
+    QFile record(pendingRecordPath(workDir));
+    if (!record.open(QIODevice::WriteOnly | QIODevice::NewOnly)
+        || record.write(QFileInfo(file).absoluteFilePath().toUtf8() + '\n') < 0 || !record.flush())
+        qWarning("update: couldn't record the download %s in %s", qPrintable(file), qPrintable(record.fileName()));
+}
+
+void forgetPendingDownload(const QString& workDir) {
+    if (workDir.isEmpty())
+        return;
+    const QString record = pendingRecordPath(workDir);
+    const QFileInfo info(record);
+    if ((info.exists() || info.isSymLink()) && !QFile::remove(record))
+        qWarning("update: couldn't remove %s", qPrintable(record));
+}
+
+void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir) {
     if (package.kind == PackageKind::MacBundle && !package.target.isEmpty()) {
         // Staged copies (.GitBolt-<v>.app, and .GitBolt-<v>-cancelled-…
         // .app, which cancel() renamed for its cleanup) and swapped-aside
@@ -865,24 +1053,25 @@ void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir,
     }
 
     if (package.kind == PackageKind::AppImage && !package.target.isEmpty()) {
-        // Beside the AppImage: an unfinished download, and checked
-        // downloads no newer than this one (an update that stopped after
-        // the download). Never this AppImage itself, whatever its name.
+        // Beside the AppImage: this user's unfinished downloads (another
+        // user's GitBolt may be downloading into a shared folder right
+        // now). Never this AppImage itself, whatever its name. A finished
+        // download only if GitBolt recorded it, below: the release's
+        // name for it is the one users keep their AppImages under.
         static const QRegularExpression part(QStringLiteral("^\\.GitBolt-.+-x86_64\\.AppImage\\.part$"));
-        static const QRegularExpression image(QStringLiteral("^GitBolt-(.+)-x86_64\\.AppImage$"));
         const QString folder = QFileInfo(package.target).absolutePath();
         for (const QFileInfo& entry : ownEntries(folder, part, QDir::Files)) {
-            if (!isTarget(entry, package.target))
-                QFile::remove(entry.absoluteFilePath());
-        }
-        for (const QFileInfo& entry : ownEntries(folder, image, QDir::Files)) {
-            const QString named = image.match(entry.fileName()).captured(1);
-            const std::optional<Version> version = Version::parse(named);
-            if (!version || version->toString() != named || *version > current || isTarget(entry, package.target))
+            if (isTarget(entry, package.target))
                 continue;
+#if defined(Q_OS_UNIX)
+            if (entry.ownerId() != ::getuid())
+                continue;
+#endif
             QFile::remove(entry.absoluteFilePath());
         }
     }
+    if (!workDir.isEmpty() && QDir::isAbsolutePath(workDir))
+        removePendingDownload(package, workDir);
 }
 
 } // namespace gitbolt::update

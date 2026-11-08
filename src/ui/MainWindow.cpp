@@ -422,11 +422,16 @@ void MainWindow::createMenuBar()
         aboutAct->setMenuRole(QAction::AboutRole);
         connect(aboutAct, &QAction::triggered, this, &MainWindow::showAbout);
         // Under About, where Mac apps keep it. ApplicationSpecificRole
-        // hoists it into the Application menu as AboutRole does.
-        auto* updateAct = appMenu->addAction(tr("Check for Updates…"));
+        // hoists it into the Application menu as AboutRole does, if the
+        // action has it before it joins the menu: added with the default
+        // role, which this text doesn't match, Cocoa first puts it in the
+        // placeholder menu itself, and the menu bar then keeps showing
+        // that menu ("App"), empty, after the role moves the item out.
+        auto* updateAct = new QAction(tr("Check for Updates…"), appMenu);
         updateAct->setObjectName(QStringLiteral("help.check-for-updates-app-menu"));
         updateAct->setMenuRole(QAction::ApplicationSpecificRole);
         connect(updateAct, &QAction::triggered, this, &MainWindow::checkForUpdates);
+        appMenu->addAction(updateAct);
     }
 #endif
     // Each top-level menu is built by its own function — pure

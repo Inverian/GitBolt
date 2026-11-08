@@ -4,8 +4,17 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QObject>
-#include <QSettings>
 #include <QStandardPaths>
+
+#if defined(Q_OS_WIN)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>  // RegOpenKeyExW, RegGetValueW
+
+#include <string>
+#include <vector>
+#endif
 
 namespace gitbolt::update {
 
@@ -177,19 +186,50 @@ PackageProbe currentProbe() {
     return probe;
 }
 
-QStringList registeredWindowsUninstallers() {
+QStringList registeredWindowsUninstallers(const QString& key) {
     QStringList found;
 #if defined(Q_OS_WIN)
+    // Read only, with the registry's own calls: RegOpenKeyExW opens a
+    // key that is there and creates nothing. QSettings did create: one
+    // made from a path opens its key for writing, and makes it when it
+    // is missing and the process may (Qt 6's qsettings_win.cpp,
+    // createOrOpenKey). So every GitBolt with administrator rights (UAC
+    // off, the built-in Administrator, Run as administrator) left an
+    // empty ...\Uninstall\GitBolt in both views, which the 32-bit NSIS
+    // uninstaller never removes. That is where CI's empty 64-bit key
+    // came from: test_update_package, run as an administrator on the
+    // hosted runner, read this before the NSIS smoke test installed
+    // anything.
     // The 32-bit NSIS stub writes under WOW6432Node (the 32-bit view);
     // the 64-bit view too, in case a later installer does.
-    for (const QSettings::Format view : {QSettings::Registry32Format, QSettings::Registry64Format}) {
-        const QSettings key(
-            QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GitBolt"),
-            view);
-        const QString value = key.value(QStringLiteral("UninstallString")).toString().trimmed();
-        if (!value.isEmpty() && !found.contains(value))
-            found << value;
+    const std::wstring path = key.toStdWString();
+    for (const REGSAM view : {REGSAM(KEY_WOW64_32KEY), REGSAM(KEY_WOW64_64KEY)}) {
+        HKEY opened = nullptr;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.c_str(), 0, KEY_READ | view, &opened) != ERROR_SUCCESS)
+            continue;
+        // A string, REG_SZ, which RegGetValueW always ends with a null;
+        // read again, bigger, if it didn't fit (ERROR_MORE_DATA gives
+        // the size), as when it grew meanwhile.
+        std::vector<wchar_t> buffer(512);
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            DWORD bytes = static_cast<DWORD>(buffer.size() * sizeof(wchar_t));
+            const LSTATUS status = RegGetValueW(opened, nullptr, L"UninstallString", RRF_RT_REG_SZ, nullptr,
+                                                buffer.data(), &bytes);
+            if (status == ERROR_MORE_DATA) {
+                buffer.resize(bytes / sizeof(wchar_t) + 1);
+                continue;
+            }
+            if (status == ERROR_SUCCESS) {
+                const QString value = QString::fromWCharArray(buffer.data()).trimmed();
+                if (!value.isEmpty() && !found.contains(value))
+                    found << value;
+            }
+            break;
+        }
+        RegCloseKey(opened);
     }
+#else
+    Q_UNUSED(key)
 #endif
     return found;
 }
