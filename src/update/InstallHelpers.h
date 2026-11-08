@@ -136,7 +136,8 @@ QString debHelperScript(const HelperInputs& in);
 /// elevated: the new copy, or the old one if nothing was installed.
 /// Both parts use cmdlets and core types only outside a try, so in
 /// PowerShell's Constrained Language mode they still report and the
-/// helper still starts GitBolt again.
+/// helper still starts GitBolt again. Both append to the one log
+/// (logFile) through windowsScriptPreamble's Write-Log.
 QString windowsHelperScript(const HelperInputs& in);
 /// The administrator part of a Windows update. It waits for GitBolt
 /// (`pid`) to quit, at most waitSeconds; then it gives up, deletes the
@@ -157,6 +158,28 @@ QString windowsHelperScript(const HelperInputs& in);
 /// last. Its exit code is 0 for ok, or one of the kWindowsExit* codes,
 /// or the installer's own when it failed.
 QString windowsElevatedScript(const HelperInputs& in);
+
+/// What both Windows parts start with, one PowerShell line each: their
+/// shared values ($log, $result, $version, $appPid, $waitSeconds), then
+/// Write-Log and Write-Result. Write-Log '<text>' appends a line, with
+/// the time, to the log, which both parts write to at once: through
+/// Out-File, so one writer has it at a time and readers (GitBolt's
+/// logTail) never stand in the way. A line that meets the other part's,
+/// or anything else holding the log, is tried again for at most
+/// kWindowsLogPatienceSeconds and, if it still can't go in, kept and
+/// written with the next one; Write-Log '' writes only what is kept
+/// (each part's last step). Write-Result writes the install result,
+/// with `onlyFirst` (the helper's) only if there is none yet. Exposed
+/// so that the tests can run Write-Log for real.
+QString windowsScriptPreamble(const HelperInputs& in, bool onlyFirst);
+
+/// How long one Write-Log in a Windows part waits, at most, for the log
+/// to take its line. Once one has waited that long in vain, the next
+/// ones try once only, until a line goes in again: a log that stays
+/// busy costs a part this much in all, not this much a line. Well under
+/// kWindowsHelperExtraSeconds, so that the helper still gives up after
+/// the administrator part.
+inline constexpr int kWindowsLogPatienceSeconds = 3;
 
 /// How long the elevated Windows helper waits for the install to be
 /// free before it gives up and installs nothing.

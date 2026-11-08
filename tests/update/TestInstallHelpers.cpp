@@ -47,7 +47,15 @@
 //     Constrained Language mode), no use of $pid, ShellExecuteExW's
 //     parameters as one string, both command lines within the limit
 //     even with long paths, and -EncodedCommand's UTF-16LE base64
-//     decoding back to each script;
+//     decoding back to each script, and the one Write-Log both share
+//     (Out-File, never Add-Content; a refused line tried again a few
+//     seconds at most, then kept for the next; each part's last step
+//     writes what was kept);
+//   - that Write-Log for real, on Windows, in every run: three
+//     powershell.exe (one in Constrained Language mode) on one log,
+//     first busy (held as the old Add-Content left it), then writing
+//     into each other, keep every line, once, in order; a log busy for
+//     longer costs a part a few seconds once, and no line;
 //   - and for real, on Windows, when GITBOLT_TEST_NSIS_INSTALLER and
 //     GITBOLT_TEST_NSIS_DIR name a GitBolt installer and a folder it
 //     installed into (CI's NSIS smoke test sets them; skipped
@@ -417,6 +425,138 @@ private:
         in.pkexec = QStringLiteral("/usr/bin/pkexec");
         return in;
     }
+
+#if defined(Q_OS_WIN)
+    // powershell.exe running `script` as launchWindowsUpdate starts the
+    // helper: by -EncodedCommand (powerShellArguments), hidden, in a
+    // console of its own that nobody sees (CREATE_NO_WINDOW; -WindowStyle
+    // Hidden would otherwise hide the console this test shares). Both
+    // its streams are kept, for the diagnostics.
+    static std::unique_ptr<QProcess> startPowerShell(const QString& script) {
+        auto process = std::make_unique<QProcess>();
+        process->setProgram(windowsPowerShell());
+        process->setArguments(powerShellArguments(script));
+        process->setProcessChannelMode(QProcess::MergedChannels);
+        process->setStandardInputFile(QProcess::nullDevice());
+        process->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+            args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+            args->flags |= CREATE_NO_WINDOW;
+        });
+        process->start();
+        return process;
+    }
+
+    // `file` (created if need be) held as Windows PowerShell 5.1's
+    // Add-Content left a log after its open met another handle: open for
+    // writing, sharing writing only. Nothing can append to it meanwhile,
+    // the old Add-Content (which then left a handle of its own) or
+    // Out-File. INVALID_HANDLE_VALUE if it can't be opened.
+    static HANDLE holdOpen(const QString& file) {
+        const std::wstring native = QDir::toNativeSeparators(file).toStdWString();
+        return CreateFileW(native.c_str(), GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+    }
+
+    // A path as a PowerShell literal, in Windows form.
+    static QString literal(const QString& file) { return powerShellQuote(QDir::toNativeSeparators(file)); }
+
+    // A script that is a part's start, windowsScriptPreamble with log()
+    // as its log, then `body`; with `constrained`, all of it in
+    // Constrained Language mode, as AppLocker or WDAC would run it.
+    QString writeLogScript(const QString& body, bool constrained) const {
+        HelperInputs in;
+        in.logFile = log();
+        in.newVersion = QStringLiteral("0.1.1");
+        return (constrained ? QStringLiteral("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n")
+                            : QString())
+               + windowsScriptPreamble(in, false) + u'\n' + body;
+    }
+
+    // Each line of the log, a part's way: UTF-8 with at most a BOM at the
+    // very start (one writer's first line), every line ending CR LF, the
+    // time first. False, and why, if it isn't so.
+    bool logLines(QStringList* lines, QString* why) const {
+        QFile file(log());
+        if (!file.open(QIODevice::ReadOnly)) {
+            *why = QStringLiteral("can't read the log: ") + file.errorString();
+            return false;
+        }
+        QByteArray text = file.readAll();
+        if (text.startsWith("\xEF\xBB\xBF"))
+            text.remove(0, 3);
+        if (text.contains("\xEF\xBB\xBF") || !text.endsWith("\r\n")) {
+            *why = QStringLiteral("a BOM after the start, or no CR LF at the end");
+            return false;
+        }
+        text.chop(2);
+        static const QRegularExpression stamped(QStringLiteral("^\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d (.+)$"));
+        for (const QString& line : QString::fromUtf8(text).split(QStringLiteral("\r\n"))) {
+            const QRegularExpressionMatch match = stamped.match(line);
+            if (!match.hasMatch() || line.contains(u'\r') || line.contains(u'\n')) {
+                *why = QStringLiteral("not a line of the log: '%1'").arg(line);
+                return false;
+            }
+            lines->append(match.captured(1));
+        }
+        return true;
+    }
+
+    // A powershell.exe a test runs, and what it has printed so far.
+    struct Writer {
+        std::unique_ptr<QProcess> process;
+        QByteArray output;
+    };
+
+    // Ends every writer still running: nothing a test started outlives it.
+    static void stopWriters(std::vector<Writer>& writers) {
+        for (Writer& writer : writers) {
+            if (writer.process && writer.process->state() != QProcess::NotRunning) {
+                writer.process->kill();
+                writer.process->waitForFinished(10000);
+            }
+        }
+    }
+
+    static bool allFinished(const std::vector<Writer>& writers) {
+        for (const Writer& writer : writers) {
+            if (writer.process->state() != QProcess::NotRunning)
+                return false;
+        }
+        return true;
+    }
+
+    static bool anyFinished(const std::vector<Writer>& writers) {
+        for (const Writer& writer : writers) {
+            if (writer.process->state() == QProcess::NotRunning)
+                return true;
+        }
+        return false;
+    }
+
+    // Each writer's state and output (both streams), then the log.
+    QString writerDiagnostics(std::vector<Writer>& writers) const {
+        QString text;
+        int number = 0;
+        for (Writer& writer : writers) {
+            QProcess& process = *writer.process;
+            writer.output += process.readAll();
+            text += QStringLiteral("writer %1: state %2, exit status %3, code %4, output:\n%5\n")
+                        .arg(QString::number(++number), QString::number(int(process.state())),
+                             QString::number(int(process.exitStatus())), QString::number(process.exitCode()),
+                             QString::fromLocal8Bit(writer.output));
+        }
+        return text + QStringLiteral("log:\n") + readFile(log());
+    }
+
+    // Each writer ended by itself, with exit code 0.
+    static bool allSucceeded(const std::vector<Writer>& writers) {
+        for (const Writer& writer : writers) {
+            if (writer.process->exitStatus() != QProcess::NormalExit || writer.process->exitCode() != 0)
+                return false;
+        }
+        return true;
+    }
+#endif
 
 private slots:
     void initTestCase() {
@@ -1180,6 +1320,7 @@ private slots:
             "    if ((Get-Date) -ge $deadline) {\n"
             "        Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: it is not started again')\n"
             "        Write-Result 'gave-up' ('GitBolt did not quit within ' + $waitSeconds + ' seconds')\n"
+            "        Write-Log ''\n"
             "        exit 1\n"
             "    }\n").arg(kWindowsHelperExtraSeconds));
         QVERIFY2(helperWait > 0, qPrintable(script));
@@ -1271,7 +1412,7 @@ private slots:
         QVERIFY(elevated.contains(QLatin1String("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)\n")));
         // Once, last.
         QCOMPARE(elevated.count(QLatin1String("Write-Result ")), 1);
-        QVERIFY(elevated.endsWith(QLatin1String("\nWrite-Result $status $reason\nexit $code")));
+        QVERIFY(elevated.endsWith(QLatin1String("\nWrite-Log ''\nWrite-Result $status $reason\nWrite-Log ''\nexit $code")));
 
         const QString script = windowsHelperScript(windowsInputs());
         for (const QString& text : {script, elevated})
@@ -1328,7 +1469,8 @@ private slots:
             "    Write-Log ('could not start GitBolt: ' + $_.Exception.Message)\n"
             "}\n"));
         QVERIFY2(quit > 0 && loop > quit && start > loop, qPrintable(script));
-        QVERIFY(script.endsWith(QLatin1String("Write-Log ('could not start GitBolt: ' + $_.Exception.Message)\n}\n")));
+        QVERIFY(script.endsWith(
+            QLatin1String("Write-Log ('could not start GitBolt: ' + $_.Exception.Message)\n}\nWrite-Log ''\n")));
         // No administrator part's pid known: only the timeout ends it.
         HelperInputs unknown = windowsInputs();
         unknown.elevatedPid = 0;
@@ -1365,8 +1507,85 @@ private slots:
             }
         }
         // The rest by cmdlets: Get-Process, Start-Process, Set-Content,
-        // Add-Content, Test-Path, Get-Item, Remove-Item, Start-Sleep.
-        QVERIFY(script.contains(QLatin1String("Add-Content -LiteralPath $log -Encoding UTF8 -Value $line")));
+        // Out-File, Test-Path, Get-Item, Remove-Item, Start-Sleep,
+        // Get-Random, Write-Warning.
+        for (const QString& text : {script, elevated}) {
+            QVERIFY(text.contains(QLatin1String(
+                "Out-File -LiteralPath $log -Append -Encoding UTF8 -NoNewline -InputObject $script:logPending")));
+            QVERIFY(!text.contains(QLatin1String("Add-Content")));
+        }
+    }
+
+    // Both parts log through the one Write-Log, windowsScriptPreamble's,
+    // which the windowsLog* tests below run for real: Out-File, never
+    // Add-Content (in Windows PowerShell 5.1 an Add-Content whose open
+    // met another handle could leave the log open behind it, refusing
+    // both parts' later lines: CI lost two that way); a refused line
+    // tried again, at random intervals, for at most
+    // kWindowsLogPatienceSeconds (then no wait at all until a line goes
+    // in again), and kept for the next Write-Log rather than dropped,
+    // with the time it was logged. Each part ends with Write-Log ''
+    // (whatever is still kept, with the full patience however the last
+    // wait went): the administrator part before its result, which the
+    // helper waits for, and after it (what Write-Result logged), and the
+    // helper before it gives up and at its very end.
+    void windowsScriptsShareOneWriteLog() {
+        const HelperInputs in = windowsInputs();
+        const QString elevated = windowsElevatedScript(in);
+        const QString script = windowsHelperScript(in);
+        QVERIFY(elevated.startsWith(windowsScriptPreamble(in, false) + u'\n'));
+        QVERIFY(script.contains(u'\n' + windowsScriptPreamble(in, true) + u'\n'));
+        QVERIFY(windowsScriptPreamble(in, true).startsWith(QLatin1String("$ErrorActionPreference = 'Stop'\n")));
+        const QString writeLog = QStringLiteral(
+            "\n$script:logPending = ''\n"
+            "$script:logPatience = %1\n"
+            "function Write-Log([string]$text) {\n"
+            "    $patience = %1\n"
+            "    if ($text -ne '') {\n"
+            "        $script:logPending += (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $text + [char]13 + [char]10\n"
+            "        $patience = $script:logPatience\n"
+            "    }\n"
+            "    $until = (Get-Date).AddSeconds($patience)\n"
+            "    while ($script:logPending) {\n"
+            "        try {\n"
+            "            Out-File -LiteralPath $log -Append -Encoding UTF8 -NoNewline -InputObject $script:logPending\n"
+            "            $script:logPending = ''\n"
+            "            $script:logPatience = %1\n"
+            "        } catch {\n"
+            "            if ((Get-Date) -ge $until) {\n"
+            "                $script:logPatience = 0\n"
+            "                try {\n"
+            "                    Write-Warning ('install.log: ' + $_.Exception.Message)\n"
+            "                } catch {\n"
+            "                }\n"
+            "                return\n"
+            "            }\n"
+            "            Start-Sleep -Milliseconds (Get-Random -Minimum 10 -Maximum 100)\n"
+            "        }\n"
+            "    }\n"
+            "}\n"
+            "function Write-Result(").arg(kWindowsLogPatienceSeconds);
+        QVERIFY(kWindowsLogPatienceSeconds > 0 && 2 * kWindowsLogPatienceSeconds < kWindowsHelperExtraSeconds);
+        for (const QString& text : {script, elevated}) {
+            QVERIFY2(text.contains(writeLog), qPrintable(text));
+            QCOMPARE(text.count(QLatin1String("function Write-Log(")), 1);
+            QCOMPARE(text.count(QLatin1String("Out-File")), 1);
+            // The result alone goes through Set-Content (its only writer
+            // at a time, read only after it is there).
+            QCOMPARE(text.count(QLatin1String("Set-Content")), 1);
+            QVERIFY(text.contains(QLatin1String("        Set-Content -LiteralPath $result ")));
+        }
+        // Where each part ends: its one exit, or the helper's last line.
+        QCOMPARE(elevated.count(QLatin1String("exit ")), 1);
+        QCOMPARE(elevated.count(QLatin1String("Write-Log ''")), 2);
+        QCOMPARE(script.count(QLatin1String("exit ")), 1);
+        QCOMPARE(script.count(QLatin1String("Write-Log ''")), 2);
+        QVERIFY(elevated.endsWith(QLatin1String("\nWrite-Log ''\nWrite-Result $status $reason\nWrite-Log ''\nexit $code")));
+        QVERIFY(script.contains(QLatin1String(
+            "        Write-Result 'gave-up' ('GitBolt did not quit within ' + $waitSeconds + ' seconds')\n"
+            "        Write-Log ''\n"
+            "        exit 1\n")));
+        QVERIFY(script.endsWith(QLatin1String("\n}\nWrite-Log ''\n")));
     }
 
     // CreateProcess takes 32767 characters, the program included, and
@@ -1441,6 +1660,231 @@ private slots:
             QCOMPARE(args.size(), 6);
             QCOMPARE(args.at(5).toLatin1(), encoded);
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Windows, for real: Write-Log (every run there)
+    // ---------------------------------------------------------------
+
+    // The Write-Log both Windows parts share (windowsScriptPreamble), run
+    // for real by three powershell.exe at once on one install.log, as
+    // both parts append to theirs, one of them in Constrained Language
+    // mode. First the log is busy for 1.5 s, held as Windows PowerShell
+    // 5.1's Add-Content left it once its open had met another's (CI lost
+    // two lines so: the Write-Log before this one tried 5 times in half a
+    // second and dropped the line): every writer's first line waits and
+    // goes in. Then they all write at once, into each other: every line
+    // is there exactly once, whole, in its writer's order, and no
+    // Write-Log took longer than its patience.
+    //
+    // Every wait in these two tests stays well inside ctest's 60 s a
+    // function (QTEST_FUNCTION_TIMEOUT), about 47 s at the very worst, so
+    // that a writer that hangs or dies fails a QVERIFY2, with every
+    // writer's output, and the guard still stops the others; the
+    // writers' own wait for the go is 40 s.
+    void windowsLogKeepsEveryLineOfWritersAtOnce() {
+#if !defined(Q_OS_WIN)
+        QSKIP("Windows only: runs Windows PowerShell");
+#else
+        constexpr int kWriters = 3;
+        constexpr int kLines = 100;
+        QVERIFY2(QFileInfo(windowsPowerShell()).isFile(), qPrintable(windowsPowerShell()));
+        const QString go = path(QStringLiteral("go"));
+        const auto ready = [this](int writer) { return path(QStringLiteral("ready-%1").arg(writer)); };
+        const auto stats = [this](int writer) { return path(QStringLiteral("stats-%1").arg(writer)); };
+        HANDLE held = holdOpen(log());
+        QVERIFY2(held != INVALID_HANDLE_VALUE, qPrintable(QString::number(GetLastError())));
+        const auto release = [&held] {
+            if (held != INVALID_HANDLE_VALUE)
+                CloseHandle(held);
+            held = INVALID_HANDLE_VALUE;
+        };
+        std::vector<Writer> writers;
+        auto stopAll = qScopeGuard([&] {
+            release();
+            stopWriters(writers);
+        });
+
+        // Each one warms up (its cmdlets loaded, on a log of its own),
+        // says it is ready (and in which language mode: whether a .NET
+        // call was refused), then waits for the go, so that all of them
+        // start writing together, into the busy log. Warm on purpose:
+        // so that what their first lines meet is the held log, not
+        // their own start. Two cold first lines, as CI lost, are the
+        // real-install test's (windowsHelperUpdatesARealInstall, case 1).
+        for (int i = 1; i <= kWriters; ++i) {
+            const QString body =
+                QStringLiteral("$ready = %1\n"
+                               "$go = %2\n"
+                               "$stats = %3\n"
+                               "$real = $log\n"
+                               "$log = %4\n"
+                               "Write-Log 'warming up'\n"
+                               "$log = $real\n"
+                               "$mode = 'ConstrainedLanguage'\n"
+                               "try {\n"
+                               "    $null = [IO.File]::Exists($log)\n"
+                               "    $mode = 'FullLanguage'\n"
+                               "} catch {\n"
+                               "}\n"
+                               "Out-File -LiteralPath $ready -Encoding Ascii -InputObject $mode\n"
+                               "$until = (Get-Date).AddSeconds(40)\n"
+                               "while (-not (Test-Path -LiteralPath $go)) {\n"
+                               "    if ((Get-Date) -ge $until) {\n"
+                               "        exit 3\n"
+                               "    }\n"
+                               "    Start-Sleep -Milliseconds 10\n"
+                               "}\n"
+                               "$longest = 0\n"
+                               "for ($n = 1; $n -le %5; $n++) {\n"
+                               "    $start = Get-Date\n"
+                               "    Write-Log ('writer %6 line ' + $n)\n"
+                               "    $took = ((Get-Date) - $start).TotalMilliseconds\n"
+                               "    if ($took -gt $longest) {\n"
+                               "        $longest = $took\n"
+                               "    }\n"
+                               "    Start-Sleep -Milliseconds (Get-Random -Minimum 0 -Maximum 20)\n"
+                               "}\n"
+                               "Write-Log ''\n"
+                               "Out-File -LiteralPath $stats -Encoding Ascii -InputObject ([string][int]$longest)\n"
+                               "exit 0\n")
+                    .arg(literal(ready(i)), literal(go), literal(stats(i)),
+                         literal(path(QStringLiteral("warm-up-%1.log").arg(i))), QString::number(kLines),
+                         QString::number(i));
+            writers.push_back(Writer{startPowerShell(writeLogScript(body, i == kWriters)), {}});
+            QVERIFY2(writers.back().process->waitForStarted(10000), qPrintable(writers.back().process->errorString()));
+        }
+        const auto allReady = [&] {
+            for (int i = 1; i <= kWriters; ++i) {
+                if (!QFileInfo::exists(ready(i)))
+                    return false;
+            }
+            return true;
+        };
+        QVERIFY2(QTest::qWaitFor([&] { return allReady() || anyFinished(writers); }, 25000) && allReady(),
+                 qPrintable(QStringLiteral("not every writer got ready\n") + writerDiagnostics(writers)));
+
+        // Go, into a log that stays busy 1.5 s longer, then is free.
+        QVERIFY(writeFile(go, "go\n"));
+        QTest::qWait(1500);
+        release();
+        QVERIFY2(QTest::qWaitFor([&] { return allFinished(writers); }, 20000),
+                 qPrintable(QStringLiteral("the writers didn't finish\n") + writerDiagnostics(writers)));
+        const QString details = writerDiagnostics(writers);
+        QVERIFY2(allSucceeded(writers), qPrintable(details));
+        QCOMPARE(readFile(ready(1)).trimmed(), QStringLiteral("FullLanguage"));
+        QCOMPARE(readFile(ready(kWriters)).trimmed(), QStringLiteral("ConstrainedLanguage"));
+
+        QStringList lines;
+        QString why;
+        QVERIFY2(logLines(&lines, &why), qPrintable(why + u'\n' + details));
+        QList<int> next(kWriters + 1, 1);
+        static const QRegularExpression written(QStringLiteral("^writer (\\d+) line (\\d+)$"));
+        for (const QString& line : std::as_const(lines)) {
+            const QRegularExpressionMatch match = written.match(line);
+            QVERIFY2(match.hasMatch(), qPrintable(line + u'\n' + details));
+            const int writer = match.captured(1).toInt();
+            QVERIFY2(writer >= 1 && writer <= kWriters, qPrintable(line));
+            // Each writer's lines in its order, none twice, none missing.
+            QVERIFY2(match.captured(2).toInt() == next[writer],
+                     qPrintable(QStringLiteral("writer %1's line %2 was due, not '%3'\n")
+                                    .arg(QString::number(writer), QString::number(next[writer]), line)
+                                + details));
+            ++next[writer];
+        }
+        for (int i = 1; i <= kWriters; ++i) {
+            QVERIFY2(next[i] == kLines + 1,
+                     qPrintable(QStringLiteral("writer %1's line %2 is missing\n").arg(i).arg(next[i]) + details));
+            bool ok = false;
+            const int longest = readFile(stats(i)).trimmed().toInt(&ok);
+            QVERIFY2(ok, qPrintable(details));
+            QVERIFY2(longest <= kWindowsLogPatienceSeconds * 1000 + 1500,
+                     qPrintable(QStringLiteral("writer %1 waited %2 ms for the log\n").arg(i).arg(longest) + details));
+            qInfo("writer %d: its longest Write-Log took %d ms", i, longest);
+        }
+        QCOMPARE(lines.size(), kWriters * kLines);
+#endif
+    }
+
+    // A log that stays busy past Write-Log's patience costs a part that
+    // much once, and none of its lines: the first Write-Log waits
+    // kWindowsLogPatienceSeconds and no longer, the next one tries once,
+    // and both lines are kept, to go in, in order, with the next one
+    // once the log is free.
+    void windowsLogWaitsOnlySoLongAndKeepsWhatItCouldntWrite() {
+#if !defined(Q_OS_WIN)
+        QSKIP("Windows only: runs Windows PowerShell");
+#else
+        QVERIFY2(QFileInfo(windowsPowerShell()).isFile(), qPrintable(windowsPowerShell()));
+        const QString go = path(QStringLiteral("go"));
+        const QString stats = path(QStringLiteral("stats"));
+        HANDLE held = holdOpen(log());
+        QVERIFY2(held != INVALID_HANDLE_VALUE, qPrintable(QString::number(GetLastError())));
+        const auto release = [&held] {
+            if (held != INVALID_HANDLE_VALUE)
+                CloseHandle(held);
+            held = INVALID_HANDLE_VALUE;
+        };
+        std::vector<Writer> writers;
+        auto stopAll = qScopeGuard([&] {
+            release();
+            stopWriters(writers);
+        });
+
+        const QString body = QStringLiteral(
+                                 "$go = %1\n"
+                                 "$stats = %2\n"
+                                 "$real = $log\n"
+                                 "$log = %3\n"
+                                 "Write-Log 'warming up'\n"
+                                 "$log = $real\n"
+                                 "$start = Get-Date\n"
+                                 "Write-Log 'one, while the log is busy'\n"
+                                 "$first = ((Get-Date) - $start).TotalMilliseconds\n"
+                                 "$start = Get-Date\n"
+                                 "Write-Log 'two, while it still is'\n"
+                                 "$second = ((Get-Date) - $start).TotalMilliseconds\n"
+                                 "Out-File -LiteralPath $stats -Encoding Ascii -InputObject "
+                                 "([string][int]$first + ' ' + [string][int]$second)\n"
+                                 "$until = (Get-Date).AddSeconds(40)\n"
+                                 "while (-not (Test-Path -LiteralPath $go)) {\n"
+                                 "    if ((Get-Date) -ge $until) {\n"
+                                 "        exit 3\n"
+                                 "    }\n"
+                                 "    Start-Sleep -Milliseconds 10\n"
+                                 "}\n"
+                                 "Write-Log 'three, once it is free'\n"
+                                 "Write-Log ''\n"
+                                 "exit 0\n")
+                                 .arg(literal(go), literal(stats), literal(path(QStringLiteral("warm-up.log"))));
+        writers.push_back(Writer{startPowerShell(writeLogScript(body, false)), {}});
+        QVERIFY2(writers.back().process->waitForStarted(10000), qPrintable(writers.back().process->errorString()));
+        // Both Write-Logs done (the log still busy), then it is free.
+        QVERIFY2(QTest::qWaitFor([&] { return QFileInfo::exists(stats) || allFinished(writers); }, 20000)
+                     && QFileInfo::exists(stats),
+                 qPrintable(writerDiagnostics(writers)));
+        release();
+        QVERIFY(writeFile(go, "go\n"));
+        QVERIFY2(QTest::qWaitFor([&] { return allFinished(writers); }, 20000),
+                 qPrintable(QStringLiteral("the writer didn't finish\n") + writerDiagnostics(writers)));
+        const QString details = writerDiagnostics(writers);
+        QVERIFY2(allSucceeded(writers), qPrintable(details));
+        // Its warnings, for the record: each wait in vain says why.
+        qInfo("%s", qPrintable(details));
+
+        const QStringList took = readFile(stats).trimmed().split(u' ');
+        QCOMPARE(took.size(), 2);
+        const int first = took.at(0).toInt();
+        const int second = took.at(1).toInt();
+        QVERIFY2(first >= kWindowsLogPatienceSeconds * 1000 - 500 && first <= kWindowsLogPatienceSeconds * 1000 + 1500,
+                 qPrintable(QStringLiteral("the first Write-Log took %1 ms\n").arg(first) + details));
+        QVERIFY2(second < 1000, qPrintable(QStringLiteral("the second Write-Log took %1 ms\n").arg(second) + details));
+        QStringList lines;
+        QString why;
+        QVERIFY2(logLines(&lines, &why), qPrintable(why + u'\n' + details));
+        QCOMPARE(lines, (QStringList{QStringLiteral("one, while the log is busy"), QStringLiteral("two, while it still is"),
+                                     QStringLiteral("three, once it is free")}));
+#endif
     }
 
     // ---------------------------------------------------------------
@@ -1615,6 +2059,21 @@ private slots:
                     qWarning("GitBolt (pid %lu) didn't close within 30 s, so it was ended", id);
             }
         };
+        // Each part's first line: it is waiting for the stand-in.
+        const auto adminWaiting = [&] {
+            return QStringLiteral("administrator part: waiting for GitBolt (pid %1) to quit").arg(gitBoltPid);
+        };
+        const auto helperWaiting = [&] {
+            return QStringLiteral("GitBolt update helper: waiting for GitBolt (pid %1) to quit").arg(gitBoltPid);
+        };
+        const auto bothWaiting = [&](int timeoutMs) {
+            return QTest::qWaitFor(
+                [&] {
+                    const QString text = readFile(log());
+                    return text.contains(adminWaiting()) && text.contains(helperWaiting());
+                },
+                timeoutMs);
+        };
 
         // 1. GitBolt doesn't quit in time: the administrator part gives
         // up, deletes the download and installs nothing; the helper,
@@ -1623,8 +2082,15 @@ private slots:
         QVERIFY2(bothStarted(givingUp), qPrintable(givingUp.error + QLatin1Char('\n') + diagnostics()));
         QVERIFY2(ended(givingUp.elevatedPid, 60000),
                  qPrintable(QStringLiteral("the administrator part didn't give up\n") + diagnostics()));
+        // Its result, written last: the helper, which would write the
+        // same words, can't for another kWindowsHelperExtraSeconds.
+        QVERIFY2(QFileInfo::exists(result()),
+                 qPrintable(QStringLiteral("the administrator part wrote no result\n") + diagnostics()));
         QVERIFY2(ended(givingUp.helperPid, (2 + kWindowsHelperExtraSeconds + 60) * 1000),
                  qPrintable(QStringLiteral("the helper didn't give up\n") + diagnostics()));
+        // Every line of both, the first ones written at the same moment.
+        QVERIFY2(readFile(log()).contains(adminWaiting()), qPrintable(diagnostics()));
+        QVERIFY2(readFile(log()).contains(helperWaiting()), qPrintable(diagnostics()));
         QVERIFY2(readFile(log()).contains(QLatin1String("did not quit within 2 seconds: giving up")),
                  qPrintable(diagnostics()));
         QVERIFY2(readFile(log()).contains(QLatin1String("did not quit within 2 seconds: it is not started again")),
@@ -1654,7 +2120,7 @@ private slots:
         QVERIFY(QFile::copy(installer, staged));
         const WindowsLaunch blocked = launch(120);
         QVERIFY2(bothStarted(blocked), qPrintable(blocked.error + QLatin1Char('\n') + diagnostics()));
-        QVERIFY2(gitbolt::test::waitForLines(log(), 2, 60000), qPrintable(diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
         quitWaited();
         QVERIFY2(finishes(blocked.helperPid, (kWindowsInUseSeconds + 120) * 1000),
                  qPrintable(QStringLiteral("the blocked helper is still running\n") + diagnostics()));
@@ -1679,14 +2145,8 @@ private slots:
         QVERIFY(gitBoltPid > 0);
         const WindowsLaunch clean = launch(120);
         QVERIFY2(bothStarted(clean), qPrintable(clean.error + QLatin1Char('\n') + diagnostics()));
-        QVERIFY2(gitbolt::test::waitForLines(log(), 2, 60000), qPrintable(diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
         QTest::qWait(1000);
-        QVERIFY2(readFile(log()).contains(
-                     QStringLiteral("administrator part: waiting for GitBolt (pid %1) to quit").arg(gitBoltPid)),
-                 qPrintable(diagnostics()));
-        QVERIFY2(readFile(log()).contains(
-                     QStringLiteral("GitBolt update helper: waiting for GitBolt (pid %1) to quit").arg(gitBoltPid)),
-                 qPrintable(diagnostics()));
         QVERIFY2(!readFile(log()).contains(QLatin1String(" running ")), qPrintable(diagnostics()));
         QVERIFY(gitbolt::test::processAlive(clean.elevatedPid));
         QVERIFY(gitbolt::test::processAlive(clean.helperPid));

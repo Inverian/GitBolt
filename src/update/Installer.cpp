@@ -860,8 +860,8 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
 
     // The helper that starts GitBolt again, not elevated, in GitBolt's
     // environment. Not into the log: both parts append to it, and a
-    // handle open for writing (ours) would make every Add-Content a
-    // sharing violation.
+    // handle open for writing (ours) would refuse every Out-File of
+    // theirs (windowsScriptPreamble's Write-Log).
     in.elevatedPid = launch.elevatedPid;
     QProcess helper;
     helper.setProgram(windowsPowerShell());
