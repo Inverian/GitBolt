@@ -152,6 +152,7 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     //     Shortcuts
     //     Recent Repositories
     //     Usage Statistics     ← official builds only (setUsageStatistics)
+    //     Updates              ← official builds only (setUpdates)
     //   Git
     //     Git Config
     //   Plugins
@@ -170,6 +171,8 @@ SettingsDialog::SettingsDialog(conf::SettingsService* settings,
     usageItem_ = addSubsection(catGitBolt, tr("Usage Statistics"),
                                createUsageStatisticsPage());
     usageItem_->setHidden(true);   // until setUsageStatistics
+    updatesItem_ = addSubsection(catGitBolt, tr("Updates"), createUpdatesPage());
+    updatesItem_->setHidden(true);   // until setUpdates
 
     auto* catGit      = makeCategoryItem(nav_, tr("Git"));
     addSubsection(catGit,      tr("Git Config"),    createGitConfigPage());
@@ -369,6 +372,86 @@ QWidget* SettingsDialog::createUsageStatisticsPage()
     layout->addWidget(usageGroup_);
     layout->addStretch(1);
     return page;
+}
+
+// ---------------------------------------------------------------------------
+// Updates page
+// ---------------------------------------------------------------------------
+//
+// GitBolt's last, its row hidden until MainWindow says this session has
+// the in-app update check (setUpdates).
+
+QWidget* SettingsDialog::createUpdatesPage()
+{
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+
+    updatesGroup_ = new QGroupBox(tr("Updates"), page);
+    updatesGroup_->setObjectName(QStringLiteral("settings.updates-group"));
+    auto* form = new QFormLayout(updatesGroup_);
+    form->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
+    // As the usage statistics notes: a wrapped label's own size hint
+    // is narrow.
+    constexpr int kUpdatesNoteWidth = 400;
+
+    autoUpdateCheck_ = new QCheckBox(tr("Check for updates automatically"), updatesGroup_);
+    autoUpdateCheck_->setObjectName(QStringLiteral("settings.check-for-updates"));
+    form->addRow(QString(), autoUpdateCheck_);
+
+    // Why the switch is disabled, when GITBOLT_UPDATE_CHECK turned the
+    // daily check off for this session.
+    updatesLockedNote_ = new QLabel(updatesGroup_);
+    updatesLockedNote_->setObjectName(QStringLiteral("settings.check-for-updates-locked-note"));
+    updatesLockedNote_->setWordWrap(true);
+    updatesLockedNote_->setMinimumWidth(kUpdatesNoteWidth);
+    conf::ThemeService::keepMutedText(updatesLockedNote_, QStringLiteral("QLabel { color: %1; }"));
+    form->addRow(QString(), updatesLockedNote_);
+    form->setRowVisible(updatesLockedNote_, false);
+
+    // What the check sends, and to whom (PRIVACY.md, Update checks).
+    auto* note = new QLabel(
+        tr("Once a day GitBolt asks GitHub whether a newer release is out. GitHub sees your IP "
+           "address. Nothing is downloaded or installed until you choose Install and Restart."),
+        updatesGroup_);
+    note->setObjectName(QStringLiteral("settings.check-for-updates-note"));
+    note->setWordWrap(true);
+    note->setMinimumWidth(kUpdatesNoteWidth);
+    conf::ThemeService::keepMutedText(note, QStringLiteral("QLabel { color: %1; }"));
+    form->addRow(QString(), note);
+
+    // The whole story, as the Usage Statistics page links its own:
+    // GitHub's anchor for PRIVACY.md's "## Update checks".
+    auto* privacyLink = new QLabel(
+        QStringLiteral("<a href=\"%1#update-checks\">%2</a>")
+            .arg(QString::fromLatin1(kPrivacyPolicyUrl),
+                 tr("What's sent, and what's checked before installing").toHtmlEscaped()),
+        updatesGroup_);
+    privacyLink->setObjectName(QStringLiteral("settings.updates-privacy-link"));
+    privacyLink->setTextFormat(Qt::RichText);
+    privacyLink->setOpenExternalLinks(true);
+    privacyLink->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    form->addRow(QString(), privacyLink);
+
+    layout->addWidget(updatesGroup_);
+    layout->addStretch(1);
+    return page;
+}
+
+void SettingsDialog::setUpdates(bool available, const QString& lockedReason)
+{
+    updatesAvailable_ = available;
+    updatesLocked_ = available && !lockedReason.isEmpty();
+    updatesItem_->setHidden(!available);
+    if (!available)
+        return;
+
+    // Locked, the switch shows what this session does (no daily
+    // check), not the stored preference the environment overrides.
+    autoUpdateCheck_->setChecked(!updatesLocked_ && settings_ && settings_->updateAutoCheck());
+    autoUpdateCheck_->setEnabled(!updatesLocked_);
+    updatesLockedNote_->setText(lockedReason);
+    if (auto* form = qobject_cast<QFormLayout*>(updatesGroup_->layout()))
+        form->setRowVisible(updatesLockedNote_, updatesLocked_);
 }
 
 // ---------------------------------------------------------------------------
@@ -1287,6 +1370,10 @@ void SettingsDialog::apply()
     // when this batch's settingsChanged fires.
     if (usageAvailable_ && !usageLocked_)
         settings_->setUsageStatisticsEnabled(usageStatsCheck_->isChecked());
+    // The daily update check: the same rule. The controller reads it at
+    // each tick, so it needs no signal of its own.
+    if (updatesAvailable_ && !updatesLocked_)
+        settings_->setUpdateAutoCheck(autoUpdateCheck_->isChecked());
 
     // UI Design — writing this triggers settingsChanged, which
     // RepositoryView is connected to; it re-runs applyBottomPanePercent

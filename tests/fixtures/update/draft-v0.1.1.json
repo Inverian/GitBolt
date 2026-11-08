@@ -1,0 +1,132 @@
+{
+  "url": "https://api.github.com/repos/Inverian/GitBolt/releases/1000001",
+  "assets_url": "https://api.github.com/repos/Inverian/GitBolt/releases/1000001/assets",
+  "upload_url": "https://uploads.github.com/repos/Inverian/GitBolt/releases/1000001/assets{?name,label}",
+  "html_url": "https://github.com/Inverian/GitBolt/releases/tag/untagged-0123456789abcdef0123",
+  "id": 1000001,
+  "author": {
+    "login": "github-actions[bot]",
+    "id": 41898282,
+    "type": "Bot",
+    "site_admin": false
+  },
+  "node_id": "RE_fixture1000001",
+  "tag_name": "v0.1.1",
+  "target_commitish": "main",
+  "name": "GitBolt 0.1.1",
+  "draft": true,
+  "immutable": false,
+  "prerelease": false,
+  "created_at": "2026-11-01T10:00:00Z",
+  "updated_at": "2026-11-01T10:30:00Z",
+  "published_at": null,
+  "assets": [
+    {
+      "url": "https://api.github.com/repos/Inverian/GitBolt/releases/assets/2001",
+      "id": 2001,
+      "node_id": "RA_fixture2001",
+      "name": "GitBolt-0.1.1-Darwin-arm64.dmg",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "application/x-apple-diskimage",
+      "state": "uploaded",
+      "size": 41234567,
+      "digest": "sha256:ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB",
+      "download_count": 3,
+      "created_at": "2026-11-01T10:20:00Z",
+      "updated_at": "2026-11-01T10:20:05Z",
+      "browser_download_url": "https://github.com/Inverian/GitBolt/releases/download/v0.1.1/GitBolt-0.1.1-Darwin-arm64.dmg"
+    },
+    {
+      "url": "https://api.github.com/repos/Inverian/GitBolt/releases/assets/2002",
+      "id": 2002,
+      "node_id": "RA_fixture2002",
+      "name": "GitBolt-0.1.1-Windows-AMD64.exe",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "application/x-msdownload",
+      "state": "uploaded",
+      "size": 30123456,
+      "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "download_count": 3,
+      "created_at": "2026-11-01T10:20:00Z",
+      "updated_at": "2026-11-01T10:20:05Z",
+      "browser_download_url": "https://github.com/Inverian/GitBolt/releases/download/v0.1.1/GitBolt-0.1.1-Windows-AMD64.exe"
+    },
+    {
+      "url": "https://api.github.com/repos/Inverian/GitBolt/releases/assets/2003",
+      "id": 2003,
+      "node_id": "RA_fixture2003",
+      "name": "gitbolt_0.1.1_amd64.deb",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "application/vnd.debian.binary-package",
+      "state": "uploaded",
+      "size": 25012345,
+      "digest": "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "download_count": 3,
+      "created_at": "2026-11-01T10:20:00Z",
+      "updated_at": "2026-11-01T10:20:05Z",
+      "browser_download_url": "https://github.com/Inverian/GitBolt/releases/download/v0.1.1/gitbolt_0.1.1_amd64.deb"
+    },
+    {
+      "url": "https://api.github.com/repos/Inverian/GitBolt/releases/assets/2004",
+      "id": 2004,
+      "node_id": "RA_fixture2004",
+      "name": "GitBolt-0.1.1-x86_64.AppImage",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "application/octet-stream",
+      "state": "uploaded",
+      "size": 52345678,
+      "download_count": 3,
+      "created_at": "2026-11-01T10:20:00Z",
+      "updated_at": "2026-11-01T10:20:05Z",
+      "browser_download_url": "https://github.com/Inverian/GitBolt/releases/download/v0.1.1/GitBolt-0.1.1-x86_64.AppImage"
+    },
+    {
+      "url": "https://api.github.com/repos/Inverian/GitBolt/releases/assets/2005",
+      "id": 2005,
+      "node_id": "RA_fixture2005",
+      "name": "SHA256SUMS.txt",
+      "label": "",
+      "uploader": {
+        "login": "github-actions[bot]",
+        "id": 41898282,
+        "type": "Bot",
+        "site_admin": false
+      },
+      "content_type": "text/plain",
+      "state": "uploaded",
+      "size": 385,
+      "digest": "sha256:5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+      "download_count": 3,
+      "created_at": "2026-11-01T10:20:00Z",
+      "updated_at": "2026-11-01T10:20:05Z",
+      "browser_download_url": "https://github.com/Inverian/GitBolt/releases/download/v0.1.1/SHA256SUMS.txt"
+    }
+  ],
+  "tarball_url": "https://api.github.com/repos/Inverian/GitBolt/tarball/v0.1.1",
+  "zipball_url": "https://api.github.com/repos/Inverian/GitBolt/zipball/v0.1.1",
+  "body": "A made-up release for the update tests.\n\n### Added\n- **Fixture:** notes with <b>markup</b> and a [link](https://example.com/notes) that stay as written.\n"
+}

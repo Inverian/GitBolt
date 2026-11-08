@@ -4,6 +4,8 @@ GitBolt sends a small amount of usage statistics, and summaries of
 crashes and errors, to the GitBolt maintainers. This page says exactly
 what is sent, where it goes, how long it is kept, and how to turn it
 off. It is on by default, and you can turn it off at any time.
+Official builds also ask GitHub whether a newer GitBolt is out: see
+[Update checks](#update-checks).
 
 Nothing that identifies your repositories or their contents is sent:
 no repository names or paths, no branch, tag or remote names, no remote
@@ -157,6 +159,90 @@ page sends nothing. A build from source, a fork, or a
 build of a pull request contains no server addresses, so it cannot
 send, and a crash report it saves is never sent by an official build
 either.
+
+## Update checks
+
+Official builds also ask whether a newer GitBolt has been released.
+Unlike usage statistics, these requests go to GitHub, where GitBolt's
+releases are published, not to the GitBolt maintainers.
+
+### What is sent
+
+A check is one HTTPS request to `api.github.com` for GitBolt's latest
+release (`https://api.github.com/repos/Inverian/GitBolt/releases/latest`).
+It carries the `User-Agent` header described above (the GitBolt version
+and the operating system) and nothing else about you: no install ID or
+device ID, no cookies, no GitHub account or token, and not your
+system's language. GitHub sees your IP address, as it does for any
+visit to github.com, and
+[GitHub's privacy statement](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement)
+covers what it does with it. GitBolt shows the release notes it gets
+back as plain text, so nothing they link to is loaded.
+
+Nothing is downloaded or installed until you choose **Install and
+Restart**. Then GitBolt downloads the release's `SHA256SUMS.txt` and
+the installer for your system from `github.com`, which hands the
+download on to GitHub's file servers (`objects.githubusercontent.com`
+or `release-assets.githubusercontent.com`). These requests carry the
+same `User-Agent`. GitHub counts the download, as it counts one from
+the release page, and shows that count publicly.
+
+### When
+
+- **Automatically**, once a day: 15 seconds or so after the window
+  opens, and then every hour while GitBolt is open, it asks GitHub
+  again if GitHub last answered more than a day ago. A check that
+  fails, while you are offline for example, is tried again an hour
+  later.
+- **When you ask**: **Help › Check for updates** (on macOS also
+  **GitBolt › Check for Updates…**) asks GitHub every time, even with
+  automatic checks turned off.
+
+GitBolt checks nothing when it is run by automated tests or in CI.
+
+### What is checked before installing
+
+- Only HTTPS, with your system's certificate checks, and only to the
+  GitHub hosts named above.
+- The release must be a published release of
+  `github.com/Inverian/GitBolt`, not a draft or a pre-release, with a
+  `v<version>` tag.
+- The download must have the size GitHub lists for it, and the
+  SHA-256 checksum the release's `SHA256SUMS.txt` lists for it (and,
+  when GitHub lists one, the checksum GitHub gives).
+- On macOS, the app in the disk image must pass
+  `codesign --verify --deep --strict` and be GitBolt
+  (`com.gitbolt.app`) at the release's version. On Windows and Linux,
+  the file must have exactly the release's name for your kind of
+  install.
+
+These checks show that the file is the one on GitBolt's GitHub release
+page and that it arrived intact: the same trust as downloading it from
+that page yourself. They can't show who published it: GitBolt's
+installers have no Apple Developer ID or Windows Authenticode
+signature, and `SHA256SUMS.txt` comes from the same release. GitBolt
+doesn't check the release's build attestations either (that needs a
+Sigstore verifier); you can check them yourself with
+`gh attestation verify <file> --repo Inverian/GitBolt`.
+
+### Which builds check
+
+Only official builds: GitBolt's releases, and the builds GitBolt's CI
+makes of its `main` branch. A build from source, a fork, a pull
+request or a Linux distribution's package doesn't check: there,
+**Help › Check for updates** opens GitBolt's releases page in your
+browser, and **Tools › Settings** has no **Updates** page.
+
+### How to turn it off
+
+Either of these stops the automatic checks:
+
+- In GitBolt, open **Tools › Settings › Updates** and clear **Check for
+  updates automatically**.
+- Set the environment variable `GITBOLT_UPDATE_CHECK=0` (or `false`,
+  `off`, `no`).
+
+**Help › Check for updates** still asks GitHub when you choose it.
 
 ## Deleting your data
 

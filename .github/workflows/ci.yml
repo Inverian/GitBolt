@@ -289,12 +289,19 @@ jobs:
       # archive). GITBOLT_STRICT_NOTICES: fail here if a licence text the
       # packages need isn't in resources/licenses (cmake/Notices.cmake),
       # as after a Qt, libgit2 or ICU update that didn't add its texts.
+      #
+      # In-app updates (src/update, PRIVACY.md's "Update checks"): the
+      # same official builds only. GITBOLT_UPDATES takes its first value
+      # from this env var, as the telemetry values do, and ON compiles
+      # GITBOLT_UPDATES_ENABLED into the app. Every other build has no
+      # update feed: Help > Check for updates opens the releases page.
       - name: Configure
         env:
           GITBOLT_TELEMETRY_HOST: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_CLIENT_ID || '' }}
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
+          GITBOLT_UPDATES: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'ON' || 'OFF' }}
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON -DGITBOLT_STRICT_NOTICES=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
@@ -321,8 +328,67 @@ jobs:
             echo "Not an official build: telemetry compiled out"
           fi
 
+      # The same rule for in-app updates. An official build without them
+      # would ship a release that never offers the next one; any other
+      # build with them would offer to replace itself with Inverian's
+      # installers. A cache without the entry fails too, so a rename in
+      # CMake can't pass quietly as "off".
+      - name: Check update wiring
+        shell: bash
+        env:
+          OFFICIAL: ${{ github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          grep -q '^GITBOLT_UPDATES:' build/CMakeCache.txt \
+            || { echo "::error::build/CMakeCache.txt has no GITBOLT_UPDATES (renamed in CMake?)"; exit 1; }
+          # tr -d: CRLF on Windows, as above. CMake's own truth values.
+          updates=$(sed -n 's/^GITBOLT_UPDATES:[A-Z]*=//p' build/CMakeCache.txt | tr -d '\r')
+          case $(printf '%s' "$updates" | tr '[:lower:]' '[:upper:]') in
+            ON|YES|TRUE|Y|1) on=true ;;
+            *)               on=false ;;
+          esac
+          if [ "$OFFICIAL" = true ]; then
+            [ "$on" = true ] || { echo "::error::official build without GITBOLT_UPDATES=ON (it is '$updates'): it could never offer the next release"; exit 1; }
+            echo "Official build; in-app updates on"
+          elif [ "$on" = true ]; then
+            echo "::error::GITBOLT_UPDATES=$updates in a non-official build ($GITHUB_EVENT_NAME, $GITHUB_REPOSITORY, $GITHUB_REF)"
+            exit 1
+          else
+            echo "Not an official build: in-app updates compiled out (GITBOLT_UPDATES=$updates)"
+          fi
+
       - name: Build
         run: cmake --build build --parallel
+
+      # The cache saying GITBOLT_UPDATES=ON (Check update wiring) doesn't
+      # show that GITBOLT_UPDATES_ENABLED reached main.cpp: its #ifdef is
+      # compiled in official builds only, so no pull request ever builds
+      # that line. A renamed or misplaced definition would ship a release
+      # with the feed compiled out, which could never offer the next one.
+      # The app binary names the feed in an official build and in no
+      # other. The app only: the update tests name it too. One leg is
+      # enough, as it is the same target's definition on every platform.
+      - name: Check the update feed is compiled in (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          OFFICIAL: ${{ github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        run: |
+          app=build/src/app/gitbolt
+          feed='https://api.github.com/repos/Inverian/GitBolt/releases/latest'
+          [ -f "$app" ] || { echo "::error::no $app to look in (renamed in CMake?)"; exit 1; }
+          # grep -c counts the binary's "lines" that name it, and exits 1
+          # when none do: an answer here, not an error.
+          count=$(LC_ALL=C grep -a -c -F -- "$feed" "$app" || true)
+          count=${count:-0}
+          if [ "$OFFICIAL" = true ]; then
+            [ "$count" -ge 1 ] || { echo "::error::official build, but $app doesn't name the update feed: GITBOLT_UPDATES_ENABLED never reached main.cpp"; exit 1; }
+            echo "Official build; $app names the update feed"
+          elif [ "$count" -ne 0 ]; then
+            echo "::error::$app names the update feed in a non-official build ($GITHUB_EVENT_NAME, $GITHUB_REPOSITORY, $GITHUB_REF)"
+            exit 1
+          else
+            echo "Not an official build: $app doesn't name the update feed"
+          fi
 
       # Every %n text needs its English singular and plural in
       # translations/gitbolt_en.ts (util::installEnglishPlurals), or the
@@ -684,6 +750,65 @@ jobs:
           [ "$fail" = 0 ] && echo "DMG smoke test passed"
           exit "$fail"
 
+      # The DMG updates itself in place, end to end
+      # (tests/e2e/test_update_install.py). The test copies the DMG's
+      # GitBolt.app into a scratch Applications folder and runs it as
+      # 0.1.0 against a loopback feed that offers this DMG, then clicks
+      # Help > Check for Updates > Install and Restart through the bridge.
+      # Afterwards the copy must be the DMG's bundle (codesign verifies
+      # it), the old one must be in a scratch HOME's Trash, and the
+      # relaunched copy must answer the bridge. A step of its own, after
+      # the smoke test's EXIT trap has detached the image: the test
+      # attaches the DMG itself, read-only. It may only read it, since
+      # Collect installers uploads it; the hash check holds it to that.
+      # No QT_QPA_PLATFORM here: the test runs the package on cocoa
+      # itself (no offscreen plugin in the bundle; the GUI session, as
+      # above). TMPDIR is the step's own folder: it holds all the test
+      # makes (no /Applications, no real Trash, no installed GitBolt) and
+      # tells its processes from others. Keep it short: the apps' unix
+      # sockets go in it, and sun_path is 104 bytes. The run is direct,
+      # not through ctest: ctest exits 0 when the test skips itself
+      # (exit 77, as without GITBOLT_E2E_INSTALL_APP), and here a skip
+      # fails. argv[1] is the build's binary, as ctest passes it;
+      # e2elib.run() wants one, but this test drives the DMG's copy.
+      # PYTHONUNBUFFERED: what the test printed survives a kill at the
+      # time limit. timeout-minutes: the test's own limits add up to
+      # about 10 minutes, so it reports its own timeout first.
+      - name: Update in place from the DMG (macOS)
+        if: github.event_name != 'pull_request' && runner.os == 'macOS'
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(sed -nE 's/^project\(GitBolt VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
+          dmg=$PWD/build/GitBolt-$ver-Darwin-arm64.dmg
+          [ -f "$dmg" ] || { echo "::error::$dmg not found"; exit 1; }
+          sum=$(shasum -a 256 < "$dmg")
+          tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
+          rc=0
+          TMPDIR=$tmp GITBOLT_E2E_INSTALL_APP=$dmg PYTHONUNBUFFERED=1 \
+            python3 tests/e2e/test_update_install.py "$PWD/build/src/app/GitBolt.app/Contents/MacOS/GitBolt" || rc=$?
+          fail=0
+          case $rc in
+            0)  echo "The DMG updated itself in place" ;;
+            77) echo "::error::test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
+            *)  echo "::error::test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
+          esac
+          # Anything of the test's still running (a relaunch it lost track
+          # of, say) names TMPDIR: listed, then killed. The list is read
+          # from a file, so no grep finds itself.
+          sleep 2
+          ps -A -o pid= -o args= > "$tmp.ps"
+          if left=$(grep -F "$tmp/" "$tmp.ps"); then
+            echo "::warning::the test left processes running; killing them:"
+            echo "$left"
+            awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
+          fi
+          if [ "$(shasum -a 256 < "$dmg")" != "$sum" ]; then
+            echo "::error::the test changed $dmg, which Collect installers uploads"; fail=1
+          fi
+          exit "$fail"
+
       # ---- Windows: NSIS ---------------------------------------------
       # NSIS is not on the windows-2025 images (actions/runner-images
       # #11754, closed "not planned": add it at runtime). The official
@@ -744,11 +869,14 @@ jobs:
             ForEach-Object { Write-Host "== $($_.FullName)"; Get-Content $_.FullName -Tail 200 }
 
       # Install the real installer silently, then prove the INSTALLED app
-      # starts. timeout-minutes: Start-Process -Wait is unbounded, and NSIS
-      # shows any MessageBox lacking /SD even under /S.
+      # starts. Then update that install in place twice, as the in-app
+      # updater does: once with its exact command line, once through its
+      # own helper script (test_update_helpers). timeout-minutes:
+      # Start-Process -Wait is unbounded, and NSIS shows any MessageBox
+      # lacking /SD even under /S.
       - name: Smoke-test NSIS installer (Windows)
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
-        timeout-minutes: 10
+        timeout-minutes: 25
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -874,27 +1002,154 @@ jobs:
           #    exits after QApplication (loads qwindows.dll) and
           #    git_libgit2_init, before the single-instance guard.
           #    Redirected handles + the env var stop QCommandLineParser
-          #    from using a MessageBox.
-          $psi = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'GitBolt.exe'), '--version')
-          $psi.UseShellExecute = $false
-          $psi.RedirectStandardOutput = $true
-          $psi.RedirectStandardError = $true
-          $psi.WorkingDirectory = $env:RUNNER_TEMP
-          $psi.Environment['PATH'] = "$sys;$env:SystemRoot"
-          foreach ($v in 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM') {
-            [void]$psi.Environment.Remove($v)
+          #    from using a MessageBox. Again after each update below.
+          function Assert-InstalledVersion([string]$when) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new((Join-Path $bin 'GitBolt.exe'), '--version')
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.WorkingDirectory = $env:RUNNER_TEMP
+            $psi.Environment['PATH'] = "$sys;$env:SystemRoot"
+            foreach ($v in 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM') {
+              [void]$psi.Environment.Remove($v)
+            }
+            $psi.Environment['QT_COMMAND_LINE_PARSER_NO_GUI_MESSAGE_BOXES'] = '1'
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $stdout = $p.StandardOutput.ReadToEndAsync()
+            $stderr = $p.StandardError.ReadToEndAsync()
+            if (-not $p.WaitForExit(60000)) { $p.Kill($true); throw "GitBolt --version did not exit within 60 s ($when)" }
+            $out = $stdout.Result.Trim()
+            Write-Host ("GitBolt --version ({2}): exit {0} (0x{0:X8}), stdout '{1}'" -f $p.ExitCode, $out, $when)
+            if ($stderr.Result.Trim()) { Write-Host "stderr: $($stderr.Result.Trim())" }
+            # 0xC0000135 = DLL not found, 0xC0000139 = entry point not found.
+            if ($p.ExitCode -ne 0) { throw "installed GitBolt.exe --version failed ($when)" }
+            if ($out -ne "GitBolt $version") { throw "expected 'GitBolt $version', got '$out' ($when)" }
           }
-          $psi.Environment['QT_COMMAND_LINE_PARSER_NO_GUI_MESSAGE_BOXES'] = '1'
-          $p = [System.Diagnostics.Process]::Start($psi)
-          $stdout = $p.StandardOutput.ReadToEndAsync()
-          $stderr = $p.StandardError.ReadToEndAsync()
-          if (-not $p.WaitForExit(60000)) { $p.Kill($true); throw 'GitBolt --version did not exit within 60 s' }
-          $out = $stdout.Result.Trim()
-          Write-Host ("exit {0} (0x{0:X8}), stdout '{1}'" -f $p.ExitCode, $out)
-          if ($stderr.Result.Trim()) { Write-Host "stderr: $($stderr.Result.Trim())" }
-          # 0xC0000135 = DLL not found, 0xC0000139 = entry point not found.
-          if ($p.ExitCode -ne 0) { throw "installed GitBolt.exe --version failed" }
-          if ($out -ne "GitBolt $version") { throw "expected 'GitBolt $version', got '$out'" }
+          Assert-InstalledVersion 'installed'
+
+          # 5) Update in place exactly as the in-app updater's helper runs
+          #    the installer (windowsHelperScript, src/update/
+          #    InstallHelpers.cpp): over the install's own folder, with
+          #    /S /D=<dir> as one ArgumentList string, /D= last and
+          #    unquoted, elevated through ShellExecute's RunAs (no prompt
+          #    with the runner's UAC off). The installer's .onInit runs
+          #    the installed copy's uninstaller first
+          #    (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL). LICENSE.txt,
+          #    which the installer writes, goes first: back afterwards, it
+          #    shows the update went to $dest, not to Program Files.
+          #    After it: one Uninstall key (whichever registry view; the
+          #    32-bit NSIS stub has no SetRegView 64, so its HKLM writes
+          #    should be WOW6432Node's) naming this version and $dest's
+          #    uninstaller, the version resource, --version.
+          function Get-UninstallKeys {
+            $views = @(
+              [pscustomobject]@{ Hive = 'LocalMachine'; View = 'Registry64'; Name = 'HKLM, 64-bit view' },
+              [pscustomobject]@{ Hive = 'LocalMachine'; View = 'Registry32'; Name = 'HKLM, 32-bit view (WOW6432Node)' },
+              # HKCU's Software is one key for both views.
+              [pscustomobject]@{ Hive = 'CurrentUser'; View = 'Registry64'; Name = 'HKCU' }
+            )
+            foreach ($r in $views) {
+              $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(([Microsoft.Win32.RegistryHive]($r.Hive)), ([Microsoft.Win32.RegistryView]($r.View)))
+              $uninstall = $base.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')
+              if ($uninstall) {
+                foreach ($name in $uninstall.GetSubKeyNames()) {
+                  $key = $uninstall.OpenSubKey($name)
+                  if (-not $key) { continue }
+                  $display = [string]$key.GetValue('DisplayName')
+                  if ($name -like 'GitBolt*' -or $display -like 'GitBolt*') {
+                    [pscustomobject]@{
+                      Location        = "$($r.Name): ...\Uninstall\$name"
+                      DisplayName     = $display
+                      DisplayVersion  = [string]$key.GetValue('DisplayVersion')
+                      UninstallString = [string]$key.GetValue('UninstallString')
+                      Values          = (@($key.GetValueNames() | ForEach-Object { if ($_) { $_ } else { '(default)' } }) -join ', ')
+                    }
+                  }
+                  $key.Close()
+                }
+                $uninstall.Close()
+              }
+              $base.Close()
+            }
+          }
+          function Assert-Updated([string]$when) {
+            $bad = @()
+            foreach ($f in 'bin\GitBolt.exe', 'Uninstall.exe', 'LICENSE.txt') {
+              if (-not (Test-Path (Join-Path $dest $f))) { $bad += "missing $f" }
+            }
+            foreach ($default in (Join-Path $env:ProgramFiles 'GitBolt'), (Join-Path ${env:ProgramFiles(x86)} 'GitBolt')) {
+              if (Test-Path $default) { $bad += "$default exists: the installer did not take /D=" }
+            }
+            $all = @(Get-UninstallKeys)
+            foreach ($k in $all) {
+              $line = "Uninstall key ({0}): {1}; DisplayName '{2}', DisplayVersion '{3}', UninstallString {4}; values: {5}"
+              Write-Host ($line -f $when, $k.Location, $k.DisplayName, $k.DisplayVersion, $k.UninstallString, $k.Values)
+            }
+            # An entry Windows lists (Apps & features) has a DisplayName and
+            # an UninstallString. A GitBolt key with neither is no second
+            # install (dry run 3 found an empty one in the 64-bit view, with
+            # the real one in WOW6432Node): reported, not failed.
+            $keys = @($all | Where-Object { $_.DisplayName -and $_.UninstallString })
+            foreach ($k in @($all | Where-Object { -not ($_.DisplayName -and $_.UninstallString) })) {
+              Write-Host "::warning::${when}: a GitBolt Uninstall key that lists nothing: $($k.Location) (values: $($k.Values))"
+            }
+            if ($keys.Count -ne 1) {
+              $bad += "$($keys.Count) GitBolt Uninstall entries with a DisplayName and an UninstallString, expected exactly one"
+            } else {
+              if ($keys[0].DisplayVersion -ne $version) { $bad += "the Uninstall key says version '$($keys[0].DisplayVersion)'" }
+              $uninstaller = Join-Path $dest 'Uninstall.exe'
+              if ($keys[0].UninstallString.Trim('"') -ne $uninstaller) {
+                $bad += "the Uninstall key runs $($keys[0].UninstallString), not $uninstaller"
+              }
+            }
+            $said = (Get-Item (Join-Path $bin 'GitBolt.exe')).VersionInfo.ProductVersion
+            if ($said -ne $version) { $bad += "GitBolt.exe says it is version '$said'" }
+            if ($bad) { throw "${when}:`n$($bad -join "`n")" }
+            Assert-InstalledVersion $when
+          }
+          Remove-Item -LiteralPath (Join-Path $dest 'LICENSE.txt')
+          $update = Start-Process -FilePath $setup[0].FullName -ArgumentList "/S /D=$dest" -Verb RunAs -Wait -PassThru
+          if ($update.ExitCode -ne 0) { throw "updating in place: the installer exited with '$($update.ExitCode)'" }
+          Assert-Updated 'updated in place'
+          Write-Host "::notice::GitBolt's Uninstall key, after an update in place: $(@(Get-UninstallKeys)[0].Location)"
+
+          # 6) The updater's own Windows helper, for real: test_update_helpers'
+          #    windowsHelperUpdatesARealInstall (tests/update/
+          #    TestInstallHelpers.cpp) builds the script with
+          #    windowsHelperScript and starts it as Installer::launchHelper
+          #    does (hidden powershell.exe -EncodedCommand, detached) for a
+          #    stand-in GitBolt. With a 2 s timeout it must give up and
+          #    change nothing; with time, it must wait, run the installer
+          #    over $dest, log its exit code 0 and start the installed
+          #    GitBolt.exe again (a test session, with an instance name of
+          #    its own; the test closes it). It runs only when these
+          #    variables name the installer and the install. The binary
+          #    the Test step ran, from ctest's own list; its PASS line
+          #    must be there, so a skip fails here.
+          $fn = 'windowsHelperUpdatesARealInstall'
+          $listed = @((ctest --test-dir build --show-only=json-v1 | Out-String | ConvertFrom-Json).tests |
+                      Where-Object name -eq 'test_update_helpers')
+          if ($listed.Count -ne 1) { throw "ctest lists $($listed.Count) tests named test_update_helpers" }
+          $cmd = @($listed[0].command)
+          Remove-Item -LiteralPath (Join-Path $dest 'LICENSE.txt')
+          $env:GITBOLT_TEST_NSIS_INSTALLER = $setup[0].FullName
+          $env:GITBOLT_TEST_NSIS_DIR = $dest
+          $env:QT_FORCE_STDERR_LOGGING = '1'
+          $env:QTEST_FUNCTION_TIMEOUT = '600000'
+          $out = Join-Path $env:RUNNER_TEMP "$fn.out"
+          $err = Join-Path $env:RUNNER_TEMP "$fn.err"
+          $t = Start-Process -FilePath $cmd[0] -ArgumentList (@($cmd | Select-Object -Skip 1) + $fn) `
+                 -WorkingDirectory $env:RUNNER_TEMP -NoNewWindow -PassThru `
+                 -RedirectStandardOutput $out -RedirectStandardError $err
+          $null = $t.Handle   # so ExitCode can still be read after the wait
+          $done = $t.WaitForExit(660000)
+          Get-Content $out, $err
+          if (-not $done) { $t.Kill($true); throw "test_update_helpers $fn did not finish within 11 minutes" }
+          if ($t.ExitCode -ne 0) { throw ("test_update_helpers {1} failed: exit {0} (0x{0:X8})" -f $t.ExitCode, $fn) }
+          if (-not (Select-String -Path $out, $err -Pattern "^PASS   : TestInstallHelpers::$fn\(\)" -Quiet)) {
+            throw "test_update_helpers $fn did not pass (skipped?)"
+          }
+          Assert-Updated "updated by the updater's helper"
 
       # ---- Linux: DEB + AppImage ---------------------------------------
       # appstream + desktop-file-utils: the metadata lint. xvfb: the
@@ -1233,7 +1488,81 @@ jobs:
           done
           grep -q '^The AppImage runtime$' "$cr" \
             || { echo "::error::the AppImage's copyright file lacks the runtime's notices"; exit 1; }
+
+          # 7) A Qt TLS backend, as the DEB's plugins/tls (above): Qt
+          #    loads it as a plugin, so nothing links it and linuxdeploy
+          #    finds it only through the Network module. Without it every
+          #    HTTPS request fails: the update check and its download,
+          #    and usage statistics. It dlopen()s the host's libssl.
+          #    usr/plugins: where linuxdeploy's Qt plugin puts plugins
+          #    (iconengines, checked in 6).
+          tls=squashfs-root/usr/plugins/tls/libqopensslbackend.so
+          if [ ! -f "$tls" ]; then
+            echo "::error::the AppImage lacks usr/plugins/tls/libqopensslbackend.so (Qt's OpenSSL TLS backend): its update checks and other HTTPS requests would fail"
+            ls -la squashfs-root/usr/plugins squashfs-root/usr/plugins/tls 2>&1 || true
+            exit 1
+          fi
           rm -rf squashfs-root
+
+      # The AppImage updates itself in place, end to end, as the DMG does
+      # above (tests/e2e/test_update_install.py). The test copies it into
+      # a scratch folder as GitBolt.AppImage: a copy named like the
+      # release's asset would be refused, because the download would land
+      # on the running file. It runs the copy as 0.1.0 against a loopback
+      # feed that offers this AppImage and clicks Install and Restart.
+      # Afterwards the file at that path must be a new one with this
+      # AppImage's bytes, and the relaunched copy must answer the bridge.
+      # The workspace AppImage is only read (Collect installers uploads
+      # it; the hash check holds the test to that). As in check 3 above:
+      # xcb under xvfb-run (no offscreen plugin in the AppImage), no Qt
+      # install's LD_LIBRARY_PATH, and APPIMAGE_EXTRACT_AND_RUN for want
+      # of FUSE. In that mode the runtime still sets APPIMAGE, which the
+      # updater goes by, and the helper's relaunch inherits the variable,
+      # as it does DISPLAY. /usr/bin/python3, the image's own:
+      # setup-python's may need the LD_LIBRARY_PATH it exports, and every
+      # GitBolt the test starts would inherit that. -s: xvfb-run's
+      # default screen is 8-bit. NO_CLEANUP: the old copy and the new one
+      # are the same bytes, so the runtime extracts both into the same
+      # $TMPDIR/appimage_extracted_<md5>, and the old runtime, deleting
+      # that as it exits, would race the relaunch (which skips files
+      # already there). The tree is in the app's TMPDIR, which the test
+      # deletes at its end anyway. TMPDIR, the direct run, argv[1] and
+      # timeout-minutes as in the macOS step.
+      - name: Update in place from the AppImage (Linux)
+        if: github.event_name != 'pull_request' && runner.os == 'Linux'
+        timeout-minutes: 12
+        run: |
+          set -euo pipefail
+          ver=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
+          appimage=$PWD/GitBolt-${ver}-x86_64.AppImage
+          [ -f "$appimage" ] || { echo "::error::missing $appimage"; exit 1; }
+          [ -x /usr/bin/python3 ] || { echo "::error::no /usr/bin/python3 on this image"; exit 1; }
+          sum=$(sha256sum < "$appimage")
+          tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
+          rc=0
+          env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+            TMPDIR="$tmp" GITBOLT_E2E_INSTALL_APP="$appimage" PYTHONUNBUFFERED=1 \
+            QT_QPA_PLATFORM=xcb APPIMAGE_EXTRACT_AND_RUN=1 NO_CLEANUP=1 \
+            xvfb-run -a -s '-screen 0 1280x1024x24' \
+            /usr/bin/python3 tests/e2e/test_update_install.py "$PWD/build/src/app/gitbolt" || rc=$?
+          fail=0
+          case $rc in
+            0)  echo "The AppImage updated itself in place" ;;
+            77) echo "::error::test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
+            *)  echo "::error::test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
+          esac
+          # Leftovers and the hash, as in the macOS step.
+          sleep 2
+          ps -A -o pid= -o args= > "$tmp.ps"
+          if left=$(grep -F "$tmp/" "$tmp.ps"); then
+            echo "::warning::the test left processes running; killing them:"
+            echo "$left"
+            awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
+          fi
+          if [ "$(sha256sum < "$appimage")" != "$sum" ]; then
+            echo "::error::the test changed $appimage, which Collect installers uploads"; fail=1
+          fi
+          exit "$fail"
 
       # ---- all: collect + upload ------------------------------------------
       # Each green leg must carry its OS's installers; a missing one fails
@@ -1431,6 +1760,15 @@ jobs:
           done
           for f in *.dmg *.exe *.deb *.AppImage; do
             [[ $f == *"$VERSION"* ]] || { echo "::error::$f doesn't carry version $VERSION"; exit 1; }
+          done
+          # The in-app updater downloads exactly these names for this
+          # version (assetNameFor, src/update/Package.cpp), each with its
+          # line in SHA256SUMS.txt. One renamed by a new runner, CPU name
+          # or CPack default would leave every installed copy unable to
+          # update to this release.
+          for f in "GitBolt-$VERSION-Darwin-arm64.dmg" "GitBolt-$VERSION-Windows-AMD64.exe" \
+                   "gitbolt_${VERSION}_amd64.deb" "GitBolt-$VERSION-x86_64.AppImage"; do
+            [ -f "$f" ] || { echo "::error::no $f in the artifacts: the in-app updater looks for exactly that name"; exit 1; }
           done
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt

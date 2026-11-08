@@ -8,11 +8,15 @@ set(SOURCES
     MainWindow.cpp
     RepoCommandController.cpp
     RepositoryView.cpp
+    UpdateController.cpp
+    UpdateSetup.cpp
     DashboardView.h
     InlineOpIndicator.h
     MainWindow.h
     RepoCommandController.h
     RepositoryView.h
+    UpdateController.h
+    UpdateSetup.h
 )
 add_library(gitbolt_ui STATIC ${SOURCES})
 
@@ -24,6 +28,7 @@ target_link_libraries(gitbolt_ui PUBLIC
     gitbolt_conf
     gitbolt_dialogs   # MainWindow opens AboutDialog, SettingsDialog, etc.
     gitbolt_telemetry # MainWindow counts actions and times opens (setTelemetry)
+    gitbolt_update    # Help > Check for Updates, the notice bar (UpdateController)
     Qt6::Widgets
     Qt6::Svg     # SVG icon rendering for Commands menu (Material Symbols)
     Qt6::Concurrent  # QtConcurrent::run for async dashboard repo probes

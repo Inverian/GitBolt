@@ -10,13 +10,14 @@
 #   util, conf, watcher — foundation, no cross-deps
 #   telemetry → util (TestSession: one test-session predicate, shared
 #                     with the crash handler); Core, Network
+#   update → util (TestSession); Core, Network
 #   git → util (for caches)
 #   models → git
 #   services → git, models, util, watcher
 #   editor → models
 #   widgets → models, services, editor
-#   dialogs → widgets, services, conf
-#   ui → widgets, editor, services, conf, dialogs, telemetry
+#   dialogs → widgets, services, conf, update
+#   ui → widgets, editor, services, conf, dialogs, telemetry, update
 #        (MainWindow opens AboutDialog etc., and feeds usage statistics)
 #   plugins → git (loaded by app, depends only on core)
 #   app → everything
@@ -24,6 +25,7 @@ add_subdirectory(util)
 add_subdirectory(conf)
 add_subdirectory(watcher)
 add_subdirectory(telemetry)
+add_subdirectory(update)
 add_subdirectory(git)
 add_subdirectory(models)
 add_subdirectory(services)

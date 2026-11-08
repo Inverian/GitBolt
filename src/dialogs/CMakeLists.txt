@@ -19,6 +19,7 @@ set(SOURCES
     StashManageDialog.cpp
     TagDialog.cpp
     TextEditorDialog.cpp
+    UpdateDialog.cpp
     WorktreeDialog.cpp
     AboutDialog.h
     AdvancedFilterDialog.h
@@ -36,6 +37,7 @@ set(SOURCES
     StashManageDialog.h
     TagDialog.h
     TextEditorDialog.h
+    UpdateDialog.h
     WorktreeDialog.h
 )
 add_library(gitbolt_dialogs STATIC ${SOURCES})
@@ -45,6 +47,7 @@ target_link_libraries(gitbolt_dialogs PUBLIC
     gitbolt_widgets
     gitbolt_services
     gitbolt_conf
+    gitbolt_update   # UpdateDialog shows a Release
     Qt6::Widgets
 )
 gitbolt_set_warnings(gitbolt_dialogs)
