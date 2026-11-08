@@ -46,7 +46,7 @@ namespace {
 constexpr char kBundleId[] = "com.gitbolt.app";
 #endif
 /// hdiutil's "Resource busy" comes and goes (actions/runner-images#7522,
-/// and on desktops too): CI tries attach and detach five times.
+/// on desktops too), so attach and detach are tried five times.
 constexpr int kAttachAttempts = 5;
 constexpr int kDetachAttempts = 5;
 constexpr int kAttachTimeoutMs = 3 * 60 * 1000;
@@ -97,10 +97,9 @@ bool isMountPoint(const QString& path) {
 }
 
 #if defined(Q_OS_UNIX)
-// What a detached process of ours starts with: a session of its own
-// (startDetached also double-forks, so it outlives GitBolt), default
-// signal dispositions, and none of GitBolt's descriptors (the instance
-// lock and its socket must die with GitBolt).
+// Gives a detached process of ours its own session, default signal
+// handling and none of GitBolt's descriptors: the instance lock and its
+// socket must die with GitBolt.
 void detachFromGitBolt(QProcess& process) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
     process.setUnixProcessParameters(QProcess::UnixProcessFlag::ResetSignalHandlers
@@ -116,14 +115,12 @@ void detachFromGitBolt(QProcess& process) {
 #endif
 
 #if defined(Q_OS_MACOS)
-/// What cancel() leaves to a detached /bin/sh -c (arguments: the pid
-/// of the step it killed or 0, the mount point or "", the staged copy,
-/// already renamed out of the way, or ""). It waits for the killed step
-/// to be gone (a zombie is gone: GitBolt reaps it later), so nothing is
-/// still writing into what it removes; detaches the image (a killed
-/// attach may only mount a moment later, so it looks a few times, and
-/// forces the last tries); removes the mount point only if it is
-/// empty; and removes the copy. BSD stat: macOS only.
+/// cancel()'s detached cleanup, for /bin/sh -c. Arguments: the killed
+/// step's pid or 0, the mount point or "", the renamed staged copy or "".
+/// It waits for that step to end (a zombie counts), so nothing still
+/// writes into what it removes. A killed attach may mount late, so it
+/// checks a few times and forces the last detaches; rmdir removes the
+/// mount point only if empty.
 constexpr char kCleanupScript[] =
     "pid=$1 mnt=$2 doomed=$3\n"
     "n=0\n"
@@ -310,9 +307,7 @@ void Installer::cancel() {
     if (launched_)
         return;
     ++run_;
-    // Nothing here may wait: killed, not waited for; a detach (seconds,
-    // more with a busy volume) and a removal of a ~100 MB copy run in
-    // a process of their own.
+    // This waits only if the background cleanup can't be started.
     const qint64 killed = abandonProcess();
     if ((attached_ || stagedCreated_) && !cleanUpInBackground(killed)) {
         if (attached_)
@@ -347,8 +342,8 @@ qint64 Installer::abandonProcess() {
     if (!process)
         return 0;
     const qint64 pid = process->processId();
-    // Its outcome no longer matters, and it mustn't go with this
-    // Installer: QProcess's destructor waits for a running process.
+    // Unparented, so it doesn't go with this Installer: QProcess's
+    // destructor waits for a running process.
     process->disconnect(this);
     process->setParent(nullptr);
     connect(process, &QProcess::finished, process, &QObject::deleteLater);
@@ -365,10 +360,9 @@ qint64 Installer::abandonProcess() {
 
 bool Installer::cleanUpInBackground(qint64 killedPid) {
 #if defined(Q_OS_MACOS)
-    // The staged copy out of the way first, by a rename within its
-    // folder: a new prepare() of the same version stages under the same
-    // name, which this cleanup's rm must never reach. The new name is
-    // still one removeStaleInstallFiles knows (.GitBolt-*.app).
+    // Rename the staged copy first: a new prepare() of this version
+    // stages under the same name, which the cleanup's rm must never
+    // reach. removeStaleInstallFiles still matches the new name.
     QString doomed;
     if (stagedCreated_ && !staged_.isEmpty()) {
         const QFileInfo staged(staged_);
@@ -393,7 +387,7 @@ bool Installer::cleanUpInBackground(qint64 killedPid) {
         cleanup.setStandardErrorFile(QProcess::nullDevice());
         detachFromGitBolt(cleanup);
         if (!cleanup.startDetached()) {
-            // Done here after all, the renamed copy included.
+            // cancel() removes it here after all, under its new name.
             if (!doomed.isEmpty())
                 staged_ = doomed;
             return false;
@@ -582,10 +576,8 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
     const QString shortVersion = info.value(QStringLiteral("CFBundleShortVersionString")).toString();
     if (shortVersion != version_.toString())
         return tr("GitBolt.app %1 is version %2, not %3.").arg(where, quoted(shortVersion), version_.toString());
-    // LaunchServices won't start an app that needs a newer macOS, and by
-    // then the helper has swapped it in and the old copy is in the
-    // Trash: refuse here, while GitBolt still runs. (A release built
-    // against a newer SDK raises it: CMAKE_OSX_DEPLOYMENT_TARGET.)
+    // Checked now, while GitBolt runs: once swapped in, LaunchServices
+    // wouldn't start it and the old copy would be in the Trash.
     // Normalised, so 14.4 and 14.4.0 are the same.
     const QString minimum = info.value(QStringLiteral("LSMinimumSystemVersion")).toString().trimmed();
     const QVersionNumber needs = QVersionNumber::fromString(minimum).normalized();
@@ -649,9 +641,8 @@ void Installer::detach(int attempt, const std::function<void()>& then) {
 }
 
 void Installer::detachNow() {
-    // cancel() and the destructor: no event loop to wait in. A plain
-    // detach (even if nothing shows as mounted yet: a killed attach may
-    // still be finishing), then a forced one if the volume is there.
+    // Synchronous. The plain detach runs even if nothing shows as mounted
+    // yet (a killed attach may still be finishing); -force only if mounted.
     attached_ = false;
     if (mountPoint_.isEmpty())
         return;
@@ -739,9 +730,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         emit failed(tr("Couldn't create %1.").arg(workDir_));
         return false;
     }
-    // One update's story per log. (A relaunched AppImage or deb copy
-    // keeps writing its own output to it, and the next update would
-    // otherwise append to all of that.)
+    // One update per log: a relaunched AppImage or deb copy keeps writing
+    // its output to it.
     if (QFile logFile(logPath()); logFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         logFile.close();
     // An earlier update's result would pass for this one's.
@@ -751,8 +741,7 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         emit failed(tr("This copy of GitBolt can't install updates."));
         return false;
     }
-    // Both parts start now, while GitBolt is still in front for UAC's
-    // prompt, and only once Windows has said yes may GitBolt quit.
+    // Both parts start now, while GitBolt is still in front for UAC.
     HelperInputs in;
     in.pid = pid;
     in.waitSeconds = kHelperWaitSeconds;
@@ -762,9 +751,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     in.newVersion = version_.toString();
     in.resultFile = resultPath();
     const WindowsLaunch launch = launchWindowsUpdate(in, window, QProcessEnvironment::systemEnvironment());
-    // Where Windows won't elevate at all (a standard user under "deny
-    // elevation requests" gets an answer at once), only an
-    // administrator can install it.
+    // Where Windows won't elevate (a standard user under "deny elevation
+    // requests"), only an administrator can install it.
     const QString byHand = tr("To install it yourself, download %1 from the release page and run it as an "
                               "administrator.")
                                .arg(assetNameFor(package_.kind, version_));
@@ -816,9 +804,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
 WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment) {
     WindowsLaunch launch;
 #if defined(Q_OS_WIN)
-    // The administrator part. ShellExecuteExW may hand the verb to a
-    // shell extension, which needs COM on this thread: GitBolt's GUI
-    // thread has it already (S_FALSE), a test's may not.
+    // ShellExecuteExW may hand the verb to a shell extension, which needs
+    // COM: GitBolt's GUI thread has it already (S_FALSE), a test's may not.
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     const std::wstring file = windowsPowerShell().toStdWString();
     const std::wstring parameters = powerShellParameters(windowsElevatedScript(in)).toStdWString();
@@ -827,9 +814,8 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
     // Its pid, for the helper; and done before this returns, since
     // GitBolt quits right after.
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
-    // UAC's prompt is this window's: in front of it, on the secure
-    // desktop. A caller with no window in front (a hidden helper once
-    // GitBolt has quit) gets only a flashing taskbar button.
+    // UAC's prompt comes up over this window; with no window in front it
+    // is only a flashing taskbar button.
     info.hwnd = reinterpret_cast<HWND>(window);
     info.lpVerb = L"runas";
     info.lpFile = file.c_str();
@@ -840,8 +826,7 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
     if (SUCCEEDED(com))
         CoUninitialize();
     if (!started) {
-        // UAC's No, by its code, so in any language (the text is the
-        // user's language's).
+        // UAC's No, by its code: the text is in the user's language.
         if (error == ERROR_CANCELLED) {
             launch.outcome = WindowsLaunch::Outcome::Declined;
             return launch;
@@ -849,19 +834,16 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
         launch.error = qt_error_string(static_cast<int>(error));
         return launch;
     }
-    // Only its pid: the helper watches the process list for it, and is
-    // handed no handle (one of an over-the-shoulder administrator's
-    // process might not be the user's to have anyway).
+    // The helper gets only its pid, no handle: an over-the-shoulder
+    // administrator's process may not be the user's to open.
     if (info.hProcess) {
         launch.elevatedPid = static_cast<qint64>(GetProcessId(info.hProcess));
         CloseHandle(info.hProcess);
     }
     launch.outcome = WindowsLaunch::Outcome::Started;
 
-    // The helper that starts GitBolt again, not elevated, in GitBolt's
-    // environment. Not into the log: both parts append to it, and a
-    // handle open for writing (ours) would refuse every Out-File of
-    // theirs (windowsScriptPreamble's Write-Log).
+    // The helper, not elevated. Its output doesn't go to the log: a write
+    // handle of ours on it would refuse every Out-File of Write-Log.
     in.elevatedPid = launch.elevatedPid;
     QProcess helper;
     helper.setProgram(windowsPowerShell());
@@ -869,10 +851,9 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
     helper.setWorkingDirectory(QFileInfo(in.logFile).absolutePath());
     helper.setStandardInputFile(QProcess::nullDevice());
     helper.setProcessEnvironment(environment);
-    // No console window at all, not one that flashes until -WindowStyle
-    // Hidden takes effect: CREATE_NO_WINDOW gives powershell.exe a
-    // console nobody sees. Windows ignores it beside CREATE_NEW_CONSOLE
-    // or DETACHED_PROCESS, so those go.
+    // CREATE_NO_WINDOW: a console nobody sees, not one that flashes until
+    // -WindowStyle Hidden applies. Windows ignores it beside
+    // CREATE_NEW_CONSOLE or DETACHED_PROCESS, so those are cleared.
     helper.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
         args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
         args->flags |= CREATE_NO_WINDOW;
@@ -903,9 +884,8 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
 
 namespace {
 
-// The entries of `folder` whose name `pattern` matches in full: real
-// files and folders only (no link, whatever it points at), hidden ones
-// included.
+// The entries of `folder` whose name `pattern` matches, hidden ones
+// included; never a link or junction, whatever it points at.
 QFileInfoList ownEntries(const QString& folder, const QRegularExpression& pattern, QDir::Filters kinds) {
     QFileInfoList found;
     const QFileInfoList entries = QDir(folder).entryInfoList(kinds | QDir::Hidden | QDir::NoDotAndDotDot | QDir::NoSymLinks);
@@ -944,12 +924,10 @@ QString pendingRecordPath(const QString& workDir) {
     return QDir(workDir).filePath(QLatin1String(kPendingDownloadFile));
 }
 
-// An AppImage download that recordPendingDownload() named and no helper
-// took over: the GitBolt that made it crashed, or was killed, first.
-// Removed if it is still what GitBolt left there: a regular file of
-// this user's, named as the release names an AppImage, and not the
-// AppImage that runs (the user may have started that very file).
-// The record goes either way.
+// Removes the download a leftover record names (its GitBolt crashed or
+// was killed) only if it is still a regular file of this user's, with
+// the release's AppImage name, and not the running AppImage (the user
+// may have started that very file). The record goes either way.
 void removePendingDownload(const PackageInfo& package, const QString& workDir) {
     const QString record = pendingRecordPath(workDir);
     const QFileInfo recordInfo(record);
@@ -1008,21 +986,12 @@ void forgetPendingDownload(const QString& workDir) {
 
 void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir) {
     if (package.kind == PackageKind::MacBundle && !package.target.isEmpty()) {
-        // Staged copies (.GitBolt-<v>.app, and .GitBolt-<v>-cancelled-…
-        // .app, which cancel() renamed for its cleanup) and swapped-aside
-        // old ones (.GitBolt-<old>.app.old). At startup nothing of ours
-        // still needs them. Only a helper uses a staged copy or an aside
-        // one, and it is done with both by the time it starts GitBolt,
-        // its last step. While it waits, the GitBolt it waits for still
-        // runs and holds the instance lock, so a GitBolt started then is
-        // folded into that one long before it gets here; only in the
-        // instant between that GitBolt's exit and the helper's swap could
-        // one get this far, and the helper would then start the old copy
-        // and report failed, nothing lost. No Installer of this process
-        // exists yet. Another user's GitBolt (fast user switching) can
-        // run from the same folder, with a helper of its own waiting
-        // and its own staged copy: that one isn't ours, so only this
-        // user's go.
+        // Staged copies (cancel()'s renamed ones too) and swapped-aside
+        // old ones. A helper is done with them before it starts GitBolt;
+        // while it waits, its GitBolt holds the instance lock, so a new one
+        // is folded into that. Only one started between that GitBolt's exit
+        // and the helper's swap can race it. Only this user's: another
+        // user's GitBolt may be mid-update from the same folder.
         static const QRegularExpression staged(QStringLiteral("^\\.GitBolt-.+\\.app(\\.old)?$"));
         const QFileInfo target(package.target);
         for (const QFileInfo& entry : ownEntries(target.absolutePath(), staged, QDir::Dirs)) {
@@ -1037,9 +1006,8 @@ void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir)
         }
     }
 
-    // Disk image mount points (macOS's prepare()), mounted or not: no
-    // Installer exists yet to use one. A mounted one is detached first;
-    // the folder goes only if empty, so never what was mounted there.
+    // Disk image mount points, detached first if mounted; rmdir removes
+    // only an empty folder, never what was mounted there.
     if (!workDir.isEmpty() && QDir::isAbsolutePath(workDir)) {
         static const QRegularExpression mount(QStringLiteral("^mount-.+$"));
         for (const QFileInfo& entry : ownEntries(workDir, mount, QDir::Dirs)) {
@@ -1053,11 +1021,9 @@ void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir)
     }
 
     if (package.kind == PackageKind::AppImage && !package.target.isEmpty()) {
-        // Beside the AppImage: this user's unfinished downloads (another
-        // user's GitBolt may be downloading into a shared folder right
-        // now). Never this AppImage itself, whatever its name. A finished
-        // download only if GitBolt recorded it, below: the release's
-        // name for it is the one users keep their AppImages under.
+        // This user's unfinished downloads beside the AppImage (another
+        // user's may be downloading there now). A finished one goes only
+        // if recorded (below): users keep their AppImages under that name.
         static const QRegularExpression part(QStringLiteral("^\\.GitBolt-.+-x86_64\\.AppImage\\.part$"));
         const QString folder = QFileInfo(package.target).absolutePath();
         for (const QFileInfo& entry : ownEntries(folder, part, QDir::Files)) {

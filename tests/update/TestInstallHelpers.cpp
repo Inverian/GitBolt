@@ -1,74 +1,10 @@
 //
-// TestInstallHelpers — the scripts that finish an update once GitBolt
-// has quit (update/InstallHelpers.h), run for real where they can be:
-//
-//   - the macOS helper (macOS): against a fake old bundle and a staged
-//     new one in a scratch "Applications" folder, with the Trash a
-//     scratch folder too (HOME points at one for the whole run). It
-//     waits while the pid lives and changes nothing; then swaps the
-//     bundles, moves the old one to the Trash (with the time added if
-//     its name is taken; deleted if there is no Trash), and starts the
-//     new one, whose environment still has GITBOLT_INSTANCE_NAME. When
-//     the swap fails (the staged bundle can't be moved: chflags uchg)
-//     the old one is put back and started. After its timeout it gives
-//     up, removes the staged copy and starts nothing;
-//   - the AppImage helper (any Unix): renames the new file over the old
-//     one and starts it (extracted again, APPIMAGE_EXTRACT_AND_RUN=1,
-//     when this one ran extracted); keeps and starts the old one when
-//     it can't; gives up after its timeout; and counts a zombie
-//     (exited, not yet reaped) as gone instead of waiting for it;
-//   - the deb helper (any Unix, with a stand-in pkexec that records
-//     what it was asked to run and exits 0, 126 (dismissed), 127
-//     (couldn't authenticate) or 1): pkexec
-//     /usr/bin/apt-get install -y on the .deb's absolute path, then
-//     /usr/bin/gitbolt's stand-in, whether apt-get worked or not;
-//   - every Unix helper's install result: the line each outcome writes
-//     (ok, declined, failed with why, gave-up), there before the
-//     relaunched copy starts (the fake app copies what it finds);
-//   - each Unix script under /bin/sh and, where it is installed, dash
-//     (Debian's and Ubuntu's /bin/sh): sh -n on paths with spaces,
-//     quotes, $ and newlines, a run for real, and none of the usual
-//     bashisms in the text;
-//   - shellQuote round-trips any text through sh;
-//   - Windows' two parts as text, the administrator part (started by
-//     GitBolt's ShellExecuteExW while it runs) and the helper that
-//     starts GitBolt again: every path in a single-quoted literal with
-//     each kind of quote PowerShell ends one at doubled, no
-//     double-quoted (interpolated) strings at all, no RunAs in either
-//     (GitBolt elevated already), both waiting for GitBolt by the
-//     process list, the administrator part giving up after its time and
-//     the helper a little later, the in-use wait (only a sharing
-//     violation counts) before the installer, /D= last and unquoted in
-//     the one ArgumentList string, the version check after it, each
-//     exit code's install result written once and last, never
-//     "declined", the helper waiting for that result (at most its time,
-//     or until the administrator part is gone without one, then failed)
-//     and starting GitBolt either way, no .NET call outside a try (for
-//     Constrained Language mode), no use of $pid, ShellExecuteExW's
-//     parameters as one string, both command lines within the limit
-//     even with long paths, and -EncodedCommand's UTF-16LE base64
-//     decoding back to each script, and the one Write-Log both share
-//     (Out-File, never Add-Content; a refused line tried again a few
-//     seconds at most, then kept for the next; each part's last steps
-//     try again, with the full patience, to write what was kept);
-//   - that Write-Log for real, on Windows, in every run: three
-//     powershell.exe (one in Constrained Language mode) on one log,
-//     first busy (held as the old Add-Content left it), then writing
-//     into each other, keep every line, once, in order; a log busy for
-//     longer costs a part a few seconds, and no line if it is free
-//     again before the part's last flush;
-//   - and for real, on Windows, when GITBOLT_TEST_NSIS_INSTALLER and
-//     GITBOLT_TEST_NSIS_DIR name a GitBolt installer and a folder it
-//     installed into (CI's NSIS smoke test sets them; skipped
-//     otherwise): both parts started by launchWindowsUpdate, as
-//     Installer::launchHelper starts them (UAC is off on the hosted
-//     runner, so runas is granted with no prompt), give up on a
-//     stand-in GitBolt that outlives the time; install nothing while
-//     another GitBolt runs from the folder, and start the old copy;
-//     with time and the folder free, wait for the stand-in, run that
-//     installer elevated over the install, check the new version,
-//     write "ok", and start the installed GitBolt.exe, which shows its
-//     window and is closed.
+// TestInstallHelpers — the update helper scripts (update/InstallHelpers.h),
+// run for real where possible. Unix helpers run against fake apps in
+// scratch folders, under /bin/sh and dash; Windows' PowerShell parts are
+// checked as text everywhere, and Write-Log runs for real on Windows. A
+// real NSIS update runs only when GITBOLT_TEST_NSIS_INSTALLER and
+// GITBOLT_TEST_NSIS_DIR are set, as CI's NSIS smoke test does.
 //
 
 #include <QDeadlineTimer>
@@ -390,8 +326,8 @@ private:
                && writeFile(in.staged, fakeAppScript(QStringLiteral("0.1.1")), true);
     }
 
-    // Deb: a stand-in pkexec that records its arguments, one a line,
-    // and exits with $GITBOLT_TEST_PKEXEC_STATUS; a stand-in gitbolt.
+    // Deb: the .deb (in a folder named with a ' and a $), and stand-ins
+    // for pkexec and gitbolt.
     HelperInputs debInputs(qint64 pid) {
         HelperInputs in;
         in.pid = pid;
@@ -404,6 +340,8 @@ private:
         return in;
     }
 
+    // The stand-in pkexec records its arguments, one a line, and exits
+    // with `pkexecStatus`.
     bool layOutDeb(const HelperInputs& in, int pkexecStatus) {
         const QByteArray pkexec = "#!/bin/sh\n"
                                   "for a in \"$@\"; do printf '%s\\n' \"$a\"; done >\"" + path(QStringLiteral("pkexec-args.txt")).toUtf8()
@@ -428,11 +366,10 @@ private:
     }
 
 #if defined(Q_OS_WIN)
-    // powershell.exe running `script` as launchWindowsUpdate starts the
-    // helper: by -EncodedCommand (powerShellArguments), hidden, in a
-    // console of its own that nobody sees (CREATE_NO_WINDOW; -WindowStyle
-    // Hidden would otherwise hide the console this test shares). Both
-    // its streams are kept, for the diagnostics.
+    // powershell.exe running `script` with powerShellArguments, as
+    // launchWindowsUpdate starts the helper. CREATE_NO_WINDOW gives it a
+    // console of its own: its -WindowStyle Hidden would otherwise hide
+    // the console this test shares.
     static std::unique_ptr<QProcess> startPowerShell(const QString& script) {
         auto process = std::make_unique<QProcess>();
         process->setProgram(windowsPowerShell());
@@ -447,11 +384,10 @@ private:
         return process;
     }
 
-    // `file` (created if need be) held as Windows PowerShell 5.1's
-    // Add-Content left a log after its open met another handle: open for
-    // writing, sharing writing only. Nothing can append to it meanwhile,
-    // the old Add-Content (which then left a handle of its own) or
-    // Out-File. INVALID_HANDLE_VALUE if it can't be opened.
+    // Opens `file` (creating it) as 5.1's Add-Content leaks a handle to a
+    // busy log: write-only, sharing writing only, so neither Out-File nor
+    // Add-Content can append to it meanwhile. INVALID_HANDLE_VALUE if it
+    // can't be opened.
     static HANDLE holdOpen(const QString& file) {
         const std::wstring native = QDir::toNativeSeparators(file).toStdWString();
         return CreateFileW(native.c_str(), GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
@@ -461,9 +397,9 @@ private:
     // A path as a PowerShell literal, in Windows form.
     static QString literal(const QString& file) { return powerShellQuote(QDir::toNativeSeparators(file)); }
 
-    // A script that is a part's start, windowsScriptPreamble with log()
-    // as its log, then `body`; with `constrained`, all of it in
-    // Constrained Language mode, as AppLocker or WDAC would run it.
+    // windowsScriptPreamble (logging to log()), then `body`; with
+    // `constrained`, all in Constrained Language mode, as under AppLocker
+    // or WDAC.
     QString writeLogScript(const QString& body, bool constrained) const {
         HelperInputs in;
         in.logFile = log();
@@ -473,9 +409,9 @@ private:
                + windowsScriptPreamble(in, false) + u'\n' + body;
     }
 
-    // Each line of the log, a part's way: UTF-8 with at most a BOM at the
-    // very start (one writer's first line), every line ending CR LF, the
-    // time first. False, and why, if it isn't so.
+    // The log's lines, without their times, each checked as the parts
+    // write it: UTF-8, the time first, CR LF last, and a BOM only at the
+    // very start. False, and why, if not.
     bool logLines(QStringList* lines, QString* why) const {
         QFile file(log());
         if (!file.open(QIODevice::ReadOnly)) {
@@ -690,23 +626,20 @@ private slots:
         QVERIFY2(helperFinished(), qPrintable(diagnostics()));
         QVERIFY2(QFileInfo::exists(marker()), qPrintable(diagnostics()));
 
-        // The new copy in place, under the old one's name, and started
-        // with the environment the helper had.
+        // The new copy in place, started with the helper's environment.
         QCOMPARE(copyOf(in.target), QStringLiteral("0.1.1"));
         QVERIFY(!QFileInfo::exists(in.target + QStringLiteral("/Contents/Resources/planted.txt")));
         const QString started = readFile(marker());
         QVERIFY2(started.startsWith(QLatin1String("0.1.1 ")), qPrintable(started));
         QVERIFY2(started.contains(QStringLiteral("instance=") + kInstance), qPrintable(started));
         QCOMPARE(started.count(u'\n'), 1);
-        // The old one in the Trash, as GitBolt-<old>.app; nothing left
-        // beside the new one.
+        // The old one in the Trash, as GitBolt-<old>.app.
         const QString trashed = in.trashDir + QStringLiteral("/GitBolt-0.1.0.app");
         QCOMPARE(copyOf(trashed), QStringLiteral("0.1.0"));
         QVERIFY(QFileInfo::exists(trashed + QStringLiteral("/Contents/Resources/planted.txt")));
         QCOMPARE(entries(QStringLiteral("Applications")), QStringList{QStringLiteral("GitBolt.app")});
         QVERIFY2(readFile(log()).contains(QLatin1String("moved the old copy to")), qPrintable(diagnostics()));
-        // The result, written before the new copy started (which found
-        // it): installed, no reason.
+        // The result: ok, no reason, written before the new copy started.
         QCOMPARE(readFile(result()), QStringLiteral("ok 0.1.1 \n"));
         QCOMPARE(resultAtRelaunch(), QStringLiteral("ok 0.1.1 \n"));
 #endif
@@ -789,8 +722,7 @@ private slots:
         QVERIFY2(readFile(log()).contains(QLatin1String("putting the old one back")), qPrintable(diagnostics()));
         const QString started = readFile(marker());
         QVERIFY2(started.startsWith(QLatin1String("0.1.0 ")), qPrintable(started));
-        // Rolled back: failed, and the old copy found that when it
-        // started.
+        // The result: failed, written before the old copy started again.
         const QString failed =
             QStringLiteral("failed 0.1.1 the new copy couldn't be moved into place, so the old one was put back\n");
         QCOMPARE(readFile(result()), failed);
@@ -839,9 +771,8 @@ private slots:
 #endif
     }
 
-    // The installed bundle can't be moved aside (its folder is
-    // read-only): nothing changes, the result says failed, and the old
-    // copy starts.
+    // The installed bundle can't be moved aside (it is made immutable):
+    // nothing changes, the result says failed, and the old copy starts.
     void macReportsAnOldCopyItCantMove() {
 #if !defined(Q_OS_MACOS)
         QSKIP("macOS only");
@@ -998,10 +929,9 @@ private slots:
         QVERIFY(!appImageRunsExtracted(path(QStringLiteral("tmp/not-there")), false));
     }
 
-    // A GitBolt whose parent hasn't reaped it yet is a zombie, which
-    // kill -0 still finds: the helper must not wait its full timeout
-    // for that (a launcher that never calls wait() would hold every
-    // update for ten minutes).
+    // A GitBolt its parent hasn't reaped yet is a zombie, which kill -0
+    // still finds: the helper counts it as quit, or a launcher that never
+    // calls wait() would hold every update for the full ten minutes.
     void aZombieCountsAsQuit() {
 #if !defined(Q_OS_UNIX)
         QSKIP("POSIX only");
@@ -1146,9 +1076,8 @@ private slots:
         }
     }
 
-    // The Windows parts' inputs, in the shape Installer::launchHelper
-    // gives them (forward slashes: the scripts turn them around), with
-    // the administrator part's pid as ShellExecuteExW gave it.
+    // Inputs as Installer::launchHelper gives them (forward slashes,
+    // which the scripts convert), with the administrator part's pid.
     static HelperInputs windowsInputs() {
         HelperInputs in;
         in.pid = 4321;
@@ -1190,8 +1119,7 @@ private slots:
         const QString script = windowsHelperScript(in);
         const QString elevated = windowsElevatedScript(in);
 
-        // No interpolated strings at all, in either script, so no path
-        // can expand.
+        // No double-quoted (interpolated) strings, so no path can expand.
         QVERIFY2(!script.contains(u'"'), qPrintable(script));
         QVERIFY2(!elevated.contains(u'"'), qPrintable(elevated));
         // Every literal closes on its line, and the paths come back as
@@ -1205,13 +1133,11 @@ private slots:
         QVERIFY(literals.contains(dir + QStringLiteral("\\bin\\GitBolt.exe")));
         QVERIFY(literals.contains(QStringLiteral("0.1.1")));
         QVERIFY(!script.contains(u'/' + QStringLiteral("Users")));
-        // The helper only starts GitBolt: the installer is the
-        // administrator part's alone, which is its own command line.
+        // Only the administrator part names the installer.
         QVERIFY(!literals.contains(cache + QStringLiteral("0.1.1\\GitBolt-0.1.1-Windows-AMD64.exe")));
         QVERIFY(!script.contains(QLatin1String("$installer")));
 
-        // The administrator part's own literals: the log and the result
-        // it writes, the folder, the installer and the version.
+        // The administrator part's literals.
         QStringList inner;
         QVERIFY2(literalsOf(elevated, &inner), qPrintable(elevated));
         QVERIFY(inner.contains(cache + QStringLiteral("install.log")));
@@ -1224,12 +1150,10 @@ private slots:
         QVERIFY(!elevated.contains(u'/' + QStringLiteral("Users")));
     }
 
-    // NSIS takes everything after /D= as the folder: it must be the
-    // last thing on the installer's command line, and not quoted. The
-    // whole of it is one ArgumentList string, so PowerShell adds
-    // nothing after it. The installer runs from the administrator part,
-    // which GitBolt's ShellExecuteExW elevated: no RunAs in either
-    // script, so UAC asks once, while GitBolt is in front.
+    // NSIS takes everything after /D= as the folder, so /D= comes last,
+    // unquoted, at the end of the one ArgumentList string. No RunAs in
+    // either script: GitBolt's ShellExecuteExW already elevated the
+    // administrator part, so UAC asks once, while GitBolt is in front.
     void windowsScriptPutsTheFolderLast() {
         HelperInputs in = windowsInputs();
         const QString elevated = windowsElevatedScript(in);
@@ -1261,19 +1185,15 @@ private slots:
         QVERIFY(windowsElevatedScript(in).contains(QLatin1String("-ArgumentList '/S /D=D:\\' -Wait")));
     }
 
-    // Both parts wait for GitBolt, by polling the process list (which
-    // shows another user's processes too: an over-the-shoulder
-    // administrator's part may not be allowed to open the user's
-    // GitBolt, which Wait-Process needs). The administrator part gives
-    // up at waitSeconds, deletes the installer and says gave-up; the
-    // helper, started after it, waits a little longer, and starts
-    // nothing if GitBolt is still there.
+    // Both parts poll the process list for GitBolt: Wait-Process must
+    // open the process, which an over-the-shoulder administrator may not
+    // be allowed to. The administrator part gives up at waitSeconds; the
+    // helper waits kWindowsHelperExtraSeconds longer.
     void windowsScriptWaitsForGitBoltFirst() {
         const HelperInputs in = windowsInputs();
         const QString script = windowsHelperScript(in);
         const QString elevated = windowsElevatedScript(in);
-        // $pid is PowerShell's own, read-only: neither script may
-        // assign it, or read it meaning GitBolt's.
+        // $pid is PowerShell's own (read-only): neither script may use it.
         const QRegularExpression pid(QStringLiteral("\\$pid\\b"), QRegularExpression::CaseInsensitiveOption);
         for (const QString& text : {script, elevated}) {
             QVERIFY(!text.contains(pid));
@@ -1286,8 +1206,8 @@ private slots:
         QVERIFY(elevated.startsWith(QLatin1String("$ErrorActionPreference = 'Stop'\n")));
         QVERIFY(script.startsWith(QLatin1String("# GitBolt's update helper (Windows)")));
 
-        // The administrator part: GitBolt first, then the folder, then
-        // the installer; giving up is its own code.
+        // The administrator part: GitBolt, then the in-use check, then the
+        // installer; giving up has its own code.
         const qsizetype wait = elevated.indexOf(QStringLiteral(
             "    $deadline = (Get-Date).AddSeconds($waitSeconds)\n"
             "    while (Get-Process -Id $appPid -ErrorAction SilentlyContinue) {\n"
@@ -1310,9 +1230,8 @@ private slots:
             "    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue\n").arg(kWindowsExitGaveUp));
         QVERIFY2(gaveUp > install, qPrintable(elevated));
 
-        // The helper: kWindowsHelperExtraSeconds longer, and if GitBolt
-        // is still there then, a gave-up (unless the administrator part
-        // wrote one) and no GitBolt started.
+        // The helper, if GitBolt is still there: gave-up (if there is no
+        // result yet) and nothing started.
         QVERIFY(script.contains(QLatin1String("\n$elevatedPid = 5678\n")));
         QVERIFY(script.contains(QLatin1String("\n$installSeconds = 900\n")));
         const qsizetype helperWait = script.indexOf(QStringLiteral(
@@ -1329,11 +1248,10 @@ private slots:
         QVERIFY(script.indexOf(QLatin1String("Start-Process -FilePath $app")) > helperWait);
     }
 
-    // Elevated, it waits (a while) until no other GitBolt runs from the
-    // install folder and GitBolt.exe can be opened with no sharing: in
-    // use, NSIS would uninstall around the locked files and install a
-    // mix. Only a sharing or lock violation counts as in use. Then the
-    // installer, then the version check.
+    // The administrator part waits until no other GitBolt runs from the
+    // folder and GitBolt.exe opens with no sharing (else NSIS would
+    // install a mix around the locked files; only a sharing or lock
+    // violation counts as in use), then installs and checks the version.
     void windowsElevatedScriptWaitsUntilTheInstallIsFree() {
         const QString elevated = windowsElevatedScript(windowsInputs());
         const qsizetype loop =
@@ -1381,11 +1299,10 @@ private slots:
         }
     }
 
-    // The administrator part says how it went: ok only for 0; gave-up;
-    // failed, with why, for everything else. It writes the result once,
-    // as its very last step (the helper starts GitBolt when it is
-    // there), as one ASCII line with no BOM. Neither part ever says
-    // declined: UAC's No reaches GitBolt itself, which keeps running.
+    // The administrator part's result: ok only for 0, gave-up, or failed
+    // with why. One ASCII line, no BOM, written once and followed only by
+    // a log flush (the helper starts GitBolt once it is there). Neither
+    // part says declined: UAC's No reaches GitBolt itself.
     void windowsScriptsReportEachOutcome() {
         const QString elevated = windowsElevatedScript(windowsInputs());
         const QString write = QStringLiteral(
@@ -1411,15 +1328,13 @@ private slots:
         QVERIFY(elevated.contains(QLatin1String(
             "    Write-Log ('the installer exited with code 0, and GitBolt.exe is now version ' + $version)\n")));
         QVERIFY(elevated.contains(QLatin1String("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)\n")));
-        // Once, last.
         QCOMPARE(elevated.count(QLatin1String("Write-Result ")), 1);
         QVERIFY(elevated.endsWith(QLatin1String("\nWrite-Log ''\nWrite-Result $status $reason\nWrite-Log ''\nexit $code")));
 
         const QString script = windowsHelperScript(windowsInputs());
         for (const QString& text : {script, elevated})
             QVERIFY(!text.contains(QLatin1String("declined")));
-        // The helper's own results never replace the administrator
-        // part's: written only if there is none.
+        // The helper's results never replace the administrator part's.
         QVERIFY(script.contains(write));
         QVERIFY(script.contains(QLatin1String(
             "function Write-Result([string]$status, [string]$reason) {\n"
@@ -1432,10 +1347,9 @@ private slots:
     }
 
     // Once GitBolt has quit, the helper waits for the administrator
-    // part's result: at most installSeconds, or until that part's
-    // process has been gone 5 seconds with none (PowerShell couldn't
-    // run there, say). With none, it writes failed itself. Then it
-    // starts GitBolt, not elevated, whatever happened.
+    // part's result, at most installSeconds or until that part has been
+    // gone 5 s; with none, it writes failed itself. Then it starts
+    // GitBolt either way.
     void windowsHelperWaitsForTheResultThenStartsGitBolt() {
         const QString script = windowsHelperScript(windowsInputs());
         const qsizetype quit = script.indexOf(QLatin1String(
@@ -1479,14 +1393,11 @@ private slots:
         QVERIFY(windowsHelperScript(unknown).contains(QLatin1String("\n$elevatedPid = 0\n$installSeconds = 120\n")));
     }
 
-    // In Constrained Language mode (AppLocker or WDAC script rules)
-    // PowerShell refuses method calls on all but its core types. An
-    // unguarded one would end a part before it reports, and, in the
-    // helper, before it starts GitBolt again: none is left outside a
-    // try. The one .NET call ([IO.File]::Open, the in-use check) is in
-    // a try whose catch counts only a sharing violation as in use. With
-    // plain ASCII inputs both scripts are ASCII, so every reason fits
-    // Set-Content's ASCII.
+    // Constrained Language mode (AppLocker or WDAC script rules) refuses
+    // method calls on all but core types, and an unguarded one would end
+    // a part before it reports or starts GitBolt again, so the one .NET
+    // call ([IO.File]::Open, the in-use check) is in a try. With ASCII
+    // inputs both scripts are ASCII, so every reason fits the ASCII result.
     void windowsScriptsRunInConstrainedLanguage() {
         const QString script = windowsHelperScript(windowsInputs());
         const QString elevated = windowsElevatedScript(windowsInputs());
@@ -1507,9 +1418,7 @@ private slots:
                 QCOMPARE(lines.at(i + 1).trimmed(), QStringLiteral("} catch {"));
             }
         }
-        // The rest by cmdlets: Get-Process, Start-Process, Set-Content,
-        // Out-File, Test-Path, Get-Item, Remove-Item, Start-Sleep,
-        // Get-Random, Write-Warning.
+        // The rest is cmdlets; the log's is Out-File, never Add-Content.
         for (const QString& text : {script, elevated}) {
             QVERIFY(text.contains(QLatin1String(
                 "Out-File -LiteralPath $log -Append -Encoding UTF8 -NoNewline -InputObject $script:logPending")));
@@ -1517,19 +1426,11 @@ private slots:
         }
     }
 
-    // Both parts log through the one Write-Log, windowsScriptPreamble's,
-    // which the windowsLog* tests below run for real: Out-File, never
-    // Add-Content (in Windows PowerShell 5.1 an Add-Content whose open
-    // met another handle could leave the log open behind it, refusing
-    // both parts' later lines: CI lost two that way); a refused line
-    // tried again, at random intervals, for at most
-    // kWindowsLogPatienceSeconds (then no wait at all until a line goes
-    // in again), and kept for the next Write-Log rather than dropped,
-    // with the time it was logged. Each part ends with Write-Log ''
-    // (whatever is still kept, with the full patience however the last
-    // wait went): the administrator part before its result, which the
-    // helper waits for, and after it (what Write-Result logged), and the
-    // helper before it gives up and at its very end.
+    // Both parts use windowsScriptPreamble's one Write-Log (run for real
+    // by the windowsLog* tests): Out-File, never Add-Content
+    // (PowerShell#27947). Each part flushes what is kept with
+    // Write-Log '': the administrator part before and after its result,
+    // the helper when it gives up and at its very end.
     void windowsScriptsShareOneWriteLog() {
         const HelperInputs in = windowsInputs();
         const QString elevated = windowsElevatedScript(in);
@@ -1571,8 +1472,8 @@ private slots:
             QVERIFY2(text.contains(writeLog), qPrintable(text));
             QCOMPARE(text.count(QLatin1String("function Write-Log(")), 1);
             QCOMPARE(text.count(QLatin1String("Out-File")), 1);
-            // The result alone goes through Set-Content (its only writer
-            // at a time, read only after it is there).
+            // Only the result uses Set-Content: it has one writer at a
+            // time and is read only once it is there.
             QCOMPARE(text.count(QLatin1String("Set-Content")), 1);
             QVERIFY(text.contains(QLatin1String("        Set-Content -LiteralPath $result ")));
         }
@@ -1589,12 +1490,10 @@ private slots:
         QVERIFY(script.endsWith(QLatin1String("\n}\nWrite-Log ''\n")));
     }
 
-    // CreateProcess takes 32767 characters, the program included, and
-    // so does ShellExecuteExW's elevated launch: both command lines (the
-    // helper's, CreateProcess; the administrator part's, "<file>"
-    // <parameters>) stay within it even with long paths, quotes in them
-    // (doubled) and all. (A path too long for this makes the launch
-    // fail while GitBolt runs; nothing would be installed.)
+    // Both command lines (the helper's for CreateProcess, the
+    // administrator part's for ShellExecuteExW) stay under the
+    // 32767-character limit, the program included, even with long paths
+    // full of (doubled) quotes.
     void windowsCommandLinesFitWithLongPaths() {
         const QString longName = QStringLiteral("Bob's \u2018quoted\u2019 folder ").repeated(8).left(220);
         HelperInputs in = windowsInputs();
@@ -1667,22 +1566,12 @@ private slots:
     // Windows, for real: Write-Log (every run there)
     // ---------------------------------------------------------------
 
-    // The Write-Log both Windows parts share (windowsScriptPreamble), run
-    // for real by three powershell.exe at once on one install.log, as
-    // both parts append to theirs, one of them in Constrained Language
-    // mode. First the log is busy for 1.5 s, held as Windows PowerShell
-    // 5.1's Add-Content left it once its open had met another's (CI lost
-    // two lines so: the Write-Log before this one tried 5 times in half a
-    // second and dropped the line): every writer's first line waits and
-    // goes in. Then they all write at once, into each other: every line
-    // is there exactly once, whole, in its writer's order, and no
-    // Write-Log took more than 1.5 s past its patience.
-    //
-    // Every wait in these two tests stays well inside ctest's 60 s a
-    // function (QTEST_FUNCTION_TIMEOUT), about 47 s at the very worst, so
-    // that a writer that hangs or dies fails a QVERIFY2, with every
-    // writer's output, and the guard still stops the others; the
-    // writers' own wait for the go is 40 s.
+    // Three powershell.exe (one in Constrained Language mode) write to one
+    // log, held busy for 1.5 s as the leaked Add-Content handle held it:
+    // every line goes in once, whole and in order, and no Write-Log takes
+    // over 1.5 s past its patience. Each test's waits add up to under
+    // ctest's 60 s per function, so a hang fails a QVERIFY2 with the
+    // writers' output and the guard stops the rest.
     void windowsLogKeepsEveryLineOfWritersAtOnce() {
 #if !defined(Q_OS_WIN)
         QSKIP("Windows only: runs Windows PowerShell");
@@ -1706,15 +1595,10 @@ private slots:
             stopWriters(writers);
         });
 
-        // Each one warms up (its cmdlets loaded, on a log of its own),
-        // says it is ready (and in which language mode: whether a .NET
-        // call was refused), then waits for the go, so that all of them
-        // start writing together, into the busy log. Warm on purpose:
-        // so that what their first lines meet is the held log, not
-        // their own start. Two cold first lines meeting, as on CI (where
-        // the helper's first line and, about 2 s later, the administrator
-        // part's give-up line were lost), are the real-install test's
-        // (windowsHelperUpdatesARealInstall, case 1).
+        // Each writer warms up on a log of its own, so that its first real
+        // line meets the held log, not its own slow start; then it says it
+        // is ready, and in which language mode, and waits for the go. (Two
+        // cold first lines meeting is the real-install test's case 1.)
         for (int i = 1; i <= kWriters; ++i) {
             const QString body =
                 QStringLiteral("$ready = %1\n"
@@ -1809,12 +1693,9 @@ private slots:
 #endif
     }
 
-    // A log that stays busy past Write-Log's patience costs a part that
-    // much for its lines, not that much a line, and none of them if it
-    // is free before the part's last flush: the first Write-Log waits
-    // kWindowsLogPatienceSeconds and no longer, the next one tries once,
-    // and both lines are kept, to go in, in order, with the next one
-    // once the log is free.
+    // Only the first Write-Log into a log that stays busy waits
+    // kWindowsLogPatienceSeconds; the next tries once. Both lines are
+    // kept and go in, in order, with the next one once the log is free.
     void windowsLogWaitsOnlySoLongAndKeepsWhatItCouldntWrite() {
 #if !defined(Q_OS_WIN)
         QSKIP("Windows only: runs Windows PowerShell");
@@ -1895,30 +1776,12 @@ private slots:
     // Windows, for real (opt-in)
     // ---------------------------------------------------------------
 
-    // A whole Windows update of a real install, which only CI's NSIS
-    // smoke test has: it installs the installer it just built, then
-    // names both (GITBOLT_TEST_NSIS_INSTALLER, GITBOLT_TEST_NSIS_DIR)
-    // and runs this function alone. The folder must be what
-    // detectPackage calls a WindowsInstall (the registry naming it, as
-    // currentProbe reads it), and the installer must have the name the
-    // updater downloads. Both parts are started by the very function
-    // Installer::launchHelper uses, launchWindowsUpdate: the
-    // administrator part by ShellExecuteExW runas (the hosted runner
-    // has UAC off, so it is granted with no prompt; a No can't be
-    // tried here), then the helper, hidden and detached, for a
-    // stand-in GitBolt they must wait for. Given 2 seconds, the
-    // administrator part gives up while that still runs, deletes the
-    // installer and says so in the install result, and the helper
-    // starts nothing. With another GitBolt running from the install
-    // folder, the administrator part waits kWindowsInUseSeconds and
-    // installs nothing: failed, and the helper starts the old copy.
-    // With the folder free, both wait for the stand-in; once that is
-    // gone, the installer runs elevated over the folder and exits 0,
-    // GitBolt.exe has the new version, the result is ok, and the
-    // helper starts the installed GitBolt.exe again, which shows its
-    // window. Every GitBolt.exe started here is a test session (an
-    // instance name of its own, so it sends and checks nothing and
-    // can't hand off to another GitBolt); the test closes them.
+    // A whole Windows update of a real install. Opt-in: CI's NSIS smoke
+    // test installs the installer it built, names both
+    // (GITBOLT_TEST_NSIS_INSTALLER, GITBOLT_TEST_NSIS_DIR) and runs this
+    // alone. launchWindowsUpdate starts both parts as GitBolt does (the
+    // hosted runner has UAC off, so runas is granted with no prompt) for
+    // a stand-in GitBolt; the test closes every GitBolt.exe it starts.
     void windowsHelperUpdatesARealInstall() {
 #if !defined(Q_OS_WIN)
         QSKIP("Windows only: runs a real NSIS installer");
@@ -1942,9 +1805,8 @@ private slots:
         QVERIFY2(QFileInfo(app).isFile(), qPrintable(app));
         QVERIFY2(processesOf(app).isEmpty(), qPrintable(app + QStringLiteral(" is running already")));
 
-        // The installer where the Downloader leaves it,
-        // <updates>/<version>/<asset name>: a copy, since a part that
-        // gives up deletes it.
+        // A copy of the installer where the Downloader leaves it,
+        // <updates>/<version>/<asset name> (giving up deletes it).
         const QString fileName = QFileInfo(installer).fileName();
         static const QRegularExpression named(QStringLiteral("^GitBolt-([0-9.]+)-"));
         const std::optional<Version> version = Version::parse(named.match(fileName).captured(1));
@@ -1954,8 +1816,7 @@ private slots:
         QVERIFY(QDir().mkpath(QFileInfo(staged).path()));
         QVERIFY(QFile::copy(installer, staged));
 
-        // GitBolt, still running when both parts start: a stand-in the
-        // test ends when GitBolt would quit.
+        // A stand-in for GitBolt, ended when GitBolt would quit.
         const auto startStandIn = [this] {
             waited_ = std::make_unique<QProcess>();
             waited_->start(windowsPowerShell(), {QStringLiteral("-NoProfile"), QStringLiteral("-NonInteractive"),
@@ -1965,9 +1826,9 @@ private slots:
         qint64 gitBoltPid = startStandIn();
         QVERIFY(gitBoltPid > 0);
 
-        // The helper passes its environment on to the GitBolt it starts:
-        // a test session's, without this run's Qt settings (the install
-        // has no offscreen plugin) and with a temporary folder of its own.
+        // What the helper hands to the GitBolt it starts: an instance name
+        // of its own, no telemetry or update check, none of this run's Qt
+        // settings (the install has no offscreen plugin), its own TEMP.
         QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
         for (const QString& name :
              {QStringLiteral("QT_QPA_PLATFORM"), QStringLiteral("QT_PLUGIN_PATH"), QStringLiteral("QML2_IMPORT_PATH"),
@@ -1993,9 +1854,8 @@ private slots:
                 for (const DWORD running : processesOf(program))
                     endProcess(running);
         });
-        // Both parts, started by launchWindowsUpdate as
-        // Installer::launchHelper starts them, on a fresh log and with no
-        // result yet.
+        // Starts both parts as Installer::launchHelper does, with a fresh
+        // log and no result.
         const auto launch = [&](int waitSeconds) {
             HelperInputs in;
             in.pid = gitBoltPid;
@@ -2017,8 +1877,8 @@ private slots:
                 parts.append(launched.helperPid);
             return launched;
         };
-        // Started, both of them, each with its pid known (the helper
-        // watches the administrator part's).
+        // Both started, each pid known (the helper watches the
+        // administrator part's).
         const auto bothStarted = [](const WindowsLaunch& launched) {
             return launched.outcome == WindowsLaunch::Outcome::Started && launched.error.isEmpty()
                    && launched.elevatedPid > 0 && launched.helperPid > 0;
@@ -2034,8 +1894,8 @@ private slots:
             return lines.isEmpty() ? QString() : lines.constLast().trimmed();
         };
         const QString startingApp = QStringLiteral(" starting ") + app;
-        // The helper's end: its last line "starting <app>" (or why that
-        // failed), then the process gone. False if it isn't, in time.
+        // Waits for the helper's last line, "starting <app>" (or why that
+        // failed), then for it to exit. False if it doesn't, in time.
         const auto finishes = [&](qint64 pid, int timeoutMs) {
             const QDeadlineTimer deadline(timeoutMs);
             while (!lastLine().endsWith(startingApp) && !lastLine().contains(QLatin1String("could not start"))
@@ -2079,16 +1939,14 @@ private slots:
                 timeoutMs);
         };
 
-        // 1. GitBolt doesn't quit in time: the administrator part gives
-        // up, deletes the download and installs nothing; the helper,
-        // a little later, starts nothing.
+        // 1. GitBolt doesn't quit in time: the administrator part gives up
+        // and deletes the download; the helper starts nothing.
         const WindowsLaunch givingUp = launch(2);
         QVERIFY2(bothStarted(givingUp), qPrintable(givingUp.error + QLatin1Char('\n') + diagnostics()));
         QVERIFY2(ended(givingUp.elevatedPid, 60000),
                  qPrintable(QStringLiteral("the administrator part didn't give up\n") + diagnostics()));
-        // Its result, written before its last flush of the log: the
-        // helper, which would write the same words, can't for another
-        // kWindowsHelperExtraSeconds.
+        // The administrator part's result: the helper writes none until
+        // kWindowsHelperExtraSeconds after that part gave up.
         QVERIFY2(QFileInfo::exists(result()),
                  qPrintable(QStringLiteral("the administrator part wrote no result\n") + diagnostics()));
         QVERIFY2(ended(givingUp.helperPid, (2 + kWindowsHelperExtraSeconds + 60) * 1000),
@@ -2108,11 +1966,9 @@ private slots:
         QVERIFY(processesOf(app).isEmpty());
         QCOMPARE(waited_->state(), QProcess::Running);
 
-        // 2. Another GitBolt runs from the install folder (another
-        // user's, or one reopened meanwhile): once the stand-in quits,
-        // the administrator part waits for it, gives up, and installs
-        // nothing; the helper starts the old copy again, and the result
-        // says why.
+        // 2. Another GitBolt runs from the install folder (another user's,
+        // or one reopened meanwhile): nothing is installed, the result says
+        // why, and the helper starts the old copy again.
         QProcessEnvironment otherEnv = env;
         otherEnv.insert(QStringLiteral("GITBOLT_INSTANCE_NAME"), kInstance + QStringLiteral("-nsis-other"));
         QProcess other;
@@ -2157,8 +2013,7 @@ private slots:
         QVERIFY(gitbolt::test::processAlive(clean.helperPid));
         QVERIFY(!QFileInfo::exists(result()));
 
-        // GitBolt quits. The log's last line, once the installer is done:
-        // "starting <app>", or, after it, why that failed.
+        // GitBolt quits.
         quitWaited();
         QVERIFY2(finishes(clean.helperPid, 4 * 60 * 1000),
                  qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
@@ -2169,18 +2024,16 @@ private slots:
                  qPrintable(diagnostics()));
         QVERIFY2(story.contains(QStringLiteral(" running ") + QDir::toNativeSeparators(staged)),
                  qPrintable(diagnostics()));
-        // 0: the installer's exit code was 0, and GitBolt.exe's
-        // ProductVersion is now the installer's.
+        // Exit code 0, and GitBolt.exe's ProductVersion is the installer's.
         QVERIFY2(story.contains(QStringLiteral(" the installer exited with code 0, and GitBolt.exe is now version %1")
                                     .arg(version->toString())),
                  qPrintable(diagnostics()));
         QCOMPARE(readFile(result()), QStringLiteral("ok %1 \n").arg(version->toString()));
         QVERIFY2(lastLine().endsWith(startingApp), qPrintable(diagnostics()));
 
-        // The installed GitBolt runs again and shows a window, so it got
-        // past loading its DLLs and Qt's platform plugin, and past the
-        // single-instance check (a copy that handed off would exit
-        // without one).
+        // The relaunched GitBolt shows a window: it got past its DLLs, Qt's
+        // platform plugin and the single-instance check (a copy that handed
+        // off would exit without one).
         const DWORD relaunched = shownGitBolt(0, 60000);
         QVERIFY2(relaunched != 0,
                  qPrintable(QStringLiteral("after a minute, %1 copies of %2 run and none shows a window\n")
