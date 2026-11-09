@@ -40,6 +40,11 @@ constexpr char kNoticesLink[] = "#third-party-notices";
 constexpr char kAboutQtLink[] = "#about-qt";
 constexpr char kNoticesWebUrl[] = "https://github.com/Inverian/GitBolt/tree/main/resources/licenses";
 
+// The link labels' flags: Tab reaches each link (on macOS too, without
+// Full Keyboard Access) and Enter opens it.
+constexpr Qt::TextInteractionFlags kKeyboardLinks =
+    Qt::LinksAccessibleByMouse | Qt::LinksAccessibleByKeyboard;
+
 QString compilerString() {
 #if defined(__clang__)
     // Apple Clang reports itself as Apple LLVM; vanilla clang reports
@@ -269,6 +274,7 @@ void AboutDialog::setupUi()
     licenseLabel_ = new QLabel(this);
     licenseLabel_->setTextFormat(Qt::RichText);
     licenseLabel_->setWordWrap(true);
+    licenseLabel_->setTextInteractionFlags(kKeyboardLinks);
     connect(licenseLabel_, &QLabel::linkActivated, this, &AboutDialog::openLink);
     const QString noticesHref = noticesPath_.isEmpty()
         ? QString::fromLatin1(kNoticesWebUrl) : QString::fromLatin1(kNoticesLink);
@@ -293,6 +299,7 @@ void AboutDialog::setupUi()
 
     linksLabel_ = new QLabel(this);
     linksLabel_->setTextFormat(Qt::RichText);
+    linksLabel_->setTextInteractionFlags(kKeyboardLinks);
     linksLabel_->setOpenExternalLinks(true);
     linksLabel_->setText(tr(
         "<p style='font-size:9pt;'>"

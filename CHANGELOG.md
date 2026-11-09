@@ -4,14 +4,28 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
-## [Unreleased]
+## [0.9.12] — 2026-11-09
 
 ### Changed
 
-- Help › Check for updates is greyed out in builds that don't check
-  for updates (built from source, forks, distribution packages)
-  instead of opening the releases page, and Help › About GitBolt
-  links to the releases page.
+- Help › Check for updates (on macOS also GitBolt › Check for
+  Updates…) is greyed out in builds without in-app updates (built
+  from source, forks, distribution packages) instead of opening the
+  releases page. Help › About GitBolt now links to the releases page,
+  in every build.
+
+### Fixed
+
+- Windows: lines could go missing from the installer's log
+  (install.log), which the update window shows when an update doesn't
+  install. When the part of an update that runs as administrator and
+  the part that starts GitBolt again wrote to it at the same moment,
+  later lines could be dropped. Now a part that finds the log busy
+  waits its turn, and keeps a line it still can't write for its next
+  write. This applies to updates that 0.9.12 or later installs; the
+  update to 0.9.12 itself is still run by the version it replaces.
+- The links in Help › About GitBolt can be reached with the Tab key
+  and opened with Enter.
 
 ## [0.9.11] — 2026-11-07
 

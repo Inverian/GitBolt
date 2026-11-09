@@ -15,7 +15,8 @@
 // And it carries the notices the LGPL asks of an app that shows copyright
 // notices (LGPL-3.0 4(c) for Qt, LGPL-2.1 section 6 for the LibXDiff in
 // libgit2), with links to the licence texts GitBolt's package installs
-// and to About Qt, and a link to the releases page.
+// and to About Qt, and a link to the releases page. Its links work from
+// the keyboard.
 //
 
 #include <QApplication>
@@ -63,6 +64,15 @@ QStringList clippedLabels(const AboutDialog& dlg) {
 QLabel* noticeLabel(const AboutDialog& dlg) {
     for (QLabel* label : dlg.findChildren<QLabel*>()) {
         if (label->text().contains(QStringLiteral("LibXDiff")))
+            return label;
+    }
+    return nullptr;
+}
+
+// The label with the links row (Website, Releases, ...).
+QLabel* linksLabel(const AboutDialog& dlg) {
+    for (QLabel* label : dlg.findChildren<QLabel*>()) {
+        if (label->text().contains(QStringLiteral(">Releases</a>")))
             return label;
     }
     return nullptr;
@@ -285,6 +295,34 @@ private slots:
                 found << label->text();
         }
         QCOMPARE(found.size(), 1);
+    }
+
+    // Tab reaches both link labels and Enter opens the link it is on, so
+    // the releases page and the licences work without a mouse.
+    void linksOpenFromTheKeyboard() {
+        UrlCatcher catcher;
+        AboutDialog dlg;
+        dlg.show();
+        dlg.activateWindow();
+        QVERIFY(QTest::qWaitForWindowActive(&dlg));
+        QLabel* notices = noticeLabel(dlg);
+        QLabel* links = linksLabel(dlg);
+        QVERIFY(notices && links);
+
+        // Tab through the dialog; on each link of the row, Enter opens it.
+        const QUrl releases(QStringLiteral("https://github.com/Inverian/GitBolt/releases"));
+        QList<QWidget*> reached;
+        for (int i = 0; i < 60 && !catcher.urls.contains(releases); ++i) {
+            QWidget* before = QApplication::focusWidget();
+            QTest::keyClick(before ? before : static_cast<QWidget*>(&dlg), Qt::Key_Tab);
+            reached << QApplication::focusWidget();
+            if (before == links && reached.last() == links)   // on a link, not just arrived
+                QTest::keyClick(links, Qt::Key_Return);
+        }
+        QVERIFY(reached.contains(notices));
+        QCOMPARE(catcher.urls,
+                 (QList<QUrl>{QUrl(QStringLiteral("https://www.gitbolt.com")), releases}));
+        QVERIFY(dlg.isVisible());   // Enter opened the link, not Close
     }
 
     // About Qt shows Qt's own box, with its version and licences.
