@@ -8,15 +8,15 @@ build (src/ui/UpdateSetup.h). Three launches:
 1. No GITBOLT_TEST_UPDATE_FEED: in-app updates are absent. dump-state's
    `updates` is "off:test-session"; there is no updateCheckTimer to
    fire; Settings' Updates page (GitBolt's seventh, row 0/6) stays
-   hidden, and selecting its row shows no switch. Help › Check for
-   Updates would open the releases page in the browser, so it isn't
-   triggered here (tests/ui/TestUpdateController.cpp catches that URL).
+   hidden, and selecting its row shows no switch; Help › Check for
+   Updates is greyed out.
 2. A test feed that isn't plain http to 127.0.0.1: GitHub's own feed,
    then localhost. Refused ("off:test-feed-refused"), absent as above.
 3. A loopback stub feed, with GITBOLT_UPDATE_CHECK=0: on against the
    stub ("test-feed"), yet nothing is scheduled: the timer exists but
    doesn't run, and the stub hears nothing while the app sits there.
-   The Updates page is shown, its switch disabled by the variable.
+   Check for Updates is enabled; the Updates page is shown, its switch
+   disabled by the variable.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from update_stub import UpdateFeed  # noqa: E402
 
 UPDATES_ROW = "0/6"
 SWITCH = "settings.check-for-updates"
+CHECK = "help.check-for-updates"
 
 
 def settings_switch(app: App) -> dict | None:
@@ -59,6 +60,8 @@ def expect_absent(app: App, gate: str) -> None:
         raise Failure(f"fire-timer updateCheckTimer worked with updates off: {reply}")
     if settings_switch(app) is not None:
         raise Failure("Settings shows the Updates page with updates off")
+    if app.action_enabled(CHECK):
+        raise Failure("Help › Check for Updates is enabled with updates off")
 
 
 def test(binary: str, scratch: str, apps: list) -> None:
@@ -99,6 +102,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
             raise Failure(f"updates gate {state.get('updates')!r} with a loopback feed")
         if state.get("updateTimerActive") is not False:
             raise Failure(f"the update check timer runs in a test session: {state}")
+        if not app.action_enabled(CHECK):
+            raise Failure("Help › Check for Updates is greyed out with the test feed on")
         switch = settings_switch(app)
         if switch is None:
             raise Failure("no Updates page with the test feed on")

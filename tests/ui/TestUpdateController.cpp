@@ -44,11 +44,11 @@
 //     doesn't quit, the dialog says how to install it by hand, and
 //     after a No, Try Again asks again for the same checked download;
 //   - MainWindow: without the in-app check (a source build, or a test
-//     session with no test feed) Help › Check for Updates opens the
-//     releases page; with it, it asks the feed; on macOS the
-//     application menu's About GitBolt and Check for Updates… have
-//     their roles as they join their placeholder menu, which then
-//     doesn't show in the menu bar.
+//     session with no test feed) both Check for Updates items are
+//     greyed out; with it, they ask the feed; on macOS the application
+//     menu's About GitBolt and Check for Updates… have their roles as
+//     they join their placeholder menu, which then doesn't show in the
+//     menu bar.
 //
 
 #include <QAbstractButton>
@@ -66,6 +66,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QProcess>
 #include <QPushButton>
 #include <QScopeGuard>
@@ -122,6 +123,40 @@ public:
     QList<QUrl> urls;
 public slots:
     void open(const QUrl& url) { urls << url; }
+};
+
+// The items a MainWindow puts in the macOS application menu, caught as
+// they join it, with their role then. That menu bar outlives each
+// window, so searching it would also find earlier windows' items.
+class AppMenuWatcher : public QObject {
+public:
+    struct Joined {
+        QPointer<QAction> action;
+        QString text;
+        QAction::MenuRole role;
+    };
+    AppMenuWatcher() { qApp->installEventFilter(this); }
+    ~AppMenuWatcher() override { qApp->removeEventFilter(this); }
+    QAction* named(const QString& name) const {
+        for (const Joined& item : joined) {
+            if (item.action && item.action->objectName() == name)
+                return item.action;
+        }
+        return nullptr;
+    }
+    QList<Joined> joined;
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::ActionAdded) {
+            auto* menu = qobject_cast<QMenu*>(watched);
+            auto* bar = menu ? qobject_cast<QMenuBar*>(menu->parentWidget()) : nullptr;
+            if (bar && !bar->parentWidget()) {
+                QAction* action = static_cast<QActionEvent*>(event)->action();
+                joined.append({action, action->text(), action->menuRole()});
+            }
+        }
+        return false;
+    }
 };
 
 // A release as GitHub's releases/latest has it, its assets on `server`,
@@ -1351,31 +1386,40 @@ private slots:
         QVERIFY(!window.findChild<UpdateDialog*>());
     }
 
-    void withoutTheCheckTheMenuOpensTheReleasesPage_data() {
-        QTest::addColumn<bool>("testSession");
-        QTest::newRow("source build") << false;
-        QTest::newRow("test session without a test feed") << true;
+    // Without the in-app check, both Check for Updates items are greyed
+    // out: nothing is asked or opened, and no folder is made.
+    void withoutTheCheckTheMenuIsGreyedOut_data() {
+        QTest::addColumn<int>("kind");
+        QTest::newRow("never set up") << 0;
+        QTest::newRow("source build") << 1;
+        QTest::newRow("test session without a test feed") << 2;
     }
-    void withoutTheCheckTheMenuOpensTheReleasesPage() {
-        QFETCH(bool, testSession);
+    void withoutTheCheckTheMenuIsGreyedOut() {
+        QFETCH(int, kind);
         UrlCatcher catcher;
+        AppMenuWatcher appMenu;
         gitbolt::ui::MainWindow window;
-        if (testSession) {
+        if (kind > 0) {
             gitbolt::ui::UpdateSetupInputs inputs;
-            inputs.testSession = gitbolt::util::TestSessionKind::Bridge;
+            if (kind == 2)
+                inputs.testSession = gitbolt::util::TestSessionKind::Bridge;
             inputs.appVersion = QStringLiteral("0.1.0");
             inputs.cacheDir = cache_->path();
             inputs.tempDir = cache_->path();
             window.setUpdates(gitbolt::ui::setUpUpdates(inputs));
-            QCOMPARE(window.updateGate(), UpdateGate::TestSession);
-        } else {
-            QCOMPARE(window.updateGate(), UpdateGate::CompiledOut);
         }
+        QCOMPARE(window.updateGate(), kind == 2 ? UpdateGate::TestSession : UpdateGate::CompiledOut);
         window.startUpdates();
         auto* action = window.findChild<QAction*>(QStringLiteral("help.check-for-updates"));
         QVERIFY(action);
-        action->trigger();
-        QCOMPARE(catcher.urls, QList<QUrl>{QUrl(QStringLiteral("https://github.com/Inverian/GitBolt/releases"))});
+        QVERIFY(!action->isEnabled());
+#ifdef Q_OS_MACOS
+        QAction* appMenuAction = appMenu.named(QStringLiteral("help.check-for-updates-app-menu"));
+        QVERIFY(appMenuAction);
+        QVERIFY(!appMenuAction->isEnabled());
+#endif
+        action->trigger();   // ignored while disabled
+        QVERIFY(catcher.urls.isEmpty());
         QVERIFY(!window.findChild<UpdateDialog*>());
         QVERIFY(!window.findChild<QTimer*>(QStringLiteral("updateCheckTimer")));
         QVERIFY(!QDir(cache_->path()).exists(QStringLiteral("updates")));
@@ -1389,9 +1433,15 @@ private slots:
         HttpServer server;
         serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
         UrlCatcher catcher;
+        AppMenuWatcher appMenu;
         gitbolt::ui::MainWindow window;
         window.setUpdates(testSetup(server, cache_->path()));
         QCOMPARE(window.updateGate(), UpdateGate::TestFeed);
+        QVERIFY(window.findChild<QAction*>(QStringLiteral("help.check-for-updates"))->isEnabled());
+#ifdef Q_OS_MACOS
+        QAction* appMenuAction = appMenu.named(QStringLiteral("help.check-for-updates-app-menu"));
+        QVERIFY(appMenuAction && appMenuAction->isEnabled());
+#endif
         // The bar sits above the views, hidden until there's news.
         auto* bar = window.findChild<UpdateNoticeBar*>(QStringLiteral("updateNotice"));
         QVERIFY(bar && bar->isHidden());
@@ -1421,55 +1471,26 @@ private slots:
 #ifndef Q_OS_MACOS
         QSKIP("macOS: the application menu");
 #else
-        struct Joined {
-            QString text;
-            QAction::MenuRole role;
-        };
-        class Watcher : public QObject {
-        public:
-            QList<Joined> joined;
-        protected:
-            bool eventFilter(QObject* watched, QEvent* event) override {
-                if (event->type() == QEvent::ActionAdded) {
-                    auto* menu = qobject_cast<QMenu*>(watched);
-                    auto* bar = menu ? qobject_cast<QMenuBar*>(menu->parentWidget()) : nullptr;
-                    if (bar && !bar->parentWidget()) {
-                        const QAction* action = static_cast<QActionEvent*>(event)->action();
-                        joined.append({action->text(), action->menuRole()});
-                    }
-                }
-                return false;
-            }
-        } watcher;
-        qApp->installEventFilter(&watcher);
+        AppMenuWatcher watcher;
         {
             gitbolt::ui::MainWindow window;
         }
-        qApp->removeEventFilter(&watcher);
 
         QStringList texts;
-        for (const Joined& item : std::as_const(watcher.joined)) {
+        for (const AppMenuWatcher::Joined& item : std::as_const(watcher.joined)) {
             texts << item.text;
             const bool guessed = item.role == QAction::TextHeuristicRole && item.text.startsWith(QLatin1String("About "));
             QVERIFY2(guessed || (item.role != QAction::TextHeuristicRole && item.role != QAction::NoRole),
                      qPrintable(item.text));
         }
         QCOMPARE(texts, (QStringList{QStringLiteral("About GitBolt"), QStringLiteral("Check for Updates…")}));
-        // Both are named for the bridge, and do what they say.
-        QAction* about = nullptr;
-        QAction* check = nullptr;
-        for (QWidget* widget : QApplication::topLevelWidgets()) {
-            if (auto* bar = qobject_cast<QMenuBar*>(widget); bar && !bar->parentWidget()) {
-                for (QAction* action : bar->findChildren<QAction*>()) {
-                    if (action->objectName() == QLatin1String("app.about"))
-                        about = action;
-                    else if (action->objectName() == QLatin1String("help.check-for-updates-app-menu"))
-                        check = action;
-                }
-            }
-        }
+        // Both are named for the bridge, with their final roles; Check for
+        // Updates… is greyed out, as the window never had updates on.
+        QAction* about = watcher.named(QStringLiteral("app.about"));
+        QAction* check = watcher.named(QStringLiteral("help.check-for-updates-app-menu"));
         QVERIFY(about && about->menuRole() == QAction::AboutRole);
         QVERIFY(check && check->menuRole() == QAction::ApplicationSpecificRole);
+        QVERIFY(!check->isEnabled());
 #endif
     }
 

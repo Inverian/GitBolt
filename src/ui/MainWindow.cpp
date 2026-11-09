@@ -430,8 +430,10 @@ void MainWindow::createMenuBar()
         auto* updateAct = new QAction(tr("Check for Updates…"), appMenu);
         updateAct->setObjectName(QStringLiteral("help.check-for-updates-app-menu"));
         updateAct->setMenuRole(QAction::ApplicationSpecificRole);
+        updateAct->setEnabled(false);   // until setUpdates() turns updates on
         connect(updateAct, &QAction::triggered, this, &MainWindow::checkForUpdates);
         appMenu->addAction(updateAct);
+        updateActions_ << updateAct;
     }
 #endif
     // Each top-level menu is built by its own function — pure
@@ -3986,15 +3988,15 @@ void MainWindow::buildHelpMenu()
         helpMenu->addAction(a);
     }
     {
-        // "Check for updates": the in-app check (UpdateController) in
-        // an official build, the GitHub releases page in the browser
-        // in every other one (checkForUpdates). The objectName is what
-        // usage statistics count, from before the in-app check too.
+        // The in-app check; greyed out until setUpdates() turns updates
+        // on. Usage statistics count it by this objectName.
         auto* a = new QAction(menuIcon(QStringLiteral("update")),
                               tr("&Check for updates"), this);
         a->setObjectName(QStringLiteral("help.check-for-updates"));
+        a->setEnabled(false);
         connect(a, &QAction::triggered, this, &MainWindow::checkForUpdates);
         helpMenu->addAction(a);
+        updateActions_ << a;
     }
     helpMenu->addSeparator();
     auto* aboutMenuAct = new QAction(menuIcon(QStringLiteral("about")),
@@ -5776,12 +5778,16 @@ telemetry::Gate MainWindow::telemetryGate() const
 void MainWindow::setUpdates(const UpdateSetup& setup)
 {
     updateGate_ = setup.gate;
-    if (updates_ || !setup.on())
-        return;   // once only
-    updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
-    // "GitBolt was updated to <v>.", at startup after an update.
-    connect(updates_, &UpdateController::statusMessage, this,
-            [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+    if (!updates_ && setup.on()) {   // once only
+        updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
+        // "GitBolt was updated to <v>.", at startup after an update.
+        connect(updates_, &UpdateController::statusMessage, this,
+                [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+    }
+    for (QAction* action : std::as_const(updateActions_)) {
+        if (action)
+            action->setEnabled(updates_ != nullptr);
+    }
 }
 
 QString MainWindow::updateDownloadDir() const
@@ -5802,14 +5808,8 @@ UpdateGate MainWindow::updateGate() const
 
 void MainWindow::checkForUpdates()
 {
-    if (updates_) {
+    if (updates_)
         updates_->checkNow();
-        return;
-    }
-    // Source, fork and distribution builds: they have no feed, and
-    // their updates are their packager's business.
-    QDesktopServices::openUrl(QUrl(QStringLiteral(
-        "https://github.com/Inverian/GitBolt/releases")));
 }
 
 void MainWindow::instrumentActionsForTelemetry()

@@ -83,7 +83,7 @@ public:
     /// once, before show(). When it is on(), Help › Check for Updates
     /// (and on macOS the app menu's Check for Updates…) asks GitHub, the
     /// notice bar shows automatic finds, and Settings has an Updates
-    /// page; otherwise Check for Updates opens the releases page.
+    /// page; otherwise Check for Updates is greyed out.
     void setUpdates(const UpdateSetup& setup);
     /// Once the window is up, as main() starts telemetry: clears old
     /// downloads and schedules the daily check (UpdateController).
@@ -122,7 +122,7 @@ private:
     /// (util::pathForChildren()).
     void launchGitk(const QString& childPath);
     /// Help › Check for Updates and the macOS app menu's item: the
-    /// in-app check when updates are on, the releases page otherwise.
+    /// in-app check (the items are greyed out when updates are off).
     void checkForUpdates();
     /// Paints the inline toolbar label / status bar / clear-timer
     /// after a fetch-pull-push worker finishes.
@@ -586,6 +586,9 @@ private:
     // In-app updates (setUpdates): null unless they are on.
     UpdateController* updates_ = nullptr;
     UpdateGate updateGate_ = UpdateGate::CompiledOut;
+    // Help › Check for Updates and the macOS app menu's copy: greyed out
+    // unless updates_ is set.
+    QList<QPointer<QAction>> updateActions_;
 };
 
 } // namespace gitbolt::ui

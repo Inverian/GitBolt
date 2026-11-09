@@ -27,8 +27,7 @@ namespace gitbolt::ui {
 ///     updateCheckTimer through the bridge).
 ///   - CompiledOut: not an official build (GITBOLT_UPDATES off, which
 ///     source, fork, pull request and distribution builds are). Help ›
-///     Check for Updates opens the releases page, as it always did, and
-///     Settings has no Updates page.
+///     Check for Updates is greyed out, and Settings has no Updates page.
 ///   - Active: an official build outside a test session.
 /// The test variables are read in a test session only.
 enum class UpdateGate { CompiledOut, TestSession, TestFeedRefused, TestFeed, Active };
@@ -82,8 +81,8 @@ struct UpdateSetup {
     /// empty when there is nothing to say.
     QString problem;
 
-    /// Help › Check for Updates asks the feed, and Settings › Updates
-    /// is shown.
+    /// Help › Check for Updates asks the feed (it's greyed out
+    /// otherwise), and Settings › Updates is shown.
     bool on() const { return gate == UpdateGate::TestFeed || gate == UpdateGate::Active; }
     /// The daily check is scheduled: an official build outside a test
     /// session, not opted out through the environment. (The Settings

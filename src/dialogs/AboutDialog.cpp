@@ -298,6 +298,8 @@ void AboutDialog::setupUi()
         "<p style='font-size:9pt;'>"
         "<a href='https://www.gitbolt.com'>Website</a>"
         " &nbsp;·&nbsp; "
+        "<a href='https://github.com/Inverian/GitBolt/releases'>Releases</a>"
+        " &nbsp;·&nbsp; "
         "<a href='https://github.com/Inverian/GitBolt'>Project repository</a>"
         " &nbsp;·&nbsp; "
         "<a href='https://github.com/Inverian/GitBolt/issues'>Report a bug</a>"

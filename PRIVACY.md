@@ -230,8 +230,9 @@ Sigstore verifier); you can check them yourself with
 Only official builds: GitBolt's releases, and the builds GitBolt's CI
 makes of its `main` branch. A build from source, a fork, a pull
 request or a Linux distribution's package doesn't check: there,
-**Help › Check for updates** opens GitBolt's releases page in your
-browser, and **Tools › Settings** has no **Updates** page.
+**Help › Check for updates** is greyed out (**Help › About** links to
+GitBolt's releases page), and **Tools › Settings** has no **Updates**
+page.
 
 ### How to turn it off
 
