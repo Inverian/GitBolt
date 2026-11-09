@@ -1453,6 +1453,14 @@ private slots:
         QCOMPARE(server.hits(kFeedPath), 1);
         QVERIFY(catcher.urls.isEmpty());
         dialog->reject();
+#ifdef Q_OS_MACOS
+        // The application menu's item asks too.
+        appMenuAction->trigger();
+        QTRY_COMPARE(server.hits(kFeedPath), 2);
+        QTRY_COMPARE(dialog->state(), State::NotInstallable);
+        QVERIFY(catcher.urls.isEmpty());
+        dialog->reject();
+#endif
 
         // The daily check's timer, for the bridge.
         auto* timer = window.findChild<QTimer*>(QStringLiteral("updateCheckTimer"));

@@ -8,10 +8,10 @@ semver once 1.0 lands.
 
 ### Changed
 
-- Help › Check for updates is greyed out in copies that can't update
-  themselves (built from source, forks, distribution packages) instead
-  of opening the releases page, and Help › About links to the releases
-  page.
+- Help › Check for updates is greyed out in builds that don't check
+  for updates (built from source, forks, distribution packages)
+  instead of opening the releases page, and Help › About GitBolt
+  links to the releases page.
 
 ## [0.9.11] — 2026-11-07
 
