@@ -128,15 +128,16 @@ endpoints compiled in. Neither is ever `on` under the bridge
 (`tests/e2e/test_telemetry_inert.py`). Address the Settings switch as
 `settings.usage-statistics`.
 
-In-app updates (`src/update`, `src/ui/UpdateController.h`, PRIVACY.md's
-"Update checks") never reach GitHub from a test session. `dump-state`
-reports `updates`, the gate main() evaluated: `compiled-out` (no
-official feed: any build configured without `GITBOLT_UPDATES=ON`),
-`off:test-session` (a test session without a test feed, even in an
-official build), `off:test-feed-refused` (the test variables below
-didn't pass; the log says why), `test-feed`, and `on` (an official
-build outside a test session; never under the bridge). Two variables,
-read only in a test session, point the updater at a loopback stub
+In-app updates (`src/update`, `src/ui/UpdateController.h`,
+PRIVACY.md's "Update checks") never reach GitHub from a test session.
+`dump-state` reports `updates`, the gate main() evaluated:
+`compiled-out` (a build configured without `GITBOLT_UPDATES=ON`,
+outside a test session, so never under the bridge), `off:test-session`
+(any build in a test session without a test feed),
+`off:test-feed-refused` (the test variables below didn't pass; the log
+says why), `test-feed`, and `on` (an official build outside a test
+session; never under the bridge). Two variables, read only in a test
+session, point the updater at a loopback stub
 (`tests/e2e/update_stub.py`):
 
 - `GITBOLT_TEST_UPDATE_FEED`: the feed URL, plain `http://` to
