@@ -7,8 +7,9 @@
 # (.github/workflows/ci.yml, Configure). OFF, the default, is every
 # source build, fork, pull request and distribution package: their
 # updates are their packager's business, and replacing one with
-# Inverian's installer would be wrong. Help > Check for Updates then
-# opens the releases page, and Settings has no Updates page.
+# Inverian's installer would be wrong. Help > Check for Updates is then
+# greyed out (Help > About links the releases page), and Settings has no
+# Updates page.
 #
 # It becomes GITBOLT_UPDATES_ENABLED on the app target only
 # (src/app/CMakeLists.txt), which is where the feed's address goes into
@@ -44,5 +45,5 @@ _gitbolt_updates_check("${GITBOLT_UPDATES}" "cache")
 if(GITBOLT_UPDATES)
     message(STATUS "In-app updates: on (official feed, GitHub releases of Inverian/GitBolt)")
 else()
-    message(STATUS "In-app updates: off (Help > Check for Updates opens the releases page)")
+    message(STATUS "In-app updates: off (Help > Check for Updates is greyed out)")
 endif()

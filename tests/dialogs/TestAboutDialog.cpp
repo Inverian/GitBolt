@@ -15,7 +15,7 @@
 // And it carries the notices the LGPL asks of an app that shows copyright
 // notices (LGPL-3.0 4(c) for Qt, LGPL-2.1 section 6 for the LibXDiff in
 // libgit2), with links to the licence texts GitBolt's package installs
-// and to About Qt.
+// and to About Qt, and a link to the releases page.
 //
 
 #include <QApplication>
@@ -272,6 +272,19 @@ private slots:
         QVERIFY(label->text().contains(QStringLiteral("<a href='%1'>").arg(license)));
         emit label->linkActivated(license);
         QCOMPARE(catcher.urls, QList<QUrl>{QUrl(license)});
+    }
+
+    // The releases page is linked in every build, as the place to get
+    // GitBolt where Check for Updates is greyed out.
+    void linksTheReleasesPage() {
+        AboutDialog dlg;
+        const QString link = QStringLiteral("<a href='https://github.com/Inverian/GitBolt/releases'>Releases</a>");
+        QStringList found;
+        for (const QLabel* label : dlg.findChildren<QLabel*>()) {
+            if (label->text().contains(link))
+                found << label->text();
+        }
+        QCOMPARE(found.size(), 1);
     }
 
     // About Qt shows Qt's own box, with its version and licences.

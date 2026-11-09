@@ -12,9 +12,9 @@ namespace gitbolt::dialogs {
 /// git GitBolt runs and what is known against it),
 /// license notice, the notices of the software it ships that the LGPL
 /// asks for (Qt's, LibXDiff's), with links to their licence texts and
-/// to About Qt, and clickable links to the project repo,
-/// trademark policy, license text, and privacy policy (what usage
-/// statistics collect).
+/// to About Qt, and clickable links to the website, the releases, the
+/// project repo, trademark policy, license text, and privacy policy
+/// (what usage statistics collect).
 ///
 /// The dialog takes no constructor arguments — everything it displays
 /// is pulled from QApplication metadata, libgit2 runtime APIs, and

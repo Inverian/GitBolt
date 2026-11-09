@@ -294,7 +294,7 @@ jobs:
       # same official builds only. GITBOLT_UPDATES takes its first value
       # from this env var, as the telemetry values do, and ON compiles
       # GITBOLT_UPDATES_ENABLED into the app. Every other build has no
-      # update feed: Help > Check for updates opens the releases page.
+      # update feed: Help > Check for updates is greyed out.
       - name: Configure
         env:
           GITBOLT_TELEMETRY_HOST: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}

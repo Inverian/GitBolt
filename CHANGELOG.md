@@ -4,6 +4,15 @@ All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com); versions follow
 semver once 1.0 lands.
 
+## [Unreleased]
+
+### Changed
+
+- Help › Check for updates is greyed out in builds that don't check
+  for updates (built from source, forks, distribution packages)
+  instead of opening the releases page, and Help › About GitBolt
+  links to the releases page.
+
 ## [0.9.11] — 2026-11-07
 
 ### Added
