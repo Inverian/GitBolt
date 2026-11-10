@@ -101,18 +101,26 @@ void RotatingLog::open() {
     size_ = file_.size();
 }
 
-// <base>.<files-1>.log goes, the others move down one, then a fresh
-// <base>.log. A rename that fails leaves the files as they are, and
-// this session keeps appending: never a retry per line.
+// <base>.log moves aside first: if that fails (Windows: another process
+// has it open), no file has changed and this session keeps appending,
+// never retrying per line. Then the oldest goes, the others move down
+// one, and the newest becomes <base>.1.log. (A leftover aside file is
+// from a rotation cut short; it would block every rename after it.)
 void RotatingLog::rotate() {
     file_.close();
-    QFile::remove(pathOf(files_ - 1));
-    for (int i = files_ - 2; i >= 0; --i) {
-        if (QFile::exists(pathOf(i)) && !QFile::rename(pathOf(i), pathOf(i + 1))) {
-            rotationFailed_ = true;
-            break;
-        }
+    const QString aside = dir_ + QLatin1Char('/') + base_ + QStringLiteral(".rotating.log");
+    QFile::remove(aside);
+    if (!QFile::rename(pathOf(0), aside)) {
+        rotationFailed_ = true;
+        open();
+        return;
     }
+    QFile::remove(pathOf(files_ - 1));
+    for (int i = files_ - 2; i >= 1; --i) {
+        if (QFile::exists(pathOf(i)))
+            QFile::rename(pathOf(i), pathOf(i + 1));
+    }
+    QFile::rename(aside, pathOf(1));
     open();
 }
 

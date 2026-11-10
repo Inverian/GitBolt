@@ -10,8 +10,8 @@
 //     that handler back once it is uninstalled
 //   - a folder name with non-ASCII letters
 //   - a rename that fails (Windows: another GitBolt has the file
-//     open) keeps the session appending, with no retry per line; the
-//     next open rotates
+//     open) keeps the session appending, with no retry per line, and
+//     the older files as they were; the next open rotates
 //   - logDirectory() on each platform
 //
 
@@ -206,15 +206,28 @@ private slots:
     }
 
     // A rename that fails leaves the session appending to the file it
-    // has, past the cap, with no retry per line. The next open rotates.
-    // Windows: another process has the file open (two test sessions
-    // share GitBolt-test.log). Elsewhere: a folder it can't change.
+    // has, past the cap, with no retry per line, and the older files
+    // as they were. The next open rotates. Windows: another process has
+    // the file open (two test sessions share GitBolt-test.log).
+    // Elsewhere: a folder it can't change.
     void aFailedRenameKeepsAppending() {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
         const QString folder = dir.filePath(QStringLiteral("logs"));
+        const auto linesIn = [&](const char* name) {
+            return linesOf(folder + QLatin1Char('/') + QString::fromLatin1(name));
+        };
+        const auto range = [](int from, int to) {
+            QList<QByteArray> lines;
+            for (int i = from; i < to; ++i)
+                lines << numbered(i);
+            return lines;
+        };
+        // Ten 10-byte lines a file: .2 has 0-9, .1 10-19.
         auto log = std::make_unique<RotatingLog>(folder, QStringLiteral("GitBolt"), 100, 3);
-        log->append(numbered(0));
+        for (int i = 0; i < 25; ++i)
+            log->append(numbered(i));
+        QCOMPARE(linesIn("GitBolt.2.log"), range(0, 10));
         {
 #ifdef Q_OS_WIN
             QFile holder(log->filePath());
@@ -226,18 +239,24 @@ private slots:
             if (QFile(folder + QStringLiteral("/probe")).open(QIODevice::WriteOnly))
                 QSKIP("the folder stays writable (root?)");
 #endif
-            for (int i = 1; i < 20; ++i)
+            for (int i = 25; i < 45; ++i)
                 log->append(numbered(i));
         }
-        // Writable again: still no rotation in this session.
-        for (int i = 20; i < 30; ++i)
+        // Released again: still no rotation in this session.
+        for (int i = 45; i < 55; ++i)
             log->append(numbered(i));
-        QCOMPARE(QDir(folder).entryList(QDir::Files),
-                 QStringList{QStringLiteral("GitBolt.log")});
-        QCOMPARE(linesOf(folder + QStringLiteral("/GitBolt.log")).size(), 30);
+        QCOMPARE(QDir(folder).entryList(QDir::Files, QDir::Name),
+                 (QStringList{QStringLiteral("GitBolt.1.log"), QStringLiteral("GitBolt.2.log"),
+                              QStringLiteral("GitBolt.log")}));
+        QCOMPARE(linesIn("GitBolt.2.log"), range(0, 10));
+        QCOMPARE(linesIn("GitBolt.1.log"), range(10, 20));
+        QCOMPARE(linesIn("GitBolt.log"), range(20, 55));
 
+        // The next session's log: this one has closed its file first.
+        log.reset();
         log = std::make_unique<RotatingLog>(folder, QStringLiteral("GitBolt"), 100, 3);
-        QCOMPARE(linesOf(folder + QStringLiteral("/GitBolt.1.log")).size(), 30);
+        QCOMPARE(linesIn("GitBolt.2.log"), range(10, 20));
+        QCOMPARE(linesIn("GitBolt.1.log"), range(20, 55));
         log->append("next session");
         QCOMPARE(linesOf(log->filePath()), QList<QByteArray>{QByteArray("next session")});
     }
