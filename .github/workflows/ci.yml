@@ -14,6 +14,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      os:
+        description: 'The build leg to run: all, or one runner image'
+        type: choice
+        options: [all, macos-latest, ubuntu-24.04, windows-latest]
+        default: all
+      tests:
+        description: 'Only the tests matching this ctest -R regex (empty: all)'
+        type: string
+        default: ''
 
 # Read-only for every job; only the release job raises contents to write.
 permissions:
@@ -36,7 +46,9 @@ jobs:
     strategy:
       fail-fast: false  # Don't cancel other jobs if one platform fails
       matrix:
-        os: [macos-latest, ubuntu-24.04, windows-latest]
+        # One leg when a dry run asks for it (the os input; push and
+        # pull_request have no inputs, so they run all three).
+        os: ${{ fromJSON(inputs.os && inputs.os != 'all' && format('["{0}"]', inputs.os) || '["macos-latest", "ubuntu-24.04", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     # Default is 360 min. A hung step (hdiutil, an installer) on the
     # 10x-priced macOS runner would burn a Free plan's monthly minutes.
@@ -441,12 +453,18 @@ jobs:
           }
 
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
-      # platform, and the Linux runners have no display server.
+      # platform, and the Linux runners have no display server. The e2e
+      # tests run on every leg, Windows' included. CTEST_ONLY: a dry
+      # run's tests input, a ctest -R regex, kept out of the script text.
       - name: Test
         id: test
+        shell: pwsh
         env:
           QT_QPA_PLATFORM: offscreen
-        run: ctest --test-dir build --output-on-failure
+          CTEST_ONLY: ${{ inputs.tests }}
+        run: |
+          $only = if ($env:CTEST_ONLY) { @('-R', $env:CTEST_ONLY) } else { @() }
+          ctest --test-dir build --output-on-failure @only
 
       # Folders opened through LaunchServices, as Finder and the Dock send
       # them, to the real cocoa app (tests/e2e/test_launchservices_open.py):
@@ -750,60 +768,122 @@ jobs:
           [ "$fail" = 0 ] && echo "DMG smoke test passed"
           exit "$fail"
 
-      # The DMG updates itself in place, end to end
-      # (tests/e2e/test_update_install.py). The test copies the DMG's
-      # GitBolt.app into a scratch Applications folder and runs it as
-      # 0.1.0 against a loopback feed that offers this DMG, then clicks
-      # Help > Check for Updates > Install and Restart through the bridge.
-      # Afterwards the copy must be the DMG's bundle (codesign verifies
-      # it), the old one must be in a scratch HOME's Trash, and the
-      # relaunched copy must answer the bridge. A step of its own, after
-      # the smoke test's EXIT trap has detached the image: the test
-      # attaches the DMG itself, read-only. It may only read it, since
-      # Collect installers uploads it; the hash check holds it to that.
-      # No QT_QPA_PLATFORM here: the test runs the package on cocoa
-      # itself (no offscreen plugin in the bundle; the GUI session, as
-      # above). TMPDIR is the step's own folder: it holds all the test
-      # makes (no /Applications, no real Trash, no installed GitBolt) and
-      # tells its processes from others. Keep it short: the apps' unix
-      # sockets go in it, and sun_path is 104 bytes. The run is direct,
-      # not through ctest: ctest exits 0 when the test skips itself
-      # (exit 77, as without GITBOLT_E2E_INSTALL_APP), and here a skip
-      # fails. argv[1] is the build's binary, as ctest passes it;
+      # The latest published release's installer for this OS: the update
+      # steps below have it update to this build through its own Install
+      # and Restart. Always Inverian/GitBolt's, whichever repository runs
+      # this: those are the copies users have. Into RUNNER_TEMP, never
+      # build/, where Collect installers would take it. A release without
+      # this OS's asset (the first after a new format) skips only those
+      # cases, with a warning; a failed download or checksum fails here.
+      - name: Download the published release's installer
+        id: published
+        if: github.event_name != 'pull_request'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            macOS)   pattern='^GitBolt-[0-9.]+-Darwin-arm64\.dmg$' ;;
+            Windows) pattern='^GitBolt-[0-9.]+-Windows-AMD64\.exe$' ;;
+            Linux)   pattern='^gitbolt_[0-9.]+_amd64\.deb$' ;;
+            *)       echo "::error::unexpected RUNNER_OS '$RUNNER_OS'"; exit 1 ;;
+          esac
+          # No tag: releases/latest, which the in-app updater asks too.
+          tag=$(gh release view --repo Inverian/GitBolt --json tagName --jq .tagName)
+          names=$(gh release view "$tag" --repo Inverian/GitBolt --json assets --jq '.assets[].name')
+          name=$(grep -E "$pattern" <<<"$names" || true)
+          if [ -z "$name" ]; then
+            echo "::warning::$tag has no asset matching $pattern: the published-release update is skipped"
+            exit 0
+          fi
+          dir=${RUNNER_TEMP//\\//}/published
+          gh release download "$tag" --repo Inverian/GitBolt --dir "$dir" --pattern "$name" --pattern SHA256SUMS.txt
+          want=$(awk -v n="$name" '$2 == n || $2 == "*" n {print $1}' "$dir/SHA256SUMS.txt")
+          if command -v sha256sum >/dev/null; then got=$(sha256sum < "$dir/$name" | cut -d' ' -f1)
+          else got=$(shasum -a 256 < "$dir/$name" | cut -d' ' -f1); fi
+          [ -n "$want" ] && [ "$got" = "$want" ] \
+            || { echo "::error::$name has SHA-256 $got, but $tag's SHA256SUMS.txt says '$want'"; exit 1; }
+          # A quarantined copy would stop at Gatekeeper's dialog.
+          if [ "$RUNNER_OS" = macOS ] && xattr -p com.apple.quarantine "$dir/$name" >/dev/null 2>&1; then
+            xattr -d com.apple.quarantine "$dir/$name"
+          fi
+          path=$dir/$name
+          if [ "$RUNNER_OS" = Windows ]; then path=$(cygpath -w "$path"); fi
+          echo "installer=$path" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "$tag's $name: $path"
+
+      # The DMG updates in place, end to end
+      # (tests/e2e/test_update_install.py), twice: itself (self), and the
+      # published release's DMG to this one (published). The test copies
+      # the installed DMG's GitBolt.app into a scratch Applications folder
+      # and runs it as 0.1.0 against a loopback feed that offers this
+      # DMG, then clicks Help > Check for Updates > Install and Restart
+      # through the bridge. Afterwards the copy must be this DMG's bundle
+      # (codesign verifies it), the old one must be in a scratch HOME's
+      # Trash, and the relaunched copy must answer the bridge. A step of
+      # its own, after the smoke test's EXIT trap has detached the image:
+      # the test attaches the DMGs itself, read-only. It may only read
+      # this one, since Collect installers uploads it; the hash check
+      # holds it to that. No QT_QPA_PLATFORM here: the test runs the
+      # package on cocoa itself (no offscreen plugin in the bundle; the
+      # GUI session, as above). TMPDIR is each case's own folder: it holds
+      # all the test makes (no /Applications, no real Trash, no installed
+      # GitBolt) and tells its processes from others. Keep it short: the
+      # apps' unix sockets go in it, and sun_path is 104 bytes. The run is
+      # direct, not through ctest: ctest exits 0 when the test skips
+      # itself (exit 77, as without GITBOLT_E2E_INSTALL_APP), and here a
+      # skip fails. argv[1] is the build's binary, as ctest passes it;
       # e2elib.run() wants one, but this test drives the DMG's copy.
       # PYTHONUNBUFFERED: what the test printed survives a kill at the
       # time limit. timeout-minutes: the test's own limits add up to
-      # about 10 minutes, so it reports its own timeout first.
-      - name: Update in place from the DMG (macOS)
+      # about 10 minutes a case, so it reports its own timeout first.
+      - name: Update in place from the DMG, and the published DMG to this build (macOS)
         if: github.event_name != 'pull_request' && runner.os == 'macOS'
-        timeout-minutes: 12
+        timeout-minutes: 24
         shell: bash
+        env:
+          PUBLISHED: ${{ steps.published.outputs.installer }}
+          PUBLISHED_VERSION: ${{ steps.published.outputs.version }}
         run: |
           set -euo pipefail
           ver=$(sed -nE 's/^project\(GitBolt VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
           dmg=$PWD/build/GitBolt-$ver-Darwin-arm64.dmg
           [ -f "$dmg" ] || { echo "::error::$dmg not found"; exit 1; }
           sum=$(shasum -a 256 < "$dmg")
-          tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
-          rc=0
-          TMPDIR=$tmp GITBOLT_E2E_INSTALL_APP=$dmg PYTHONUNBUFFERED=1 \
-            python3 tests/e2e/test_update_install.py "$PWD/build/src/app/GitBolt.app/Contents/MacOS/GitBolt" || rc=$?
           fail=0
-          case $rc in
-            0)  echo "The DMG updated itself in place" ;;
-            77) echo "::error::test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
-            *)  echo "::error::test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
-          esac
-          # Anything of the test's still running (a relaunch it lost track
-          # of, say) names TMPDIR: listed, then killed. The list is read
-          # from a file, so no grep finds itself.
-          sleep 2
-          ps -A -o pid= -o args= > "$tmp.ps"
-          if left=$(grep -F "$tmp/" "$tmp.ps"); then
-            echo "::warning::the test left processes running; killing them:"
-            echo "$left"
-            awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
-          fi
+          for case in self published; do
+            if [ "$case" = self ]; then
+              installed=$dmg published_version=
+            elif [ -n "$PUBLISHED" ]; then
+              installed=$PUBLISHED published_version=$PUBLISHED_VERSION
+            else
+              echo "::warning::no published DMG (see the download step): the published case is skipped"
+              continue
+            fi
+            tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
+            rc=0
+            TMPDIR=$tmp GITBOLT_E2E_INSTALL_APP=$installed GITBOLT_E2E_UPDATE_APP=$dmg \
+              GITBOLT_E2E_PUBLISHED_VERSION=$published_version PYTHONUNBUFFERED=1 \
+              python3 tests/e2e/test_update_install.py "$PWD/build/src/app/GitBolt.app/Contents/MacOS/GitBolt" || rc=$?
+            case $rc in
+              0)  echo "$case: the DMG updated in place" ;;
+              77) echo "::error::$case: test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
+              *)  echo "::error::$case: test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
+            esac
+            # Anything of the case's still running (a relaunch it lost
+            # track of, say) names its TMPDIR: listed, then killed. The
+            # list is read from a file, so no grep finds itself.
+            sleep 2
+            ps -A -o pid= -o args= > "$tmp.ps"
+            if left=$(grep -F "$tmp/" "$tmp.ps"); then
+              echo "::warning::$case: the test left processes running; killing them:"
+              echo "$left"
+              awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
+            fi
+          done
           if [ "$(shasum -a 256 < "$dmg")" != "$sum" ]; then
             echo "::error::the test changed $dmg, which Collect installers uploads"; fail=1
           fi
@@ -871,13 +951,17 @@ jobs:
       # Install the real installer silently, then prove the INSTALLED app
       # starts. Then update that install in place twice, as the in-app
       # updater does: once with its exact command line, once through its
-      # own two parts (test_update_helpers). timeout-minutes:
-      # Start-Process -Wait is unbounded, and NSIS shows any MessageBox
-      # lacking /SD even under /S.
+      # own two parts (test_update_helpers). Last, the published release,
+      # installed there, updates to this build through its own Install and
+      # Restart. timeout-minutes: Start-Process -Wait is unbounded, and
+      # NSIS shows any MessageBox lacking /SD even under /S.
       - name: Smoke-test NSIS installer (Windows)
         if: github.event_name != 'pull_request' && runner.os == 'Windows'
-        timeout-minutes: 25
+        timeout-minutes: 40
         shell: pwsh
+        env:
+          PUBLISHED_INSTALLER: ${{ steps.published.outputs.installer }}
+          PUBLISHED_VERSION: ${{ steps.published.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           $version = (Select-String -Path CMakeLists.txt -Pattern 'project\(GitBolt VERSION ([0-9]+\.[0-9]+\.[0-9]+)').Matches[0].Groups[1].Value
@@ -1159,6 +1243,61 @@ jobs:
             throw "test_update_helpers $fn did not pass (skipped?)"
           }
           Assert-Updated "updated by the updater's helper"
+
+          # 7) The published release updates to this build, as a user's
+          #    copy would (tests/e2e/test_update_install.py): its installer
+          #    over $dest (its .onInit uninstalls this build first), then
+          #    that copy run as 0.1.0 against a loopback feed offering this
+          #    installer, through Help > Check for Updates > Install and
+          #    Restart over the bridge's named pipe. Its administrator part
+          #    is granted unprompted (UAC is off), and the copy it starts
+          #    again inherits the bridge. TEMP and TMP: a private folder,
+          #    where the test's runtime folders go. No Qt from the build's
+          #    environment (as in 4). The test's PASS needs exit 0; 77 is a
+          #    skip, which fails here.
+          if (-not $env:PUBLISHED_INSTALLER) {
+            Write-Host "::warning::no published installer (see the download step): part 7 skipped"
+          } else {
+            $pub = Start-Process -FilePath $env:PUBLISHED_INSTALLER -ArgumentList "/S /D=$dest" -Verb RunAs -Wait -PassThru
+            if ($pub.ExitCode -ne 0) { throw "the published installer exited with $($pub.ExitCode)" }
+            $said = (Get-Item (Join-Path $bin 'GitBolt.exe')).VersionInfo.ProductVersion
+            if ($said -ne $env:PUBLISHED_VERSION) { throw "the published install's GitBolt.exe says version '$said', not $env:PUBLISHED_VERSION" }
+            Remove-Item -LiteralPath (Join-Path $dest 'LICENSE.txt')
+            $tmp = Join-Path $env:RUNNER_TEMP ('gbup-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+            New-Item -ItemType Directory -Path $tmp | Out-Null
+            $vars = @{
+              TEMP = $tmp; TMP = $tmp
+              PATH = (@($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath "$_\Qt6Core.dll" -ErrorAction SilentlyContinue) }) -join ';')
+              QT_PLUGIN_PATH = $null; QML2_IMPORT_PATH = $null; QT_QPA_PLATFORM_PLUGIN_PATH = $null; QT_QPA_PLATFORM = $null
+              GITBOLT_E2E_INSTALLED_APP = (Join-Path $bin 'GitBolt.exe')
+              GITBOLT_E2E_UPDATE_APP = $setup[0].FullName
+              GITBOLT_E2E_PUBLISHED_VERSION = $env:PUBLISHED_VERSION
+              PYTHONUNBUFFERED = '1'; PYTHONUTF8 = '1'
+            }
+            $python = (Get-Command python -CommandType Application -TotalCount 1).Source
+            $saved = @{}
+            foreach ($k in $vars.Keys) {
+              $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+              [Environment]::SetEnvironmentVariable($k, $vars[$k])
+            }
+            try {
+              & $python tests\e2e\test_update_install.py (Join-Path $bin 'GitBolt.exe')
+              $rc = $LASTEXITCODE
+            } finally {
+              foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+            }
+            # Anything still running from $dest (a relaunch the test lost
+            # track of): listed, then stopped.
+            Start-Sleep -Seconds 2
+            $left = @(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like "$dest\*" })
+            if ($left) {
+              Write-Host "::warning::the test left processes running; stopping them:"
+              $left | ForEach-Object { Write-Host "$($_.ProcessId) $($_.CommandLine)"; Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+            }
+            if ($rc -eq 77) { throw 'test_update_install.py skipped itself (exit 77) instead of running' }
+            if ($rc -ne 0) { throw "test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it." }
+            Assert-Updated "updated by the published release's updater"
+          }
 
       # ---- Linux: DEB + AppImage ---------------------------------------
       # appstream + desktop-file-utils: the metadata lint. xvfb: the
@@ -1513,63 +1652,93 @@ jobs:
           fi
           rm -rf squashfs-root
 
-      # The AppImage updates itself in place, end to end, as the DMG does
-      # above (tests/e2e/test_update_install.py). The test copies it into
-      # a scratch folder as GitBolt.AppImage: a copy named like the
-      # release's asset would be refused, because the download would land
-      # on the running file. It runs the copy as 0.1.0 against a loopback
-      # feed that offers this AppImage and clicks Install and Restart.
-      # Afterwards the file at that path must be a new one with this
-      # AppImage's bytes, and the relaunched copy must answer the bridge.
-      # The workspace AppImage is only read (Collect installers uploads
-      # it; the hash check holds the test to that). As in check 3 above:
-      # xcb under xvfb-run (no offscreen plugin in the AppImage), no Qt
-      # install's LD_LIBRARY_PATH, and APPIMAGE_EXTRACT_AND_RUN for want
-      # of FUSE. In that mode the runtime still sets APPIMAGE, which the
-      # updater goes by, and the helper's relaunch inherits the variable,
-      # as it does DISPLAY. /usr/bin/python3, the image's own:
-      # setup-python's may need the LD_LIBRARY_PATH it exports, and every
-      # GitBolt the test starts would inherit that. -s: xvfb-run's
-      # default screen is 8-bit. NO_CLEANUP: the old copy and the new one
-      # are the same bytes, so the runtime extracts both into the same
-      # $TMPDIR/appimage_extracted_<md5>, and the old runtime, deleting
-      # that as it exits, would race the relaunch (which skips files
-      # already there). The tree is in the app's TMPDIR, which the test
-      # deletes at its end anyway. TMPDIR, the direct run, argv[1] and
-      # timeout-minutes as in the macOS step.
-      - name: Update in place from the AppImage (Linux)
+      # The .deb updates in place, end to end, as the DMG does above
+      # (tests/e2e/test_update_install.py), twice: itself (self), and the
+      # published release's .deb to this one (published). Each case
+      # installs its package with apt, relabelled 0.1.0, so that apt sees
+      # an upgrade even at the same version (a dry run's), and runs it as
+      # 0.1.0 against a loopback feed offering this .deb, then clicks
+      # Install and Restart. Its helper runs the real pkexec and apt-get:
+      # a polkit rule stands in for the agent's password prompt, for the
+      # runner's user. Afterwards dpkg must have this .deb's version and
+      # binary, and the relaunched copy must answer the bridge. As in the
+      # smoke test: xcb under xvfb-run (no offscreen plugin in the
+      # package), no Qt install's LD_LIBRARY_PATH. /usr/bin/python3, the
+      # image's own: setup-python's may need the LD_LIBRARY_PATH it
+      # exports, and every GitBolt the test starts would inherit that.
+      # -s: xvfb-run's default screen is 8-bit. TMPDIR, the direct run,
+      # argv[1] and timeout-minutes as in the macOS step.
+      - name: Update in place from the DEB, and the published DEB to this build (Linux)
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
-        timeout-minutes: 12
+        timeout-minutes: 25
+        env:
+          PUBLISHED: ${{ steps.published.outputs.installer }}
+          PUBLISHED_VERSION: ${{ steps.published.outputs.version }}
         run: |
           set -euo pipefail
           ver=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
-          appimage=$PWD/GitBolt-${ver}-x86_64.AppImage
-          [ -f "$appimage" ] || { echo "::error::missing $appimage"; exit 1; }
+          deb=$PWD/build/gitbolt_${ver}_amd64.deb
+          [ -f "$deb" ] || { echo "::error::missing $deb"; exit 1; }
           [ -x /usr/bin/python3 ] || { echo "::error::no /usr/bin/python3 on this image"; exit 1; }
-          sum=$(sha256sum < "$appimage")
-          tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
-          rc=0
-          env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
-            TMPDIR="$tmp" GITBOLT_E2E_INSTALL_APP="$appimage" PYTHONUNBUFFERED=1 \
-            QT_QPA_PLATFORM=xcb APPIMAGE_EXTRACT_AND_RUN=1 NO_CLEANUP=1 \
-            xvfb-run -a -s '-screen 0 1280x1024x24' \
-            /usr/bin/python3 tests/e2e/test_update_install.py "$PWD/build/src/app/gitbolt" || rc=$?
+          sum=$(sha256sum < "$deb")
+
+          sudo apt-get install -y -qq pkexec polkitd >/dev/null
+          printf '%s\n' 'polkit.addRule(function (action, subject) {' \
+            "    if (action.id == \"org.freedesktop.policykit.exec\" && subject.user == \"$(id -un)\")" \
+            '        return polkit.Result.YES;' '});' |
+            sudo tee /etc/polkit-1/rules.d/49-gitbolt-ci.rules >/dev/null
+          sudo systemctl restart polkit
+          pkexec /bin/true </dev/null || { echo "::error::pkexec still asks for a password"; exit 1; }
+
+          # The same package, as version 0.1.0: files and md5sums as they
+          # were (it has no maintainer scripts).
+          relabel() {
+            local dir
+            dir=$(mktemp -d "$RUNNER_TEMP/relabel.XXXXXX")
+            dpkg-deb -R "$1" "$dir/pkg"
+            sed -i 's/^Version: .*/Version: 0.1.0/' "$dir/pkg/DEBIAN/control"
+            chmod 0755 "$dir/pkg"
+            dpkg-deb --root-owner-group -Znone -b "$dir/pkg" "$2" >/dev/null
+            rm -rf "$dir"
+          }
           fail=0
-          case $rc in
-            0)  echo "The AppImage updated itself in place" ;;
-            77) echo "::error::test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
-            *)  echo "::error::test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
-          esac
-          # Leftovers and the hash, as in the macOS step.
-          sleep 2
-          ps -A -o pid= -o args= > "$tmp.ps"
-          if left=$(grep -F "$tmp/" "$tmp.ps"); then
-            echo "::warning::the test left processes running; killing them:"
-            echo "$left"
-            awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
-          fi
-          if [ "$(sha256sum < "$appimage")" != "$sum" ]; then
-            echo "::error::the test changed $appimage, which Collect installers uploads"; fail=1
+          for case in self published; do
+            if [ "$case" = self ]; then
+              src=$deb published_version=
+            elif [ -n "$PUBLISHED" ]; then
+              src=$PUBLISHED published_version=$PUBLISHED_VERSION
+            else
+              echo "::warning::no published .deb (see the download step): the published case is skipped"
+              continue
+            fi
+            tmp=$(mktemp -d "$RUNNER_TEMP/gbup.XXXXXX")
+            relabel "$src" "$tmp.deb"
+            sudo apt-get install -y -qq "$tmp.deb" >/dev/null
+            rc=0
+            env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
+              TMPDIR="$tmp" GITBOLT_E2E_INSTALLED_APP=/usr/bin/gitbolt GITBOLT_E2E_UPDATE_APP="$deb" \
+              GITBOLT_E2E_PUBLISHED_VERSION="$published_version" PYTHONUNBUFFERED=1 QT_QPA_PLATFORM=xcb \
+              xvfb-run -a -s '-screen 0 1280x1024x24' \
+              /usr/bin/python3 tests/e2e/test_update_install.py "$PWD/build/src/app/gitbolt" || rc=$?
+            case $rc in
+              0)  echo "$case: the .deb updated in place" ;;
+              77) echo "::error::$case: test_update_install.py skipped itself (exit 77) instead of running"; fail=1 ;;
+              *)  echo "::error::$case: test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it."; fail=1 ;;
+            esac
+            # Leftovers as in the macOS step: the case's own processes,
+            # and any installed GitBolt still running.
+            sleep 2
+            ps -A -o pid= -o args= > "$tmp.ps"
+            left=$(grep -F "$tmp/" "$tmp.ps" || true; grep -E '^ *[0-9]+ /usr/(bin|lib/gitbolt)/gitbolt( |$)' "$tmp.ps" || true)
+            if [ -n "$left" ]; then
+              echo "::warning::$case: the test left processes running; killing them:"
+              echo "$left"
+              awk '{print $1}' <<<"$left" | xargs kill -9 2>/dev/null || true
+            fi
+            sudo apt-get purge -y -qq gitbolt >/dev/null
+          done
+          if [ "$(sha256sum < "$deb")" != "$sum" ]; then
+            echo "::error::the test changed $deb, which Collect installers uploads"; fail=1
           fi
           exit "$fail"
 
