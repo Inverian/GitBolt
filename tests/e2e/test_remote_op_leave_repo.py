@@ -31,9 +31,9 @@ from __future__ import annotations
 
 import os
 
-from e2elib import (App, Failure, OpenGate, SilentServer, auto_fetch_config,
-                    check_for, git, home_screen, make_repo, on_screen, run,
-                    stall_auto_fetch)
+from e2elib import (WINDOWS, App, Failure, OpenGate, SilentServer,
+                    auto_fetch_config, check_for, git, home_screen, make_repo,
+                    on_screen, run, stall_auto_fetch)
 
 SHOWN = "Fetching from origin…"
 CANCELLED = "Fetch cancelled."
@@ -205,24 +205,27 @@ def test(binary: str, scratch: str, apps: list) -> None:
     # open is still pending: the failure goes up over the loading
     # screen, and goes once work-c is open. It stuck there, a red
     # "✗ fetch failed" over a repository with no remote to fail.
-    gate = OpenGate(work_c, scratch)
-    server = reveal_auto_fetch(app, work_a)
-    handoff = app.launch_second(work_c)
-    if handoff.returncode != 0:
-        raise Failure(f"hand-off of work-c failed: rc={handoff.returncode}")
-    app.wait_until(lambda s: any(t.startswith("Opening work-c")
-                                 for t in s["windows"]),
-                   "work-c's open pending")
-    server.hang_up()
-    app.wait_until(lambda s: s.get("statusMessage", "")
-                   .startswith("fetch failed"),
-                   "work-a's fetch failing while work-c opens")
-    gate.release()
-    app.wait_until(on_screen("work-c"), "work-c on screen")
-    check_for(2, "a revealed fetch that failed while work-c opened",
-              lambda: app.state().get("opIndicator") != ""
-              and f"work-a's fetch left {app.state().get('opIndicator')!r} "
-                  "on work-c")
+    if WINDOWS:
+        print("7. skipped on Windows: it holds work-c's open at a FIFO")
+    else:
+        gate = OpenGate(work_c, scratch)
+        server = reveal_auto_fetch(app, work_a)
+        handoff = app.launch_second(work_c)
+        if handoff.returncode != 0:
+            raise Failure(f"hand-off of work-c failed: rc={handoff.returncode}")
+        app.wait_until(lambda s: any(t.startswith("Opening work-c")
+                                     for t in s["windows"]),
+                       "work-c's open pending")
+        server.hang_up()
+        app.wait_until(lambda s: s.get("statusMessage", "")
+                       .startswith("fetch failed"),
+                       "work-a's fetch failing while work-c opens")
+        gate.release()
+        app.wait_until(on_screen("work-c"), "work-c on screen")
+        check_for(2, "a revealed fetch that failed while work-c opened",
+                  lambda: app.state().get("opIndicator") != ""
+                  and f"work-a's fetch left {app.state().get('opIndicator')!r} "
+                      "on work-c")
 
     # 8. Close, then an open that fails: the home screen stays, with
     # every repository action still off.

@@ -131,4 +131,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        print("SKIP: the login shell's git under launchd's PATH has no Windows "
+              "counterpart (TestGitNotice covers Windows' git versions)")
+        sys.exit(77)
     run(test)

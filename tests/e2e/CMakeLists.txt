@@ -1,14 +1,8 @@
 # End-to-end tests: drive the real app binary through the test bridge
-# (docs/AGENT_TESTING.md) and assert on-disk git outcomes.
-#
-# Unix-only: the harness reaches QLocalServer's named socket as a
-# unix-domain socket, which has no Windows equivalent (named pipes).
-# The single-instance hand-off, which these tests also drive, is tested
-# on every platform, Windows included, by tests/app/TestSingleInstance.cpp.
-if(WIN32)
-    message(STATUS "GitBolt: e2e tests skipped on Windows (unix sockets)")
-    return()
-endif()
+# (docs/AGENT_TESTING.md) and assert on-disk git outcomes, on every
+# platform. On Windows the harness reaches the bridge as a named pipe,
+# and a test, or a part of one, that can't run there skips itself
+# (exit 77) and says why.
 
 find_package(Python3 COMPONENTS Interpreter)
 if(NOT Python3_FOUND)
@@ -52,6 +46,7 @@ set(E2E_TESTS
 )
 # Needs macOS's small unix-socket buffers to hold a hand-off line up
 # the way Windows' unbuffered pipes hold up every one (see the test).
+# Its 64 KB argument is over Windows' 32,767-character command line too.
 if(APPLE)
     list(APPEND E2E_TESTS test_instance_busy_owner)
 endif()
@@ -64,6 +59,11 @@ if(APPLE)
     list(APPEND E2E_TESTS test_launchservices_open)
 endif()
 
+# Windows starts processes, and MSYS sh's hooks, more slowly.
+set(E2E_TIMEOUT 120)
+if(WIN32)
+    set(E2E_TIMEOUT 240)
+endif()
 foreach(t IN LISTS E2E_TESTS)
     add_test(NAME e2e_${t}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/${t}.py
@@ -72,20 +72,23 @@ foreach(t IN LISTS E2E_TESTS)
     # timing assertions get flaky under parallel CPU contention.
     set_tests_properties(e2e_${t} PROPERTIES
         LABELS "e2e"
-        TIMEOUT 120
-        RUN_SERIAL TRUE)
+        TIMEOUT ${E2E_TIMEOUT}
+        RUN_SERIAL TRUE
+        SKIP_RETURN_CODE 77)
+    # UTF-8: Windows' Python would print in the ANSI code page, which
+    # lacks some of the app's text a FAIL line quotes (…, ✗).
+    if(WIN32)
+        set_tests_properties(e2e_${t} PROPERTIES ENVIRONMENT "PYTHONUTF8=1")
+    endif()
 endforeach()
 
-if(APPLE)
-    set_tests_properties(e2e_test_launchservices_open PROPERTIES SKIP_RETURN_CODE 77)
-endif()
-
-# A packaged GitBolt (a DMG on macOS, an AppImage on Linux) updates
-# itself in place: download, checks, the helper, the relaunch. It needs
-# that package, which only CI's packaging jobs (or a local cpack) make,
-# so it runs only when GITBOLT_E2E_INSTALL_APP names one, and is skipped
-# everywhere else. Its own longer TIMEOUT: hdiutil, codesign --deep
-# twice and a copy of the bundle take a minute or two.
+# A packaged GitBolt (a DMG on macOS, a .deb on Linux) updates in place:
+# download, checks, the helper, the relaunch. It needs that package,
+# which only CI's packaging jobs (or a local cpack) make, so it runs
+# only when GITBOLT_E2E_INSTALL_APP or GITBOLT_E2E_INSTALLED_APP names
+# one, and is skipped everywhere else. CI also runs it on Windows,
+# directly, against the NSIS install. Its own longer TIMEOUT: hdiutil,
+# codesign --deep twice and a copy of the bundle take a minute or two.
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME e2e_test_update_install
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_update_install.py

@@ -7,8 +7,8 @@ and GNOME Shell and KWin find the window's icon and launcher by
 Qt made up "com.gitbolt.gitbolt", which no installed file matches: a
 generic icon, and a window apart from its launcher and favorite.
 dump-state reports the name the app runs with; the entry it names
-must exist and claim that class too (a renamed copy, as AppImage
-integrators make, then still matches).
+must exist and claim that class too (a renamed copy of the entry
+then still matches).
 """
 
 from __future__ import annotations

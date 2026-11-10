@@ -27,7 +27,7 @@ import subprocess
 import sys
 import time
 
-from e2elib import App, Failure, app_env, make_repo, run
+from e2elib import WINDOWS, App, Failure, app_env, make_repo, run
 
 
 def _shm_segments() -> dict[str, str]:
@@ -77,6 +77,20 @@ def _early_exits(binary: str, scratch: str) -> None:
                   if seg not in before and cpid in pids]
         if leaked:
             raise Failure(f"early exits leaked shared memory {leaked}")
+
+
+def _remove(path: str) -> None:
+    """os.remove, retried for a second: on Windows a launcher reading
+    the file shares it without delete."""
+    deadline = time.monotonic() + 1
+    while True:
+        try:
+            os.remove(path)
+            return
+        except PermissionError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _on(name: str):
@@ -154,23 +168,28 @@ def test(binary: str, scratch: str, apps: list) -> None:
     if not untouched:
         raise Failure("the stale lock was removed while its .rmlock was "
                       "held")
-    os.remove(rmlock)
+    _remove(rmlock)
     third.wait_bridge()
     third.wait_until(_on("repo-a"), "repo A open over the empty lock")
 
     # That recovery must never take a lock that is still held: with
     # the live owner's socket gone, a launch finds no listener, retries
     # the removal for its whole wait, and has to give up.
-    os.remove(os.path.join(third.runtime_dir, third.instance_name))
-    blocked = third.launch_second(repo_b)
-    if blocked.returncode != 1 or b"not responding" not in blocked.stderr:
-        raise Failure("launch against a live owner without a socket should "
-                      f"give up with rc 1, got rc={blocked.returncode}: "
-                      f"{blocked.stderr[-400:]}")
-    if not os.path.exists(third.lock_path):
-        raise Failure("a live instance's lock was removed")
-    if not _on("repo-a")(third.state()):
-        raise Failure(f"owner changed repo: {third.state()}")
+    if WINDOWS:
+        print("skipped on Windows: a live owner without its socket (a pipe "
+              "is no file to remove; TestSingleInstance's "
+              "claimGivesUpWhenNobodyListens covers it)")
+    else:
+        os.remove(os.path.join(third.runtime_dir, third.instance_name))
+        blocked = third.launch_second(repo_b)
+        if blocked.returncode != 1 or b"not responding" not in blocked.stderr:
+            raise Failure("launch against a live owner without a socket should "
+                          f"give up with rc 1, got rc={blocked.returncode}: "
+                          f"{blocked.stderr[-400:]}")
+        if not os.path.exists(third.lock_path):
+            raise Failure("a live instance's lock was removed")
+        if not _on("repo-a")(third.state()):
+            raise Failure(f"owner changed repo: {third.state()}")
 
     rc = third.quit()
     if rc != 0:
