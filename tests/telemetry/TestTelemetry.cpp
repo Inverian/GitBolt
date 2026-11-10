@@ -19,6 +19,8 @@
 //     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
 //     leave; a background exception goes as its type alone
+//   - the log: one line per request's outcome, with the event's name
+//     and never a payload, an ID or a URL
 //
 
 #include <QCryptographicHash>
@@ -31,6 +33,7 @@
 #include <QLockFile>
 #include <QNetworkAccessManager>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTemporaryDir>
@@ -157,6 +160,18 @@ QString crashReport() {
                             "#2 GitBolt +0x30 ?\n"
                             "#3 dyld +0x40 start+0x2\n"
                             "\n=== End of Report ===\n");
+}
+
+// The "Telemetry: …" lines logged while installed (others go on).
+QStringList g_telemetryLines;
+QtMessageHandler g_handlerBefore = nullptr;
+
+void captureTelemetryLines(QtMsgType type, const QMessageLogContext& context,
+                           const QString& message) {
+    if (message.startsWith(QLatin1String("Telemetry: ")))
+        g_telemetryLines << message;
+    else if (g_handlerBefore)
+        g_handlerBefore(type, context, message);
 }
 
 // A new queue in `dir` holding one record.
@@ -1678,6 +1693,67 @@ private slots:
             QCOMPARE(errorDetail(ErrorKind::BackgroundException, kind), kind);
         QCOMPARE(errorDetail(ErrorKind::BackgroundException, QStringLiteral("MyError")),
                  QStringLiteral("other"));
+    }
+
+    // One line per request for the local log: sent, dropped, not sent
+    // (retried at the next tick) and offline, with the event's fixed
+    // name; and the switch turned off and events kept at quit. Never a
+    // payload, an install or device ID, or a URL.
+    void sendOutcomesAreLogged() {
+        g_telemetryLines.clear();
+        g_handlerBefore = qInstallMessageHandler(captureTelemetryLines);
+        const auto restore = qScopeGuard([] { qInstallMessageHandler(g_handlerBefore); });
+
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.flushIntervalMs = 300;
+        int answered = 0;
+        stub_->respond = [&answered](const StubRequest&) {
+            const int status[] = {200, 400, 503};
+            return StubResponse{answered < 3 ? status[answered++] : 202, {}};
+        };
+        auto service = makeService(config, provider);
+        service->recordRepoOpened(1, 1, 1);
+        service->recordError(ErrorKind::OperationFailed, QStringLiteral("fetch"));
+        service->recordLaunch();
+        service->start();
+        QTRY_COMPARE(service->queuedCount(), 0);
+        service->persistPending();   // nothing kept: no line
+        service.reset();
+
+        // Nothing listens: offline. Kept at quit, then turned off.
+        Config offline = config;
+        offline.transferTimeoutMs = 10000;   // Windows takes ~2 s to refuse
+        const int port = closedPort();
+        offline.trackUrl.setPort(port);
+        offline.storeUrl.setPort(port);
+        service = makeService(offline, provider);
+        service->recordRepoOpened(2, 2, 1);
+        service->start();
+        QTRY_VERIFY2_WITH_TIMEOUT(g_telemetryLines.contains(
+                                      QStringLiteral("Telemetry: offline; 1 events wait")),
+                                  qPrintable(g_telemetryLines.join(QLatin1Char('\n'))), 15000);
+        service->persistPending();
+        service.reset();
+        service = makeService(offline, provider);
+        service->setUserEnabled(false);
+        service.reset();
+
+        g_telemetryLines.removeDuplicates();
+        QCOMPARE(g_telemetryLines,
+                 (QStringList{QStringLiteral("Telemetry: repo_opened sent (HTTP 200)"),
+                              QStringLiteral("Telemetry: operation_failed dropped (HTTP 400)"),
+                              QStringLiteral("Telemetry: app_launched not sent (HTTP 503); "
+                                             "retrying at the next tick"),
+                              QStringLiteral("Telemetry: app_launched sent (HTTP 202)"),
+                              QStringLiteral("Telemetry: offline; 1 events wait"),
+                              QStringLiteral("Telemetry: 1 events kept for the next start"),
+                              QStringLiteral("Telemetry: turned off; the queue was deleted")}));
+        for (const QString& line : std::as_const(g_telemetryLines)) {
+            for (const QString& secret : {kInstallId, deviceIdFor(kInstallId), QStringLiteral("{"),
+                                          QStringLiteral("http"), QStringLiteral("127.0.0.1")})
+                QVERIFY2(!line.contains(secret), qPrintable(line));
+        }
     }
 
     void crashReportIsQueuedAndSent() {
