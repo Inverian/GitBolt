@@ -82,13 +82,10 @@ namespace gitbolt::ui {
 /// anything else, for a version newer than this one, opens the dialog
 /// on why, the end of install.log, and how to install by hand.
 ///
-/// Outcomes, for usage statistics (updateResult, one per attempt, with
-/// fixed codes only): at start() from install-result and the
-/// pending-install marker the launch leaves ("<from> <to> <unix time>":
-/// a marker older than kResultPatienceSeconds with no result is
-/// no_result), or at once when an attempt stops while GitBolt runs.
-/// checkFailed carries a check's failure code (never being offline);
-/// commandUsed, a click on the dialog's or the bar's buttons, by name.
+/// Usage statistics, fixed codes only: updateResult once per attempt (at
+/// once, or at the next start() for one the helper finishes), checkFailed
+/// for a failed check (never for being offline), commandUsed for the
+/// dialog's and the bar's buttons.
 class UpdateController : public QObject {
     Q_OBJECT
 public:
@@ -106,6 +103,8 @@ public:
     /// keeps them).
     static constexpr char kInstallResultFile[] = "install-result";
     static constexpr char kInstallLogFile[] = "install.log";
+    /// Also there, left by the launch: "<from> <to> <unix time>". With no
+    /// result once kResultPatienceSeconds are over, the attempt is no_result.
     static constexpr char kInstallMarkerFile[] = "pending-install";
     /// How long a marker without a result may be a helper still at work
     /// (its wait for the quit, then Windows' install), with a margin.

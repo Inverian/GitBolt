@@ -102,14 +102,9 @@ QString openErrorName(int gitErrorCode);
 /// library doesn't link the updater; a test pins the two lists.)
 QString updateReason(const QString& code);
 
-/// How an install attempt ended (UpdateController), each field checked
-/// against a fixed vocabulary when the event is built:
-///   - status: ok, failed, declined, incompatible, gave_up, no_result
-///   - fromVersion, toVersion: x.y.z, else "unknown"
-///   - package: dmg, nsis, deb, else "other"
-///   - stage: check, download, prepare, launch, quit, install
-///   - reason: updateReason()
-/// Anything outside a vocabulary becomes "other".
+/// How one install attempt ended (UpdateController). updateResultEvent
+/// checks each field against its fixed vocabulary (versions x.y.z, else
+/// "unknown"; the rest, else "other").
 struct UpdateResult {
     QString status;
     QString fromVersion;
