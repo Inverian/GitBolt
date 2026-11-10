@@ -1,13 +1,16 @@
 name: CI
 
 # pull_request      -> build + test on macOS, Linux and Windows
-# push to main      -> build + test + installers (DMG, NSIS .exe, DEB,
-#                      AppImage), then a GitHub Release when the version in
-#                      CMakeLists.txt has no v<version> tag yet
+# push to main      -> build + test + installers (DMG, NSIS .exe, DEB) and
+#                      their symbol files, then a GitHub Release when the
+#                      version in CMakeLists.txt has no v<version> tag yet
 # workflow_dispatch -> build + test + installers on any branch (a dry run);
 #                      never releases
 #   Dry-run a branch before merging (gh >= 2.87 prints the new run's URL):
 #     url=$(gh workflow run ci.yml --ref <branch>) && gh run watch "${url##*/}" --exit-status
+#   One leg and some tests only (its installers then come from a binary
+#   that ran only those; dry-run artifacts are never released):
+#     gh workflow run ci.yml --ref <branch> -f os=windows-latest -f tests='^e2e_'
 on:
   push:
     branches: [main]   # branches only, so tag pushes never trigger this
@@ -147,14 +150,14 @@ jobs:
 
       # What later steps take from the Qt install: its bin/ on PATH
       # (CMake finds Qt6 through it, and the Windows tests load the Qt
-      # DLLs from it), QT_ROOT_DIR (Build AppImage's qmake) and, on
-      # Linux, LD_LIBRARY_PATH (linuxdeploy and the DEB's dpkg-shlibdeps
-      # resolve Qt's libraries through it). install-qt-action also
-      # exported QT_PLUGIN_PATH, QML2_IMPORT_PATH and PKG_CONFIG_PATH,
-      # which nothing here needs: Qt finds its plugins next to the
-      # QtCore it loads, and a package missing a plugin can no longer
-      # borrow this Qt's during its smoke test. qmake must report the
-      # version asked for, so a cache that holds another Qt fails here.
+      # DLLs from it) and, on Linux, LD_LIBRARY_PATH (the DEB's
+      # dpkg-shlibdeps resolves Qt's libraries through it).
+      # install-qt-action also exported QT_PLUGIN_PATH, QML2_IMPORT_PATH
+      # and PKG_CONFIG_PATH, which nothing here needs: Qt finds its
+      # plugins next to the QtCore it loads, and a package missing a
+      # plugin can no longer borrow this Qt's during its smoke test. qmake
+      # must report the version asked for, so a cache that holds another
+      # Qt fails here.
       - name: Qt environment
         shell: bash
         env:
@@ -174,7 +177,6 @@ jobs:
           # Native paths on Windows, like Path's other entries
           native() { if [ "$RUNNER_OS" = Windows ]; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
           native "$root/bin" >> "$GITHUB_PATH"
-          echo "QT_ROOT_DIR=$(native "$root")" >> "$GITHUB_ENV"
           if [ "$RUNNER_OS" = Linux ]; then
             echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:+$LD_LIBRARY_PATH:}$root/lib" >> "$GITHUB_ENV"
           fi
@@ -245,9 +247,8 @@ jobs:
       # at link time. The rest is what install-qt-action installed for
       # Qt 6.5 and later, all of it, as before: what the Qt plugins we
       # ship link (libqxcb.so: xcb-cursor, xkbcommon-x11, ...), which
-      # the deploy script, linuxdeploy and the DEB's dpkg-shlibdeps must
-      # find on this runner (the DEB smoke test checks Depends for
-      # libxcb-cursor0).
+      # the deploy script and the DEB's dpkg-shlibdeps must find on this
+      # runner (the DEB smoke test checks Depends for libxcb-cursor0).
       - name: Install build dependencies (Ubuntu)
         if: runner.os == 'Linux'
         run: |
@@ -295,6 +296,10 @@ jobs:
       # from this env var, as the telemetry values do, and ON compiles
       # GITBOLT_UPDATES_ENABLED into the app. Every other build has no
       # update feed: Help > Check for updates is greyed out.
+      #
+      # GITBOLT_RELEASE_SYMBOLS (cmake/Symbols.cmake): line tables at the
+      # same optimisation, pull requests included, so every run builds and
+      # tests the code that ships; Symbol files (below) splits them out.
       - name: Configure
         env:
           GITBOLT_TELEMETRY_HOST: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'https://telemetry.gitbolt.com' || '' }}
@@ -302,7 +307,7 @@ jobs:
           GITBOLT_TELEMETRY_OPENPANEL_SECRET: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_OPENPANEL_SECRET || '' }}
           GITBOLT_TELEMETRY_GLITCHTIP_DSN: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && secrets.GITBOLT_TELEMETRY_GLITCHTIP_DSN || '' }}
           GITBOLT_UPDATES: ${{ (github.repository_id == '1380838933' && github.event_name == 'push' && github.ref == 'refs/heads/main') && 'ON' || 'OFF' }}
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON -DGITBOLT_STRICT_NOTICES=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DGITBOLT_BUNDLED_LIBGIT2=ON -DGITBOLT_REQUIRE_ENGLISH_PLURALS=ON -DGITBOLT_STRICT_NOTICES=ON -DGITBOLT_RELEASE_SYMBOLS=ON ${{ runner.os == 'Windows' && '-DGITBOLT_QTEST_ARGS=-nocrashhandler' || '' }}
 
       # Only an official build may carry endpoints: a PR, dry-run or
       # fork build that has them fails here, before it can be tested,
@@ -567,15 +572,67 @@ jobs:
       # of the way, so a package that only works on the runner fails here.
       # ==================================================================
 
+      # ---- all: symbol files -------------------------------------------
+      # The binary just tested, split into GitBolt-<version>-<platform>-
+      # symbols.zip (gitbolt_symbols, cmake/Packaging.cmake), which the
+      # release publishes so its crash reports can be read
+      # (tools/symbolize.py). Before packaging: on Linux it adds the debug
+      # link the .deb's binary carries. Each smoke test checks the zip
+      # against the packaged binary.
+      - name: Symbol files
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --target gitbolt_symbols
+          ls -l build/GitBolt-*-symbols.zip
+
       # ---- macOS: DMG ------------------------------------------------
+      # GitBolt's own (self-signed) code-signing identity, in a keychain of
+      # this run's, for Package DMG: its designated requirement pins the
+      # certificate, not each build's cdhash, so folder access a user
+      # granted survives updates. Dry runs sign too; a fork (no secret)
+      # signs ad hoc. A secret that isn't the committed certificate's key
+      # fails here. The partition list spares codesign a GUI key prompt.
+      - name: Signing identity (macOS)
+        if: github.event_name != 'pull_request' && runner.os == 'macOS'
+        shell: bash
+        env:
+          P12: ${{ secrets.GITBOLT_MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.GITBOLT_MACOS_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$P12" ] || { echo "::notice::no GITBOLT_MACOS_SIGNING_P12: the DMG is signed ad hoc"; exit 0; }
+          pin=$(openssl x509 -in src/app/platform/macos/codesign-certificate.pem -outform DER | shasum -a 1 | cut -d' ' -f1)
+          kc=$RUNNER_TEMP/gitbolt-signing.keychain-db
+          kcpw=$(openssl rand -hex 24)
+          p12=$RUNNER_TEMP/gitbolt-signing.p12
+          printf '%s' "$P12" | base64 --decode > "$p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings "$kc"   # no options: never locks itself
+          security unlock-keychain -p "$kcpw" "$kc"
+          rc=0
+          security import "$p12" -k "$kc" -f pkcs12 -P "$P12_PASSWORD" -T /usr/bin/codesign || rc=$?
+          rm -f "$p12"
+          [ "$rc" = 0 ] || { echo "::error::security import of GITBOLT_MACOS_SIGNING_P12 failed ($rc)"; exit 1; }
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" > /dev/null
+          # codesign finds identities only in the search list.
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          ids=$(security find-identity -p codesigning "$kc")
+          echo "$ids"
+          grep -qi "$pin" <<<"$ids" \
+            || { echo "::error::GITBOLT_MACOS_SIGNING_P12 isn't the certificate in src/app/platform/macos/codesign-certificate.pem ($pin)"; exit 1; }
+          echo "GITBOLT_MACOS_SIGN_IDENTITY=$pin" >> "$GITHUB_ENV"
+
       # During CPack's staging install, qt_generate_deploy_app_script runs
       # macdeployqt (Qt into the bundle; libgit2 is linked statically),
       # then src/app/platform/macos/FinalizeBundle.cmake deletes LC_RPATHs
       # that point outside the bundle, fails on libraries that aren't in
-      # it, and re-signs ad hoc and verifies: macdeployqt strips and
-      # renames, and the rpath edits change binaries it signed (ad-hoc
-      # signing is its default since 6.11), which Gatekeeper reports as
-      # "damaged".
+      # it, and re-signs and verifies: macdeployqt strips and renames, and
+      # the rpath edits change binaries it signed (ad-hoc signing is its
+      # default since 6.11), which Gatekeeper reports as "damaged". It
+      # signs with GITBOLT_MACOS_SIGN_IDENTITY (Signing identity, above),
+      # else ad hoc.
       # hdiutil fails intermittently with "Resource busy" on hosted macOS
       # runners (actions/runner-images#7522), so retry the whole cpack run,
       # which re-stages from scratch.
@@ -593,6 +650,22 @@ jobs:
           echo "::error::cpack DragNDrop failed 3 times"
           exit 1
 
+      # The identity goes before anything runs the DMG: the smoke test and
+      # the update tests run as on a user's Mac, which doesn't hold it.
+      # Deleting the keychain also takes it off the search list.
+      - name: Remove signing keychain (macOS)
+        if: always() && github.event_name != 'pull_request' && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          kc=$RUNNER_TEMP/gitbolt-signing.keychain-db
+          if [ -e "$kc" ]; then security delete-keychain "$kc"; echo "Deleted $kc"; fi
+          pin=$(openssl x509 -in src/app/platform/macos/codesign-certificate.pem -outform DER | shasum -a 1 | cut -d' ' -f1)
+          certs=$(security find-certificate -a -Z)
+          if grep -qi "$pin" <<<"$certs"; then
+            echo "::error::a keychain on the search list still holds GitBolt's certificate"; exit 1
+          fi
+
       # The launch check uses the cocoa QPA (macdeployqt bundles no
       # offscreen plugin); hosted macOS images auto-login a GUI session.
       # timeout-minutes: --version exits before the single-instance guard
@@ -602,6 +675,9 @@ jobs:
         if: github.event_name != 'pull_request' && runner.os == 'macOS'
         timeout-minutes: 10
         shell: bash
+        env:
+          # Upstream only (by repository ID): a fork has no signing secret.
+          REQUIRE_SIGNED: ${{ github.repository_id == '1380838933' }}
         run: |
           set -euo pipefail
           ver=$(sed -nE 's/^project\(GitBolt VERSION ([0-9.]+).*/\1/p' CMakeLists.txt)
@@ -639,6 +715,24 @@ jobs:
           # 1) Nested frameworks/dylibs/plugins + bundle seal. An invalid one
           #    is what Gatekeeper shows as "GitBolt is damaged".
           codesign --verify --deep --strict "$app" || err "codesign --verify failed"
+
+          # 1b) Signed with GitBolt's certificate (src/app/platform/macos/
+          #     codesign-certificate.pem), not ad hoc. A folder grant holds
+          #     the designated requirement, and the next build must satisfy
+          #     it: a lost or rotated key fails here, not on users' Macs.
+          #     Ad-hoc DRs print as "# designated => cdhash ...".
+          pin=$(openssl x509 -in src/app/platform/macos/codesign-certificate.pem -outform DER | shasum -a 1 | cut -d' ' -f1)
+          dr=$(codesign -d -r- "$app" 2>&1 | sed -nE 's/^(# )?designated => //p')
+          echo "designated requirement: $dr"
+          if [ "$REQUIRE_SIGNED" = true ]; then
+            req="identifier \"com.gitbolt.app\" and certificate root = H\"$pin\""
+            codesign --verify --deep --strict --test-requirement="=$req" "$app" \
+              || err "GitBolt.app doesn't satisfy $req"
+            grep -qiF "H\"$pin\"" <<<"$dr" \
+              || err "the designated requirement doesn't pin $pin (signed ad hoc? GITBOLT_MACOS_SIGNING_P12 lost?)"
+          else
+            echo "::notice::not the upstream repository: an ad-hoc signature is fine"
+          fi
 
           # 2) Every Mach-O: no dependency or LC_RPATH naming the build host
           #    (Homebrew, the aqt Qt under /Users/runner, /usr/local), no
@@ -746,6 +840,12 @@ jobs:
           else
             rc=$?; echo "$out"; err "GitBolt --version exited $rc"
           fi
+
+          # 7) The symbol files belong to this GitBolt: the same UUID
+          #    (macdeployqt's strip and the signing keep it), line tables,
+          #    and main at its entry point.
+          python3 tools/symbolize.py --check "build/GitBolt-$ver-Darwin-arm64-symbols.zip" "$app/Contents/MacOS/GitBolt" \
+            || err "the symbol files don't match the DMG's GitBolt"
 
           [ "$fail" = 0 ] && echo "DMG smoke test passed"
           exit "$fail"
@@ -966,6 +1066,8 @@ jobs:
           # 3b) Versions Explorer shows (gitbolt.rc.in, CPACK_NSIS_DEFINES)
           #     and GitBolt.exe's manifest name, which Qt 6.11.3 writes
           #     (QT_WINDOWS_APP_PROJECT_IDENTIFIER in src/app/CMakeLists.txt).
+          #     The installer's GitBoltMinimumWindows, which the updater
+          #     reads, is checked by part 6's test (windowsMinimumOf).
           $exe = Join-Path $bin 'GitBolt.exe'
           foreach ($pe in $exe, $setup[0].FullName) {
             $said = (Get-Item $pe).VersionInfo.ProductVersion
@@ -991,6 +1093,11 @@ jobs:
           if ($ids.Count -ne 1 -or $ids[0] -notmatch 'name="com\.gitbolt\.app"') {
             $bad += "GitBolt.exe's manifest is not named com.gitbolt.app"
           }
+          # 3c) The symbol files (Symbol files, above) belong to the
+          #     installed GitBolt.exe: the same PDB id, a PDB in the zip,
+          #     and the entry point found by llvm-symbolizer.
+          python tools/symbolize.py --check "build/GitBolt-$version-Windows-AMD64-symbols.zip" $exe
+          if ($LASTEXITCODE) { $bad += "the symbol files don't match bin\GitBolt.exe" }
           if ($bad) {
             Get-ChildItem $dest -Recurse -File | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }
             throw "NSIS payload check failed:`n$($bad -join "`n")"
@@ -1160,16 +1267,15 @@ jobs:
           }
           Assert-Updated "updated by the updater's helper"
 
-      # ---- Linux: DEB + AppImage ---------------------------------------
-      # appstream + desktop-file-utils: the metadata lint. xvfb: the
-      # AppImage launch check. No libfuse2 (only a virtual package on
-      # noble): linuxdeploy runs with APPIMAGE_EXTRACT_AND_RUN, never FUSE.
+      # ---- Linux: DEB ------------------------------------------------
+      # appstream + desktop-file-utils: the metadata lint. xvfb: the DEB
+      # update test's display.
       - name: Packaging tools (Linux)
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         run: sudo apt-get install -y appstream desktop-file-utils xvfb
 
-      # Deterministic metadata lint (appimagetool's own appstreamcli run
-      # depends on the image and on network access).
+      # Deterministic metadata lint: --no-net, so it can't depend on what
+      # appstreamcli might fetch.
       - name: Lint desktop entry + AppStream metainfo (Linux)
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         run: |
@@ -1188,141 +1294,6 @@ jobs:
         working-directory: build
         run: cpack -G DEB -C Release
 
-      - name: Build AppImage (Linux)
-        if: github.event_name != 'pull_request' && runner.os == 'Linux'
-        env:
-          # linuxdeploy and its Qt plugin are AppImages; extract-and-run
-          # needs no FUSE and is inherited by the processes it spawns.
-          APPIMAGE_EXTRACT_AND_RUN: '1'
-          # appimagetool would run appstreamcli only if the image ships
-          # it; the metadata is linted explicitly above instead.
-          LDAI_NO_APPSTREAM: '1'
-          # The SVG icon engine (iconengines/libqsvgicon), which draws the
-          # menus' SVG icons at any scale. The Qt plugin deploys it with
-          # the svg module, which it finds by what gitbolt links, and the
-          # linker drops libQt6Svg from that list (nothing calls it
-          # directly; the .deb's deploy goes by the CMake target instead).
-          EXTRA_QT_MODULES: 'svg'
-        run: |
-          set -euo pipefail
-          # QT_ROOT_DIR: from Qt environment, above.
-          export QMAKE="$QT_ROOT_DIR/bin/qmake"
-          [ -x "$QMAKE" ] || { echo "::error::qmake not found at $QMAKE"; exit 1; }
-          export LINUXDEPLOY_OUTPUT_VERSION="$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)"
-          [ -n "$LINUXDEPLOY_OUTPUT_VERSION" ] || { echo "::error::no project version in CMakeCache"; exit 1; }
-
-          # Tagged releases, each checked against its sha256 from when it
-          # was pinned ('continuous' is rebuilt in place, and a release's
-          # assets can be replaced). tools/check-ci-pins.py reports newer
-          # tagged releases, and --write bumps tag and hash. The Qt plugin
-          # is at its latest tagged release; only 'continuous' is newer.
-          # The runtime is the ELF stub every AppImage starts with;
-          # appimagetool would otherwise download it from type2-runtime's
-          # 'continuous' release on every build.
-          fetch() {   # <url> <sha256>
-            local f=${1##*/}
-            curl -fsSL --retry 3 -o "$f" "$1"
-            echo "$2  $f" | sha256sum -c - \
-              || { echo "::error::$f does not match its pinned sha256"; exit 1; }
-          }
-          fetch https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage \
-                c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
-          fetch https://github.com/linuxdeploy/linuxdeploy-plugin-qt/releases/download/1-alpha-20250213-1/linuxdeploy-plugin-qt-x86_64.AppImage \
-                15106be885c1c48a021198e7e1e9a48ce9d02a86dd0a1848f00bdbf3c1c92724
-          fetch https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 \
-                2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
-          chmod +x linuxdeploy*.AppImage
-          export LDAI_RUNTIME_FILE="$PWD/runtime-x86_64"
-
-          # Icon file stem must equal the desktop Icon= key (gitbolt).
-          for s in 16 32 48 64 128 256 512; do
-            install -Dm644 "resources/icons/gitbolt-$s.png" \
-              "AppDir/usr/share/icons/hicolor/${s}x${s}/apps/gitbolt.png"
-          done
-          install -Dm644 src/app/platform/linux/com.gitbolt.app.metainfo.xml \
-            AppDir/usr/share/metainfo/com.gitbolt.app.metainfo.xml
-
-          # Two passes, to drop the Qt 5-era AppRun hook the Qt plugin's
-          # tag still writes (later, untagged commits skip it on Qt 6): on
-          # GNOME and XFCE it exports QT_QPA_PLATFORMTHEME=gtk2, a theme
-          # Qt 6 doesn't have, over the user's own setting. linuxdeploy
-          # wraps AppRun in a script sourcing apprun-hooks/* when it sets
-          # up the AppDir root, and skips that until a desktop file is
-          # deployed. So pass 1 deploys the binary and Qt without one, the
-          # hook goes, and pass 2 adds the desktop file, AppRun (a plain
-          # symlink to usr/bin/gitbolt) and the AppImage. Its rescan of
-          # usr/bin and usr/lib finds everything already deployed.
-          # --executable: the build-tree binary (RPATH rewritten, stripped)
-          # plus what it links outside the AppImage excludelist.
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --executable build/src/app/gitbolt --plugin qt
-          # Both fail if a bumped plugin stops writing the hook (then drop
-          # the extra pass) or another hook shows up (look at it first).
-          rm AppDir/apprun-hooks/linuxdeploy-plugin-qt-hook.sh
-          rmdir AppDir/apprun-hooks
-
-          # The licence texts, where the .deb has them: GitBolt's and those
-          # of Qt, ICU and the rest in build/copyright (cmake/Notices.cmake),
-          # then what pass 1 took from this Ubuntu: for each package a
-          # bundled library comes from, its version and source package (the
-          # LGPL ones' source is in Ubuntu's archive by those), its Debian
-          # copyright file and the /usr/share/common-licenses texts those
-          # cite; and the AppImage runtime's, fetched above (its release
-          # is in the notice's name). Qt's and ICU's libraries come from the
-          # Qt install, not a package.
-          cr=AppDir/usr/share/doc/gitbolt/copyright
-          install -Dm644 build/copyright "$cr"
-          runtime_notice=resources/licenses/appimage-runtime-20251108.txt
-          [ -f "$runtime_notice" ] || { echo "::error::no $runtime_notice"; exit 1; }
-          # The notice names the SHA-256 of the runtime it is for: a pin
-          # bumped (tools/check-ci-pins.py --write) needs a new notice.
-          grep -qF "$(sha256sum runtime-x86_64 | cut -d' ' -f1)" "$runtime_notice" \
-            || { echo "::error::$runtime_notice is not the notice of the runtime fetched above (its SHA-256 isn't in it)"; exit 1; }
-          rule=$(printf '=%.0s' $(seq 80))
-          declare -A libs=()
-          for f in AppDir/usr/lib/*.so*; do
-            n=${f##*/}
-            case $n in libQt6*|libicu*) continue ;; esac
-            p=$( { dpkg-query -S "/usr/lib/x86_64-linux-gnu/$n" "/lib/x86_64-linux-gnu/$n" 2>/dev/null || true; } \
-                 | awk -F: 'NR == 1 { print $1 }')
-            [ -n "$p" ] || { echo "::error::no Ubuntu package owns $n, which the AppImage bundles"; exit 1; }
-            libs[$p]+=" $n"
-          done
-          mapfile -t pkgs < <(printf '%s\n' "${!libs[@]}" | sort)
-          {
-            printf '\n%s\nLibraries of Ubuntu %s packages in the AppImage\n%s\n\n' \
-              "$rule" "$(. /etc/os-release && echo "$VERSION_ID")" "$rule"
-            echo 'Package, version, source package and version: the libraries from it.'
-            echo 'Source code: https://launchpad.net/ubuntu/+source/<source package>/<version>'
-            echo
-            for p in "${pkgs[@]}"; do
-              dpkg-query -W -f='${Package} ${Version}, source ${source:Package} ${source:Version}:' "$p"
-              echo "${libs[$p]}"
-            done
-            for p in "${pkgs[@]}"; do
-              doc=/usr/share/doc/$p/copyright
-              [ -f "$doc" ] || { echo "::error::no $doc" >&2; exit 1; }
-              printf '\n%s\n%s: %s\n%s\n\n' "$rule" "$p" "$doc" "$rule"
-              cat "$doc"
-            done
-            for p in "${pkgs[@]}"; do cat "/usr/share/doc/$p/copyright"; done \
-              | { grep -o '/usr/share/common-licenses/[A-Za-z0-9][A-Za-z0-9.+-]*' || true; } \
-              | sed -E 's/[.]+$//' | sort -u | while read -r l; do
-                  [ -f "$l" ] || l=${l%+}
-                  [ -f "$l" ] || { echo "::error::$l, which a copyright file cites, isn't on the runner" >&2; exit 1; }
-                  printf '\n%s\n%s\n%s\n\n' "$rule" "$l" "$rule"
-                  cat "$l"
-                done
-            printf '\n%s\nThe AppImage runtime\n%s\n\n' "$rule" "$rule"
-            cat "$runtime_notice"
-          } >> "$cr"
-          echo "AppImage copyright: ${#pkgs[@]} Ubuntu packages, $(wc -c < "$cr") bytes"
-          # Exec=gitbolt must name a file in usr/bin.
-          ./linuxdeploy-x86_64.AppImage --appdir AppDir \
-            --desktop-file src/app/platform/linux/gitbolt.desktop \
-            --output appimage
-          ls -l "GitBolt-${LINUXDEPLOY_OUTPUT_VERSION}-x86_64.AppImage"
-
       - name: Smoke-test Linux packages
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         timeout-minutes: 15
@@ -1330,13 +1301,14 @@ jobs:
           set -euo pipefail
           ver=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build/CMakeCache.txt)
           deb="build/gitbolt_${ver}_amd64.deb"
-          appimage="GitBolt-${ver}-x86_64.AppImage"
-          # Separate checks: under set -e, the first test in `a && b` failing does not abort.
-          [ -f "$deb" ]      || { echo "::error::missing $deb"; exit 1; }
-          [ -f "$appimage" ] || { echo "::error::missing $appimage"; exit 1; }
+          [ -f "$deb" ] || { echo "::error::missing $deb"; exit 1; }
 
           # 1) DEB shape
-          dpkg-deb -f "$deb" Package Version Depends
+          dpkg-deb -f "$deb" Package Version Depends Recommends
+          # Nautilus's Open in GitBolt needs the Python binding (cmake/Packaging.cmake).
+          recommends=$(dpkg-deb -f "$deb" Recommends)
+          [ "$recommends" = python3-nautilus ] \
+            || { echo "::error::Recommends is '$recommends', expected python3-nautilus"; exit 1; }
           dpkg-deb -c "$deb" | awk '{print $6}' > deb.lst
           # plugins/tls: usage statistics' HTTPS; it dlopen()s the system
           # libssl, which Depends must name (cmake/Packaging.cmake).
@@ -1437,6 +1409,23 @@ jobs:
               bash -euo pipefail -c '
                 export DEBIAN_FRONTEND=noninteractive
                 apt-get update -qq
+                # What the DEB Recommends exists here.
+                apt-cache show python3-nautilus >/dev/null
+                # The updater asks apt before it quits (src/update/
+                # Installer.cpp): as the user, no root, by the exit code.
+                # This stock system must take the DEB, and refuse a copy
+                # of it that needs libc6 (>= 99); both answers are printed,
+                # so the wording of each apt generation is in the log.
+                ask() { LC_ALL=C.UTF-8 runuser -u nobody -- apt-get -s -q install "$1" 2>&1; }
+                out=$(ask "/in/gitbolt_${VER}_amd64.deb") || { echo "$out"; echo "apt-get -s refused the DEB"; exit 1; }
+                echo "$out" | tail -n 3
+                mkdir -p /tmp/newer/DEBIAN
+                dpkg-deb -e "/in/gitbolt_${VER}_amd64.deb" /tmp/newer/DEBIAN
+                sed -i -E "s/libc6 \(>= [^)]*\)/libc6 (>= 99)/" /tmp/newer/DEBIAN/control
+                grep -q "libc6 (>= 99)" /tmp/newer/DEBIAN/control
+                dpkg-deb -b /tmp/newer /tmp/newer.deb >/dev/null
+                if out=$(ask /tmp/newer.deb); then echo "$out"; echo "apt-get -s took a DEB that needs libc6 (>= 99)"; exit 1; fi
+                echo "$out"
                 # xauth: xvfb-run needs it, and with --no-install-recommends
                 # not every release pulls it in with xvfb (Debian 13 does
                 # not, and xvfb-run then stops at "xauth command not found").
@@ -1450,68 +1439,15 @@ jobs:
                 grep -qx "GitBolt $VER" <<<"$out"'
           done
 
-          # 3) AppImage on the runner without the Qt install's
-          #    LD_LIBRARY_PATH (or any Qt plugin path the image might set)
-          chmod +x "$appimage"
-          out=$(env -u LD_LIBRARY_PATH -u QT_PLUGIN_PATH -u QML2_IMPORT_PATH \
-                  APPIMAGE_EXTRACT_AND_RUN=1 GITBOLT_INSTANCE_NAME=ci-smoke \
-                  xvfb-run -a "./$appimage" --version)
-          echo "AppImage: $out"
-          grep -qx "GitBolt $ver" <<<"$out"
-
-          # 4) No script the AppImage runs before gitbolt (AppRun, unless
-          #    it is the symlink to usr/bin/gitbolt, and apprun-hooks/)
-          #    sets QT_QPA_PLATFORMTHEME: the Qt plugin's hook, see Build
-          #    AppImage. -r doesn't follow the AppRun symlink; -I skips
-          #    binaries. -l lists the offending files.
-          rm -rf squashfs-root
-          "./$appimage" --appimage-extract >/dev/null
-          if grep -rlIF --exclude-dir=usr QT_QPA_PLATFORMTHEME squashfs-root; then
-            echo "::error::the AppImage sets QT_QPA_PLATFORMTHEME before starting gitbolt"
-            ls -l squashfs-root/AppRun
-            exit 1
-          fi
-
-          # 5) No libgit2 in the AppImage: it is linked into gitbolt
-          #    statically, so a copy here means linuxdeploy found a
-          #    shared one the binary links.
-          if find squashfs-root/usr/lib -name 'libgit2*' | grep .; then
-            echo "::error::the AppImage bundles a libgit2, but libgit2 is linked in statically"
-            exit 1
-          fi
-
-          # 6) The SVG icon engine (EXTRA_QT_MODULES in Build AppImage) and
-          #    the licence texts.
-          [ -f squashfs-root/usr/plugins/iconengines/libqsvgicon.so ] \
-            || { echo "::error::the AppImage lacks plugins/iconengines/libqsvgicon.so"; exit 1; }
-          #    build/copyright comes first, then each bundled library's
-          #    package (Build AppImage).
-          cr=squashfs-root/usr/share/doc/gitbolt/copyright
-          head -c "$(stat -c %s build/copyright)" "$cr" | cmp -s - build/copyright \
-            || { echo "::error::the AppImage's usr/share/doc/gitbolt/copyright doesn't start with build/copyright"; exit 1; }
-          for f in squashfs-root/usr/lib/*.so*; do
-            n=${f##*/}
-            case $n in libQt6*|libicu*) continue ;; esac
-            grep -qE "^[^ ]+ [^ ]+, source .*: (.* )?${n//./\\.}( |$)" "$cr" \
-              || { echo "::error::the AppImage's copyright file names no package for $n"; exit 1; }
-          done
-          grep -q '^The AppImage runtime$' "$cr" \
-            || { echo "::error::the AppImage's copyright file lacks the runtime's notices"; exit 1; }
-
-          # 7) A Qt TLS backend, as the DEB's plugins/tls (above): Qt
-          #    loads it as a plugin, so nothing links it and linuxdeploy
-          #    finds it only through the Network module. Without it every
-          #    HTTPS request fails: the update check and its download,
-          #    and usage statistics. It dlopen()s the host's libssl.
-          #    usr/plugins: where linuxdeploy's Qt plugin puts plugins
-          #    (iconengines, checked in 6).
-          tls=squashfs-root/usr/plugins/tls/libqopensslbackend.so
-          if [ ! -f "$tls" ]; then
-            echo "::error::the AppImage lacks usr/plugins/tls/libqopensslbackend.so (Qt's OpenSSL TLS backend): its update checks and other HTTPS requests would fail"
-            ls -la squashfs-root/usr/plugins squashfs-root/usr/plugins/tls 2>&1 || true
-            exit 1
-          fi
-          rm -rf squashfs-root
+          # 3) The symbol files (Symbol files, above) belong to the DEB's
+          #    gitbolt, which CPack stripped: the same build ID, line tables
+          #    in gitbolt.debug and none left in the binary, _start at its
+          #    entry point, and a debug link naming gitbolt.debug.
+          python3 tools/symbolize.py --check "build/GitBolt-${ver}-Linux-x86_64-symbols.zip" debroot/usr/lib/gitbolt/gitbolt \
+            || { echo "::error::the symbol files don't match the DEB's gitbolt"; exit 1; }
+          link=$(readelf --string-dump=.gnu_debuglink debroot/usr/lib/gitbolt/gitbolt)
+          grep -qF gitbolt.debug <<<"$link" \
+            || { echo "::error::the DEB's gitbolt has no debug link to gitbolt.debug"; echo "$link"; exit 1; }
 
       # The AppImage updates itself in place, end to end, as the DMG does
       # above (tests/e2e/test_update_install.py). The test copies it into
@@ -1574,19 +1510,20 @@ jobs:
           exit "$fail"
 
       # ---- all: collect + upload ------------------------------------------
-      # Each green leg must carry its OS's installers; a missing one fails
-      # here, on a dry run, rather than at the first real release.
+      # Each green leg must carry its OS's installer and one symbols zip; a
+      # missing one fails here, on a dry run, rather than at the first real
+      # release.
       - name: Collect installers
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          mkdir -p dist
+          mkdir -p dist symbols
           case "$RUNNER_OS" in
             macOS)   pats=('build/GitBolt-*.dmg') ;;
             Windows) pats=('build/GitBolt-*.exe') ;;
-            Linux)   pats=('build/gitbolt_*_amd64.deb' 'GitBolt-*-x86_64.AppImage') ;;
+            Linux)   pats=('build/gitbolt_*_amd64.deb') ;;
             *)       echo "::error::unexpected RUNNER_OS '$RUNNER_OS'"; exit 1 ;;
           esac
           for p in "${pats[@]}"; do
@@ -1594,7 +1531,10 @@ jobs:
             [ ${#m[@]} -gt 0 ] || { echo "::error::no installer matches $p"; exit 1; }
             cp -- "${m[@]}" dist/
           done
-          ls -la dist/
+          zips=(build/GitBolt-*-symbols.zip)
+          [ ${#zips[@]} -eq 1 ] || { echo "::error::expected one build/GitBolt-*-symbols.zip, found ${#zips[@]}"; exit 1; }
+          cp -- "${zips[0]}" symbols/
+          ls -la dist/ symbols/
 
       # v7 = node24. `archive` (default true) zips dist/*, which can hold
       # several files. Short retention: these are for trying a build
@@ -1606,6 +1546,17 @@ jobs:
         with:
           name: GitBolt-${{ runner.os }}
           path: dist/*
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
+
+      # An artifact of their own, so a tester's download of the installers
+      # stays small. The release job's GitBolt-* takes both.
+      - name: Upload symbol files
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: GitBolt-${{ runner.os }}-symbols
+          path: symbols/*
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'workflow_dispatch' && 3 || 7 }}
 
@@ -1691,10 +1642,11 @@ jobs:
 
   # ==========================================================================
   # Release: push to main only, every build/test/package/smoke test green,
-  # and the version has no tag yet. Attests each installer's build, creates
-  # tag v<version> at this commit plus the GitHub Release with every
-  # installer and the CHANGELOG section as notes, then checks the release
-  # as it's served. Dry runs never get here, on any branch, including main.
+  # and the version has no tag yet. Attests each file's build, creates tag
+  # v<version> at this commit plus the GitHub Release with every installer,
+  # the symbol files and the CHANGELOG section as notes, then checks the
+  # release as it's served. Dry runs never get here, on any branch,
+  # including main.
   # ==========================================================================
   release:
     name: release ${{ needs.version.outputs.tag }}
@@ -1744,7 +1696,8 @@ jobs:
           fi
 
       # v8 = node24 and the pair for upload-artifact v7. merge-multiple
-      # puts all three platforms' files in one directory.
+      # puts all three platforms' installers and symbol files in one
+      # directory.
       - name: Download installers
         if: steps.recheck.outputs.go == 'true'
         uses: actions/download-artifact@v8
@@ -1753,39 +1706,37 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Every format must be present (a missing one fails the release rather
-      # than publishing a partial one). The CPack names derive from CMake's
-      # PROJECT_VERSION, so they also cross-check the version job's read.
+      # Exactly the release's files, each platform's installer and symbols
+      # zip: a missing one fails the release rather than publishing a
+      # partial one, and so does an extra one. The CPack names derive from
+      # CMake's PROJECT_VERSION, so they also cross-check the version job's
+      # read.
       - name: Check installers, write checksums
         if: steps.recheck.outputs.go == 'true'
         working-directory: dist
         run: |
           set -euo pipefail
-          shopt -s nullglob
           ls -la
-          for ext in dmg exe deb AppImage; do
-            files=(*."$ext")
-            [ ${#files[@]} -gt 0 ] || { echo "::error::no .$ext installer in the artifacts"; exit 1; }
-          done
-          for f in *.dmg *.exe *.deb *.AppImage; do
-            [[ $f == *"$VERSION"* ]] || { echo "::error::$f doesn't carry version $VERSION"; exit 1; }
-          done
-          # The in-app updater downloads exactly these names for this
-          # version (assetNameFor, src/update/Package.cpp), each with its
-          # line in SHA256SUMS.txt. One renamed by a new runner, CPU name
-          # or CPack default would leave every installed copy unable to
-          # update to this release.
-          for f in "GitBolt-$VERSION-Darwin-arm64.dmg" "GitBolt-$VERSION-Windows-AMD64.exe" \
-                   "gitbolt_${VERSION}_amd64.deb" "GitBolt-$VERSION-x86_64.AppImage"; do
-            [ -f "$f" ] || { echo "::error::no $f in the artifacts: the in-app updater looks for exactly that name"; exit 1; }
-          done
+          # The in-app updater downloads exactly the installer names for
+          # this version (assetNameFor, src/update/Package.cpp), each with
+          # its line in SHA256SUMS.txt, and never a symbols zip. One renamed
+          # by a new runner, CPU name or CPack default would leave every
+          # installed copy unable to update to this release.
+          expected=("GitBolt-$VERSION-Darwin-arm64.dmg" "GitBolt-$VERSION-Windows-AMD64.exe"
+                    "gitbolt_${VERSION}_amd64.deb"
+                    "GitBolt-$VERSION-Darwin-arm64-symbols.zip" "GitBolt-$VERSION-Windows-AMD64-symbols.zip"
+                    "GitBolt-$VERSION-Linux-x86_64-symbols.zip")
+          diff <(printf '%s\n' "${expected[@]}" | sort) <(printf '%s\n' * | sort) \
+            || { echo "::error::the artifacts aren't exactly the release's files (<: missing, >: unexpected); the in-app updater looks for exactly the installer names"; exit 1; }
           sha256sum -- * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
-      # Build provenance for each installer listed in SHA256SUMS.txt, signed
-      # through Sigstore with this workflow's identity and kept by GitHub.
-      # The installers have no Developer ID or Authenticode signature, so
-      # this is how a download shows it was built by ci.yml on main:
+      # Build provenance for each file listed in SHA256SUMS.txt, installers
+      # and symbol files, signed through Sigstore with this workflow's
+      # identity and kept by GitHub. No installer has an Apple Developer ID
+      # or Authenticode signature (the DMG's app carries GitBolt's own
+      # self-signed certificate), so this is how a download shows it was
+      # built by ci.yml on main:
       #   gh attestation verify <file> --repo Inverian/GitBolt
       # Before the release exists, so a failure here publishes nothing.
       - name: Attest the installers
@@ -1843,7 +1794,7 @@ jobs:
           [ "$(jq -r .body <<<"$rel" | tr -d '\r')" = "$(printf '%s\n' "$NOTES" | tr -d '\r')" ] \
             || err "the release notes differ from CHANGELOG.md's [$VERSION] section"
           diff <(jq -r '.assets[].name' <<<"$rel" | sort) <(cd dist && printf '%s\n' * | sort) \
-            || err "the release's files differ from the installers checked above"
+            || err "the release's files differ from the files checked above"
           out="$RUNNER_TEMP/published"
           mkdir "$out"
           gh release download "$TAG" --dir "$out"
@@ -1858,4 +1809,4 @@ jobs:
               || err "${f##*/}: its attestation doesn't verify"
             n=$((n + 1))
           done
-          echo "Checked the published $TAG: Latest, notes, checksums, and $n attested installers" >> "$GITHUB_STEP_SUMMARY"
+          echo "Checked the published $TAG: Latest, notes, checksums, and $n attested files" >> "$GITHUB_STEP_SUMMARY"
