@@ -126,7 +126,9 @@ QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QStri
                            const QDateTime& at);
 
 /// level "fatal", from a parsed report. Contexts and release come from
-/// the report, not the running app.
+/// the report, not the running app; so do the tag build_id (when the
+/// report has a Build ID) and, on Windows, the exception code in the
+/// exception's value ("SIGSEGV 0xc0000005").
 QJsonObject glitchTipCrash(const CrashEvent& crash);
 
 /// The sanitized detail recordError() dedupes on: operationName(),

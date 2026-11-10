@@ -135,14 +135,20 @@ gitbolt_add_test(test_telemetry telemetry/TestTelemetry.cpp)
 target_sources(test_telemetry PRIVATE telemetry/HttpStub.h telemetry/CrashHeader.h)
 target_link_libraries(test_telemetry PRIVATE gitbolt_telemetry Qt6::Network)
 # Crash reports: fixtures for every refusal, the renderHeader round
-# trip, and (POSIX) death tests that parse the crash.log a real
-# handler wrote. Their helper is built as "gitbolt", in a directory of
-# its own, so the parser counts its frames as the app's.
+# trip, and death tests that parse the crash.log a real handler wrote.
+# Their helper is built as "gitbolt", in a directory of its own, so the
+# parser counts its frames as the app's. MSVC: linked with /DEBUG, so
+# the test and the helper have the PDB id the Build ID line reads, and
+# dbghelp to check it independently.
 gitbolt_add_test(test_crash_log_parser telemetry/TestCrashLogParser.cpp)
 target_sources(test_crash_log_parser PRIVATE telemetry/CrashHeader.h)
 target_link_libraries(test_crash_log_parser PRIVATE gitbolt_telemetry)
 target_compile_definitions(test_crash_log_parser PRIVATE
     GITBOLT_CRASH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crash")
+if(MSVC)
+    target_link_options(test_crash_log_parser PRIVATE /DEBUG)
+    target_link_libraries(test_crash_log_parser PRIVATE dbghelp)
+endif()
 
 # update/ — the installer side of in-app updates. What kind of install
 # the running copy is and whether the updater may replace it, from
@@ -173,18 +179,19 @@ gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
 set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
-if(NOT WIN32)
-    add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
-    # dladdr, as for gitbolt_util: in libdl before glibc 2.34
-    target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
-    set_target_properties(gitbolt_crash_helper PROPERTIES
-        OUTPUT_NAME gitbolt
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
-    gitbolt_set_warnings(gitbolt_crash_helper)
-    add_dependencies(test_crash_log_parser gitbolt_crash_helper)
-    target_compile_definitions(test_crash_log_parser PRIVATE
-        GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
+add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
+# dladdr, as for gitbolt_util: in libdl before glibc 2.34 (empty on Windows)
+target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
+set_target_properties(gitbolt_crash_helper PROPERTIES
+    OUTPUT_NAME gitbolt
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
+if(MSVC)
+    target_link_options(gitbolt_crash_helper PRIVATE /DEBUG)
 endif()
+gitbolt_set_warnings(gitbolt_crash_helper)
+add_dependencies(test_crash_log_parser gitbolt_crash_helper)
+target_compile_definitions(test_crash_log_parser PRIVATE
+    GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
 
 # update/ — the in-app updater's rules, no network: Version, the feed's
 # and the downloads' URL allowlists, the daily schedule, the
@@ -472,6 +479,16 @@ if(NOT WIN32 AND Python3_FOUND)
     add_test(NAME ci_pins
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ci_pins.py ${PROJECT_SOURCE_DIR})
+endif()
+
+# tools/symbolize.py: reports and GlitchTip events parsed, build IDs read
+# from synthetic Mach-O, ELF and PE headers, and a round trip through
+# the crash helper's real crash.log (skipped where no symbolizer is).
+if(NOT WIN32 AND Python3_FOUND)
+    add_test(NAME symbolize_tool
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_symbolize.py ${PROJECT_SOURCE_DIR}
+                $<TARGET_FILE:gitbolt_crash_helper>)
 endif()
 
 # e2e/ tests — the real app binary driven through the test bridge.

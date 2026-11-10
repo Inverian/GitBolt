@@ -1,0 +1,35 @@
+=== GitBolt Crash Report ===
+Format: 2
+App version: 0.1.5
+Build: official
+Opt-out: none
+Session: user
+Qt version: 6.10.0 (runtime), 6.10.0 (compile)
+OS: windows 11
+Kernel: winnt 10.0.26100
+CPU Arch: x86_64
+Build ID: 3f2a9c1d5e6b47a8b9c0d1e2f3a4b5c61
+Signal: SIGSEGV (11)
+Exception: 0xc0000005
+Stack: exception
+Epoch: 1760000999
+
+--- Stack Trace ---
+#0 GitBolt.exe +0x51a40 ?
+#1 GitBolt.exe +0x52b10 ?
+#2 Qt6Core.dll +0x2b1c0 ?
+#3 Qt6Widgets.dll +0x1d0e4 ?
+#4 AliceInputHook64.dll +0x2200 ?
+#5 GitBolt.exe +0x3e10 ?
+#6 KERNEL32.DLL +0x17344 ?
+#7 ntdll.dll +0x526b1 ?
+
+--- Modules ---
+GitBolt.exe base=0x7ff6a1230000 size=0x1c8000 time=0x6730a1b2 pdb=GitBolt.pdb id=3f2a9c1d5e6b47a8b9c0d1e2f3a4b5c61
+Qt6Core.dll base=0x7ffb12340000 size=0x6a1000 time=0x672f0e11 pdb=Qt6Core.pdb id=0a1b2c3d4e5f60718293a4b5c6d7e8f91
+Qt6Widgets.dll base=0x7ffb22340000 size=0x5c2000 time=0x672f0e12 pdb=Qt6Widgets.pdb id=1a1b2c3d4e5f60718293a4b5c6d7e8f91
+AliceInputHook64.dll base=0x7ffb32340000 size=0x12000 time=0x5f000000
+KERNEL32.DLL base=0x7ffb42340000 size=0xc5000 time=0x9a1b2c3d pdb=kernel32.pdb id=2b1b2c3d4e5f60718293a4b5c6d7e8f91
+ntdll.dll base=0x7ffb52340000 size=0x1f8000 time=0x1b2c3d4e pdb=ntdll.pdb id=3c1b2c3d4e5f60718293a4b5c6d7e8f91
+
+=== End of Report ===

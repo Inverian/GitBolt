@@ -1,17 +1,28 @@
 //
 // gitbolt_crash_helper — the death tests' crashing process
-// (TestCrashLogParser::realCrashLogParses and
-// testSessionCrashKeepsUsersLog). Installs the real crash handler, the
-// way main() does but with the values injected, and dies on SIGSEGV.
-// The test runs it with HOME pointed at a temporary directory and
-// parses the crash.log the handler wrote there.
+// (TestCrashLogParser::realCrashLogParses, windowsRealCrashLogParses
+// and testSessionCrashKeepsUsersLog, and tests/tools/test_symbolize.py).
+// Installs the real crash handler, the way main() does but with the
+// values injected, and dies. The test runs it with HOME pointed at a
+// temporary directory and parses the crash.log the handler wrote there.
+//
+// GITBOLT_CRASH_HELPER_DIR: the report folder instead of ~/.gitbolt.
+// Required on Windows, where HOME doesn't move the profile folder and
+// a run would overwrite the developer's own crash.log.
 //
 // Arguments, in any order:
 //   test-session  install as a test session (the report goes to
 //                 crash-test.log, stamped "Session: test")
 //   fault         die of a real fault in a leaf function instead of
-//                 raise(), after printing that function's offset in
-//                 the executable ("faultNow +0x<hex>") to stdout
+//                 raise() (on Windows, which has no raise() handler,
+//                 the default)
+//   null-call     call through a null function pointer
+//   throw         throw a std::runtime_error nothing catches
+//   abort         call std::abort()
+//   invalid-parameter
+//                 fclose(nullptr): the CRT's invalid-parameter handler
+//                 (Windows; elsewhere a fault)
+//   worker        do the above on a std::thread, not the main thread
 //   check-ports   (macOS) don't crash: print whether a task-level port
 //                 takes EXC_CRASH ("crash port: set" or "crash port:
 //                 none") once the handler is installed, and exit 0
@@ -27,6 +38,10 @@
 //   -ilc …        the same, as a login shell queryLoginShellPath() asks
 //                 for its PATH: the marker, then "/crash-port-set" or
 //                 "/crash-port-none"
+//
+// Before it crashes, it prints the crashing function's start relative
+// to the executable ("<function> +0x<hex>"), which the crash.log's
+// offsets are relative to too.
 //
 // A user session's crash keeps macOS's crash reporter out of it here,
 // as the helper's own doing (keepCrashReporterOut). A test session's
@@ -46,11 +61,21 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <stdexcept>
+#include <thread>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #ifdef Q_OS_MACOS
 #include <mach/mach.h>
@@ -75,18 +100,41 @@ void keepCrashReporterOut() {
 }
 #endif
 
+// Where `function` starts, relative to the executable's load address:
+// what the crash.log's offsets are relative to.
+void printOffset(const char* name, const void* function) {
+    const auto start = reinterpret_cast<std::uintptr_t>(function);
+    std::uintptr_t base = 0;
+#ifdef Q_OS_WIN
+    HMODULE module = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                               | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(function), &module))
+        base = reinterpret_cast<std::uintptr_t>(module);
+#else
+    Dl_info info{};
+    if (::dladdr(function, &info) != 0 && info.dli_fbase)
+        base = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
+#endif
+    if (base != 0)
+        std::printf("%s +0x%llx\n", name, static_cast<unsigned long long>(start - base));
+    std::fflush(stdout);
+}
+
+// Volatile both ways, so no optimizer proves them null and turns the
+// access into a trap instruction (SIGILL/SIGTRAP, which aren't caught).
+volatile int* volatile g_nowhere = nullptr;
+using Function = void (*)();
+volatile Function g_nullFunction = nullptr;
+#ifdef Q_OS_WIN
+std::FILE* volatile g_noFile = nullptr;
+#endif
+volatile int g_after = 0;
+
 // A couple of frames of our own between main and the crash.
 Q_NEVER_INLINE void crashNow() {
     std::raise(SIGSEGV);
 }
-
-Q_NEVER_INLINE void crashSoon() {
-    crashNow();
-}
-
-// Volatile both ways, so no optimizer proves it null and turns the
-// store into a trap instruction (SIGILL/SIGTRAP, which aren't caught).
-volatile int* volatile g_nowhere = nullptr;
 
 // A leaf: it calls nothing, so on arm64 it pushes no frame record, and
 // a frame-pointer walk from the signal frame starts at its caller.
@@ -94,21 +142,62 @@ Q_NEVER_INLINE void faultNow() {
     *g_nowhere = 42;
 }
 
-Q_NEVER_INLINE void faultSoon() {
-    faultNow();
+// The store after the call keeps it a call (not a jump), so this
+// function is the frame the null address returns to.
+Q_NEVER_INLINE void callNull() {
+    g_nullFunction();
+    g_after = 1;
 }
 
-// faultNow's start, relative to the executable's load address: what
-// the crash.log's offsets are relative to.
-void printFaultNowOffset() {
-    const auto start = reinterpret_cast<std::uintptr_t>(&faultNow);
-    Dl_info info{};
-    if (::dladdr(reinterpret_cast<const void*>(start), &info) != 0 && info.dli_fbase) {
-        std::printf("faultNow +0x%llx\n",
-                    static_cast<unsigned long long>(
-                        start - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
+Q_NEVER_INLINE void throwNow() {
+    throw std::runtime_error("C:\\Users\\alice\\secret-repo");
+}
+
+Q_NEVER_INLINE void abortNow() {
+    std::abort();
+}
+
+#ifdef Q_OS_WIN
+Q_NEVER_INLINE void invalidParameterNow() {
+    const int result = std::fclose(g_noFile);
+    std::printf("fclose: %d\n", result);
+}
+#endif
+
+enum class Crash { Raise, Fault, NullCall, Throw, Abort, InvalidParameter };
+
+Q_NEVER_INLINE void crash(Crash how) {
+    switch (how) {
+    case Crash::Raise:
+        crashNow();
+        break;
+    case Crash::Fault:
+        printOffset("faultNow", reinterpret_cast<const void*>(&faultNow));
+        faultNow();
+        break;
+    case Crash::NullCall:
+        printOffset("callNull", reinterpret_cast<const void*>(&callNull));
+        callNull();
+        break;
+    case Crash::Throw:
+        printOffset("throwNow", reinterpret_cast<const void*>(&throwNow));
+        throwNow();
+        break;
+    case Crash::Abort:
+        printOffset("abortNow", reinterpret_cast<const void*>(&abortNow));
+        abortNow();
+        break;
+    case Crash::InvalidParameter:
+#ifdef Q_OS_WIN
+        printOffset("invalidParameterNow", reinterpret_cast<const void*>(&invalidParameterNow));
+        invalidParameterNow();
+#else
+        printOffset("faultNow", reinterpret_cast<const void*>(&faultNow));
+        faultNow();
+#endif
+        break;
     }
-    std::fflush(stdout);
+    g_after = 2;
 }
 
 #ifdef Q_OS_MACOS
@@ -128,9 +217,7 @@ bool crashPortSet() {
     }
     return false;
 }
-#endif
 
-#ifdef Q_OS_MACOS
 const char* setOrNone(bool set) {
     return set ? "set" : "none";
 }
@@ -180,21 +267,47 @@ int main(int argc, char* argv[]) {
     }
 #endif
     bool testSession = false;
-    bool fault = false;
+    bool onWorker = false;
     bool checkPorts = false;
     bool checkChildPorts = false;
+#ifdef Q_OS_WIN
+    Crash how = Crash::Fault;   // raise(SIGSEGV) reaches no handler there
+#else
+    Crash how = Crash::Raise;
+#endif
     for (int i = 1; i < argc; ++i) {
-        testSession = testSession || std::strcmp(argv[i], "test-session") == 0;
-        fault = fault || std::strcmp(argv[i], "fault") == 0;
-        checkChildPorts = checkChildPorts || std::strcmp(argv[i], "check-child-ports") == 0;
-        checkPorts = checkPorts || checkChildPorts || std::strcmp(argv[i], "check-ports") == 0;
+        const auto is = [&](const char* word) { return std::strcmp(argv[i], word) == 0; };
+        testSession = testSession || is("test-session");
+        onWorker = onWorker || is("worker");
+        checkChildPorts = checkChildPorts || is("check-child-ports");
+        checkPorts = checkPorts || checkChildPorts || is("check-ports");
+        if (is("fault"))
+            how = Crash::Fault;
+        else if (is("null-call"))
+            how = Crash::NullCall;
+        else if (is("throw"))
+            how = Crash::Throw;
+        else if (is("abort"))
+            how = Crash::Abort;
+        else if (is("invalid-parameter"))
+            how = Crash::InvalidParameter;
     }
+    const QString reportDir = qEnvironmentVariable("GITBOLT_CRASH_HELPER_DIR");
+#ifdef Q_OS_WIN
+    if (reportDir.isEmpty() && !checkPorts) {
+        std::fprintf(stderr, "GITBOLT_CRASH_HELPER_DIR is not set\n");
+        return 2;
+    }
+    // No Windows Error Reporting box on a desktop, should the handler
+    // under test let a crash through.
+    SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+#endif
 #ifdef Q_OS_MACOS
     if (!testSession && !checkPorts)
         keepCrashReporterOut();
 #endif
     gitbolt::util::CrashHandler::install("0.1.0", /*officialBuild=*/true,
-                                         /*envOptOut=*/false, testSession);
+                                         /*envOptOut=*/false, testSession, reportDir);
     if (checkPorts) {
 #ifdef Q_OS_MACOS
         std::printf("crash port: %s\n", crashPortSet() ? "set" : "none");
@@ -206,10 +319,11 @@ int main(int argc, char* argv[]) {
         std::fflush(stdout);
         return 0;
     }
-    if (fault) {
-        printFaultNowOffset();
-        faultSoon();
+    if (onWorker) {
+        std::thread worker([how] { crash(how); });
+        worker.join();
+    } else {
+        crash(how);
     }
-    crashSoon();
     return 0;
 }

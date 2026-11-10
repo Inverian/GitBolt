@@ -356,7 +356,11 @@ QJsonObject glitchTipCrash(const CrashEvent& crash) {
 
     QJsonObject exception;
     exception.insert(QStringLiteral("type"), crash.signal);
-    exception.insert(QStringLiteral("value"), crash.signal);
+    // Windows: "SIGSEGV 0xc0000005", the exception the signal stands for.
+    exception.insert(QStringLiteral("value"),
+                     crash.exceptionCode.isEmpty()
+                         ? crash.signal
+                         : crash.signal + QLatin1Char(' ') + crash.exceptionCode);
     exception.insert(QStringLiteral("mechanism"), mechanism);
     exception.insert(QStringLiteral("stacktrace"),
                      QJsonObject{{QStringLiteral("frames"), frames}});
@@ -364,8 +368,12 @@ QJsonObject glitchTipCrash(const CrashEvent& crash) {
     event.insert(QStringLiteral("exception"),
                  QJsonObject{{QStringLiteral("values"), QJsonArray{exception}}});
     event.insert(QStringLiteral("fingerprint"), QJsonArray::fromStringList(crash.fingerprint));
-    event.insert(QStringLiteral("tags"),
-                 QJsonObject{{QStringLiteral("kind"), QStringLiteral("crash")}});
+    // build_id: which symbol file reads the offsets. Not in the
+    // fingerprint: another binary's offsets differ anyway.
+    QJsonObject tags{{QStringLiteral("kind"), QStringLiteral("crash")}};
+    if (!crash.buildId.isEmpty())
+        tags.insert(QStringLiteral("build_id"), crash.buildId);
+    event.insert(QStringLiteral("tags"), tags);
     return event;
 }
 
