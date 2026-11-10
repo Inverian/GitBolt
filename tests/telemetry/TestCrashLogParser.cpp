@@ -529,18 +529,21 @@ private slots:
         QCOMPARE(got, expected);
     }
 
+    // ucrtbased.dll: a Debug build's CRT (a local Windows run's).
     void windowsAbortDropsCrtFrames() {
-        const std::optional<CrashEvent> event = CrashLogParser::parse(report(
-            withCrashOs(officialHeader(), "windows 11"),
-            {QStringLiteral("#0 GitBolt.exe +0x100 ?"), QStringLiteral("#1 ucrtbase.dll +0x200 raise+0x1"),
-             QStringLiteral("#2 ucrtbase.dll +0x300 abort+0x1"), QStringLiteral("#3 GitBolt.exe +0x400 ?"),
-             QStringLiteral("#4 KERNEL32.DLL +0x500 BaseThreadInitThunk+0x1")},
-            QStringLiteral("SIGABRT (22)")));
-        QVERIFY(event);
-        QCOMPARE(event->os, QStringLiteral("Windows"));
-        QCOMPARE(event->frames.size(), 2);
-        QCOMPARE(event->frames.last().package, QStringLiteral("GitBolt.exe"));
-        QCOMPARE(event->frames.last().offset, std::optional<quint64>(0x400));
+        for (const QString& crt : {QStringLiteral("ucrtbase.dll"), QStringLiteral("ucrtbased.dll")}) {
+            const std::optional<CrashEvent> event = CrashLogParser::parse(report(
+                withCrashOs(officialHeader(), "windows 11"),
+                {QStringLiteral("#0 GitBolt.exe +0x100 ?"), QStringLiteral("#1 %1 +0x200 raise+0x1").arg(crt),
+                 QStringLiteral("#2 %1 +0x300 abort+0x1").arg(crt), QStringLiteral("#3 GitBolt.exe +0x400 ?"),
+                 QStringLiteral("#4 KERNEL32.DLL +0x500 BaseThreadInitThunk+0x1")},
+                QStringLiteral("SIGABRT (22)")));
+            QVERIFY(event);
+            QCOMPARE(event->os, QStringLiteral("Windows"));
+            QCOMPARE(event->frames.size(), 2);
+            QCOMPARE(event->frames.last().package, QStringLiteral("GitBolt.exe"));
+            QCOMPARE(event->frames.last().offset, std::optional<quint64>(0x400));
+        }
     }
 
     // An unhandled C++ exception reaches the handler through the CRT's
@@ -913,18 +916,22 @@ private slots:
         // first, with its size, time stamp and the same id.
         static const QRegularExpression line(QStringLiteral(
             "^#(\\d+) (?:(\\S+) \\+0x([0-9a-f]+) \\?|\\? 0x[0-9a-f]+)$"));
-        const qsizetype begin = log.indexOf(QStringLiteral("--- Stack Trace ---\n"));
-        const qsizetype middle = log.indexOf(QStringLiteral("\n\n--- Modules ---\n"));
+        const QString stackMarker = QStringLiteral("--- Stack Trace ---\n");
+        const QString modulesMarker = QStringLiteral("\n\n--- Modules ---\n");
+        const qsizetype begin = log.indexOf(stackMarker);
+        const qsizetype middle = log.indexOf(modulesMarker);
         const qsizetype end = log.indexOf(QStringLiteral("\n\n=== End of Report ==="));
         QVERIFY2(begin > 0 && middle > begin && end > middle, qPrintable(log));
-        const QStringList lines = log.mid(begin + 20, middle - begin - 20).split(QLatin1Char('\n'));
+        const qsizetype framesAt = begin + stackMarker.size();
+        const QStringList lines = log.mid(framesAt, middle - framesAt).split(QLatin1Char('\n'));
         QVERIFY2(lines.size() >= 3, qPrintable(log));
         for (qsizetype i = 0; i < lines.size(); ++i) {
             const QRegularExpressionMatch m = line.match(lines.at(i));
             QVERIFY2(m.hasMatch(), qPrintable(lines.at(i)));
             QCOMPARE(m.captured(1).toInt(), int(i));
         }
-        const QStringList moduleLines = log.mid(middle + 17, end - middle - 17).split(QLatin1Char('\n'));
+        const qsizetype modulesAt = middle + modulesMarker.size();
+        const QStringList moduleLines = log.mid(modulesAt, end - modulesAt).split(QLatin1Char('\n'));
         QVERIFY2(QRegularExpression(QStringLiteral(
                      "^gitbolt\\.exe base=0x[0-9a-f]+ size=0x[0-9a-f]+ time=0x[0-9a-f]{8} "
                      "pdb=\\S+\\.pdb id=%1$").arg(id.captured(1)))

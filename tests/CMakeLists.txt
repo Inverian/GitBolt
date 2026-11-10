@@ -189,8 +189,10 @@ target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS}
 set_target_properties(gitbolt_crash_helper PROPERTIES
     OUTPUT_NAME gitbolt
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
+# /INCREMENTAL:NO: in a Debug build a function's address would be its
+# incremental-link thunk, not the code the crash frames point into.
 if(MSVC)
-    target_link_options(gitbolt_crash_helper PRIVATE /DEBUG)
+    target_link_options(gitbolt_crash_helper PRIVATE /DEBUG /INCREMENTAL:NO)
 endif()
 gitbolt_set_warnings(gitbolt_crash_helper)
 add_dependencies(test_crash_log_parser gitbolt_crash_helper)

@@ -199,7 +199,7 @@ std::optional<RawFrame> parseFrameLine(QStringView line) {
 
 bool isWindowsDispatchModule(const QString& module) {
     static const QRegularExpression dispatch(
-        QStringLiteral("^(ntdll|KERNELBASE|kernel32|ucrtbase|vcruntime140[_a-z0-9]*)\\.dll$"),
+        QStringLiteral("^(ntdll|KERNELBASE|kernel32|ucrtbased?|vcruntime140[_a-z0-9]*)\\.dll$"),
         QRegularExpression::CaseInsensitiveOption);
     return dispatch.match(fileName(module)).hasMatch();
 }

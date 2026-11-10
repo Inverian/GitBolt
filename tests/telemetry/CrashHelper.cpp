@@ -70,6 +70,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <crtdbg.h>
 #include <windows.h>
 #else
 #include <dlfcn.h>
@@ -301,6 +302,13 @@ int main(int argc, char* argv[]) {
     // No Windows Error Reporting box on a desktop, should the handler
     // under test let a crash through.
     SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+#ifdef _DEBUG
+    // Nor a debug CRT's dialog, which abort() and an invalid parameter
+    // open before the handlers run.
+    _set_abort_behavior(0, _WRITE_ABORT_MSG);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_DEBUG);
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_DEBUG);
+#endif
 #endif
 #ifdef Q_OS_MACOS
     if (!testSession && !checkPorts)
