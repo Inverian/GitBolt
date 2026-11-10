@@ -373,15 +373,17 @@ int main(int argc, char* argv[]) {
     app.installEventFilter(&openRequests);
 #ifdef Q_OS_MACOS
     // A launch by Finder or LaunchServices has its folder in an event,
-    // not in argv, and the event comes once the event loop first
-    // turns. Turn it now, before the single-instance guard: a launch
-    // that finds GitBolt running hands its path over below and exits,
-    // and the folder would go with it. (BusyInstanceNotice turns the
+    // not in argv. Wait for it before the single-instance guard: a
+    // launch that finds GitBolt running hands its path over below and
+    // exits, and the folder would go with it. The event can come after
+    // the loop's first turn, but before AppKit finishes launching: one
+    // turn alone could miss it. (BusyInstanceNotice turns the
     // loop before any window exists, too.)
     if (initialRepoPath.isEmpty()
         && QGuiApplication::platformName() == QLatin1String("cocoa")) {
-        QCoreApplication::processEvents();
-        initialRepoPath = openRequests.takePending();
+        constexpr int kLaunchFolderWaitMs = 3000;
+        initialRepoPath = openRequests.waitForLaunchFolder(
+            gitbolt::app::macos::launchFinishedProbe(), kLaunchFolderWaitMs);
     }
     openRequests.setLaunchPath(initialRepoPath);
 #endif

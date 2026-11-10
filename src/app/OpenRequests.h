@@ -4,6 +4,8 @@
 #include <QObject>
 #include <QString>
 
+#include <functional>
+
 class QEvent;
 
 namespace gitbolt::app {
@@ -35,6 +37,12 @@ public:
     /// launch whose folder came as an event rather than in argv, before
     /// the single-instance guard decides who opens it.
     QString takePending();
+
+    /// takePending(), once the launch's folder has had time to come:
+    /// runs the event loop until a request is held, `launched` says the
+    /// system has finished launching GitBolt (macOS sends a launch's
+    /// folder before that), or `capMs` has passed, which it warns of.
+    QString waitForLaunchFolder(const std::function<bool()>& launched, int capMs);
 
     /// The path this launch opens anyway (from argv, or takePending).
     /// The same folder requested within 2 s is dropped: AppKit may send

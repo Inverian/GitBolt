@@ -10,6 +10,9 @@ events itself).
 3. A second launch with a folder (`open -n`, the same instance name)
    takes its event before the single-instance guard and hands it over:
    repo-c opens in the first, and the second exits.
+   No launch waits out the cap on AppKit finishing its launch (it says
+   "had not finished launching"): its folder could be lost, and every
+   launch would start 3 s late.
 4. Finder's service provider on the real NSApp (bridge service-open).
 5. The service itself goes to the user's GitBolt only: macOS gives it
    to the first process that asks, so a GitBolt with an instance name
@@ -136,26 +139,28 @@ def test(binary: str, scratch: str, apps: list) -> None:
         state = first.wait_until(on_screen("repo-a"), "repo-a from a cold launch", timeout=30)
         if not same_dir(state["repoPath"], repo_a):
             raise Failure(f"cold launch opened {state['repoPath']}")
+        no_launch_wait(first.log_path, "the cold launch")
 
         launch(binary, repo_b, first.env, first.log_path, new_instance=False)
         first.wait_until(on_screen("repo-b"), "repo-b sent to the running GitBolt", timeout=30)
 
         second_env = dict(first.env)
         second_env["GITBOLT_TEST_BRIDGE"] = f"{first.bridge_name}-second"
-        launch(binary, repo_c, second_env,
-               os.path.join(runtime_dir, "second.log"), new_instance=True)
+        second_log = os.path.join(runtime_dir, "second.log")
+        launch(binary, repo_c, second_env, second_log, new_instance=True)
         try:
             first.wait_until(on_screen("repo-c"), "repo-c handed over by a second launch",
                              timeout=30)
         except Failure as e:
-            raise Failure(f"{e}; the second launch's log: "
-                          f"{read(os.path.join(runtime_dir, 'second.log'))}") from None
+            raise Failure(f"{e}; the second launch's log: {read(second_log)}; "
+                          f"the first's: {read(first.log_path)}") from None
         deadline = time.monotonic() + 20
         while len(processes(binary)) > 1:
             if time.monotonic() > deadline:
                 raise Failure(f"the second launch never exited: {processes(binary)}; "
-                              f"its log: {read(os.path.join(runtime_dir, 'second.log'))}")
+                              f"its log: {read(second_log)}")
             time.sleep(0.5)
+        no_launch_wait(second_log, "the second launch")
 
         first.ok(f"service-open {repo_d}")
         first.wait_until(on_screen("repo-d"), "repo-d from the service provider", timeout=30)
@@ -172,6 +177,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     try:
         users.wait_bridge(timeout=60)
         users.wait_until(on_screen("repo-a"), "repo-a in the default namespace", timeout=30)
+        no_launch_wait(users.log_path, "the default-namespace launch")
         deadline = time.monotonic() + 15
         while not service_registered():
             if time.monotonic() > deadline:
@@ -187,6 +193,18 @@ def read(path: str) -> str:
             return fh.read()[-2000:]
     except OSError:
         return "(none)"
+
+
+def no_launch_wait(log: str, label: str) -> None:
+    """The launch didn't wait out the cap on AppKit finishing its
+    launch, which OpenRequests::waitForLaunchFolder warns of."""
+    try:
+        with open(log) as fh:
+            waited = "had not finished launching" in fh.read()
+    except OSError:
+        return
+    if waited:
+        raise Failure(f"{label} waited out the launch cap; its log: {read(log)}")
 
 
 def teardown(binary: str, app: App) -> None:

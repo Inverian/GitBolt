@@ -2,19 +2,23 @@
 // TestOpenRequests — the folders macOS asks a running GitBolt to open
 // (src/app/OpenRequests.h): open-documents events, as Qt delivers them
 // to the application object, and Finder's service. Platform-neutral:
-// the events are sent here the way Qt sends them.
+// the events are sent here the way Qt sends them. A launch's folder
+// is waited for until the system has finished launching GitBolt.
 //
 
 #include "app/OpenRequests.h"
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QFileOpenEvent>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 #include <QUrl>
 
 using gitbolt::app::OpenRequests;
@@ -27,6 +31,12 @@ bool sendFileOpen(const QUrl& url)
 {
     QFileOpenEvent event(url);
     return QCoreApplication::sendEvent(qApp, &event);
+}
+
+// The same event, posted: delivered at the loop's next turn.
+void postFileOpen(const QUrl& url)
+{
+    QCoreApplication::postEvent(qApp, new QFileOpenEvent(url));
 }
 
 // Records the events that reach it, past the application's filters.
@@ -238,6 +248,63 @@ private slots:
         requests.setReady();
         QCoreApplication::processEvents();
         QCOMPARE(spy.count(), 0);
+    }
+
+    // A launch's folder event can come after the loop's first turn
+    // (one turn alone could miss it, and a second launch handed over
+    // nothing): it is waited for, and the wait ends as it comes.
+    void aLateLaunchFolderIsWaitedFor() {
+        QTest::failOnWarning(QRegularExpression(QStringLiteral("had not finished launching")));
+        QTemporaryDir dir;
+        OpenRequests requests;
+        qApp->installEventFilter(&requests);
+        bool launched = false;
+        QObject context;   // its timers go with it
+        QTimer::singleShot(150, &context, [&] { postFileOpen(QUrl::fromLocalFile(dir.path())); });
+        QTimer::singleShot(1500, &context, [&] { launched = true; });
+        QElapsedTimer clock;
+        clock.start();
+        QCOMPARE(requests.waitForLaunchFolder([&] { return launched; }, 3000),
+                 QDir::cleanPath(dir.path()));
+        QVERIFY2(clock.elapsed() < 1500, qPrintable(QString::number(clock.elapsed())));
+    }
+
+    // One posted as the launch finishes is still taken.
+    void aFolderPostedAsLaunchFinishesIsTaken() {
+        QTemporaryDir dir;
+        OpenRequests requests;
+        qApp->installEventFilter(&requests);
+        postFileOpen(QUrl::fromLocalFile(dir.path()));
+        QCOMPARE(requests.waitForLaunchFolder([] { return true; }, 3000),
+                 QDir::cleanPath(dir.path()));
+    }
+
+    // A launch with no folder goes on once the launch has finished.
+    void noFolderReturnsOnceLaunched() {
+        QTest::failOnWarning(QRegularExpression(QStringLiteral("had not finished launching")));
+        OpenRequests requests;
+        qApp->installEventFilter(&requests);
+        bool launched = false;
+        QObject context;
+        QTimer::singleShot(100, &context, [&] { launched = true; });
+        QElapsedTimer clock;
+        clock.start();
+        QCOMPARE(requests.waitForLaunchFolder([&] { return launched; }, 3000), QString());
+        QVERIFY(launched);
+        QVERIFY2(clock.elapsed() < 2000, qPrintable(QString::number(clock.elapsed())));
+    }
+
+    // A launch that never says it has finished waits no longer than the
+    // cap, and says so.
+    void theWaitEndsAtTheCap() {
+        OpenRequests requests;
+        qApp->installEventFilter(&requests);
+        QTest::ignoreMessage(QtWarningMsg, "macOS had not finished launching GitBolt after 300 ms");
+        QElapsedTimer clock;
+        clock.start();
+        QCOMPARE(requests.waitForLaunchFolder([] { return false; }, 300), QString());
+        QVERIFY2(clock.elapsed() >= 300, qPrintable(QString::number(clock.elapsed())));
+        QVERIFY2(clock.elapsed() < 2000, qPrintable(QString::number(clock.elapsed())));
     }
 };
 
