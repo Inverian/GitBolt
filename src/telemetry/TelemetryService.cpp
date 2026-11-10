@@ -268,12 +268,15 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId,
         paceTimer_.start(config_.paceMs);
         return;
     case Outcome::Retry:
-        if (status > 0)
+        if (status > 0) {
             qInfo("Telemetry: %s not sent (HTTP %d); retrying at the next tick",
                   qPrintable(name), status);
-        else
+        } else {
+            const char* error =
+                QMetaEnum::fromType<QNetworkReply::NetworkError>().valueToKey(reply->error());
             qInfo("Telemetry: %s not sent (%s); retrying at the next tick", qPrintable(name),
-                  QMetaEnum::fromType<QNetworkReply::NetworkError>().valueToKey(reply->error()));
+                  error ? error : "network error");
+        }
         queue_->bumpAttempts(recordId);
         backingOff_ = true;
         endCycle();
