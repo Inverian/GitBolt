@@ -18,6 +18,9 @@ events itself).
    to the first process that asks, so a GitBolt with an instance name
    of its own (this test's, the dogfood driver's) must never register
    it, and one in the default namespace must.
+6. A launch with no folder (the app double-clicked in Finder or the
+   Dock) doesn't wait out the cap either. A held folder ends the wait
+   early, so only this launch shows that AppKit's finished launch does.
 
 `open` registers the build's GitBolt.app with LaunchServices, which
 only a throwaway CI runner may have done to it: the test runs only
@@ -80,7 +83,7 @@ class Launched(App):
         def wait(self, timeout=None):
             return 0
 
-    def __init__(self, binary: str, folder: str, runtime_dir: str,
+    def __init__(self, binary: str, folder: str | None, runtime_dir: str,
                  instance_name: str | None, label: str):
         self.binary = binary
         self.label = label
@@ -103,9 +106,10 @@ class Launched(App):
         pass   # see teardown()
 
 
-def launch(binary: str, folder: str, env: dict, log: str, new_instance: bool) -> None:
-    """`open` the folder with GitBolt.app; only the variables GitBolt
-    reads go with it (LaunchServices gives the app none of ours)."""
+def launch(binary: str, folder: str | None, env: dict, log: str, new_instance: bool) -> None:
+    """`open` the folder (or with none, the app) with GitBolt.app; only
+    the variables GitBolt reads go with it (LaunchServices gives the
+    app none of ours)."""
     args = ["open", "-g"]
     if new_instance:
         args.append("-n")
@@ -114,7 +118,7 @@ def launch(binary: str, folder: str, env: dict, log: str, new_instance: bool) ->
             if key in env:
                 args += ["--env", f"{key}={env[key]}"]
         args += ["--stderr", log]   # where Qt's warnings go
-    args += ["-a", bundle_of(binary), folder]
+    args += ["-a", bundle_of(binary)] + ([folder] if folder else [])
     done = subprocess.run(args, capture_output=True, text=True, timeout=60)
     if done.returncode != 0:
         raise Failure(f"{' '.join(args)} -> {done.returncode}: {done.stderr}")
@@ -185,6 +189,17 @@ def test(binary: str, scratch: str, apps: list) -> None:
             time.sleep(0.5)
     finally:
         teardown(binary, users)
+
+    # 6: no folder, in a namespace of its own.
+    bare_dir = make_runtime_dir()
+    bare = Launched(binary, None, bare_dir, f"gb-ls-bare-{uuid.uuid4().hex[:8]}",
+                    "no folder")
+    apps.append(bare)
+    try:
+        bare.wait_bridge(timeout=60)
+        no_launch_wait(bare.log_path, "the launch with no folder")
+    finally:
+        teardown(binary, bare)
 
 
 def read(path: str) -> str:
