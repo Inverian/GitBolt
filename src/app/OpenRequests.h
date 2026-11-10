@@ -5,6 +5,7 @@
 #include <QString>
 
 #include <functional>
+#include <optional>
 
 class QEvent;
 
@@ -42,7 +43,8 @@ public:
     /// runs the event loop until a request is held, `launched` says the
     /// system has finished launching GitBolt (macOS sends a launch's
     /// folder before that), or `capMs` has passed, which it warns of.
-    QString waitForLaunchFolder(const std::function<bool()>& launched, int capMs);
+    /// Nothing if a quit came meanwhile (macOS's, at a logout, say).
+    std::optional<QString> waitForLaunchFolder(const std::function<bool()>& launched, int capMs);
 
     /// The path this launch opens anyway (from argv, or takePending).
     /// The same folder requested within 2 s is dropped: AppKit may send

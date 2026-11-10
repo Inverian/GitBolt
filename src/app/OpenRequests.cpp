@@ -55,7 +55,7 @@ QString OpenRequests::takePending()
     return std::exchange(pending_, QString());
 }
 
-QString OpenRequests::waitForLaunchFolder(const std::function<bool()>& launched, int capMs)
+std::optional<QString> OpenRequests::waitForLaunchFolder(const std::function<bool()>& launched, int capMs)
 {
     // A real exec, not one processEvents(): on macOS that runs AppKit's
     // own [NSApp run] launch, whose folder event can come after the
@@ -68,16 +68,21 @@ QString OpenRequests::waitForLaunchFolder(const std::function<bool()>& launched,
         clock.start();
         QTimer poll;
         poll.setInterval(10);
+        // Ends with 1: a 0 is QCoreApplication::exit(0), a quit from macOS
+        // the next exec() would forget (kept if it came in the same pass).
         QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+            if (!loop.isRunning())
+                return;
             if (done()) {
-                loop.quit();
+                loop.exit(1);
             } else if (clock.elapsed() >= capMs) {
                 timedOut = true;
-                loop.quit();
+                loop.exit(1);
             }
         });
         poll.start();
-        loop.exec();
+        if (loop.exec() != 1)
+            return std::nullopt;
     }
     // A folder event posted just as the launch finished.
     QCoreApplication::processEvents();

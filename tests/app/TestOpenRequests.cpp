@@ -21,6 +21,8 @@
 #include <QTimer>
 #include <QUrl>
 
+#include <optional>
+
 using gitbolt::app::OpenRequests;
 
 namespace {
@@ -37,6 +39,12 @@ bool sendFileOpen(const QUrl& url)
 void postFileOpen(const QUrl& url)
 {
     QCoreApplication::postEvent(qApp, new QFileOpenEvent(url));
+}
+
+// What a launch wait ended with, "(quit)" for a quit.
+QString folderOf(const std::optional<QString>& waited)
+{
+    return waited.value_or(QStringLiteral("(quit)"));
 }
 
 // Records the events that reach it, past the application's filters.
@@ -264,7 +272,7 @@ private slots:
         QTimer::singleShot(1500, &context, [&] { launched = true; });
         QElapsedTimer clock;
         clock.start();
-        QCOMPARE(requests.waitForLaunchFolder([&] { return launched; }, 3000),
+        QCOMPARE(folderOf(requests.waitForLaunchFolder([&] { return launched; }, 3000)),
                  QDir::cleanPath(dir.path()));
         QVERIFY2(clock.elapsed() < 1500, qPrintable(QString::number(clock.elapsed())));
     }
@@ -275,7 +283,7 @@ private slots:
         OpenRequests requests;
         qApp->installEventFilter(&requests);
         postFileOpen(QUrl::fromLocalFile(dir.path()));
-        QCOMPARE(requests.waitForLaunchFolder([] { return true; }, 3000),
+        QCOMPARE(folderOf(requests.waitForLaunchFolder([] { return true; }, 3000)),
                  QDir::cleanPath(dir.path()));
     }
 
@@ -289,7 +297,7 @@ private slots:
         QTimer::singleShot(100, &context, [&] { launched = true; });
         QElapsedTimer clock;
         clock.start();
-        QCOMPARE(requests.waitForLaunchFolder([&] { return launched; }, 3000), QString());
+        QCOMPARE(folderOf(requests.waitForLaunchFolder([&] { return launched; }, 3000)), QString());
         QVERIFY(launched);
         QVERIFY2(clock.elapsed() < 2000, qPrintable(QString::number(clock.elapsed())));
     }
@@ -302,9 +310,32 @@ private slots:
         QTest::ignoreMessage(QtWarningMsg, "macOS had not finished launching GitBolt after 300 ms");
         QElapsedTimer clock;
         clock.start();
-        QCOMPARE(requests.waitForLaunchFolder([] { return false; }, 300), QString());
+        QCOMPARE(folderOf(requests.waitForLaunchFolder([] { return false; }, 300)), QString());
         QVERIFY2(clock.elapsed() >= 300, qPrintable(QString::number(clock.elapsed())));
         QVERIFY2(clock.elapsed() < 2000, qPrintable(QString::number(clock.elapsed())));
+    }
+
+    // A quit during the wait (macOS's, at a logout) is told, not lost:
+    // app.exec() would forget it, and GitBolt start anyway.
+    void aQuitDuringTheWaitIsTold() {
+        OpenRequests requests;
+        qApp->installEventFilter(&requests);
+        QObject context;
+        // What Qt sends the application when macOS asks it to quit.
+        QTimer::singleShot(50, &context, [] {
+            QEvent quit(QEvent::Quit);
+            QCoreApplication::sendEvent(qApp, &quit);
+        });
+        QElapsedTimer clock;
+        clock.start();
+        const std::optional<QString> waited = requests.waitForLaunchFolder([] { return false; }, 3000);
+        const qint64 elapsed = clock.elapsed();
+        // Qt holds a quit until exec() next starts, and every event loop
+        // till then returns at once: one starts and ends, for later tests.
+        QTimer::singleShot(0, qApp, &QCoreApplication::quit);
+        QCoreApplication::exec();
+        QCOMPARE(folderOf(waited), QStringLiteral("(quit)"));
+        QVERIFY2(elapsed < 2000, qPrintable(QString::number(elapsed)));
     }
 };
 
