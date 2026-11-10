@@ -77,7 +77,10 @@ private:
     /// (first feature/* branch, a remote's first fetch) get their
     /// own watch before refs land inside them. Idempotent.
     void watchRefsSubtree();
-    void addFileIfExists(const QString& path);
+    /// refs/ and every directory below it, in the common dir.
+    QStringList refsSubtree() const;
+    /// Those of `candidates` that exist and aren't watched yet.
+    QStringList unwatchedFiles(const QStringList& candidates) const;
 
     QFileSystemWatcher watcher_;
     QTimer debounceTimer_;

@@ -89,7 +89,9 @@
 //     switched, or the service goes,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
-//     leaves out (.git, node_modules, build, …),
+//     leaves out (.git, node_modules, build, …); a repository switch
+//     sets the watcher up in one addPaths and drops the old watches in
+//     one removePaths,
 //   - removeWorktree deletes the folder the user was asked about or
 //     nothing, whatever the worktree's files in .git/worktrees say.
 //
@@ -102,6 +104,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QLoggingCategory>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -182,6 +185,42 @@ std::unique_ptr<gitbolt::test::TestRepo> repoWithCommits(int n) {
     }
     return repo;
 }
+
+// Counts QFileSystemWatcher's addPaths and removePaths calls while in
+// scope, from the "adding"/"removing" lines Qt logs under
+// qt.core.filesystemwatcher (debug). Every other message passes on.
+class WatcherCallCount {
+public:
+    WatcherCallCount() {
+        adds_ = removes_ = 0;
+        QLoggingCategory::setFilterRules(QStringLiteral("qt.core.filesystemwatcher.debug=true"));
+        previous_ = qInstallMessageHandler(&WatcherCallCount::handle);
+    }
+    ~WatcherCallCount() {
+        qInstallMessageHandler(previous_);
+        QLoggingCategory::setFilterRules(QString());
+    }
+    WatcherCallCount(const WatcherCallCount&) = delete;
+    WatcherCallCount& operator=(const WatcherCallCount&) = delete;
+
+    int adds() const { return adds_; }
+    int removes() const { return removes_; }
+
+private:
+    static void handle(QtMsgType type, const QMessageLogContext& context, const QString& message) {
+        if (qstrcmp(context.category, "qt.core.filesystemwatcher") != 0) {
+            previous_(type, context, message);
+        } else if (message.startsWith(QLatin1String("adding"))) {
+            ++adds_;
+        } else if (message.startsWith(QLatin1String("removing"))) {
+            ++removes_;
+        }
+    }
+
+    static inline QtMessageHandler previous_ = nullptr;
+    static inline int adds_ = 0;
+    static inline int removes_ = 0;
+};
 
 // The order in which the main thread receives GitService's completion
 // and refresh signals, by short name. The context object lives on the
@@ -707,6 +746,77 @@ private slots:
             QVERIFY2(dirs.contains(QString::fromLatin1(in)), in);
         for (const char* out : {".git", "node_modules", "build"})
             QVERIFY2(!dirs.contains(QString::fromLatin1(out)), out);
+    }
+
+    // A repository switch registers the new watches in one addPaths and
+    // drops the old ones in one removePaths. On macOS every call flushes
+    // the FSEvents stream, and each call after a restart waited for the
+    // stream's history replay: up to seconds with the window frozen.
+    // Counted from Qt's own debug lines, so it holds on every platform.
+    void watchSetupIsOneCallEach() {
+        auto a = repoWithCommits(1);
+        auto b = repoWithCommits(1);
+        QVERIFY(a && b);
+        gitbolt::watcher::FileWatcher watcher;
+        watcher.watchGitInternals(a->path());
+
+        int adds = 0;
+        int removes = 0;
+        {
+            const WatcherCallCount count;
+            watcher.watchGitInternals(b->path());
+            adds = count.adds();
+            removes = count.removes();
+        }
+        QCOMPARE(adds, 1);
+        QCOMPARE(removes, 1);
+    }
+
+    // Not a check: how long a repository switch blocks in the watcher
+    // here, for a before/after comparison of FileWatcher. Each new
+    // repository's .git gets ~20,000 fresh files, history a restarted
+    // FSEvents stream replays. GITBOLT_WATCHER_BENCH=1 runs it.
+    void switchTimings() {
+        if (qEnvironmentVariableIntValue("GITBOLT_WATCHER_BENCH") != 1)
+            QSKIP("set GITBOLT_WATCHER_BENCH=1 to time repository switches");
+        auto previous = repoWithCommits(1);
+        QVERIFY(previous);
+        gitbolt::watcher::FileWatcher watcher;
+        watcher.watchGitInternals(previous->path());
+        QTest::qWait(1000);
+
+        QList<qint64> switches;
+        QList<qint64> chunks;
+        for (int round = 0; round < 10; ++round) {
+            auto next = repoWithCommits(1);
+            QVERIFY(next);
+            const QString bench = next->path() + QStringLiteral("/.git/objects/bench");
+            QVERIFY(QDir().mkpath(bench));
+            for (int i = 0; i < 20000; ++i) {
+                QFile file(bench + QLatin1Char('/') + QString::number(i));
+                QVERIFY(file.open(QIODevice::WriteOnly));
+            }
+            QTest::qWait(1500);
+
+            const QStringList dirs = gitbolt::watcher::FileWatcher::enumerateWatchDirs(next->path());
+            QElapsedTimer timer;
+            timer.start();
+            watcher.watchGitInternals(next->path());
+            switches << timer.elapsed();
+            // The async open's first working-tree chunk comes a moment later.
+            QTest::qWait(30);
+            timer.restart();
+            watcher.addWatchPaths(next->path(), dirs);
+            chunks << timer.elapsed();
+            qInfo("round %d: watchGitInternals %lld ms, first chunk %lld ms",
+                  round, switches.last(), chunks.last());
+            previous = std::move(next);   // the one before goes, unwatched
+        }
+        std::sort(switches.begin(), switches.end());
+        std::sort(chunks.begin(), chunks.end());
+        qInfo("watchGitInternals: median %lld ms, max %lld ms; first chunk: median %lld ms, max %lld ms",
+              switches.at(switches.size() / 2), switches.last(),
+              chunks.at(chunks.size() / 2), chunks.last());
     }
 
     // -----------------------------------------------------------------
