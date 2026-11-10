@@ -30,9 +30,10 @@ namespace gitbolt::update {
 /// release. On top of that, prepare() checks that the file is the
 /// asset this package installs from (assetNameFor), and on macOS that
 /// the app in the disk image, and again the staged copy, passes
-/// `codesign --verify --deep --strict` (its ad-hoc seal, so nothing in
-/// the bundle changed after it was built), is com.gitbolt.app, and is
-/// the release's version.
+/// `codesign --verify --deep --strict` (its seal, so nothing in the
+/// bundle changed after it was built), is com.gitbolt.app, and is the
+/// release's version. macOS releases carry GitBolt's own certificate,
+/// but the updater doesn't pin it: a lost key would strand every copy.
 ///
 /// macOS, step by step: attach the DMG read-only at a mount point in
 /// workDir (hdiutil's intermittent "Resource busy" is retried, as CI
