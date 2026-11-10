@@ -76,17 +76,6 @@ PackageInfo macBundle(const PackageProbe& probe, const QString& bundle) {
     return info;
 }
 
-// The binary runs from inside the AppImage $APPDIR names: its folder is
-// $APPDIR/usr/bin, compared canonically (applicationDirPath comes from
-// /proc/self/exe, resolved; the runtime's mount or extraction may be
-// under a TMPDIR reached through a link).
-bool runsFromAppDir(const QString& appDirPath, const QString& appDirEnv) {
-    if (appDirEnv.isEmpty())
-        return false;
-    const QString running = QFileInfo(appDirPath).canonicalFilePath();
-    return !running.isEmpty() && running == QFileInfo(appDirEnv + QStringLiteral("/usr/bin")).canonicalFilePath();
-}
-
 // A Windows path from the registry or the probe, comparable: forward
 // slashes, no quotes around it, no arguments after a quoted one.
 QString windowsComparable(QString path) {
@@ -114,19 +103,6 @@ bool sameWindowsPath(const QString& a, const QString& b) {
 PackageInfo detectPackage(const PackageProbe& probe) {
     const QString appDir = QDir::cleanPath(probe.appDirPath);
     if (!probe.appDirPath.isEmpty()) {
-        // AppImage first: its runtime says so outright, if this binary
-        // is inside the image it names.
-        if (!probe.appImage.isEmpty() && QFileInfo(probe.appImage).isFile()
-            && runsFromAppDir(appDir, probe.appDir)) {
-            const QFileInfo image(probe.appImage);
-            PackageInfo info{PackageKind::AppImage, image.absoluteFilePath(), false, {}};
-            if (writable(probe, image.absolutePath()))
-                info.canInstall = true;
-            else
-                info.whyNot = cannotChange(image.absolutePath());
-            return info;
-        }
-
         if (const QString bundle = bundleOf(appDir);
             !bundle.isEmpty() && QFileInfo(bundle + QStringLiteral("/Contents/Frameworks")).isDir())
             return macBundle(probe, bundle);
@@ -177,8 +153,6 @@ PackageInfo detectPackage(const PackageProbe& probe) {
 PackageProbe currentProbe() {
     PackageProbe probe;
     probe.appDirPath = QCoreApplication::applicationDirPath();
-    probe.appImage = qEnvironmentVariable("APPIMAGE");
-    probe.appDir = qEnvironmentVariable("APPDIR");
 #if defined(Q_OS_LINUX)
     probe.pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
 #endif
@@ -243,8 +217,6 @@ QString assetNameFor(PackageKind kind, const Version& version) {
         return QStringLiteral("GitBolt-%1-Windows-AMD64.exe").arg(v);
     case PackageKind::Deb:
         return QStringLiteral("gitbolt_%1_amd64.deb").arg(v);
-    case PackageKind::AppImage:
-        return QStringLiteral("GitBolt-%1-x86_64.AppImage").arg(v);
     case PackageKind::Unknown:
         break;
     }

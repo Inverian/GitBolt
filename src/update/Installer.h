@@ -1,5 +1,6 @@
 #pragma once
 
+#include "update/Failure.h"
 #include "update/InstallHelpers.h"
 #include "update/Package.h"
 #include "update/Version.h"
@@ -8,6 +9,7 @@
 #include <QProcessEnvironment>
 #include <QString>
 #include <QStringList>
+#include <QVersionNumber>
 
 #include <functional>
 
@@ -28,17 +30,17 @@ namespace gitbolt::update {
 /// release. On top of that, prepare() checks that the file is the
 /// asset this package installs from (assetNameFor), and on macOS that
 /// the app in the disk image, and again the staged copy, passes
-/// `codesign --verify --deep --strict` (its ad-hoc seal, so nothing in
-/// the bundle changed after it was built), is com.gitbolt.app, and is
-/// the release's version.
+/// `codesign --verify --deep --strict` (its seal, so nothing in the
+/// bundle changed after it was built), is com.gitbolt.app, and is the
+/// release's version. macOS releases carry GitBolt's own certificate,
+/// but the updater doesn't pin it: a lost key would strand every copy.
 ///
 /// macOS, step by step: attach the DMG read-only at a mount point in
 /// workDir (hdiutil's intermittent "Resource busy" is retried, as CI
 /// does), check GitBolt.app there, ditto it to <folder>/.GitBolt-<v>.app
 /// beside the installed bundle (same volume, so the helper's swap is
 /// two renames), check the copy, detach. Other packages need nothing
-/// staged: the AppImage was downloaded beside the old one and is made
-/// executable; the .deb and the Windows installer stay where they are.
+/// staged: the .deb and the Windows installer stay where they are.
 ///
 /// GUI thread; one prepare() at a time. Every step runs in a QProcess,
 /// and every outcome is signalled from the event loop, never from
@@ -61,9 +63,11 @@ public:
 
     /// Checks `downloadedFile` (already verified by the Downloader) as
     /// the installer of `version`, and stages it. Emits status() as it
-    /// goes, then prepared() or failed(). macOS also refuses, before
-    /// GitBolt quits, an app whose LSMinimumSystemVersion is above the
-    /// running macOS: once swapped in, it wouldn't start.
+    /// goes, then prepared() or failed(). Before GitBolt quits it also
+    /// refuses what wouldn't install or start here: a macOS app whose
+    /// LSMinimumSystemVersion, or a Windows installer whose
+    /// GitBoltMinimumWindows, is above this system (NeedsNewerSystem);
+    /// a .deb that `apt-get -s install` refuses (AptRefused).
     void prepare(const QString& downloadedFile, const Version& version);
     /// Stops prepare() and undoes it: kills the running step, detaches
     /// the disk image and removes the staged copy. Emits nothing. Also
@@ -92,10 +96,11 @@ public:
 
     /// prepare() is running.
     bool busy() const;
+    /// Why the last failed() was.
+    Failure failure() const;
     /// The last prepare() failed because the release needs a newer
-    /// system than this one (macOS: its app's LSMinimumSystemVersion is
-    /// above the running macOS): downloaded again, it would be refused
-    /// again.
+    /// system than this one (failure() is NeedsNewerSystem): downloaded
+    /// again, it would be refused again.
     bool needsNewerSystem() const;
     /// The helper's script and log, in workDir: install-helper.sh (or
     /// none on Windows, where the script is passed on the command line)
@@ -129,9 +134,11 @@ private:
     };
     using ToolDone = std::function<void(const ToolResult&)>;
 
-    void runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done);
+    /// `environment`: the tool's, when not empty; else GitBolt's.
+    void runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done,
+                 const QProcessEnvironment& environment = {});
     void succeed();
-    void fail(const QString& message);
+    void fail(Failure failure, const QString& message);
     void finishLater(const std::function<void()>& emitter);
     /// The destructor's cancel(): everything undone before it returns.
     void cancelNow();
@@ -151,9 +158,13 @@ private:
     void detach(int attempt, const std::function<void()>& then);
     void detachNow();
     bool mounted() const;
-    QString checkBundle(const QString& bundle, const QString& where);
+    /// A problem with the bundle, or empty; `why` its code when not the
+    /// default (NeedsNewerSystem).
+    QString checkBundle(const QString& bundle, const QString& where, Failure& why);
     void removeStaged();
     void removeMountPoint();
+    // deb
+    void askApt();
 
     QString helperScript(qint64 pid) const;
 
@@ -168,7 +179,7 @@ private:
     QString staged_;          ///< the new copy prepared() leaves for the helper
     bool stagedCreated_ = false;  ///< staged_ is a copy this Installer made (macOS)
     QString executable_;      ///< macOS: Contents/MacOS/<CFBundleExecutable> of the staged copy
-    bool needsNewerSystem_ = false;   ///< macOS: refused for its minimum macOS (checkBundle)
+    Failure failure_ = Failure::None;   ///< why the last failed() was
 
     QProcess* process_ = nullptr;
     quint64 run_ = 0;         ///< bumped by every prepare() and cancel(); stale callbacks see a new one
@@ -210,6 +221,25 @@ struct WindowsLaunch {
 /// other's. Elsewhere: Failed.
 WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment);
 
+/// The NSIS installer's version-resource key that holds the oldest
+/// Windows it installs on (cmake/Packaging.cmake writes it).
+inline constexpr char kWindowsMinimumKey[] = "GitBoltMinimumWindows";
+
+/// Windows: `file`'s kWindowsMinimumKey string, read from its version
+/// resource under each language it lists. Empty when it has none, and
+/// elsewhere.
+QString windowsMinimumOf(const QString& file);
+
+/// A minimum system version (LSMinimumSystemVersion, kWindowsMinimumKey)
+/// is above `running`; false when `minimum` isn't a version at all.
+/// Normalised, so 14.4 and 14.4.0 are the same.
+bool systemTooOld(const QString& minimum, const QVersionNumber& running);
+
+/// This system's major.minor.micro (0 where unknown): what systemTooOld
+/// is given, and what a refusal is remembered for. Windows' micro is the
+/// build, which QSysInfo::productVersion() ("10", "11") leaves out.
+QVersionNumber runningSystem();
+
 /// At startup, removes what an update that never finished left behind:
 /// a crash, a force quit or a logout during prepare() or while the
 /// helper waited (the helper's own cleanup dies with it). Nothing that
@@ -220,33 +250,10 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
 ///     user owns; and in `workDir`, the disk image mount points
 ///     (mount-XXXXXX), detached first (forced) if still mounted, then
 ///     removed only if empty;
-///   - AppImage: in the AppImage's folder, the Downloader's
-///     .GitBolt-<v>-x86_64.AppImage.part files that this user owns, and
-///     the download recordPendingDownload() named, if it is still a
-///     file of this user's named as the release names an AppImage
-///     (GitBolt-<v>-x86_64.AppImage); never the running AppImage
-///     (package.target), and never any other GitBolt-<v>-x86_64.AppImage:
-///     that is the name users keep their AppImages under (an update
-///     keeps the old one's name, too);
 ///   - nothing for the other packages: their downloads are in
 ///     workDir/<v>/, which removeOldDownloads clears.
-/// The record itself goes, whatever the package. Synchronous (a forced
-/// detach is bounded); the app calls it once, before any Installer
-/// exists.
+/// Synchronous (a forced detach is bounded); the app calls it once,
+/// before any Installer exists.
 void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir);
-
-/// <workDir>/pending-download: the absolute path of an AppImage's
-/// checked download (beside the AppImage, outside GitBolt's folders)
-/// that no helper has taken over yet.
-inline constexpr char kPendingDownloadFile[] = "pending-download";
-/// UpdateController records the download when the Downloader finishes
-/// one for an AppImage, and forgets it once the helper takes the file
-/// over or the download is deleted. A record still there at the next
-/// start is a crash's (or a kill's) in between, and the next start
-/// removes that file (removeStaleInstallFiles): it is the one
-/// GitBolt-<v>-x86_64.AppImage beside the AppImage that GitBolt knows
-/// is its own.
-void recordPendingDownload(const QString& workDir, const QString& file);
-void forgetPendingDownload(const QString& workDir);
 
 } // namespace gitbolt::update

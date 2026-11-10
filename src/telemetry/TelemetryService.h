@@ -87,6 +87,9 @@ public:
     /// One per (kind, sanitized detail) per session, at most
     /// maxErrorsPerSession.
     void recordError(ErrorKind kind, const QString& detail = {});
+    /// update_result, once per install attempt; a failed or unfinished
+    /// one (status failed, no_result) also as an UpdateFailed error.
+    void recordUpdateResult(const UpdateResult& result);
     /// Parses a crash.log (CrashLogParser) and queues the reduced event
     /// if the parser accepts it. Synchronous and network-free: main()
     /// calls it right before the "Crash Detected" box deletes the file.

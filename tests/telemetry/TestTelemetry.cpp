@@ -9,6 +9,8 @@
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
+//   - update outcomes: update_result's fixed fields, and an update_failed
+//     error for a failed or unfinished one, once per stage and code
 //   - pacing, the per-tick budget, the debounced first flush (a crash
 //     summary goes first, at once), retry and drop outcomes, backoff
 //     until the next tick, offline tries that cost no attempt
@@ -1817,6 +1819,118 @@ private slots:
         // The records behind it go in the same cycle.
         QTRY_COMPARE(stub_->requests().size(), 4);
         QTRY_COMPARE(service->queuedCount(), 0);
+    }
+
+    // ---- update outcomes --------------------------------------------------
+
+    // update_result has exactly its fixed fields; a failed (or
+    // unfinished) attempt is an update_failed error too, tagged with the
+    // stage and code only, once per session for each.
+    void updateResultEventShape() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.maxPerFlush = 20;
+        auto service = makeService(config, provider);
+        service->start();
+        service->recordUpdateResult({QStringLiteral("failed"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("deb"), QStringLiteral("install"), QStringLiteral("apt_failed")});
+        QTRY_COMPARE(stub_->requests().size(), 2);
+
+        const StubRequest& track = stub_->requests().at(0);
+        QCOMPARE(track.path, QByteArray("/track"));
+        const QJsonObject payload = track.json().value(QStringLiteral("payload")).toObject();
+        QCOMPARE(payload.value(QStringLiteral("name")).toString(), QStringLiteral("update_result"));
+        const QJsonObject props = properties(track);
+        QCOMPARE(keySet(props),
+                 (QSet<QString>{QStringLiteral("app_version"), QStringLiteral("__deviceId"),
+                                QStringLiteral("__os"), QStringLiteral("__osVersion"),
+                                QStringLiteral("__device"), QStringLiteral("status"),
+                                QStringLiteral("from_version"), QStringLiteral("to_version"),
+                                QStringLiteral("package"), QStringLiteral("stage"),
+                                QStringLiteral("reason")}));
+        QCOMPARE(props.value(QStringLiteral("status")).toString(), QStringLiteral("failed"));
+        QCOMPARE(props.value(QStringLiteral("from_version")).toString(), QStringLiteral("0.1.0"));
+        QCOMPARE(props.value(QStringLiteral("to_version")).toString(), QStringLiteral("0.1.1"));
+        QCOMPARE(props.value(QStringLiteral("package")).toString(), QStringLiteral("deb"));
+        QCOMPARE(props.value(QStringLiteral("stage")).toString(), QStringLiteral("install"));
+        QCOMPARE(props.value(QStringLiteral("reason")).toString(), QStringLiteral("apt_failed"));
+
+        const StubRequest& store = stub_->requests().at(1);
+        QCOMPARE(store.path, QByteArray("/api/42/store/"));
+        const QJsonObject event = store.json();
+        QCOMPARE(event.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("update_failed: install/apt_failed"));
+        QCOMPARE(event.value(QStringLiteral("fingerprint")).toArray(),
+                 (QJsonArray{QStringLiteral("update_failed"), QStringLiteral("install/apt_failed")}));
+        QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
+                 (QJsonObject{{QStringLiteral("kind"), QStringLiteral("update_failed")},
+                              {QStringLiteral("stage"), QStringLiteral("install")},
+                              {QStringLiteral("code"), QStringLiteral("apt_failed")}}));
+        QVERIFY(!store.body.contains(kInstallId.toLatin1()));
+        QVERIFY(!store.body.contains(deviceIdFor(kInstallId).toLatin1()));
+
+        // The other outcomes are usage statistics only; no_result is an
+        // error too; the same failure again only an update_result.
+        for (const char* status : {"ok", "declined", "incompatible", "gave_up"})
+            service->recordUpdateResult({QString::fromLatin1(status), QStringLiteral("0.1.0"),
+                                         QStringLiteral("0.1.1"), QStringLiteral("dmg"), QStringLiteral("install"),
+                                         QStringLiteral("none")});
+        service->recordUpdateResult({QStringLiteral("no_result"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("nsis"), QStringLiteral("install"), QStringLiteral("no_result")});
+        service->recordUpdateResult({QStringLiteral("failed"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("deb"), QStringLiteral("install"), QStringLiteral("apt_failed")});
+        // An update check's failure, as MainWindow reports it.
+        service->recordError(ErrorKind::UpdateFailed, QStringLiteral("check/rate_limited"));
+        QTRY_COMPARE(service->queuedCount(), 0);
+        QTRY_COMPARE(stub_->requests().size(), 2 + 6 + 2);
+        QStringList errors;
+        for (const StubRequest& request : stub_->requests()) {
+            if (request.path == QByteArray("/api/42/store/"))
+                errors << request.json().value(QStringLiteral("fingerprint")).toArray().at(1).toString();
+        }
+        QCOMPARE(errors, (QStringList{QStringLiteral("install/apt_failed"), QStringLiteral("install/no_result"),
+                                      QStringLiteral("check/rate_limited")}));
+    }
+
+    // Whatever reaches recordUpdateResult or an update_failed error, only
+    // the fixed vocabularies leave.
+    void unsafeUpdateInputsNeverLeave_data() { unsafeInputsNeverLeave_data(); }
+    void unsafeUpdateInputsNeverLeave() {
+        QFETCH(QString, input);
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.maxPerFlush = 20;
+        auto service = makeService(config, provider);
+        service->start();
+        service->recordUpdateResult({input, input, input, input, input, input});
+        service->recordUpdateResult({QStringLiteral("failed"), input, input, input, input, input});
+        service->recordError(ErrorKind::UpdateFailed, input);
+        service->recordError(ErrorKind::UpdateFailed, QStringLiteral("check/") + input);
+        service->recordError(ErrorKind::UpdateFailed, input + QStringLiteral("/http_error"));
+        QTRY_COMPARE(service->queuedCount(), 0);
+        QVERIFY(stub_->requests().size() >= 3);
+        for (const StubRequest& request : stub_->requests()) {
+            if (request.path == QByteArray("/track")) {
+                const QJsonObject props = properties(request);
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("failed")})
+                            .contains(props.value(QStringLiteral("status")).toString()));
+                QCOMPARE(props.value(QStringLiteral("from_version")).toString(), QStringLiteral("unknown"));
+                QCOMPARE(props.value(QStringLiteral("to_version")).toString(), QStringLiteral("unknown"));
+                for (const char* key : {"package", "stage", "reason"})
+                    QCOMPARE(props.value(QLatin1String(key)).toString(), QStringLiteral("other"));
+            } else {
+                const QJsonObject tags = request.json().value(QStringLiteral("tags")).toObject();
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("check")})
+                            .contains(tags.value(QStringLiteral("stage")).toString()));
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("http_error")})
+                            .contains(tags.value(QStringLiteral("code")).toString()));
+            }
+            QByteArray all = request.everything();
+            all.replace("gitbolt@0.1.0", "");
+            all.replace("openpanel-client-secret", "");   // a header's name
+            for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com", "feature/"})
+                QVERIFY2(!all.contains(sentinel), sentinel);
+        }
     }
 
     // ---- inert and off sessions ----------------------------------------

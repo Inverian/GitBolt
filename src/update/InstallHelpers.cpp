@@ -2,7 +2,6 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QStorageInfo>
 #include <QStringList>
 
 namespace gitbolt::update {
@@ -117,6 +116,41 @@ QString powerShellParameters(const QString& script) {
     return powerShellArguments(script).join(u' ');
 }
 
+Failure installResultFailure(const QString& status, const QString& reason) {
+    if (status == QLatin1String("ok"))
+        return Failure::None;
+    if (status == QLatin1String("gave-up"))
+        return Failure::QuitTimeout;
+    if (status == QLatin1String("declined"))
+        return Failure::PermissionDeclined;
+    if (status != QLatin1String("failed"))
+        return Failure::Other;
+    // The reasons the helpers below write (report, Write-Result).
+    static const struct {
+        const char* start;
+        Failure failure;
+    } kReasons[] = {
+        {"the new copy was missing", Failure::NewCopyMissing},
+        {"the old copy couldn't be moved aside", Failure::MoveAsideFailed},
+        {"the new copy couldn't be moved into place, so the old one was put back", Failure::MoveIntoPlaceFailed},
+        {"the new copy couldn't be moved into place, nor the old one back", Failure::RollbackFailed},
+        {"pkexec couldn't authenticate", Failure::ElevationFailed},
+        {"apt-get failed with status", Failure::AptFailed},
+        {"another GitBolt kept running", Failure::InUse},
+        {"the installer could not be started", Failure::InstallerNotStarted},
+        {"the installer ran, but GitBolt.exe is not version", Failure::WrongVersion},
+        {"the administrator part of the update failed", Failure::ElevatedError},
+        {"the installer exited with code", Failure::InstallerExit},
+        {"the administrator part of the update did not finish within", Failure::ElevatedTimeout},
+        {"the administrator part of the update ended without a result", Failure::ElevatedNoResult},
+    };
+    for (const auto& known : kReasons) {
+        if (reason.startsWith(QLatin1String(known.start)))
+            return known.failure;
+    }
+    return Failure::Other;
+}
+
 QString macHelperScript(const HelperInputs& in) {
     const QString folder = QFileInfo(QDir::cleanPath(in.target)).path();
     const QString oldName = in.oldVersion.isEmpty() ? QStringLiteral("GitBolt")
@@ -187,34 +221,6 @@ QString macHelperScript(const HelperInputs& in) {
                "fi\n"
                "report ok \"\"\n"
                "start \"$target\"\n");
-}
-
-QString appImageHelperScript(const HelperInputs& in) {
-    const QString values = shellLine("target", in.target) + shellLine("staged", in.staged);
-    return shellPreamble("AppImage", in, values)
-           + QStringLiteral("say \"GitBolt update helper: $target, to be replaced by $staged\"\n")
-           + shellWait(QStringLiteral("rm -f \"$staged\""))
-           + QStringLiteral(
-               "# A rename within one folder: the new file takes the old one's\n"
-               "# path in one step (the old one, which its runtime no longer\n"
-               "# holds open, goes with it).\n"
-               "if [ -f \"$staged\" ] && [ ! -d \"$target\" ] && mv -f \"$staged\" \"$target\"; then\n"
-               "    say \"installed the new AppImage as $target\"\n"
-               "    report ok \"\"\n"
-               "else\n"
-               "    say \"couldn't move the new AppImage over $target: keeping the old one\"\n"
-               "    rm -f \"$staged\"\n"
-               "    report failed \"the new AppImage couldn't be moved over the old one\"\n"
-               "fi\n")
-           + (in.extractAndRun ? QStringLiteral(
-                  "# This GitBolt ran extracted (--appimage-extract-and-run: no FUSE\n"
-                  "# here), which the runtime doesn't pass on; so must the next one.\n"
-                  "APPIMAGE_EXTRACT_AND_RUN=1\n"
-                  "export APPIMAGE_EXTRACT_AND_RUN\n")
-                               : QString())
-           + QStringLiteral(
-               "say \"starting $target\"\n"
-               "exec \"$target\"\n");
 }
 
 QString debHelperScript(const HelperInputs& in) {
@@ -517,20 +523,6 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("Write-Log ''"),
     };
     return lines.join(u'\n') + u'\n';
-}
-
-bool appImageRunsExtracted(const QString& appDir, bool extractAndRunSet) {
-    if (extractAndRunSet)
-        return true;
-    if (appDir.isEmpty())
-        return false;
-    const QString canonical = QFileInfo(appDir).canonicalFilePath();
-    if (canonical.isEmpty() || !QFileInfo(canonical).isDir())
-        return false;
-    // Mounted, $APPDIR is a mount point (/tmp/.mount_X); extracted, a
-    // plain folder (<tmp>/appimage_extracted_<hash>).
-    const QStorageInfo volume(canonical);
-    return volume.isValid() && QFileInfo(volume.rootPath()).canonicalFilePath() != canonical;
 }
 
 } // namespace gitbolt::update

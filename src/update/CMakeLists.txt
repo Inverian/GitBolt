@@ -21,6 +21,7 @@ set(SOURCES
     Version.cpp
     Checker.h
     Downloader.h
+    Failure.h
     InstallHelpers.h
     Installer.h
     Package.h
@@ -34,8 +35,9 @@ add_library(gitbolt_update STATIC ${SOURCES})
 target_include_directories(gitbolt_update PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(gitbolt_update PUBLIC Qt6::Core gitbolt_util PRIVATE Qt6::Network)
 # Windows: ShellExecuteExW asks UAC for the installer (shell32, with COM:
-# ole32), and the installed copy is read from the registry (advapi32).
+# ole32), the installed copy is read from the registry (advapi32), and
+# the installer's minimum Windows from its version resource (version).
 if(WIN32)
-    target_link_libraries(gitbolt_update PRIVATE shell32 ole32 advapi32)
+    target_link_libraries(gitbolt_update PRIVATE shell32 ole32 advapi32 version)
 endif()
 gitbolt_set_warnings(gitbolt_update)

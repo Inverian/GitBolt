@@ -1,5 +1,6 @@
 #pragma once
 
+#include "update/Failure.h"
 #include "update/Release.h"
 #include "update/UpdateConfig.h"
 #include "update/Version.h"
@@ -55,6 +56,9 @@ public:
     /// check(false) never downgrades a manual one.
     void check(bool manual);
     bool busy() const;
+    /// Why the last failed() was: rate_limited, http_error,
+    /// network_error (offline), bad_response or refused.
+    Failure failure() const;
 
 signals:
     void upToDate(const gitbolt::update::Version& latest, bool manual);
@@ -64,6 +68,7 @@ signals:
 private:
     void onFinished(QNetworkReply* reply);
     void report(QNetworkReply* reply, bool manual);
+    void fail(Failure failure, const QString& message, bool manual);
 
     Config config_;
     QNetworkAccessManager* network_ = nullptr;
@@ -71,6 +76,7 @@ private:
     bool busy_ = false;
     bool manual_ = false;
     bool tooLarge_ = false;
+    Failure failure_ = Failure::None;
 };
 
 } // namespace gitbolt::update

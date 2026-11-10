@@ -156,7 +156,6 @@ private slots:
                                  << "Windows will ask for permission for Windows PowerShell to install it.";
         QTest::newRow("deb") << int(PackageKind::Deb) << "You'll be asked for an administrator's password.";
         QTest::newRow("macOS") << int(PackageKind::MacBundle) << "";
-        QTest::newRow("AppImage") << int(PackageKind::AppImage) << "";
         QTest::newRow("unknown") << int(PackageKind::Unknown) << "";
     }
     void availableWarnsOfTheSystemsPrompt() {

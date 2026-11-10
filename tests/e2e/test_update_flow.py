@@ -44,7 +44,7 @@ NOTICE = "GitBolt 0.1.1 is available."
 def test(binary: str, scratch: str, apps: list) -> None:
     stub = UpdateFeed("0.1.1")
     for name in ("GitBolt-0.1.1-Darwin-arm64.dmg", "GitBolt-0.1.1-Windows-AMD64.exe",
-                 "gitbolt_0.1.1_amd64.deb", "GitBolt-0.1.1-x86_64.AppImage"):
+                 "gitbolt_0.1.1_amd64.deb"):
         stub.add_asset(name, f"not really {name}".encode())
     stub.add_checksums()
     config_home = os.path.join(scratch, "config")

@@ -55,12 +55,17 @@ bool Downloader::busy() const {
     return busy_;
 }
 
-void Downloader::start(const Release& release, const QString& assetName, const QString& dir) {
+Failure Downloader::failure() const {
+    return failure_;
+}
+
+void Downloader::start(const Release& release, const QString& assetName) {
     if (busy_)
         return;
     busy_ = true;
     ++run_;
-    const QString why = prepare(release, assetName, dir);
+    failure_ = Failure::None;
+    const Problem why = prepare(release, assetName);
     if (!why.isEmpty()) {
         failLater(why);
         return;
@@ -76,37 +81,39 @@ void Downloader::cancel() {
     reset();
 }
 
-QString Downloader::prepare(const Release& release, const QString& assetName, const QString& dir) {
+Downloader::Problem Downloader::prepare(const Release& release, const QString& assetName) {
     const QString sumsName = QString::fromLatin1(kChecksumsAsset);
+    // What GitBolt won't ask for at all.
+    const auto refused = [](const QString& message) { return Problem{Failure::Refused, message}; };
     if (!config_.isUsable())
-        return tr("Updates aren't set up in this copy of GitBolt.");
+        return refused(tr("Updates aren't set up in this copy of GitBolt."));
     if (!isPlainFileName(assetName))
-        return tr("“%1” isn't a file GitBolt downloads.").arg(assetName);
+        return refused(tr("“%1” isn't a file GitBolt downloads.").arg(assetName));
     const ReleaseAsset* asset = release.asset(assetName);
     if (!asset)
-        return tr("GitBolt %1 has no %2.").arg(release.version.toString(), assetName);
+        return refused(tr("GitBolt %1 has no %2.").arg(release.version.toString(), assetName));
     const ReleaseAsset* sums = release.asset(sumsName);
     if (!sums)
-        return tr("GitBolt %1 has no %2, so its download can't be checked.")
-            .arg(release.version.toString(), sumsName);
+        return refused(tr("GitBolt %1 has no %2, so its download can't be checked.")
+                           .arg(release.version.toString(), sumsName));
     if (asset->size <= 0)
-        return tr("GitHub lists %1 as empty.").arg(assetName);
+        return refused(tr("GitHub lists %1 as empty.").arg(assetName));
     if (asset->size > config_.maxDownloadBytes)
-        return tr("%1 is larger than GitBolt downloads (%2 MiB).")
-            .arg(assetName)
-            .arg(config_.maxDownloadBytes / (1024 * 1024));
+        return refused(tr("%1 is larger than GitBolt downloads (%2 MiB).")
+                           .arg(assetName)
+                           .arg(config_.maxDownloadBytes / (1024 * 1024)));
     if (sums->size <= 0 || sums->size > kMaxChecksumsBytes)
-        return tr("GitHub lists %1 with a size it can't have.").arg(sumsName);
+        return refused(tr("GitHub lists %1 with a size it can't have.").arg(sumsName));
     for (const QUrl& url : {sums->downloadUrl, asset->downloadUrl}) {
         if (!config_.isAllowedDownloadUrl(url))
-            return tr("GitBolt doesn't download from %1.").arg(origin(url));
+            return refused(tr("GitBolt doesn't download from %1.").arg(origin(url)));
     }
 
-    const QString target = dir.isEmpty() ? QDir(config_.downloadDir).filePath(release.version.toString()) : dir;
+    const QString target = QDir(config_.downloadDir).filePath(release.version.toString());
     if (!QDir::isAbsolutePath(target))
-        return tr("GitBolt can't download into %1.").arg(QDir::toNativeSeparators(target));
+        return refused(tr("GitBolt can't download into %1.").arg(QDir::toNativeSeparators(target)));
     if (!QDir().mkpath(target))
-        return tr("Couldn't create the folder %1.").arg(QDir::toNativeSeparators(target));
+        return {Failure::DiskError, tr("Couldn't create the folder %1.").arg(QDir::toNativeSeparators(target))};
 
     asset_ = *asset;
     checksums_ = *sums;
@@ -137,7 +144,8 @@ QNetworkReply* Downloader::get(const QUrl& url) {
         if (reply != reply_)
             return;
         if (!config_.isAllowedDownloadUrl(to)) {
-            fail(tr("The download was sent on to %1, which GitBolt doesn't download from.").arg(origin(to)));
+            fail({Failure::Refused,
+                  tr("The download was sent on to %1, which GitBolt doesn't download from.").arg(origin(to))});
             return;
         }
         emit reply->redirectAllowed();
@@ -158,7 +166,8 @@ void Downloader::fetchChecksums() {
         }
         checksumsBody_ += reply->readAll();
         if (checksumsBody_.size() > checksums_.size)
-            fail(tr("%1 is larger than GitHub lists.").arg(QString::fromLatin1(kChecksumsAsset)));
+            fail({Failure::SizeMismatch,
+                  tr("%1 is larger than GitHub lists.").arg(QString::fromLatin1(kChecksumsAsset))});
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply] { onChecksumsFinished(reply); });
 }
@@ -169,27 +178,28 @@ void Downloader::onChecksumsFinished(QNetworkReply* reply) {
         return;
     reply_ = nullptr;
     const QString sumsName = QString::fromLatin1(kChecksumsAsset);
-    if (const QString why = replyProblem(reply, sumsName); !why.isEmpty()) {
+    if (const Problem why = replyProblem(reply, sumsName); !why.isEmpty()) {
         fail(why);
         return;
     }
     checksumsBody_ += reply->readAll();
     if (checksumsBody_.size() != checksums_.size) {
-        fail(tr("%1 arrived with %2 bytes; GitHub lists %3.")
-                 .arg(sumsName)
-                 .arg(checksumsBody_.size())
-                 .arg(checksums_.size));
+        fail({Failure::SizeMismatch, tr("%1 arrived with %2 bytes; GitHub lists %3.")
+                                         .arg(sumsName)
+                                         .arg(checksumsBody_.size())
+                                         .arg(checksums_.size)});
         return;
     }
     expected_ = checksumFor(checksumsBody_, asset_.name);
     if (expected_.isEmpty()) {
-        fail(tr("%1 has no checksum for %2.").arg(sumsName, asset_.name));
+        fail({Failure::ChecksumMissing, tr("%1 has no checksum for %2.").arg(sumsName, asset_.name)});
         return;
     }
     // Both are GitHub's word for the same file: if they disagree, no
     // download can match both, so don't fetch it.
     if (!asset_.sha256.isEmpty() && asset_.sha256 != expected_) {
-        fail(tr("GitHub's checksum for %1 differs from the one in %2.").arg(asset_.name, sumsName));
+        fail({Failure::ChecksumConflict,
+              tr("GitHub's checksum for %1 differs from the one in %2.").arg(asset_.name, sumsName)});
         return;
     }
     fetchAsset();
@@ -200,10 +210,8 @@ void Downloader::fetchAsset() {
     // first (a leftover, or a link someone planted; remove() unlinks a
     // link itself, never what it points to), and the open is NewOnly
     // (O_CREAT|O_EXCL, CREATE_NEW on Windows), which fails on any
-    // existing name, a link included, rather than follow it. For an
-    // AppImage the .part is in the AppImage's folder, which others may
-    // be able to write to. If the name can't be freed, the download
-    // fails rather than write anywhere else.
+    // existing name, a link included, rather than follow it. If the name
+    // can't be freed, the download fails rather than write anywhere else.
     QFile::remove(partPath_);
     file_ = std::make_unique<QFile>(partPath_);
     if (!file_->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
@@ -211,7 +219,7 @@ void Downloader::fetchAsset() {
         // Not discardPart's remove(): what is there isn't ours.
         file_.reset();
         partPath_.clear();
-        fail(tr("Couldn't save %1: %2.").arg(asset_.name, why));
+        fail({Failure::DiskError, tr("Couldn't save %1: %2.").arg(asset_.name, why)});
         return;
     }
     hash_ = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
@@ -221,7 +229,7 @@ void Downloader::fetchAsset() {
         if (reply != reply_)
             return;
         const qint64 before = received_;
-        if (const QString why = consume(reply); !why.isEmpty()) {
+        if (const Problem why = consume(reply); !why.isEmpty()) {
             fail(why);
             return;
         }
@@ -231,7 +239,7 @@ void Downloader::fetchAsset() {
     connect(reply, &QNetworkReply::finished, this, [this, reply] { onAssetFinished(reply); });
 }
 
-QString Downloader::consume(QNetworkReply* reply) {
+Downloader::Problem Downloader::consume(QNetworkReply* reply) {
     if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 200) {
         reply->readAll();
         return {};
@@ -240,9 +248,10 @@ QString Downloader::consume(QNetworkReply* reply) {
     if (chunk.isEmpty())
         return {};
     if (received_ + chunk.size() > asset_.size)
-        return tr("%1 is larger than GitHub lists (%2 bytes).").arg(asset_.name).arg(asset_.size);
+        return {Failure::SizeMismatch,
+                tr("%1 is larger than GitHub lists (%2 bytes).").arg(asset_.name).arg(asset_.size)};
     if (file_->write(chunk) != chunk.size())
-        return tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString());
+        return {Failure::DiskError, tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString())};
     hash_->addData(chunk);
     received_ += chunk.size();
     return {};
@@ -253,47 +262,49 @@ void Downloader::onAssetFinished(QNetworkReply* reply) {
     if (reply != reply_)
         return;
     reply_ = nullptr;
-    if (const QString why = replyProblem(reply, asset_.name); !why.isEmpty()) {
+    if (const Problem why = replyProblem(reply, asset_.name); !why.isEmpty()) {
         fail(why);
         return;
     }
-    if (const QString why = consume(reply); !why.isEmpty()) {
+    if (const Problem why = consume(reply); !why.isEmpty()) {
         fail(why);
         return;
     }
     if (!file_->flush()) {
-        fail(tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString()));
+        fail({Failure::DiskError, tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString())});
         return;
     }
     file_->close();
     file_.reset();
     if (received_ != asset_.size) {
-        fail(tr("%1 arrived with %2 bytes; GitHub lists %3.").arg(asset_.name).arg(received_).arg(asset_.size));
+        fail({Failure::SizeMismatch,
+              tr("%1 arrived with %2 bytes; GitHub lists %3.").arg(asset_.name).arg(received_).arg(asset_.size)});
         return;
     }
     const QByteArray actual = hash_->result().toHex();
     if (actual != expected_) {
-        fail(tr("%1 doesn't match its checksum in %2, so it was deleted.")
-                 .arg(asset_.name, QString::fromLatin1(kChecksumsAsset)));
+        fail({Failure::ChecksumMismatch, tr("%1 doesn't match its checksum in %2, so it was deleted.")
+                                             .arg(asset_.name, QString::fromLatin1(kChecksumsAsset))});
         return;
     }
     if (!asset_.sha256.isEmpty() && actual != asset_.sha256) {
-        fail(tr("%1 doesn't match the checksum GitHub lists for it, so it was deleted.").arg(asset_.name));
+        fail({Failure::ChecksumMismatch,
+              tr("%1 doesn't match the checksum GitHub lists for it, so it was deleted.").arg(asset_.name)});
         return;
     }
 
     // Into place, by the system's rename alone (rename(2); MoveFileExW
     // with MOVEFILE_REPLACE_EXISTING on Windows): it replaces whatever
-    // has the final name, an earlier copy or a link (the link itself,
-    // which another user may have planted in an AppImage's folder), in
-    // one step, and never writes through a link. Not QFile::rename: it
+    // has the final name, an earlier copy or a link (the link itself),
+    // in one step, and never writes through a link. Not QFile::rename: it
     // never replaces, and when the rename fails it copies instead,
     // through a link at the final name to wherever it points.
     std::error_code error;
     std::filesystem::rename(std::filesystem::path(partPath_.toStdU16String()),
                             std::filesystem::path(finalPath_.toStdU16String()), error);
     if (error) {
-        fail(tr("Couldn't move %1 into place: %2.").arg(asset_.name, QString::fromLocal8Bit(error.message())));
+        fail({Failure::DiskError,
+              tr("Couldn't move %1 into place: %2.").arg(asset_.name, QString::fromLocal8Bit(error.message()))});
         return;
     }
     const QString path = finalPath_;
@@ -301,28 +312,29 @@ void Downloader::onAssetFinished(QNetworkReply* reply) {
     emit finished(path);
 }
 
-QString Downloader::replyProblem(QNetworkReply* reply, const QString& name) const {
+Downloader::Problem Downloader::replyProblem(QNetworkReply* reply, const QString& name) const {
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     if (status > 0 && status != 200)
-        return tr("Couldn't download %1: GitHub answered HTTP %2.").arg(name).arg(status);
+        return {Failure::HttpError, tr("Couldn't download %1: GitHub answered HTTP %2.").arg(name).arg(status)};
     // No status: no answer. A 200 with an error: cut off midway.
     if (status != 200 || reply->error() != QNetworkReply::NoError)
-        return tr("Couldn't download %1: %2.").arg(name, reply->errorString());
+        return {Failure::NetworkError, tr("Couldn't download %1: %2.").arg(name, reply->errorString())};
     return {};
 }
 
-void Downloader::failLater(const QString& message) {
-    QTimer::singleShot(0, this, [this, run = run_, message] {
+void Downloader::failLater(const Problem& problem) {
+    QTimer::singleShot(0, this, [this, run = run_, problem] {
         if (run == run_)
-            fail(message);
+            fail(problem);
     });
 }
 
-void Downloader::fail(const QString& message) {
+void Downloader::fail(const Problem& problem) {
     dropReply();
     discardPart();
     reset();
-    emit failed(message);
+    failure_ = problem.failure;
+    emit failed(problem.message);
 }
 
 void Downloader::dropReply() {

@@ -162,8 +162,8 @@ target_sources(test_update_package PRIVATE update/FakeApps.h)
 target_link_libraries(test_update_package PRIVATE gitbolt_update)
 # The helpers that finish an update once GitBolt has quit, run for real
 # on scratch folders with HOME a scratch folder too: macOS's (on macOS)
-# and the AppImage's under /bin/sh and dash, the deb's with a stand-in
-# pkexec; Windows' two PowerShell parts as text (quoting, /D= last, the
+# and the deb's (with a stand-in pkexec) under /bin/sh and dash; Windows'
+# two PowerShell parts as text (quoting, /D= last, the
 # -EncodedCommand round trip and ShellExecuteExW's parameters, the
 # administrator part that waits for the install folder to be free and
 # writes the result last, the helper that waits for it and starts GitBolt
@@ -174,14 +174,23 @@ target_link_libraries(test_update_package PRIVATE gitbolt_update)
 gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
 target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_helpers PRIVATE gitbolt_update)
+# What the real installer must carry (GitBoltMinimumWindows).
+target_compile_definitions(test_update_helpers PRIVATE
+    GITBOLT_WINDOWS_MINIMUM="${GITBOLT_WINDOWS_MINIMUM}")
 # Installer::prepare for each package, and whole updates through a real
-# detached helper: an AppImage on any Unix; on macOS real disk images,
-# made here with hdiutil from fake ad-hoc-signed bundles, including a
-# wrong bundle id, a wrong version and a broken seal. About a minute on
-# macOS (each hdiutil create takes seconds), hence the longer TIMEOUT.
+# detached helper: a deb (stand-in pkexec and apt-get) on any Unix; on
+# macOS real disk images, made here with hdiutil from fake ad-hoc-signed
+# bundles, including a wrong bundle id, a wrong version and a broken
+# seal. About a minute on macOS (each hdiutil create takes seconds),
+# hence the longer TIMEOUT. On Windows the test exe carries a
+# GitBoltMinimumWindows above any Windows, as an installer for a newer
+# one would.
 gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
+if(WIN32)
+    target_sources(test_update_installer PRIVATE update/NeedsNewerWindows.rc)
+endif()
 set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
 add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
 # dladdr, as for gitbolt_util: in libdl before glibc 2.34 (empty on Windows)
@@ -328,9 +337,11 @@ set_property(TEST test_about_dialog APPEND PROPERTY ENVIRONMENT
     "QT_QPA_PLATFORM=offscreen:configfile=short-screen.json")
 
 # ui/ — the Settings switch reaching usage statistics through a real
-# MainWindow's own SettingsService, against the loopback HttpStub.
+# MainWindow's own SettingsService, against the loopback HttpStub; and
+# in-app updates' outcomes, dialog buttons and (macOS) application menu
+# reaching the same service, with a loopback feed (update/HttpServer.h).
 gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
-target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h)
+target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h update/HttpServer.h ui/AppMenuWatcher.h)
 target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)
 set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # In-app updates' gate (ui/UpdateSetup.h) as a table: a test session
@@ -342,11 +353,14 @@ target_link_libraries(test_update_setup PRIVATE gitbolt_ui)
 # the loopback stub (update/HttpServer.h): the dialog for a manual check,
 # the notice bar for the daily one, Skip and dismiss, the schedule, and
 # installs stopped (Cancel, closing, a bad or abandoned download) with
-# nothing left behind; Help › Check for Updates through a real
-# MainWindow. Off screen; on macOS a disk image hdiutil refuses, and
-# one made here (update/FakeApps.h) for a newer macOS, take a moment.
+# nothing left behind, each attempt's outcome and the pending-install
+# marker for usage statistics; Help › Check for Updates through a real
+# MainWindow. A deb with stand-in apt-get and pkexec on Unix. Off screen;
+# on macOS a disk image hdiutil refuses, and one made here
+# (update/FakeApps.h) for a newer macOS, take a moment.
 gitbolt_add_test(test_update_controller ui/TestUpdateController.cpp)
-target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h)
+target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h
+    ui/AppMenuWatcher.h)
 target_link_libraries(test_update_controller PRIVATE gitbolt_ui gitbolt_update Qt6::Network)
 set_property(TEST test_update_controller APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File > Recent Repositories following the recent list, and the

@@ -138,6 +138,15 @@ void TelemetryService::recordError(ErrorKind kind, const QString& detail) {
             glitchTipError(client_, kind, detail, QDateTime::currentDateTimeUtc()));
 }
 
+void TelemetryService::recordUpdateResult(const UpdateResult& result) {
+    if (!isActive())
+        return;
+    if (std::optional<QJsonObject> event = updateResultEvent(client_, installId(), result))
+        enqueue(Sink::OpenPanel, std::move(*event));
+    if (result.status == QLatin1String("failed") || result.status == QLatin1String("no_result"))
+        recordError(ErrorKind::UpdateFailed, result.stage + u'/' + result.reason);
+}
+
 bool TelemetryService::queueCrashReport(const QString& crashLog) {
     if (!isActive())
         return false;
