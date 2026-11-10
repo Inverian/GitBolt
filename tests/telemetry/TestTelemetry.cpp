@@ -18,7 +18,9 @@
 //   - the queue's caps, load-time rules and lock, and a stale lock no
 //     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
-//     leave
+//     leave; a background exception goes as its type alone
+//   - the log: one line per request's outcome, with the event's name
+//     and never a payload, an ID or a URL
 //
 
 #include <QCryptographicHash>
@@ -31,6 +33,7 @@
 #include <QLockFile>
 #include <QNetworkAccessManager>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTemporaryDir>
@@ -48,6 +51,7 @@
 #include "telemetry/TelemetryService.h"
 #include "telemetry/Transport.h"
 #include "util/TestSession.h"
+#include "util/WorkerExceptions.h"
 
 #include <memory>
 #include <optional>
@@ -156,6 +160,18 @@ QString crashReport() {
                             "#2 GitBolt +0x30 ?\n"
                             "#3 dyld +0x40 start+0x2\n"
                             "\n=== End of Report ===\n");
+}
+
+// The "Telemetry: …" lines logged while installed (others go on).
+QStringList g_telemetryLines;
+QtMessageHandler g_handlerBefore = nullptr;
+
+void captureTelemetryLines(QtMsgType type, const QMessageLogContext& context,
+                           const QString& message) {
+    if (message.startsWith(QLatin1String("Telemetry: ")))
+        g_telemetryLines << message;
+    else if (g_handlerBefore)
+        g_handlerBefore(type, context, message);
 }
 
 // A new queue in `dir` holding one record.
@@ -1524,6 +1540,7 @@ private slots:
         service->recordError(ErrorKind::OperationFailed,
                              QStringLiteral("push origin feature/secret-branch"));
         service->recordError(ErrorKind::RepoOpenFailed, input);
+        service->recordError(ErrorKind::BackgroundException, input);
         service->persistPending();   // counts out now, if any were kept
 
         // No command was counted; the errors went out sanitized.
@@ -1544,6 +1561,8 @@ private slots:
                 QCOMPARE(tags.value(QStringLiteral("op")).toString(), QStringLiteral("other"));
             if (tags.contains(QStringLiteral("code")))
                 QCOMPARE(tags.value(QStringLiteral("code")).toString(), QStringLiteral("other"));
+            if (tags.contains(QStringLiteral("type")))
+                QCOMPARE(tags.value(QStringLiteral("type")).toString(), QStringLiteral("other"));
             QByteArray all = request.everything();
             all.replace("gitbolt@0.1.0", "");   // the release names the app, not a person
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com",
@@ -1640,6 +1659,101 @@ private slots:
         QCOMPARE(commit.value(QStringLiteral("tags")).toObject(),
                  (QJsonObject{{QStringLiteral("kind"), QStringLiteral("commit_failed")}}));
         QCOMPARE(provider.calls, 0);
+    }
+
+    // An exception that escaped background work (AsyncRunner): its type
+    // from a fixed list, never its text; once per type per session.
+    void backgroundExceptionShape() {
+        Provider provider;
+        auto service = makeService(testConfig(*stub_, dir_->path()), provider);
+        service->start();
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("non_std"));
+        QTRY_COMPARE(stub_->requests().size(), 2);
+        QTest::qWait(300);
+        QCOMPARE(stub_->requests().size(), 2);
+
+        const QJsonObject event = stub_->requests().first().json();
+        QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("error"));
+        QCOMPARE(event.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: out_of_range"));
+        QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
+                 (QJsonObject{{QStringLiteral("kind"), QStringLiteral("background_exception")},
+                              {QStringLiteral("type"), QStringLiteral("out_of_range")}}));
+        QCOMPARE(event.value(QStringLiteral("fingerprint")).toArray(),
+                 (QJsonArray{QStringLiteral("background_exception"),
+                             QStringLiteral("out_of_range")}));
+        QCOMPARE(stub_->requests().at(1).json().value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: non_std"));
+        QCOMPARE(provider.calls, 0);
+
+        // Every token AsyncRunner can report is sendable as it is.
+        for (const QString& kind : gitbolt::util::workerExceptionKinds())
+            QCOMPARE(errorDetail(ErrorKind::BackgroundException, kind), kind);
+        QCOMPARE(errorDetail(ErrorKind::BackgroundException, QStringLiteral("MyError")),
+                 QStringLiteral("other"));
+    }
+
+    // One line per request for the local log: sent, dropped, not sent
+    // (retried at the next tick) and offline, with the event's fixed
+    // name; and the switch turned off and events kept at quit. Never a
+    // payload, an install or device ID, or a URL.
+    void sendOutcomesAreLogged() {
+        g_telemetryLines.clear();
+        g_handlerBefore = qInstallMessageHandler(captureTelemetryLines);
+        const auto restore = qScopeGuard([] { qInstallMessageHandler(g_handlerBefore); });
+
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.flushIntervalMs = 300;
+        int answered = 0;
+        stub_->respond = [&answered](const StubRequest&) {
+            const int status[] = {200, 400, 503};
+            return StubResponse{answered < 3 ? status[answered++] : 202, {}};
+        };
+        auto service = makeService(config, provider);
+        service->recordRepoOpened(1, 1, 1);
+        service->recordError(ErrorKind::OperationFailed, QStringLiteral("fetch"));
+        service->recordLaunch();
+        service->start();
+        QTRY_COMPARE(service->queuedCount(), 0);
+        service->persistPending();   // nothing kept: no line
+        service.reset();
+
+        // Nothing listens: offline. Kept at quit, then turned off.
+        Config offline = config;
+        offline.transferTimeoutMs = 10000;   // Windows takes ~2 s to refuse
+        const int port = closedPort();
+        offline.trackUrl.setPort(port);
+        offline.storeUrl.setPort(port);
+        service = makeService(offline, provider);
+        service->recordRepoOpened(2, 2, 1);
+        service->start();
+        QTRY_VERIFY2_WITH_TIMEOUT(g_telemetryLines.contains(
+                                      QStringLiteral("Telemetry: offline; 1 events wait")),
+                                  qPrintable(g_telemetryLines.join(QLatin1Char('\n'))), 15000);
+        service->persistPending();
+        service.reset();
+        service = makeService(offline, provider);
+        service->setUserEnabled(false);
+        service.reset();
+
+        g_telemetryLines.removeDuplicates();
+        QCOMPARE(g_telemetryLines,
+                 (QStringList{QStringLiteral("Telemetry: repo_opened sent (HTTP 200)"),
+                              QStringLiteral("Telemetry: operation_failed dropped (HTTP 400)"),
+                              QStringLiteral("Telemetry: app_launched not sent (HTTP 503); "
+                                             "retrying at the next tick"),
+                              QStringLiteral("Telemetry: app_launched sent (HTTP 202)"),
+                              QStringLiteral("Telemetry: offline; 1 events wait"),
+                              QStringLiteral("Telemetry: 1 events kept for the next start"),
+                              QStringLiteral("Telemetry: turned off; the queue was deleted")}));
+        for (const QString& line : std::as_const(g_telemetryLines)) {
+            for (const QString& secret : {kInstallId, deviceIdFor(kInstallId), QStringLiteral("{"),
+                                          QStringLiteral("http"), QStringLiteral("127.0.0.1")})
+                QVERIFY2(!line.contains(secret), qPrintable(line));
+        }
     }
 
     void crashReportIsQueuedAndSent() {

@@ -7,11 +7,16 @@ test's HOME through, so a crash in any e2e test truncated the real
 showing them Crash Detected at their next launch), and the app's git
 read the developer's ~/.gitconfig. The crash handler creates
 ~/.gitbolt at startup, which shows which home the app ran with.
+
+The log file likewise: a test session writes GitBolt-test.log, in the
+app's own HOME (macOS) or XDG_STATE_HOME (Linux), never the user's
+GitBolt.log or anything under the test's HOME.
 """
 
 from __future__ import annotations
 
 import os
+import sys
 
 from e2elib import App, Failure, make_repo, run
 
@@ -48,6 +53,22 @@ def test(binary: str, scratch: str, apps: list) -> None:
     rc = app.quit()
     if rc != 0:
         raise Failure(f"quit rc={rc}{app.tail()}")
+
+    log_dir = (os.path.join(app_home, "Library", "Logs", "GitBolt")
+               if sys.platform == "darwin"
+               else os.path.join(app.env["XDG_STATE_HOME"], "GitBolt"))
+    log = os.path.join(log_dir, "GitBolt-test.log")
+    if not os.path.isfile(log):
+        raise Failure(f"no {log}{app.tail()}")
+    with open(log, encoding="utf-8") as fh:
+        text = fh.read()
+    if " started: " not in text or "test session" not in text:
+        raise Failure(f"no session line in {log}:\n{text}")
+    if os.path.exists(os.path.join(log_dir, "GitBolt.log")):
+        raise Failure("a test session wrote the user's GitBolt.log")
+    for leak in (("Library", "Logs", "GitBolt"), (".local", "state", "GitBolt")):
+        if os.path.exists(os.path.join(user_home, *leak)):
+            raise Failure(f"the app wrote {os.path.join(*leak)} in the test's HOME")
 
 
 if __name__ == "__main__":

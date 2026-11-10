@@ -30,9 +30,10 @@ namespace gitbolt::telemetry {
 /// neither the install ID nor the device ID: errors and crashes can't
 /// be linked to an install.
 
-enum class ErrorKind { OperationFailed, CommitFailed, RepoOpenFailed };
+enum class ErrorKind { OperationFailed, CommitFailed, RepoOpenFailed, BackgroundException };
 
-/// "operation_failed", "commit_failed", "repo_open_failed".
+/// "operation_failed", "commit_failed", "repo_open_failed",
+/// "background_exception".
 QString errorKindName(ErrorKind kind);
 
 /// What every event says about the machine, captured once per session.
@@ -121,16 +122,20 @@ QJsonObject withTimestamp(QJsonObject event, const QDateTime& queued);
 
 /// level "error"; `detail` goes through operationName() for
 /// OperationFailed and must be an openErrorName() value for
-/// RepoOpenFailed (else "other"); CommitFailed ignores it.
+/// RepoOpenFailed, or a util::workerExceptionKinds() token for
+/// BackgroundException (tag "type"), else "other"; CommitFailed
+/// ignores it.
 QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QString& detail,
                            const QDateTime& at);
 
 /// level "fatal", from a parsed report. Contexts and release come from
-/// the report, not the running app.
+/// the report, not the running app; so do the tag build_id (when the
+/// report has a Build ID) and, on Windows, the exception code in the
+/// exception's value ("SIGSEGV 0xc0000005").
 QJsonObject glitchTipCrash(const CrashEvent& crash);
 
 /// The sanitized detail recordError() dedupes on: operationName(),
-/// the checked openErrorName() value, or empty.
+/// the checked openErrorName() value or exception type, or empty.
 QString errorDetail(ErrorKind kind, const QString& detail);
 
 } // namespace gitbolt::telemetry

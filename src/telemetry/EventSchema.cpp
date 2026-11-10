@@ -1,5 +1,7 @@
 #include "telemetry/EventSchema.h"
 
+#include "util/WorkerExceptions.h"
+
 #include <QCryptographicHash>
 #include <QJsonArray>
 #include <QLocale>
@@ -89,6 +91,7 @@ QString errorKindName(ErrorKind kind) {
     case ErrorKind::OperationFailed: return QStringLiteral("operation_failed");
     case ErrorKind::CommitFailed:    return QStringLiteral("commit_failed");
     case ErrorKind::RepoOpenFailed:  return QStringLiteral("repo_open_failed");
+    case ErrorKind::BackgroundException: return QStringLiteral("background_exception");
     }
     return QStringLiteral("other");
 }
@@ -296,6 +299,8 @@ QString errorDetail(ErrorKind kind, const QString& detail) {
         return QStringLiteral("other");
     case ErrorKind::CommitFailed:
         return {};
+    case ErrorKind::BackgroundException:
+        return util::workerExceptionKinds().contains(detail) ? detail : QStringLiteral("other");
     }
     return {};
 }
@@ -316,6 +321,8 @@ QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QStri
         tags.insert(QStringLiteral("op"), clean);
     else if (kind == ErrorKind::RepoOpenFailed)
         tags.insert(QStringLiteral("code"), clean);
+    else if (kind == ErrorKind::BackgroundException)
+        tags.insert(QStringLiteral("type"), clean);
     if (!clean.isEmpty())
         fingerprint.append(clean);
     event.insert(QStringLiteral("message"),
@@ -356,7 +363,11 @@ QJsonObject glitchTipCrash(const CrashEvent& crash) {
 
     QJsonObject exception;
     exception.insert(QStringLiteral("type"), crash.signal);
-    exception.insert(QStringLiteral("value"), crash.signal);
+    // Windows: "SIGSEGV 0xc0000005", the exception the signal stands for.
+    exception.insert(QStringLiteral("value"),
+                     crash.exceptionCode.isEmpty()
+                         ? crash.signal
+                         : crash.signal + QLatin1Char(' ') + crash.exceptionCode);
     exception.insert(QStringLiteral("mechanism"), mechanism);
     exception.insert(QStringLiteral("stacktrace"),
                      QJsonObject{{QStringLiteral("frames"), frames}});
@@ -364,8 +375,12 @@ QJsonObject glitchTipCrash(const CrashEvent& crash) {
     event.insert(QStringLiteral("exception"),
                  QJsonObject{{QStringLiteral("values"), QJsonArray{exception}}});
     event.insert(QStringLiteral("fingerprint"), QJsonArray::fromStringList(crash.fingerprint));
-    event.insert(QStringLiteral("tags"),
-                 QJsonObject{{QStringLiteral("kind"), QStringLiteral("crash")}});
+    // build_id: which symbol file reads the offsets. Not in the
+    // fingerprint: another binary's offsets differ anyway.
+    QJsonObject tags{{QStringLiteral("kind"), QStringLiteral("crash")}};
+    if (!crash.buildId.isEmpty())
+        tags.insert(QStringLiteral("build_id"), crash.buildId);
+    event.insert(QStringLiteral("tags"), tags);
     return event;
 }
 

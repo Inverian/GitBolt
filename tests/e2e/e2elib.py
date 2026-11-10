@@ -23,6 +23,8 @@ test run can coexist with a real GitBolt session and with other tests:
   and libgit2, written by Settings' Git Config page) and
   QDir::homePath() all hang off it. The harness's own git() keeps the
   test's HOME: make_repo sets the identity the app's commits need.
+- XDG_STATE_HOME: a private dir, for the app's log on Linux (macOS
+  keeps it under HOME): an exported one would reach the developer's.
 - QT_QPA_PLATFORM=offscreen: no focus stealing, same behavior on
   headless CI. An exported QT_QPA_PLATFORM wins for the apps a test
   drives, so a developer can watch them; never for a second launch,
@@ -74,6 +76,7 @@ def app_env(runtime_dir: str, instance_name: str,
                               or os.path.join(runtime_dir, "config"))
     env["HOME"] = home or os.path.join(runtime_dir, "home")
     os.makedirs(env["HOME"], exist_ok=True)
+    env["XDG_STATE_HOME"] = os.path.join(runtime_dir, "state")
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env["GITBOLT_TELEMETRY"] = "0"
     return env

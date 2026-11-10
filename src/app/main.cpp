@@ -16,9 +16,11 @@
 #include "update/UpdateConfig.h"
 #include "util/CrashHandler.h"
 #include "util/LockFiles.h"
+#include "util/LogFile.h"
 #include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
+#include "util/WorkerExceptions.h"
 #include "widgets/PlainTextDialogs.h"
 
 #ifdef Q_OS_MACOS
@@ -49,6 +51,7 @@
 #include <QScopeGuard>
 #include <QStandardPaths>
 #include <QStyleHints>
+#include <QSysInfo>
 #include <QTextStream>
 #include <QThreadPool>
 #include <QUrl>
@@ -446,6 +449,28 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const gitbolt::util::TestSessionKind testSessionKind =
+        gitbolt::util::detectTestSession(QGuiApplication::platformName(),
+                                         app.arguments());
+    const bool testSession = gitbolt::util::isTestSession(testSessionKind);
+
+    // The log file (util/LogFile.h), local only: from here on every Qt
+    // message goes there too, and on to stderr as before. Askpass,
+    // --help and hand-off launches have returned by now, so the GitBolt
+    // that owns the window owns the file. A test session writes a file
+    // of its own. The session line goes in directly: stderr stays quiet.
+    gitbolt::util::RotatingLog appLog(gitbolt::util::logDirectory(),
+                                      testSession ? QStringLiteral("GitBolt-test")
+                                                  : QStringLiteral("GitBolt"));
+    appLog.append(gitbolt::util::logLine(
+        'I', QStringLiteral("GitBolt %1 started: %2, %3, Qt %4, pid %5%6")
+                 .arg(app.applicationVersion(), QSysInfo::prettyProductName(),
+                      QSysInfo::currentCpuArchitecture(), QString::fromLatin1(qVersion()))
+                 .arg(QCoreApplication::applicationPid())
+                 .arg(testSession ? QStringLiteral(", test session") : QString())));
+    gitbolt::util::installMessageLog(&appLog);
+    const auto messageLogGone = qScopeGuard([] { gitbolt::util::uninstallMessageLog(); });
+
 #ifdef Q_OS_MACOS
     // Finder's "Open in GitBolt", only now that this is the GitBolt
     // that opens things: macOS gives the service to the first process
@@ -541,7 +566,22 @@ int main(int argc, char* argv[]) {
             [&settings]() { return settings.reloadUsageStatisticsEnabled(); });
         QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
                          &telemetry::TelemetryService::persistPending);
+        // An exception escaping background work: its type, as an error
+        // report (the dedupe and cap apply; inert and off send nothing).
+        // Queued: it comes from a worker thread.
+        telemetry::TelemetryService* service = telemetryService.get();
+        gitbolt::util::setWorkerExceptionSink([service](const char* kind) {
+            QMetaObject::invokeMethod(
+                service,
+                [service, type = QString::fromLatin1(kind)] {
+                    service->recordError(telemetry::ErrorKind::BackgroundException, type);
+                },
+                Qt::QueuedConnection);
+        });
     }
+    // Cleared before the service goes (declared after it); the sink's
+    // lock means nothing is posted once this has run.
+    const auto workerSinkGone = qScopeGuard([] { gitbolt::util::setWorkerExceptionSink({}); });
 
     // Check for crash report from a previous session. Not in a test
     // session: ~/.gitbolt/crash.log is the user's (a bridge run outside
@@ -552,10 +592,6 @@ int main(int argc, char* argv[]) {
     // The report is read here, before the telemetry service starts
     // below; the box that tells the user comes up once the window and
     // the hand-off listener are (see there).
-    const gitbolt::util::TestSessionKind testSessionKind =
-        gitbolt::util::detectTestSession(QGuiApplication::platformName(),
-                                         app.arguments());
-    const bool testSession = gitbolt::util::isTestSession(testSessionKind);
     const bool crashBoxOptIn =
         qEnvironmentVariable("GITBOLT_TEST_CRASH_BOX") == QLatin1String("1");
     const bool crashPending = (!testSession || crashBoxOptIn)

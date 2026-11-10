@@ -39,6 +39,10 @@ namespace gitbolt::telemetry {
 ///   - Command counts become command_used events every countWindowMs
 ///     and at quit.
 ///
+/// Each request's outcome goes to the log (qInfo, qWarning for a
+/// dropped record) with the event's fixed name only: no payload, ID or
+/// URL. So do turning it off and the events kept at quit.
+///
 /// Every record*, count* and flush entry point does nothing unless the
 /// service is active: enabled, not quitting, its queue lock held. The
 /// network stack is created at the first flush, so loading the TLS
@@ -120,7 +124,7 @@ private:
     void scheduleFlush();
     void beginCycle();
     void sendFront();
-    void onReplyFinished(QNetworkReply* reply, quint64 recordId);
+    void onReplyFinished(QNetworkReply* reply, quint64 recordId, const QString& name);
     void endCycle();
     void onRetryTick();
     void flushCounts();
