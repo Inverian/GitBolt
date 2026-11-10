@@ -894,8 +894,8 @@ QString windowsMinimumOf(const QString& file) {
     if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<LPVOID*>(&pairs), &bytes) && pairs) {
         for (UINT i = 0; i < bytes / sizeof(LanguageAndCodePage); ++i)
             blocks << QStringLiteral("%1%2")
-                          .arg(pairs[i].language, 4, 16, QLatin1Char('0'))
-                          .arg(pairs[i].codePage, 4, 16, QLatin1Char('0'));
+                          .arg(uint(pairs[i].language), 4, 16, QLatin1Char('0'))
+                          .arg(uint(pairs[i].codePage), 4, 16, QLatin1Char('0'));
     }
     blocks << QStringLiteral("040904b0") << QStringLiteral("040904e4") << QStringLiteral("000004b0");
     for (const QString& block : std::as_const(blocks)) {
