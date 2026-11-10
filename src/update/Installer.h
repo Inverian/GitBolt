@@ -235,6 +235,11 @@ QString windowsMinimumOf(const QString& file);
 /// Normalised, so 14.4 and 14.4.0 are the same.
 bool systemTooOld(const QString& minimum, const QVersionNumber& running);
 
+/// This system's major.minor.micro (0 where unknown): what systemTooOld
+/// is given, and what a refusal is remembered for. Windows' micro is the
+/// build, which QSysInfo::productVersion() ("10", "11") leaves out.
+QVersionNumber runningSystem();
+
 /// At startup, removes what an update that never finished left behind:
 /// a crash, a force quit or a logout during prepare() or while the
 /// helper waited (the helper's own cleanup dies with it). Nothing that

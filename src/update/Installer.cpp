@@ -270,9 +270,7 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
         // Before UAC and before GitBolt quits: uninstall-before-install
         // would leave nothing that starts. No key: no check, as on macOS.
         const QString minimum = windowsMinimumOf(file_);
-        const QOperatingSystemVersion os = QOperatingSystemVersion::current();
-        const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()),
-                                     qMax(0, os.microVersion()));
+        const QVersionNumber running = runningSystem();
         if (systemTooOld(minimum, running)) {
             const QVersionNumber needs = QVersionNumber::fromString(minimum.trimmed());
             const QString build = needs.segmentCount() >= 3 ? QString::number(needs.microVersion()) : needs.toString();
@@ -622,8 +620,7 @@ QString Installer::checkBundle(const QString& bundle, const QString& where, Fail
     // Checked now, while GitBolt runs: once swapped in, LaunchServices
     // wouldn't start it and the old copy would be in the Trash.
     const QString minimum = info.value(QStringLiteral("LSMinimumSystemVersion")).toString().trimmed();
-    const QOperatingSystemVersion os = QOperatingSystemVersion::current();
-    const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
+    const QVersionNumber running = runningSystem();
     if (systemTooOld(minimum, running)) {
         const QString shown = running.microVersion() > 0 ? running.toString()
                                                          : QStringLiteral("%1.%2").arg(running.majorVersion())
@@ -928,6 +925,11 @@ bool systemTooOld(const QString& minimum, const QVersionNumber& running) {
     if (needs.isNull() || end != text.size())
         return false;
     return running.normalized() < needs;
+}
+
+QVersionNumber runningSystem() {
+    const QOperatingSystemVersion os = QOperatingSystemVersion::current();
+    return QVersionNumber(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
 }
 
 WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment) {

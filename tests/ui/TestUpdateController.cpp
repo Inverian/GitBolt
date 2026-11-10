@@ -84,12 +84,12 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QStatusBar>
-#include <QSysInfo>
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QVersionNumber>
 
 #include "../TestProcessHelper.h"
 #include "../update/FakeApps.h"
@@ -715,25 +715,28 @@ private slots:
 #endif
     }
 
-    // A release Install found this system too old for (macOS's minimum,
-    // remembered in updates/incompatible*): shown as one this copy can't
-    // install, with why, and not downloaded again; with the system
-    // changed since (an upgrade may be enough), installable again; and
-    // forgotten once a newer one comes out.
+    // A release Install found this system too old for (macOS's or
+    // Windows' minimum, remembered in updates/incompatible*): shown as one
+    // this copy can't install, with why, and not downloaded again; with
+    // the system changed since, if only its build (Windows 10's feature
+    // updates), installable again; and forgotten once a newer one comes out.
     void aReleaseThisSystemIsTooOldForIsntDownloadedAgain_data() {
-        QTest::addColumn<bool>("sameSystem");
-        QTest::newRow("this system") << true;
-        QTest::newRow("the system changed since") << false;
+        QTest::addColumn<QString>("system");
+        const QVersionNumber running = gitbolt::update::runningSystem();
+        QTest::newRow("this system") << running.toString();
+        QTest::newRow("another build since")
+            << QVersionNumber(running.majorVersion(), running.minorVersion(), running.microVersion() + 1).toString();
+        QTest::newRow("the system changed since") << QStringLiteral("0.0.1");
     }
     void aReleaseThisSystemIsTooOldForIsntDownloadedAgain() {
-        QFETCH(bool, sameSystem);
+        QFETCH(QString, system);
+        const bool sameSystem = system == gitbolt::update::runningSystem().toString();
         HttpServer server;
         serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         Harness h(testSetup(server, cache_->path(), deb()));
         const QString why = QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this Mac has macOS 15.6, "
                                            "so it can't be installed here.");
-        h.settings.setIncompatibleUpdate(QStringLiteral("0.1.1"), why,
-                                         sameSystem ? QSysInfo::productVersion() : QStringLiteral("0.0.1"));
+        h.settings.setIncompatibleUpdate(QStringLiteral("0.1.1"), why, system);
         h.controller->checkNow();
         QTRY_VERIFY(h.dialog()->state() != State::Checking);
         if (!sameSystem) {
@@ -792,7 +795,7 @@ private slots:
         QVERIFY2(shown.contains(QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this Mac has macOS ")),
                  qPrintable(shown));
         QCOMPARE(h.settings.incompatibleUpdateVersion(), QStringLiteral("0.1.1"));
-        QCOMPARE(h.settings.incompatibleUpdateSystem(), QSysInfo::productVersion());
+        QCOMPARE(h.settings.incompatibleUpdateSystem(), gitbolt::update::runningSystem().toString());
         QCOMPARE(h.results, QStringList{QStringLiteral("incompatible prepare needs_newer_system 0.1.0 0.1.1 dmg")});
         const QString version = QDir(h.controller->setup().config.downloadDir).filePath(QStringLiteral("0.1.1"));
         QCOMPARE(entries(version), QStringList{});

@@ -15,7 +15,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
-#include <QSysInfo>
 #include <QTimer>
 #include <QWidget>
 
@@ -427,7 +426,8 @@ void UpdateController::onAvailable(const update::Release& release, bool manual)
     // A release this system was too old for stays refused until a newer
     // one comes out, or the system changes (it may be new enough now).
     if (const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
-        refused && (release.version > *refused || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion()))
+        refused
+        && (release.version > *refused || settings_->incompatibleUpdateSystem() != update::runningSystem().toString()))
         settings_->setIncompatibleUpdate({}, {}, {});
     // An automatic check that ran on while an install started: the
     // install keeps the release it started with.
@@ -661,7 +661,7 @@ void UpdateController::helperGaveUp()
 QString UpdateController::refusedForThisSystem(const update::Version& version) const
 {
     const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
-    if (!refused || *refused != version || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion())
+    if (!refused || *refused != version || settings_->incompatibleUpdateSystem() != update::runningSystem().toString())
         return {};
     return settings_->incompatibleUpdateReason();
 }
@@ -685,7 +685,8 @@ void UpdateController::failInstall(const QString& message)
     if (installer_ && installer_->needsNewerSystem() && shownRelease_) {
         reportResult("incompatible", "prepare", update::Failure::NeedsNewerSystem, setup_.config.current.toString(),
                      to);
-        settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message, QSysInfo::productVersion());
+        settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message,
+                                         update::runningSystem().toString());
         stopInstall();
         retryChecks_ = false;
         showRelease(*shownRelease_);
