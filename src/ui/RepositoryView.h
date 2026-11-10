@@ -49,7 +49,7 @@ namespace gitbolt::ui {
 ///   │            │  Revision grid (commit log + graph)  │
 ///   │ BranchTree ├──────────────────────────────────────┤
 ///   │            │  Inspector tabs                      │
-///   │            │   [Commit Info] [File Tree] [Diff]   │
+///   │            │ [Commit] [Diff] [File Tree] [Console]│
 ///   └────────────┴──────────────────────────────────────┘
 ///
 /// All staging/commit-message UI lives in a separate `CommitDialog`
@@ -197,7 +197,6 @@ private:
     QWidget* buildCommitInfoTab();
     QWidget* buildDiffTab();
     QWidget* buildFileTreeTab();
-    QWidget* buildGpgTab();
     QWidget* buildConsoleTab();
     void showCommitDetails(const git::CommitData& commit);
     /// Sizes the Commit tab's top row and avatar to the metadata as

@@ -459,7 +459,7 @@ void SettingsDialog::setUpdates(bool available, const QString& lockedReason)
 // ---------------------------------------------------------------------------
 //
 // Currently one setting: the default height of the bottom inspector
-// pane (Commit / Diff / File tree / GPG / Console) as a percent of
+// pane (Commit / Diff / File tree / Console) as a percent of
 // the revision-graph column's height. The slider and spinbox are
 // two-way bound so touching either updates the other, and the small
 // label underneath shows a live "Revision graph: 60%  Inspector: 40%"
@@ -506,7 +506,7 @@ QWidget* SettingsDialog::createUiDesignPage()
 
     auto* note = new QLabel(
         tr("This is the DEFAULT height of the commit inspector panel "
-           "(Commit / Diff / File tree / GPG / Console) at the bottom "
+           "(Commit / Diff / File tree / Console) at the bottom "
            "of the repository view. You can still drag the splitter "
            "at any time to override this."),
         layoutGroup);
