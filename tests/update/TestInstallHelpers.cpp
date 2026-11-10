@@ -4,7 +4,9 @@
 // scratch folders, under /bin/sh and dash; Windows' PowerShell parts are
 // checked as text everywhere, and Write-Log runs for real on Windows. A
 // real NSIS update runs only when GITBOLT_TEST_NSIS_INSTALLER and
-// GITBOLT_TEST_NSIS_DIR are set, as CI's NSIS smoke test does.
+// GITBOLT_TEST_NSIS_DIR are set, as CI's NSIS smoke test does. Every
+// install result a helper can write has a fixed code
+// (installResultFailure), never "other".
 //
 
 #include <QDeadlineTimer>
@@ -902,6 +904,100 @@ private slots:
         QVERIFY(!QFileInfo::exists(in.staged));
         QCOMPARE(readFile(result()), QStringLiteral("gave-up 0.1.1 GitBolt didn't quit within 1 seconds\n"));
 #endif
+    }
+
+    // ---------------------------------------------------------------
+    // Install results as codes
+    // ---------------------------------------------------------------
+
+    // The lines the helpers write (as the real runs here produce them)
+    // and the code usage statistics get for each.
+    void installResultCodes_data() {
+        QTest::addColumn<QString>("line");
+        QTest::addColumn<QString>("code");
+        QTest::newRow("ok") << "ok 0.1.1 " << "none";
+        QTest::newRow("gave up") << "gave-up 0.1.1 GitBolt didn't quit within 1 seconds" << "quit_timeout";
+        QTest::newRow("Windows: gave up") << "gave-up 0.1.1 GitBolt did not quit within 600 seconds" << "quit_timeout";
+        QTest::newRow("deb: declined") << "declined 0.1.1 the administrator password prompt was dismissed"
+                                       << "permission_declined";
+        QTest::newRow("mac: missing") << "failed 0.1.1 the new copy was missing" << "new_copy_missing";
+        QTest::newRow("mac: aside") << "failed 0.1.1 the old copy couldn't be moved aside" << "move_aside_failed";
+        QTest::newRow("mac: put back")
+            << "failed 0.1.1 the new copy couldn't be moved into place, so the old one was put back"
+            << "move_into_place_failed";
+        QTest::newRow("mac: no rollback")
+            << "failed 0.1.1 the new copy couldn't be moved into place, nor the old one back" << "rollback_failed";
+        QTest::newRow("deb: no polkit")
+            << "failed 0.1.1 pkexec couldn't authenticate (no polkit authentication agent is running, or polkit "
+               "isn't set up to allow it)"
+            << "elevation_failed";
+        QTest::newRow("deb: apt") << "failed 0.1.1 apt-get failed with status 100" << "apt_failed";
+        QTest::newRow("Windows: in use") << "failed 0.1.1 another GitBolt kept running from the install folder"
+                                         << "in_use";
+        QTest::newRow("Windows: not started") << "failed 0.1.1 the installer could not be started"
+                                              << "installer_not_started";
+        QTest::newRow("Windows: wrong version") << "failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1"
+                                                << "wrong_version";
+        QTest::newRow("Windows: elevated error") << "failed 0.1.1 the administrator part of the update failed"
+                                                 << "elevated_error";
+        QTest::newRow("Windows: exit code") << "failed 0.1.1 the installer exited with code 2" << "installer_exit";
+        QTest::newRow("Windows: elevated timeout")
+            << "failed 0.1.1 the administrator part of the update did not finish within 900 seconds"
+            << "elevated_timeout";
+        QTest::newRow("Windows: no result")
+            << "failed 0.1.1 the administrator part of the update ended without a result" << "elevated_no_result";
+        QTest::newRow("something new") << "failed 0.1.1 a reason no helper writes yet" << "other";
+        QTest::newRow("no reason") << "failed 0.1.1" << "other";
+        QTest::newRow("an unknown status") << "maybe 0.1.1 the new copy was missing" << "other";
+    }
+    void installResultCodes() {
+        QFETCH(QString, line);
+        QFETCH(QString, code);
+        const QStringList parts = line.split(u' ');
+        const QString reason = parts.mid(2).join(u' ');
+        QCOMPARE(QString::fromLatin1(failureName(installResultFailure(parts.at(0), reason))), code);
+    }
+
+    // Every reason the helpers' scripts can write maps to a code of its
+    // own: a reworded reason would otherwise turn into "other" unseen.
+    void everyReasonAHelperWritesHasACode() {
+        HelperInputs in = nastyInputs();
+        QList<QPair<QString, QString>> written;   // status, reason
+        static const QRegularExpression shellReport(QStringLiteral("report (\\S+) \"([^\"]*)\""));
+        for (const QString& script : {macHelperScript(in), debHelperScript(in)}) {
+            for (auto it = shellReport.globalMatch(script); it.hasNext();) {
+                const QRegularExpressionMatch m = it.next();
+                if (m.captured(1) != QLatin1String("$1"))   // report() itself
+                    written.append({m.captured(1), m.captured(2)});
+            }
+        }
+        QCOMPARE(written.size(), 11);   // the mac helper's 6, the deb's 5
+        // PowerShell: $reason = '…' (its status from a $status line just
+        // before, else failed), and Write-Result '<status>' ['(]'…'.
+        static const QRegularExpression psStatus(QStringLiteral("^\\s*\\$status = '([^']+)'$"));
+        static const QRegularExpression psReason(QStringLiteral("^\\s*\\$reason = '([^']+)'"));
+        static const QRegularExpression psResult(QStringLiteral("Write-Result '([^']+)' \\(?'([^']*)'"));
+        const qsizetype shell = written.size();
+        for (const QString& script : {windowsElevatedScript(in), windowsHelperScript(in)}) {
+            QString status = QStringLiteral("failed");
+            for (const QString& scriptLine : script.split(u'\n')) {
+                if (const QRegularExpressionMatch m = psStatus.match(scriptLine); m.hasMatch()) {
+                    status = m.captured(1);
+                    continue;
+                }
+                if (const QRegularExpressionMatch m = psReason.match(scriptLine); m.hasMatch())
+                    written.append({status, m.captured(1)});
+                else if (const QRegularExpressionMatch r = psResult.match(scriptLine); r.hasMatch())
+                    written.append({r.captured(1), r.captured(2)});
+                status = QStringLiteral("failed");
+            }
+        }
+        QCOMPARE(written.size() - shell, 9);
+        for (const auto& [status, reason] : std::as_const(written)) {
+            const Failure failure = installResultFailure(status, reason);
+            QVERIFY2(failure != Failure::Other, qPrintable(status + QLatin1Char(' ') + reason));
+            QCOMPARE(failure == Failure::None, status == QLatin1String("ok"));
+        }
     }
 
     void debScriptNamesTheRealCommands() {

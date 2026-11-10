@@ -10,7 +10,9 @@
 //   - GitHub's rate limit (403 with x-ratelimit-remaining: 0 or
 //     retry-after, 429), other statuses, a server that never answers,
 //     one that refuses connections, bad JSON, a refused release, an
-//     oversized answer: each one failed() sentence
+//     oversized answer: each one failed() sentence, and its code
+//     (failure(): rate_limited, http_error, network_error, bad_response,
+//     refused)
 //   - a redirect is an answer, not followed
 //   - one request at a time: a manual check during an automatic one
 //     upgrades it; outcomes come from the event loop with busy() false
@@ -190,40 +192,47 @@ private slots:
         QTest::addColumn<QByteArray>("header");   // "name: value", or empty
         QTest::addColumn<QByteArray>("body");
         QTest::addColumn<QString>("message");
+        QTest::addColumn<QString>("code");   // Checker::failure()
         const QString limited = QStringLiteral("GitHub is limiting requests from your network; try again later.");
         const QByteArray limitBody = "{\"message\":\"API rate limit exceeded for 127.0.0.1.\","
                                      "\"documentation_url\":\"https://docs.github.com\"}";
         QTest::newRow("403, no requests left") << 403 << QByteArray("x-ratelimit-remaining: 0") << limitBody
-                                               << limited;
-        QTest::newRow("403, retry-after") << 403 << QByteArray("Retry-After: 60") << limitBody << limited;
-        QTest::newRow("429") << 429 << QByteArray() << limitBody << limited;
+                                               << limited << "rate_limited";
+        QTest::newRow("403, retry-after") << 403 << QByteArray("Retry-After: 60") << limitBody << limited
+                                          << "rate_limited";
+        QTest::newRow("429") << 429 << QByteArray() << limitBody << limited << "rate_limited";
         QTest::newRow("403, requests left: not the limit")
             << 403 << QByteArray("x-ratelimit-remaining: 12") << QByteArray("{}")
-            << QStringLiteral("GitHub answered the update check with HTTP 403.");
+            << QStringLiteral("GitHub answered the update check with HTTP 403.") << "http_error";
         QTest::newRow("404") << 404 << QByteArray() << QByteArray("{\"message\":\"Not Found\"}")
-                             << QStringLiteral("GitHub answered the update check with HTTP 404.");
+                             << QStringLiteral("GitHub answered the update check with HTTP 404.") << "http_error";
         QTest::newRow("500") << 500 << QByteArray() << QByteArray("oops")
-                             << QStringLiteral("GitHub answered the update check with HTTP 500.");
+                             << QStringLiteral("GitHub answered the update check with HTTP 500.") << "http_error";
         QTest::newRow("bad JSON") << 200 << QByteArray() << QByteArray("{\"tag_name\": ")
-                                  << QStringLiteral("GitHub's answer wasn't a GitBolt release: it isn't JSON.");
+                                  << QStringLiteral("GitHub's answer wasn't a GitBolt release: it isn't JSON.")
+                                  << "bad_response";
         QTest::newRow("HTML") << 200 << QByteArray() << QByteArray("<html>Unicorn!</html>")
-                              << QStringLiteral("GitHub's answer wasn't a GitBolt release: it isn't JSON.");
+                              << QStringLiteral("GitHub's answer wasn't a GitBolt release: it isn't JSON.")
+                              << "bad_response";
         QJsonObject draft = QJsonDocument::fromJson(releaseJson(QStringLiteral("v0.1.1"))).object();
         draft.insert(QStringLiteral("draft"), true);
         QTest::newRow("a draft") << 200 << QByteArray() << QJsonDocument(draft).toJson()
-                                 << QStringLiteral("GitHub's answer wasn't a GitBolt release: it is a draft.");
+                                 << QStringLiteral("GitHub's answer wasn't a GitBolt release: it is a draft.")
+                                 << "bad_response";
         QJsonObject fork = QJsonDocument::fromJson(releaseJson(QStringLiteral("v0.1.1"))).object();
         fork.insert(QStringLiteral("html_url"), QStringLiteral("https://github.com/Fork/GitBolt/releases/tag/v0.1.1"));
         QTest::newRow("another repository's release")
             << 200 << QByteArray() << QJsonDocument(fork).toJson()
             << QStringLiteral("GitHub's answer wasn't a GitBolt release: its page isn't under "
-                              "https://github.com/Inverian/GitBolt/releases/.");
+                              "https://github.com/Inverian/GitBolt/releases/.")
+            << "bad_response";
     }
     void failures() {
         QFETCH(int, status);
         QFETCH(QByteArray, header);
         QFETCH(QByteArray, body);
         QFETCH(QString, message);
+        QFETCH(QString, code);
         Served served = Served::withStatus(status, body);
         if (!header.isEmpty()) {
             const qsizetype colon = header.indexOf(':');
@@ -238,6 +247,7 @@ private slots:
         QTRY_COMPARE(failed.count(), 1);
         QCOMPARE(failed.at(0).at(0).toString(), message);
         QCOMPARE(failed.at(0).at(1).toBool(), true);
+        QCOMPARE(QString::fromLatin1(failureName(checker.failure())), code);
         QCOMPARE(available.count() + upToDate.count(), 0);
         QVERIFY(!checker.busy());
     }
@@ -254,6 +264,7 @@ private slots:
         QVERIFY2(message.startsWith(QLatin1String("Couldn't reach GitHub: ")), qPrintable(message));
         QVERIFY2(message.endsWith(u'.'), qPrintable(message));
         QCOMPARE(failed.at(0).at(1).toBool(), false);
+        QCOMPARE(checker.failure(), Failure::NetworkError);
         QCOMPARE(server_->hits(kFeedPath), 1);
     }
 
@@ -286,6 +297,8 @@ private slots:
         const QString message = failed.at(0).at(0).toString();
         QVERIFY2(message.startsWith(QStringLiteral("Couldn't reach GitHub: ")), qPrintable(message));
         QVERIFY2(!message.contains(QStringLiteral("timed out"), Qt::CaseInsensitive), qPrintable(message));
+        // Offline, as far as the UI's telemetry goes: never sent.
+        QCOMPARE(checker.failure(), Failure::NetworkError);
 #ifndef Q_OS_WIN
         QCOMPARE(message, QStringLiteral("Couldn't reach GitHub: Connection refused."));
 #endif
@@ -317,6 +330,7 @@ private slots:
         QTRY_COMPARE(failed.count(), 1);
         QCOMPARE(failed.at(0).at(0).toString(),
                  QStringLiteral("GitHub's answer wasn't a GitBolt release: it is too large."));
+        QCOMPARE(checker.failure(), Failure::BadResponse);
     }
 
     void aManualCheckUpgradesTheRunningOne() {
@@ -369,6 +383,7 @@ private slots:
         QTRY_COMPARE(failed.count(), 1);
         QCOMPARE(failed.at(0).at(0).toString(), QStringLiteral("Updates aren't set up in this copy of GitBolt."));
         QCOMPARE(failed.at(0).at(1).toBool(), true);
+        QCOMPARE(checker.failure(), Failure::Refused);
         QVERIFY(!checker.busy());
         QTest::qWait(50);
         QCOMPARE(server_->requests().size(), 0);

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "update/Failure.h"
 #include "update/Release.h"
 #include "update/UpdateConfig.h"
 #include "update/Version.h"
@@ -61,6 +62,8 @@ public:
     /// Stops the download and deletes its .part. Emits nothing.
     void cancel();
     bool busy() const;
+    /// Why the last failed() was.
+    Failure failure() const;
 
 signals:
     /// Bytes of the installer so far, of `total` (the API's size).
@@ -71,17 +74,25 @@ signals:
     void failed(const QString& message);
 
 private:
-    QString prepare(const Release& release, const QString& assetName);
+    /// What went wrong: a code and a sentence; none when the sentence
+    /// is empty.
+    struct Problem {
+        Failure failure = Failure::None;
+        QString message;
+        bool isEmpty() const { return message.isEmpty(); }
+    };
+
+    Problem prepare(const Release& release, const QString& assetName);
     QNetworkReply* get(const QUrl& url);
     void fetchChecksums();
     void onChecksumsFinished(QNetworkReply* reply);
     void fetchAsset();
     void onAssetFinished(QNetworkReply* reply);
-    /// Writes and hashes what `reply` has; an error sentence, or empty.
-    QString consume(QNetworkReply* reply);
-    QString replyProblem(QNetworkReply* reply, const QString& name) const;
-    void failLater(const QString& message);
-    void fail(const QString& message);
+    /// Writes and hashes what `reply` has.
+    Problem consume(QNetworkReply* reply);
+    Problem replyProblem(QNetworkReply* reply, const QString& name) const;
+    void failLater(const Problem& problem);
+    void fail(const Problem& problem);
     void dropReply();
     void discardPart();
     void reset();
@@ -90,6 +101,7 @@ private:
     QNetworkAccessManager* network_ = nullptr;
     QNetworkReply* reply_ = nullptr;
     bool busy_ = false;
+    Failure failure_ = Failure::None;
     /// Bumped by every start and every end: a queued failure from an
     /// earlier run is dropped.
     quint64 run_ = 0;

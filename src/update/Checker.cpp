@@ -38,6 +38,15 @@ bool Checker::busy() const {
     return busy_;
 }
 
+Failure Checker::failure() const {
+    return failure_;
+}
+
+void Checker::fail(Failure failure, const QString& message, bool manual) {
+    failure_ = failure;
+    emit failed(message, manual);
+}
+
 void Checker::check(bool manual) {
     if (busy_) {
         manual_ = manual_ || manual;
@@ -51,7 +60,7 @@ void Checker::check(bool manual) {
         QTimer::singleShot(0, this, [this] {
             const bool wasManual = std::exchange(manual_, false);
             busy_ = false;
-            emit failed(tr("Updates aren't set up in this copy of GitBolt."), wasManual);
+            fail(Failure::Refused, tr("Updates aren't set up in this copy of GitBolt."), wasManual);
         });
         return;
     }
@@ -93,7 +102,7 @@ void Checker::report(QNetworkReply* reply, bool manual) {
         return tr("GitHub's answer wasn't a GitBolt release: %1.").arg(why);
     };
     if (tooLarge_) {
-        emit failed(notARelease(tr("it is too large")), manual);
+        fail(Failure::BadResponse, notARelease(tr("it is too large")), manual);
         return;
     }
 
@@ -105,23 +114,23 @@ void Checker::report(QNetworkReply* reply, bool manual) {
         || (status == 403
             && (reply->rawHeader("x-ratelimit-remaining").trimmed() == "0" || reply->hasRawHeader("retry-after")));
     if (limited) {
-        emit failed(tr("GitHub is limiting requests from your network; try again later."), manual);
+        fail(Failure::RateLimited, tr("GitHub is limiting requests from your network; try again later."), manual);
         return;
     }
     if (status > 0 && status != 200) {
-        emit failed(tr("GitHub answered the update check with HTTP %1.").arg(status), manual);
+        fail(Failure::HttpError, tr("GitHub answered the update check with HTTP %1.").arg(status), manual);
         return;
     }
     // No status: no answer at all. A 200 with an error: the answer was
     // cut off (the connection dropped, or the transfer timed out).
     if (status != 200 || reply->error() != QNetworkReply::NoError) {
-        emit failed(tr("Couldn't reach GitHub: %1.").arg(reply->errorString()), manual);
+        fail(Failure::NetworkError, tr("Couldn't reach GitHub: %1.").arg(reply->errorString()), manual);
         return;
     }
 
     const ParsedRelease parsed = parseRelease(reply->readAll(), config_.repo);
     if (!parsed.release) {
-        emit failed(notARelease(parsed.error), manual);
+        fail(Failure::BadResponse, notARelease(parsed.error), manual);
         return;
     }
     if (parsed.release->version > config_.current)

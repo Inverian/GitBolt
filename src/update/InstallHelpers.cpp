@@ -116,6 +116,41 @@ QString powerShellParameters(const QString& script) {
     return powerShellArguments(script).join(u' ');
 }
 
+Failure installResultFailure(const QString& status, const QString& reason) {
+    if (status == QLatin1String("ok"))
+        return Failure::None;
+    if (status == QLatin1String("gave-up"))
+        return Failure::QuitTimeout;
+    if (status == QLatin1String("declined"))
+        return Failure::PermissionDeclined;
+    if (status != QLatin1String("failed"))
+        return Failure::Other;
+    // The reasons the helpers below write (report, Write-Result).
+    static const struct {
+        const char* start;
+        Failure failure;
+    } kReasons[] = {
+        {"the new copy was missing", Failure::NewCopyMissing},
+        {"the old copy couldn't be moved aside", Failure::MoveAsideFailed},
+        {"the new copy couldn't be moved into place, so the old one was put back", Failure::MoveIntoPlaceFailed},
+        {"the new copy couldn't be moved into place, nor the old one back", Failure::RollbackFailed},
+        {"pkexec couldn't authenticate", Failure::ElevationFailed},
+        {"apt-get failed with status", Failure::AptFailed},
+        {"another GitBolt kept running", Failure::InUse},
+        {"the installer could not be started", Failure::InstallerNotStarted},
+        {"the installer ran, but GitBolt.exe is not version", Failure::WrongVersion},
+        {"the administrator part of the update failed", Failure::ElevatedError},
+        {"the installer exited with code", Failure::InstallerExit},
+        {"the administrator part of the update did not finish within", Failure::ElevatedTimeout},
+        {"the administrator part of the update ended without a result", Failure::ElevatedNoResult},
+    };
+    for (const auto& known : kReasons) {
+        if (reason.startsWith(QLatin1String(known.start)))
+            return known.failure;
+    }
+    return Failure::Other;
+}
+
 QString macHelperScript(const HelperInputs& in) {
     const QString folder = QFileInfo(QDir::cleanPath(in.target)).path();
     const QString oldName = in.oldVersion.isEmpty() ? QStringLiteral("GitBolt")

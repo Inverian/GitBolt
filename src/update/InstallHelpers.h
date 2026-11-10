@@ -1,5 +1,7 @@
 #pragma once
 
+#include "update/Failure.h"
+
 #include <QByteArray>
 #include <QString>
 #include <QStringList>
@@ -67,6 +69,13 @@ struct HelperInputs {
 /// declined (pkexec's dialog dismissed), failed (the new version isn't in
 /// place) or gave-up (GitBolt didn't quit in time). The next GitBolt reads
 /// and deletes it, and reports anything but ok for a newer version.
+
+/// The fixed code for an install result: by status (ok: None, gave-up:
+/// QuitTimeout, declined: PermissionDeclined), and for failed by the
+/// start of the helpers' own reason (Other when none matches). A failed
+/// result is read by the version that wrote it (the old copy starts
+/// again), so the helpers' words need no other format.
+Failure installResultFailure(const QString& status, const QString& reason);
 
 /// macOS: after GitBolt quits, rename the old bundle aside in its folder
 /// and the staged one into its place, move the old one to the Trash (or

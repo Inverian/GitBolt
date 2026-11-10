@@ -270,6 +270,7 @@ private slots:
                  QStringLiteral("The download was sent on to http://localhost:%1, which GitBolt doesn't download "
                                 "from.")
                      .arg(elsewhere.port()));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QTest::qWait(200);
         QCOMPARE(elsewhere.requests().size(), 0);
         QVERIFY(leftNothing());
@@ -284,6 +285,7 @@ private slots:
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
                  QStringLiteral("GitBolt doesn't download from http://localhost:%1.").arg(server_->port()));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);   // not even the checksums
         QVERIFY(leftNothing());
     }
@@ -294,6 +296,7 @@ private slots:
             QUrl(QStringLiteral("http://github.com/Inverian/GitBolt/releases/download/v0.1.1/SHA256SUMS.txt"));
         Downloader downloader(config());
         QCOMPARE(run(downloader, release), QStringLiteral("GitBolt doesn't download from http://github.com."));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
     }
 
@@ -308,6 +311,7 @@ private slots:
         QCOMPARE(run(downloader, release),
                  QStringLiteral("gitbolt_0.1.1_amd64.deb doesn't match its checksum in SHA256SUMS.txt, so it "
                                 "was deleted."));
+        QCOMPARE(downloader.failure(), Failure::ChecksumMismatch);
         QCOMPARE(server_->hits(kAssetPath), 1);
         QVERIFY(leftNothing());
     }
@@ -323,6 +327,7 @@ private slots:
         QCOMPARE(run(downloader, release),
                  QStringLiteral("gitbolt_0.1.1_amd64.deb doesn't match its checksum in SHA256SUMS.txt, so it "
                                 "was deleted."));
+        QCOMPARE(downloader.failure(), Failure::ChecksumMismatch);
         QVERIFY(leftNothing());
     }
 
@@ -333,6 +338,7 @@ private slots:
         QCOMPARE(run(downloader, release),
                  QStringLiteral("GitHub's checksum for gitbolt_0.1.1_amd64.deb differs from the one in "
                                 "SHA256SUMS.txt."));
+        QCOMPARE(downloader.failure(), Failure::ChecksumConflict);
         QCOMPARE(server_->hits(kSumsPath), 1);
         QCOMPARE(server_->hits(kAssetPath), 0);
         QVERIFY(leftNothing());
@@ -346,6 +352,7 @@ private slots:
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
                  QStringLiteral("SHA256SUMS.txt has no checksum for gitbolt_0.1.1_amd64.deb."));
+        QCOMPARE(downloader.failure(), Failure::ChecksumMissing);
         QCOMPARE(server_->hits(kAssetPath), 0);
         QVERIFY(leftNothing());
     }
@@ -356,6 +363,7 @@ private slots:
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
                  QStringLiteral("GitBolt 0.1.1 has no SHA256SUMS.txt, so its download can't be checked."));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
         QVERIFY(leftNothing());
     }
@@ -365,6 +373,7 @@ private slots:
         Downloader downloader(config());
         QCOMPARE(run(downloader, release, QStringLiteral("GitBolt-0.1.1-Darwin-arm64.dmg")),
                  QStringLiteral("GitBolt 0.1.1 has no GitBolt-0.1.1-Darwin-arm64.dmg."));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
     }
 
@@ -386,6 +395,7 @@ private slots:
         assetIn(release, kAsset)->size = listed;
         Downloader downloader(config());
         QCOMPARE(run(downloader, release), message);
+        QCOMPARE(downloader.failure(), Failure::SizeMismatch);
         QVERIFY(leftNothing());
     }
 
@@ -398,6 +408,7 @@ private slots:
                  QStringLiteral("SHA256SUMS.txt arrived with %1 bytes; GitHub lists %2.")
                      .arg(sumsFor(file).size())
                      .arg(sumsFor(file).size() + 1));
+        QCOMPARE(downloader.failure(), Failure::SizeMismatch);
         QCOMPARE(server_->hits(kAssetPath), 0);
     }
 
@@ -409,6 +420,7 @@ private slots:
         Downloader downloader(config);
         QCOMPARE(run(downloader, release),
                  QStringLiteral("gitbolt_0.1.1_amd64.deb is larger than GitBolt downloads (1 MiB)."));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
     }
 
@@ -434,6 +446,7 @@ private slots:
         server_->routes.insert(path, Served::withStatus(status, file));
         Downloader downloader(config());
         QCOMPARE(run(downloader, release), message);
+        QCOMPARE(downloader.failure(), Failure::HttpError);
         QVERIFY(leftNothing());
     }
 
@@ -447,6 +460,7 @@ private slots:
         config.requestTimeoutMs = 300;
         Downloader downloader(config);
         const QString message = run(downloader, release);
+        QCOMPARE(downloader.failure(), Failure::NetworkError);
         QVERIFY2(message.startsWith(QLatin1String("Couldn't download gitbolt_0.1.1_amd64.deb: ")),
                  qPrintable(message));
         QVERIFY(leftNothing());
@@ -468,6 +482,7 @@ private slots:
         QVERIFY2(failed.at(0).at(0).toString().startsWith(
                      QLatin1String("Couldn't download gitbolt_0.1.1_amd64.deb: ")),
                  qPrintable(failed.at(0).at(0).toString()));
+        QCOMPARE(downloader.failure(), Failure::NetworkError);
         QVERIFY(leftNothing());
         server_ = std::make_unique<HttpServer>();   // for cleanup()
     }
@@ -635,6 +650,7 @@ private slots:
         const Release release = publish(payload(1000));
         Downloader downloader(config());
         const QString why = run(downloader, release);
+        QCOMPARE(downloader.failure(), Failure::DiskError);
         QVERIFY2(why.startsWith(QStringLiteral("Couldn't move %1 into place").arg(kAsset)), qPrintable(why));
         QCOMPARE(entriesOf(finalPath()), QStringList{QStringLiteral("inside.txt")});
         QVERIFY(!QFileInfo::exists(partPath()));
@@ -649,6 +665,7 @@ private slots:
         const Release release = publish(payload(1000));
         Downloader downloader(config());
         const QString why = run(downloader, release);
+        QCOMPARE(downloader.failure(), Failure::DiskError);
         QVERIFY2(why.startsWith(QStringLiteral("Couldn't save %1").arg(kAsset)), qPrintable(why));
         QCOMPARE(contentsOf(partPath() + QStringLiteral("/inside.txt")), QByteArray("not ours"));
         QVERIFY(!QFileInfo::exists(finalPath()));
@@ -703,6 +720,7 @@ private slots:
         Downloader downloader(config());
         QCOMPARE(run(downloader, release, name),
                  QStringLiteral("“%1” isn't a file GitBolt downloads.").arg(name));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
         QCOMPARE(entriesOf(dir_->path()), QStringList());
     }
@@ -713,6 +731,7 @@ private slots:
         config.downloadDir = QStringLiteral("relative/updates");
         Downloader downloader(config);
         QCOMPARE(run(downloader, release), QStringLiteral("Updates aren't set up in this copy of GitBolt."));
+        QCOMPARE(downloader.failure(), Failure::Refused);
         QCOMPARE(server_->requests().size(), 0);
     }
 
