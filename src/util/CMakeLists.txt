@@ -7,6 +7,7 @@ set(SOURCES
     CrashHandler.cpp
     DesktopOpen.cpp
     LockFiles.cpp
+    LogFile.cpp
     LoginPath.cpp
     MessageText.cpp
     TestSession.cpp
@@ -17,6 +18,7 @@ set(SOURCES
     CrashHandler.h
     DesktopOpen.h
     LockFiles.h
+    LogFile.h
     LoginPath.h
     LruCache.h
     MessageText.h

@@ -112,6 +112,9 @@ endif()
 # util/ tests — AsyncRunner's threading guarantees (no repository needed),
 # and a worker's exception reaching the sink (util/WorkerExceptions.h)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+# The log file (util/LogFile.h): rotation, lines intact across threads,
+# the message handler that forwards, a rename another process blocks.
+gitbolt_add_test(test_log_file util/TestLogFile.cpp)
 # The login shell's PATH for git's children (util/LoginPath.h): a
 # Dock-launched GitBolt had launchd's, and a hook that needs node failed.
 gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
