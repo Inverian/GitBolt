@@ -382,6 +382,23 @@ private slots:
         QVERIFY(!gitbolt::util::isHeadlessPlatform(u""));
     }
 
+    // Windows' GitBolt.ini of an e2e app: its XDG_CONFIG_HOME, only with
+    // an instance name of its own.
+    void testSettingsDir() {
+        const QString dir = QStringLiteral("/tmp/gb-e2e/config");
+        QCOMPARE(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", "gb-e2e-inst"},
+                                                         {"XDG_CONFIG_HOME", dir}})),
+                 dir);
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_TEST_BRIDGE", "gb-e2e"},
+                                                        {"XDG_CONFIG_HOME", dir}}))
+                    .isEmpty());
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", ""},
+                                                        {"XDG_CONFIG_HOME", dir}}))
+                    .isEmpty());
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", "gb-e2e-inst"}}))
+                    .isEmpty());
+    }
+
     // ---- identifiers and sanitizers -----------------------------------
 
     void deviceIdIsDerivedAndDistinct() {

@@ -57,6 +57,11 @@ inline bool isTestSession(TestSessionKind kind) {
     return kind != TestSessionKind::None;
 }
 
+/// Where an instance-named test session keeps GitBolt.ini on Windows:
+/// XDG_CONFIG_HOME when both it and GITBOLT_INSTANCE_NAME are
+/// non-empty, else empty (the usual %APPDATA%).
+QString testSettingsDir(const EnvLookup& env = processEnvironment);
+
 /// True for an offscreen or minimal platform spec, as QT_QPA_PLATFORM
 /// or -platform take it: case-insensitive, ":options" ignored, and any
 /// entry of a ";" fallback list counts (erring towards "test").

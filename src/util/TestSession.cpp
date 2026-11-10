@@ -63,6 +63,12 @@ TestSessionKind detectTestSession(const QString& platformName,
     return TestSessionKind::None;
 }
 
+QString testSettingsDir(const EnvLookup& env) {
+    if (env("GITBOLT_INSTANCE_NAME").value_or(QString()).isEmpty())
+        return {};
+    return env("XDG_CONFIG_HOME").value_or(QString());
+}
+
 TestSessionKind detectTestSession(int argc, const char* const* argv,
                                   const EnvLookup& env) {
     QStringList arguments;
