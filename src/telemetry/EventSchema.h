@@ -25,14 +25,17 @@ namespace gitbolt::telemetry {
 ///   - app_launched: arch, qt_version, locale
 ///   - command_used: command, count
 ///   - repo_opened:  open_ms, history_ms, commits_bucket
+///   - update_result: status, from_version, to_version, package, stage,
+///                    reason (UpdateResult)
 /// GlitchTip gets Sentry store events (POST <host>/api/<id>/store/)
 /// with no user, server_name, request, extra or breadcrumbs, and
 /// neither the install ID nor the device ID: errors and crashes can't
 /// be linked to an install.
 
-enum class ErrorKind { OperationFailed, CommitFailed, RepoOpenFailed };
+enum class ErrorKind { OperationFailed, CommitFailed, RepoOpenFailed, UpdateFailed };
 
-/// "operation_failed", "commit_failed", "repo_open_failed".
+/// "operation_failed", "commit_failed", "repo_open_failed",
+/// "update_failed".
 QString errorKindName(ErrorKind kind);
 
 /// What every event says about the machine, captured once per session.
@@ -94,6 +97,28 @@ QString operationName(const QString& opLiteral);
 /// values against the enum.)
 QString openErrorName(int gitErrorCode);
 
+/// An update failure code (update/Failure.h's failureName) when it is on
+/// this allowlist, a copy of those names; anything else is "other". (This
+/// library doesn't link the updater; a test pins the two lists.)
+QString updateReason(const QString& code);
+
+/// How an install attempt ended (UpdateController), each field checked
+/// against a fixed vocabulary when the event is built:
+///   - status: ok, failed, declined, incompatible, gave_up, no_result
+///   - fromVersion, toVersion: x.y.z, else "unknown"
+///   - package: dmg, nsis, deb, else "other"
+///   - stage: check, download, prepare, launch, quit, install
+///   - reason: updateReason()
+/// Anything outside a vocabulary becomes "other".
+struct UpdateResult {
+    QString status;
+    QString fromVersion;
+    QString toVersion;
+    QString package;
+    QString stage;
+    QString reason;
+};
+
 /// "0", "1-99", "100-255" or "256+": the first history page holds at
 /// most 256 commits.
 QString commitsBucket(int firstPageCommits);
@@ -112,6 +137,8 @@ std::optional<QJsonObject> commandUsedEvent(const ClientInfo& client, const QStr
 std::optional<QJsonObject> repoOpenedEvent(const ClientInfo& client, const QString& installId,
                                            qint64 openMs, qint64 historyMs,
                                            int firstPageCommits);
+std::optional<QJsonObject> updateResultEvent(const ClientInfo& client, const QString& installId,
+                                             const UpdateResult& result);
 
 /// The track event with properties.__timestamp set to `queued`. Only
 /// for a record older than Config::timestampAfterMs at send time.
@@ -121,7 +148,9 @@ QJsonObject withTimestamp(QJsonObject event, const QDateTime& queued);
 
 /// level "error"; `detail` goes through operationName() for
 /// OperationFailed and must be an openErrorName() value for
-/// RepoOpenFailed (else "other"); CommitFailed ignores it.
+/// RepoOpenFailed (else "other"); CommitFailed ignores it. UpdateFailed
+/// takes "<stage>/<code>" (UpdateResult's vocabularies), tagged stage
+/// and code.
 QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QString& detail,
                            const QDateTime& at);
 
@@ -130,7 +159,8 @@ QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QStri
 QJsonObject glitchTipCrash(const CrashEvent& crash);
 
 /// The sanitized detail recordError() dedupes on: operationName(),
-/// the checked openErrorName() value, or empty.
+/// the checked openErrorName() value, the checked "<stage>/<code>", or
+/// empty.
 QString errorDetail(ErrorKind kind, const QString& detail);
 
 } // namespace gitbolt::telemetry

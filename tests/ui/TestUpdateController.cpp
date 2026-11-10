@@ -42,6 +42,14 @@
 //     GitBolt runs (the launch hook stands in for the prompt): GitBolt
 //     doesn't quit, the dialog says how to install it by hand, and
 //     after a No, Try Again asks again for the same checked download;
+//   - every attempt's outcome, for usage statistics (updateResult): at
+//     start() from install-result and the pending-install marker the
+//     launch leaves (a marker alone, past its patience, is no_result),
+//     or at once for a download, preparation or launch that fails, a
+//     No, and a helper that gave up; with fixed codes, each of which
+//     telemetry::updateReason lets through; a check's failure code
+//     (never being offline), and every click on the dialog's and the
+//     bar's buttons, by name;
 //   - MainWindow: without the in-app check (a source build, or a test
 //     session with no test feed) both Check for Updates items are
 //     greyed out; with it, they ask the feed; on macOS the application
@@ -77,6 +85,7 @@
 #include <QSignalSpy>
 #include <QStatusBar>
 #include <QSysInfo>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -84,9 +93,11 @@
 
 #include "../TestProcessHelper.h"
 #include "../update/FakeApps.h"
+#include "AppMenuWatcher.h"
 #include "../update/HttpServer.h"
 #include "conf/SettingsService.h"
 #include "dialogs/UpdateDialog.h"
+#include "telemetry/EventSchema.h"
 #include "ui/MainWindow.h"
 #include "ui/UpdateController.h"
 #include "ui/UpdateSetup.h"
@@ -98,6 +109,7 @@
 
 using gitbolt::conf::SettingsService;
 using gitbolt::dialogs::UpdateDialog;
+using gitbolt::test::AppMenuWatcher;
 using gitbolt::test::HttpServer;
 using gitbolt::test::Served;
 using gitbolt::ui::UpdateController;
@@ -127,40 +139,6 @@ public:
     QList<QUrl> urls;
 public slots:
     void open(const QUrl& url) { urls << url; }
-};
-
-// The items a MainWindow puts in the macOS application menu, caught as
-// they join it, with their role then. That menu bar outlives each
-// window, so searching it would also find earlier windows' items.
-class AppMenuWatcher : public QObject {
-public:
-    struct Joined {
-        QPointer<QAction> action;
-        QString text;
-        QAction::MenuRole role;
-    };
-    AppMenuWatcher() { qApp->installEventFilter(this); }
-    ~AppMenuWatcher() override { qApp->removeEventFilter(this); }
-    QAction* named(const QString& name) const {
-        for (const Joined& item : joined) {
-            if (item.action && item.action->objectName() == name)
-                return item.action;
-        }
-        return nullptr;
-    }
-    QList<Joined> joined;
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override {
-        if (event->type() == QEvent::ActionAdded) {
-            auto* menu = qobject_cast<QMenu*>(watched);
-            auto* bar = menu ? qobject_cast<QMenuBar*>(menu->parentWidget()) : nullptr;
-            if (bar && !bar->parentWidget()) {
-                QAction* action = static_cast<QActionEvent*>(event)->action();
-                joined.append({action, action->text(), action->menuRole()});
-            }
-        }
-        return false;
-    }
 };
 
 // A release as GitHub's releases/latest has it, its assets on `server`,
@@ -266,14 +244,26 @@ const QList<QPair<QString, QByteArray>> kEveryInstaller{
     {QStringLiteral("gitbolt_0.1.1_amd64.deb"), "deb"},
 };
 
+// "<status> <stage> <reason> <from> <to> <package>", to compare.
+QString described(const gitbolt::telemetry::UpdateResult& r) {
+    return QStringList{r.status, r.stage, r.reason, r.fromVersion, r.toVersion, r.package}.join(u' ');
+}
+
 // The window's side of it, without a MainWindow: the controller with a
-// window, the window's settings and its notice bar.
+// window, the window's settings and its notice bar; and what it says
+// for usage statistics.
 struct Harness {
     explicit Harness(UpdateSetup setup) {
         auto* column = new QVBoxLayout(&window);
         bar = new UpdateNoticeBar(&window);
         column->addWidget(bar);
         controller = new UpdateController(std::move(setup), &settings, bar, &window);
+        QObject::connect(controller, &UpdateController::updateResult, controller,
+                         [this](const gitbolt::telemetry::UpdateResult& r) { results << described(r); });
+        QObject::connect(controller, &UpdateController::checkFailed, controller,
+                         [this](const QString& reason) { checkFailures << reason; });
+        QObject::connect(controller, &UpdateController::commandUsed, controller,
+                         [this](const QString& name) { commands << name; });
     }
 
     UpdateDialog* dialog() const { return controller->dialog(); }
@@ -294,7 +284,18 @@ struct Harness {
     SettingsService settings;
     UpdateNoticeBar* bar = nullptr;
     UpdateController* controller = nullptr;
+    QStringList results;
+    QStringList checkFailures;
+    QStringList commands;
 };
+
+int closedPort() {
+    QTcpServer probe;
+    probe.listen(QHostAddress::LocalHost, 0);
+    const int port = probe.serverPort();
+    probe.close();
+    return port;
+}
 
 } // namespace
 
@@ -703,6 +704,7 @@ private slots:
                  qPrintable(shown));
         QVERIFY(h.settings.incompatibleUpdateVersion().isEmpty());
         QCOMPARE(h.downloads(), QStringList{});
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed prepare apt_refused 0.1.0 0.1.1 deb")});
         const QByteArray debPath = QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8();
         QCOMPARE(server.hits(debPath), 1);
 
@@ -791,6 +793,7 @@ private slots:
                  qPrintable(shown));
         QCOMPARE(h.settings.incompatibleUpdateVersion(), QStringLiteral("0.1.1"));
         QCOMPARE(h.settings.incompatibleUpdateSystem(), QSysInfo::productVersion());
+        QCOMPARE(h.results, QStringList{QStringLiteral("incompatible prepare needs_newer_system 0.1.0 0.1.1 dmg")});
         const QString version = QDir(h.controller->setup().config.downloadDir).filePath(QStringLiteral("0.1.1"));
         QCOMPARE(entries(version), QStringList{});
         QCOMPARE(entries(apps.path()), QStringList{QStringLiteral("GitBolt.app")});
@@ -823,6 +826,7 @@ private slots:
         QTRY_COMPARE(h.dialog()->state(), State::Available);
         h.button("updateDialog.install")->click();
         QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::Failed, 30000);
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed prepare attach_failed 0.1.0 0.1.1 dmg")});
         const QString version = QDir(h.controller->setup().config.downloadDir).filePath(QStringLiteral("0.1.1"));
         QCOMPARE(entries(version), QStringList{});
         QCOMPARE(entries(apps.path()), QStringList{QStringLiteral("GitBolt.app")});
@@ -1381,6 +1385,289 @@ private slots:
         QVERIFY(!h.dialog());
         QCOMPARE(status.count(), 0);
         QVERIFY(!QFile::exists(path));
+    }
+
+    // ---- outcomes, for usage statistics ------------------------------------------
+
+    // At start(): install-result and the pending-install marker give one
+    // outcome; the marker's from only if it is the same attempt's (0.9.x
+    // writes none). A marker alone is a helper still at work until its
+    // patience is over, then no_result. Stale or malformed: nothing.
+    void earlierOutcomesAreReported_data() {
+        QTest::addColumn<QByteArray>("result");   // empty: none
+        QTest::addColumn<QByteArray>("marker");   // empty: none; <now>, <old>: its time
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<QString>("reported");    // empty: nothing
+        QTest::addColumn<bool>("markerKept");
+        const int deb = int(PackageKind::Deb);
+        QTest::newRow("ok, with its marker") << QByteArray("ok 0.1.0 \n") << QByteArray("0.0.9 0.1.0 <now>\n") << deb
+                                             << "ok install none 0.0.9 0.1.0 deb" << false;
+        QTest::newRow("ok, no marker (0.9.x)") << QByteArray("ok 0.1.0\n") << QByteArray() << deb
+                                               << "ok install none unknown 0.1.0 deb" << false;
+        QTest::newRow("deb: apt-get failed") << QByteArray("failed 0.1.1 apt-get failed with status 100\n")
+                                             << QByteArray("0.1.0 0.1.1 <now>") << deb
+                                             << "failed install apt_failed 0.1.0 0.1.1 deb" << false;
+        QTest::newRow("deb: declined")
+            << QByteArray("declined 0.1.1 the administrator password prompt was dismissed\n")
+            << QByteArray("0.1.0 0.1.1 <now>") << deb << "declined install permission_declined 0.1.0 0.1.1 deb"
+            << false;
+        QTest::newRow("gave up") << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n")
+                                 << QByteArray("0.1.0 0.1.1 <now>") << deb << "gave_up quit quit_timeout 0.1.0 0.1.1 deb"
+                                 << false;
+        QTest::newRow("Windows: the installer failed")
+            << QByteArray("failed 0.1.1 the installer exited with code 2\n") << QByteArray("0.1.0 0.1.1 <now>")
+            << int(PackageKind::WindowsInstall) << "failed install installer_exit 0.1.0 0.1.1 nsis" << false;
+        QTest::newRow("an aged marker alone") << QByteArray() << QByteArray("0.1.0 0.1.1 <old>")
+                                              << int(PackageKind::MacBundle)
+                                              << "no_result install no_result 0.1.0 0.1.1 dmg" << false;
+        QTest::newRow("a young marker alone") << QByteArray() << QByteArray("0.1.0 0.1.1 <now>") << deb << ""
+                                              << true;
+        QTest::newRow("a marker and an unreadable result") << QByteArray("garbage\n")
+                                                           << QByteArray("0.1.0 0.1.1 <now>") << deb
+                                                           << "no_result install no_result 0.1.0 0.1.1 deb" << false;
+        QTest::newRow("a stale result") << QByteArray("failed 0.1.0 the installer exited with code 2\n")
+                                        << QByteArray("0.0.9 0.1.0 <now>") << deb << "" << false;
+        QTest::newRow("a marker for another version")
+            << QByteArray("failed 0.1.1 apt-get failed with status 100\n") << QByteArray("0.1.0 0.1.2 <now>") << deb
+            << "failed install apt_failed unknown 0.1.1 deb" << false;
+        QTest::newRow("a malformed marker") << QByteArray() << QByteArray("0.1.0 v0.1.1 <old>") << deb << "" << false;
+        QTest::newRow("a marker of two lines") << QByteArray() << QByteArray("0.1.0 0.1.1 1\n0.1.0 0.1.1 1\n") << deb
+                                               << "" << false;
+    }
+    void earlierOutcomesAreReported() {
+        QFETCH(QByteArray, result);
+        QFETCH(QByteArray, marker);
+        QFETCH(int, kind);
+        QFETCH(QString, reported);
+        QFETCH(bool, markerKept);
+        HttpServer server;
+        UpdateSetup setup = testSetup(server, cache_->path(),
+                                      {PackageKind(kind), QDir(cache_->path()).filePath(QStringLiteral("target")),
+                                       true, {}});
+        const QDir downloads(setup.config.downloadDir);
+        const QString markerPath = downloads.filePath(QLatin1String(UpdateController::kInstallMarkerFile));
+        if (!result.isEmpty())
+            QVERIFY(writeFile(downloads.filePath(QStringLiteral("install-result")), result));
+        if (!marker.isEmpty()) {
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            marker.replace("<now>", QByteArray::number(now));
+            marker.replace("<old>", QByteArray::number(now - UpdateController::kResultPatienceSeconds - 60));
+            QVERIFY(writeFile(markerPath, marker));
+        }
+        Harness h(setup);
+        h.controller->start();
+        QCOMPARE(h.results, reported.isEmpty() ? QStringList{} : QStringList{reported});
+        QCOMPARE(QFileInfo::exists(markerPath), markerKept);
+        QVERIFY(!QFileInfo::exists(downloads.filePath(QStringLiteral("install-result"))));
+    }
+
+    // Once the helper runs, the marker says so for the next start: one
+    // that comes while the helper may still work says nothing and keeps
+    // it; one past the patience reports no_result and removes it.
+    void theHelperLaunchLeavesAMarker() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        const UpdateSetup setup = testSetup(
+            server, cache_->path(),
+            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
+        const QString markerPath =
+            QDir(setup.config.downloadDir).filePath(QLatin1String(UpdateController::kInstallMarkerFile));
+        {
+            Harness h(setup);
+            int quits = 0;
+            h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
+            h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64) { return true; });
+            h.controller->checkNow();
+            QTRY_COMPARE(h.dialog()->state(), State::Available);
+            const qint64 before = QDateTime::currentSecsSinceEpoch();
+            h.button("updateDialog.install")->click();
+            QTRY_COMPARE(h.dialog()->state(), State::Restarting);
+            const QStringList line = QString::fromUtf8(contents(markerPath)).trimmed().split(u' ');
+            QCOMPARE(line.size(), 3);
+            QCOMPARE(line.mid(0, 2), (QStringList{QStringLiteral("0.1.0"), QStringLiteral("0.1.1")}));
+            QVERIFY(line.at(2).toLongLong() >= before && line.at(2).toLongLong() <= QDateTime::currentSecsSinceEpoch());
+            QCOMPARE(h.results, QStringList{});   // nothing to say yet
+        }
+        {
+            Harness again(setup);
+            again.controller->start();
+            QCOMPARE(again.results, QStringList{});
+            QVERIFY(QFileInfo::exists(markerPath));
+        }
+        const qint64 old = QDateTime::currentSecsSinceEpoch() - UpdateController::kResultPatienceSeconds - 1;
+        QVERIFY(writeFile(markerPath, "0.1.0 0.1.1 " + QByteArray::number(old) + '\n'));
+        Harness late(setup);
+        late.controller->start();
+        QCOMPARE(late.results, QStringList{QStringLiteral("no_result install no_result 0.1.0 0.1.1 nsis")});
+        QVERIFY(!QFileInfo::exists(markerPath));
+    }
+
+    // While GitBolt runs: a failed download, Windows' No or failure (the
+    // launch hook standing in for UAC), and a helper that gave up are each
+    // reported at once; a Cancel or a closed dialog is no attempt's end.
+    void inSessionOutcomesAreReported_data() {
+        QTest::addColumn<QString>("how");
+        QTest::addColumn<QString>("reported");
+        QTest::newRow("a bad checksum") << "bad checksum" << "failed download checksum_mismatch 0.1.0 0.1.1 nsis";
+        QTest::newRow("UAC: No") << "declined" << "declined launch permission_declined 0.1.0 0.1.1 nsis";
+        QTest::newRow("UAC: refused") << "failed" << "failed launch other 0.1.0 0.1.1 nsis";
+        QTest::newRow("the helper gave up") << "gave up" << "gave_up quit quit_timeout 0.1.0 0.1.1 nsis";
+        QTest::newRow("Cancel") << "cancel" << "";
+        QTest::newRow("closed") << "close" << "";
+    }
+    void inSessionOutcomesAreReported() {
+        QFETCH(QString, how);
+        QFETCH(QString, reported);
+        HttpServer server;
+        const QString exe = QStringLiteral("GitBolt-0.1.1-Windows-AMD64.exe");
+        if (how == QLatin1String("bad checksum")) {
+            serve(server, QStringLiteral("0.1.1"), {{exe, "exe"}}, true, QByteArray(64, 'a') + "  " + exe.toUtf8() + '\n');
+        } else {
+            serve(server, QStringLiteral("0.1.1"), {{exe, QByteArray(256 * 1024, 'x')}});
+            auto& route = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(exe).toUtf8()];
+            if (how == QLatin1String("cancel") || how == QLatin1String("close")) {
+                route.chunkBytes = 4096;
+                route.chunkDelayMs = 40;
+            }
+        }
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        const QString markerPath = QDir(h.controller->setup().config.downloadDir)
+                                       .filePath(QLatin1String(UpdateController::kInstallMarkerFile));
+        int quits = 0;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300, 1000});
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64) {
+            if (how == QLatin1String("declined")) {
+                emit installer.declined(QStringLiteral("Install it yourself."));
+                return false;
+            }
+            if (how == QLatin1String("failed")) {
+                emit installer.failed(QStringLiteral("Access is denied."));
+                return false;
+            }
+            return true;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        if (how == QLatin1String("cancel") || how == QLatin1String("close")) {
+            QTRY_VERIFY(h.downloads().size() == 1);
+            if (how == QLatin1String("cancel"))
+                h.button("updateDialog.cancel")->click();
+            else
+                h.dialog()->reject();
+            QTest::qWait(200);
+        } else if (how == QLatin1String("gave up")) {
+            QTRY_VERIFY(QFileInfo::exists(markerPath));
+            QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::Failed, 5000);
+            QVERIFY(!QFileInfo::exists(markerPath));
+        } else {
+            QTRY_VERIFY(!h.results.isEmpty());
+        }
+        QCOMPARE(h.results, reported.isEmpty() ? QStringList{} : QStringList{reported});
+    }
+
+    // Every click on the dialog's and the notice bar's buttons is
+    // counted by the button's name, which usage statistics accept.
+    void buttonsAreCountedByName() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, QByteArray(256 * 1024, 'n')}});
+        auto& slow = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8()];
+        slow.chunkBytes = 4096;
+        slow.chunkDelayMs = 40;
+        Harness h(testSetup(server, cache_->path(), deb()));
+        h.fire();
+        QTRY_COMPARE(h.bar->isHidden(), false);
+        h.bar->findChild<QAbstractButton*>(QStringLiteral("updateNotice.view"))->click();
+        QCOMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.later")->click();
+        h.bar->showVersion(QStringLiteral("0.1.1"));
+        h.bar->findChild<QAbstractButton*>(QStringLiteral("updateNotice.dismiss"))->click();
+
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        h.button("updateDialog.cancel")->click();
+        h.button("updateDialog.skip")->click();
+
+        server.routes.insert(kFeedPath, Served::withStatus(500, "{}"));
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Failed);
+        h.button("updateDialog.retry")->click();
+        QTRY_COMPARE(h.dialog()->state(), State::Failed);
+        h.button("updateDialog.close")->click();
+
+        const QStringList expected{
+            QStringLiteral("updateNotice.view"),    QStringLiteral("updateDialog.later"),
+            QStringLiteral("updateNotice.dismiss"), QStringLiteral("updateDialog.install"),
+            QStringLiteral("updateDialog.cancel"),  QStringLiteral("updateDialog.skip"),
+            QStringLiteral("updateDialog.retry"),   QStringLiteral("updateDialog.close")};
+        QCOMPARE(h.commands, expected);
+        // Every button either has, the rest included.
+        QStringList names;
+        for (QAbstractButton* b : h.dialog()->findChildren<QAbstractButton*>())
+            names << b->objectName();
+        for (QAbstractButton* b : h.bar->findChildren<QAbstractButton*>())
+            names << b->objectName();
+        QVERIFY(names.size() >= expected.size());
+        for (const QString& name : std::as_const(names))
+            QCOMPARE(gitbolt::telemetry::commandName(name).value_or(QStringLiteral("(refused)")), name);
+    }
+
+    // A check GitHub answered with an error, a rate limit or not a
+    // release is reported with its code, manual or automatic; being
+    // offline isn't.
+    void checkFailuresAreReported_data() {
+        QTest::addColumn<int>("status");   // 0: a closed port
+        QTest::addColumn<QByteArray>("header");
+        QTest::addColumn<QByteArray>("body");
+        QTest::addColumn<QString>("reported");
+        QTest::newRow("500") << 500 << QByteArray() << QByteArray("{}") << "http_error";
+        QTest::newRow("404") << 404 << QByteArray() << QByteArray("{}") << "http_error";
+        QTest::newRow("403, no requests left") << 403 << QByteArray("x-ratelimit-remaining") << QByteArray("{}")
+                                               << "rate_limited";
+        QTest::newRow("429") << 429 << QByteArray() << QByteArray("{}") << "rate_limited";
+        QTest::newRow("bad JSON") << 200 << QByteArray() << QByteArray("{\"tag_name\": ") << "bad_response";
+        QTest::newRow("offline") << 0 << QByteArray() << QByteArray() << "";
+    }
+    void checkFailuresAreReported() {
+        QFETCH(int, status);
+        QFETCH(QByteArray, header);
+        QFETCH(QByteArray, body);
+        QFETCH(QString, reported);
+        HttpServer server;
+        Served served = Served::withStatus(status, body);
+        if (!header.isEmpty())
+            served.headers.append({header, "0"});
+        server.routes.insert(kFeedPath, served);
+        UpdateSetup setup = testSetup(server, cache_->path());
+        if (status == 0)
+            setup.config.feedUrl = QUrl(QStringLiteral("http://127.0.0.1:%1/latest").arg(closedPort()));
+        Harness h(setup);
+        h.controller->checkNow();
+        QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::Failed, 20000);
+        h.dialog()->reject();
+        h.fire();
+        QTRY_VERIFY_WITH_TIMEOUT(!h.checker()->busy(), 20000);
+        QTest::qWait(50);
+        const QStringList expected = reported.isEmpty() ? QStringList{} : QStringList{reported, reported};
+        QCOMPARE(h.checkFailures, expected);
+    }
+
+    // update/Failure.h's names and telemetry's allowlist are one list:
+    // every code can be sent, as itself, and no two share a name.
+    void everyFailureCodeIsSendable() {
+        using gitbolt::update::Failure;
+        QSet<QString> names;
+        for (int i = int(Failure::Other); i <= int(Failure::None); ++i) {
+            const QString name = QString::fromLatin1(gitbolt::update::failureName(Failure(i)));
+            QCOMPARE(gitbolt::telemetry::updateReason(name), name);
+            QVERIFY2(!names.contains(name), qPrintable(name));
+            names.insert(name);
+        }
+        QCOMPARE(names.size(), int(Failure::None) + 1);
+        QCOMPARE(gitbolt::telemetry::updateReason(QStringLiteral("system_too_old")), QStringLiteral("other"));
     }
 
     // ---- MainWindow -----------------------------------------------------------

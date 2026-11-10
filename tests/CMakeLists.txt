@@ -324,9 +324,11 @@ set_property(TEST test_about_dialog APPEND PROPERTY ENVIRONMENT
     "QT_QPA_PLATFORM=offscreen:configfile=short-screen.json")
 
 # ui/ — the Settings switch reaching usage statistics through a real
-# MainWindow's own SettingsService, against the loopback HttpStub.
+# MainWindow's own SettingsService, against the loopback HttpStub; and
+# in-app updates' outcomes, dialog buttons and (macOS) application menu
+# reaching the same service, with a loopback feed (update/HttpServer.h).
 gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
-target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h)
+target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h update/HttpServer.h ui/AppMenuWatcher.h)
 target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)
 set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # In-app updates' gate (ui/UpdateSetup.h) as a table: a test session
@@ -342,7 +344,8 @@ target_link_libraries(test_update_setup PRIVATE gitbolt_ui)
 # MainWindow. Off screen; on macOS a disk image hdiutil refuses, and
 # one made here (update/FakeApps.h) for a newer macOS, take a moment.
 gitbolt_add_test(test_update_controller ui/TestUpdateController.cpp)
-target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h)
+target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h
+    ui/AppMenuWatcher.h)
 target_link_libraries(test_update_controller PRIVATE gitbolt_ui gitbolt_update Qt6::Network)
 set_property(TEST test_update_controller APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File > Recent Repositories following the recent list, and the

@@ -10,6 +10,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <initializer_list>
 
 namespace gitbolt::telemetry {
 
@@ -82,6 +83,23 @@ QString hexAddress(quint64 value) {
     return QStringLiteral("0x%1").arg(value, 0, 16);
 }
 
+QString oneOf(const QString& value, std::initializer_list<const char*> allowed) {
+    for (const char* name : allowed) {
+        if (value == QLatin1String(name))
+            return value;
+    }
+    return QStringLiteral("other");
+}
+
+QString updateStage(const QString& stage) {
+    return oneOf(stage, {"check", "download", "prepare", "launch", "quit", "install"});
+}
+
+QString updateVersion(const QString& version) {
+    static const QRegularExpression pattern(QStringLiteral("^\\d{1,6}\\.\\d{1,6}\\.\\d{1,6}$"));
+    return checked(version, pattern, QStringLiteral("unknown"));
+}
+
 } // namespace
 
 QString errorKindName(ErrorKind kind) {
@@ -89,6 +107,7 @@ QString errorKindName(ErrorKind kind) {
     case ErrorKind::OperationFailed: return QStringLiteral("operation_failed");
     case ErrorKind::CommitFailed:    return QStringLiteral("commit_failed");
     case ErrorKind::RepoOpenFailed:  return QStringLiteral("repo_open_failed");
+    case ErrorKind::UpdateFailed:    return QStringLiteral("update_failed");
     }
     return QStringLiteral("other");
 }
@@ -229,6 +248,22 @@ QString openErrorName(int gitErrorCode) {
     return QString::fromLatin1(names[gitErrorCode]);
 }
 
+QString updateReason(const QString& code) {
+    // update/Failure.h's names, in its order (TestUpdateController pins it).
+    return oneOf(code, {
+        "other",              "refused",           "network_error",       "http_error",
+        "rate_limited",       "bad_response",      "size_mismatch",       "checksum_missing",
+        "checksum_conflict",  "checksum_mismatch", "disk_error",          "not_installable",
+        "wrong_file",         "busy",              "attach_failed",       "bad_bundle",
+        "needs_newer_system", "apt_refused",       "signature_invalid",   "copy_failed",
+        "not_ready",          "no_pkexec",         "helper_start_failed", "elevation_failed",
+        "permission_declined", "quit_timeout",     "new_copy_missing",    "move_aside_failed",
+        "move_into_place_failed", "rollback_failed", "apt_failed",        "in_use",
+        "installer_not_started", "installer_exit", "wrong_version",       "elevated_error",
+        "elevated_timeout",   "elevated_no_result", "no_result",          "none",
+    });
+}
+
 QString commitsBucket(int firstPageCommits) {
     if (firstPageCommits <= 0)
         return QStringLiteral("0");
@@ -272,6 +307,19 @@ std::optional<QJsonObject> repoOpenedEvent(const ClientInfo& client, const QStri
     return trackEvent(client, installId, QStringLiteral("repo_opened"), properties);
 }
 
+std::optional<QJsonObject> updateResultEvent(const ClientInfo& client, const QString& installId,
+                                             const UpdateResult& result) {
+    QJsonObject properties;
+    properties.insert(QStringLiteral("status"),
+                      oneOf(result.status, {"ok", "failed", "declined", "incompatible", "gave_up", "no_result"}));
+    properties.insert(QStringLiteral("from_version"), updateVersion(result.fromVersion));
+    properties.insert(QStringLiteral("to_version"), updateVersion(result.toVersion));
+    properties.insert(QStringLiteral("package"), oneOf(result.package, {"dmg", "nsis", "deb"}));
+    properties.insert(QStringLiteral("stage"), updateStage(result.stage));
+    properties.insert(QStringLiteral("reason"), updateReason(result.reason));
+    return trackEvent(client, installId, QStringLiteral("update_result"), properties);
+}
+
 QJsonObject withTimestamp(QJsonObject event, const QDateTime& queued) {
     QJsonObject payload = event.value(QStringLiteral("payload")).toObject();
     QJsonObject properties = payload.value(QStringLiteral("properties")).toObject();
@@ -296,6 +344,12 @@ QString errorDetail(ErrorKind kind, const QString& detail) {
         return QStringLiteral("other");
     case ErrorKind::CommitFailed:
         return {};
+    case ErrorKind::UpdateFailed: {
+        const qsizetype slash = detail.indexOf(u'/');
+        if (slash < 0)
+            return QStringLiteral("other/other");
+        return updateStage(detail.left(slash)) + u'/' + updateReason(detail.mid(slash + 1));
+    }
     }
     return {};
 }
@@ -312,10 +366,14 @@ QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QStri
     QJsonObject tags;
     tags.insert(QStringLiteral("kind"), kindName);
     QJsonArray fingerprint{kindName};
-    if (kind == ErrorKind::OperationFailed)
+    if (kind == ErrorKind::OperationFailed) {
         tags.insert(QStringLiteral("op"), clean);
-    else if (kind == ErrorKind::RepoOpenFailed)
+    } else if (kind == ErrorKind::RepoOpenFailed) {
         tags.insert(QStringLiteral("code"), clean);
+    } else if (kind == ErrorKind::UpdateFailed) {
+        tags.insert(QStringLiteral("stage"), clean.section(u'/', 0, 0));
+        tags.insert(QStringLiteral("code"), clean.section(u'/', 1));
+    }
     if (!clean.isEmpty())
         fingerprint.append(clean);
     event.insert(QStringLiteral("message"),

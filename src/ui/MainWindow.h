@@ -292,8 +292,9 @@ private:
     /// Counts every menu and toolbar action's trigger by objectName
     /// (TelemetryService::countCommand) — never by text or bridge
     /// slug, which can hold paths and branch names. Each action once
-    /// (the menu and the toolbar share QActions); Recent Repositories
-    /// entries, whose texts are paths, all count as "file.recent".
+    /// (the menu and the toolbar share QActions), the macOS application
+    /// menu's too; Recent Repositories entries, whose texts are paths,
+    /// all count as "file.recent".
     void instrumentActionsForTelemetry();
     void createStatusBar();
     void setupConnections();
@@ -589,6 +590,10 @@ private:
     // Help › Check for Updates and the macOS app menu's copy: greyed out
     // unless updates_ is set.
     QList<QPointer<QAction>> updateActions_;
+    // macOS: the application menu's items (About, Check for Updates…),
+    // on a menu bar of their own, so usage statistics count them too.
+    // Null elsewhere.
+    QPointer<QMenu> appMenu_;
 };
 
 } // namespace gitbolt::ui

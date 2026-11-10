@@ -417,6 +417,7 @@ void MainWindow::createMenuBar()
     {
         auto* globalBar  = new QMenuBar(nullptr);
         auto* appMenu    = globalBar->addMenu(QStringLiteral("App"));  // label unused
+        appMenu_ = appMenu;
         auto* aboutAct   = appMenu->addAction(tr("About GitBolt"));
         aboutAct->setObjectName(QStringLiteral("app.about"));
         aboutAct->setMenuRole(QAction::AboutRole);
@@ -5783,6 +5784,20 @@ void MainWindow::setUpdates(const UpdateSetup& setup)
         // "GitBolt was updated to <v>.", at startup after an update.
         connect(updates_, &UpdateController::statusMessage, this,
                 [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+        // Usage statistics (setTelemetry, which main() calls first):
+        // outcomes, a check's failure code, the dialog's and bar's buttons.
+        connect(updates_, &UpdateController::updateResult, this, [this](const telemetry::UpdateResult& result) {
+            if (telemetry_)
+                telemetry_->recordUpdateResult(result);
+        });
+        connect(updates_, &UpdateController::checkFailed, this, [this](const QString& reason) {
+            if (telemetry_)
+                telemetry_->recordError(telemetry::ErrorKind::UpdateFailed, QStringLiteral("check/") + reason);
+        });
+        connect(updates_, &UpdateController::commandUsed, this, [this](const QString& name) {
+            if (telemetry_)
+                telemetry_->countCommand(name);
+        });
     }
     for (QAction* action : std::as_const(updateActions_)) {
         if (action)
@@ -5835,6 +5850,9 @@ void MainWindow::instrumentActionsForTelemetry()
         }
     };
     walk(menuBar());
+    // macOS's application menu: a menu bar of its own, outside the window.
+    if (appMenu_)
+        walk(appMenu_);
     const auto toolbars = findChildren<QToolBar*>();
     for (QToolBar* toolbar : toolbars)
         walk(toolbar);
