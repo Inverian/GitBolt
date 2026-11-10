@@ -109,7 +109,8 @@ if(NOT WIN32)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestFlattenLibraryLinks.cmake)
 endif()
 
-# util/ tests — AsyncRunner's threading guarantees (no repository needed)
+# util/ tests — AsyncRunner's threading guarantees (no repository needed),
+# and a worker's exception reaching the sink (util/WorkerExceptions.h)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
 # The login shell's PATH for git's children (util/LoginPath.h): a
 # Dock-launched GitBolt had launchd's, and a hook that needs node failed.

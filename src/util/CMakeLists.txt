@@ -12,6 +12,7 @@ set(SOURCES
     TestSession.cpp
     ToolTip.cpp
     Translations.cpp
+    WorkerExceptions.cpp
     AsyncRunner.h
     CrashHandler.h
     DesktopOpen.h
@@ -23,6 +24,7 @@ set(SOURCES
     TestSession.h
     ToolTip.h
     Translations.h
+    WorkerExceptions.h
 )
 add_library(gitbolt_util STATIC ${SOURCES})
 

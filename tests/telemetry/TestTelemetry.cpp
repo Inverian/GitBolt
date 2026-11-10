@@ -18,7 +18,7 @@
 //   - the queue's caps, load-time rules and lock, and a stale lock no
 //     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
-//     leave
+//     leave; a background exception goes as its type alone
 //
 
 #include <QCryptographicHash>
@@ -48,6 +48,7 @@
 #include "telemetry/TelemetryService.h"
 #include "telemetry/Transport.h"
 #include "util/TestSession.h"
+#include "util/WorkerExceptions.h"
 
 #include <memory>
 #include <optional>
@@ -1524,6 +1525,7 @@ private slots:
         service->recordError(ErrorKind::OperationFailed,
                              QStringLiteral("push origin feature/secret-branch"));
         service->recordError(ErrorKind::RepoOpenFailed, input);
+        service->recordError(ErrorKind::BackgroundException, input);
         service->persistPending();   // counts out now, if any were kept
 
         // No command was counted; the errors went out sanitized.
@@ -1544,6 +1546,8 @@ private slots:
                 QCOMPARE(tags.value(QStringLiteral("op")).toString(), QStringLiteral("other"));
             if (tags.contains(QStringLiteral("code")))
                 QCOMPARE(tags.value(QStringLiteral("code")).toString(), QStringLiteral("other"));
+            if (tags.contains(QStringLiteral("type")))
+                QCOMPARE(tags.value(QStringLiteral("type")).toString(), QStringLiteral("other"));
             QByteArray all = request.everything();
             all.replace("gitbolt@0.1.0", "");   // the release names the app, not a person
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com",
@@ -1640,6 +1644,40 @@ private slots:
         QCOMPARE(commit.value(QStringLiteral("tags")).toObject(),
                  (QJsonObject{{QStringLiteral("kind"), QStringLiteral("commit_failed")}}));
         QCOMPARE(provider.calls, 0);
+    }
+
+    // An exception that escaped background work (AsyncRunner): its type
+    // from a fixed list, never its text; once per type per session.
+    void backgroundExceptionShape() {
+        Provider provider;
+        auto service = makeService(testConfig(*stub_, dir_->path()), provider);
+        service->start();
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("non_std"));
+        QTRY_COMPARE(stub_->requests().size(), 2);
+        QTest::qWait(300);
+        QCOMPARE(stub_->requests().size(), 2);
+
+        const QJsonObject event = stub_->requests().first().json();
+        QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("error"));
+        QCOMPARE(event.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: out_of_range"));
+        QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
+                 (QJsonObject{{QStringLiteral("kind"), QStringLiteral("background_exception")},
+                              {QStringLiteral("type"), QStringLiteral("out_of_range")}}));
+        QCOMPARE(event.value(QStringLiteral("fingerprint")).toArray(),
+                 (QJsonArray{QStringLiteral("background_exception"),
+                             QStringLiteral("out_of_range")}));
+        QCOMPARE(stub_->requests().at(1).json().value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: non_std"));
+        QCOMPARE(provider.calls, 0);
+
+        // Every token AsyncRunner can report is sendable as it is.
+        for (const QString& kind : gitbolt::util::workerExceptionKinds())
+            QCOMPARE(errorDetail(ErrorKind::BackgroundException, kind), kind);
+        QCOMPARE(errorDetail(ErrorKind::BackgroundException, QStringLiteral("MyError")),
+                 QStringLiteral("other"));
     }
 
     void crashReportIsQueuedAndSent() {

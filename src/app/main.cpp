@@ -19,6 +19,7 @@
 #include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
+#include "util/WorkerExceptions.h"
 #include "widgets/PlainTextDialogs.h"
 
 #ifdef Q_OS_MACOS
@@ -537,7 +538,22 @@ int main(int argc, char* argv[]) {
             [&settings]() { return settings.reloadUsageStatisticsEnabled(); });
         QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
                          &telemetry::TelemetryService::persistPending);
+        // An exception escaping background work: its type, as an error
+        // report (the dedupe and cap apply; inert and off send nothing).
+        // Queued: it comes from a worker thread.
+        telemetry::TelemetryService* service = telemetryService.get();
+        gitbolt::util::setWorkerExceptionSink([service](const char* kind) {
+            QMetaObject::invokeMethod(
+                service,
+                [service, type = QString::fromLatin1(kind)] {
+                    service->recordError(telemetry::ErrorKind::BackgroundException, type);
+                },
+                Qt::QueuedConnection);
+        });
     }
+    // Cleared before the service goes (declared after it); the sink's
+    // lock means nothing is posted once this has run.
+    const auto workerSinkGone = qScopeGuard([] { gitbolt::util::setWorkerExceptionSink({}); });
 
     // Check for crash report from a previous session. Not in a test
     // session: ~/.gitbolt/crash.log is the user's (a bridge run outside
