@@ -150,9 +150,10 @@ private:
         const QString said = path(QStringLiteral("apt-output.txt"));
         return writeFile(said, output)
                && writeFile(path(QStringLiteral("stand-ins/apt-get")),
-                            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >" + shellQuote(aptArgs()).toUtf8()
-                                + "\nprintf 'LC_ALL=%s\\n' \"$LC_ALL\" >>" + shellQuote(aptArgs()).toUtf8() + "\ncat "
-                                + shellQuote(said).toUtf8() + "\nexit " + QByteArray::number(status) + "\n",
+                            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >"
+                                + shellQuote(aptArgs()).toUtf8() + "\nprintf 'LC_ALL=%s\\n' \"$LC_ALL\" >>"
+                                + shellQuote(aptArgs()).toUtf8() + "\ncat " + shellQuote(said).toUtf8() + "\nexit "
+                                + QByteArray::number(status) + "\n",
                             true);
     }
 
@@ -256,8 +257,9 @@ private slots:
         // one) as the launcher; apt-get's check says yes (aptSays).
         const QString bin = path(QStringLiteral("stand-ins"));
         QVERIFY(writeFile(bin + QStringLiteral("/pkexec"),
-                          "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >" + shellQuote(pkexecArgs()).toUtf8()
-                              + "\nfor last in \"$@\"; do :; done\ncp \"$last\" " + shellQuote(launcher()).toUtf8() + "\n",
+                          "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >"
+                              + shellQuote(pkexecArgs()).toUtf8() + "\nfor last in \"$@\"; do :; done\ncp \"$last\" "
+                              + shellQuote(launcher()).toUtf8() + "\n",
                           true));
         QVERIFY(aptSays(0));
         path_ = std::make_unique<ScopedEnv>("PATH", QFile::encodeName(bin) + ':' + qgetenv("PATH"));
@@ -412,7 +414,8 @@ private slots:
         QSKIP("Windows only: version resources");
 #else
         QCOMPARE(windowsMinimumOf(QCoreApplication::applicationFilePath()), QStringLiteral("10.0.99999"));
-        const QString exe = QDir(workDir()).filePath(QStringLiteral("0.1.1/") + assetNameFor(PackageKind::WindowsInstall, kNew));
+        const QString exe =
+            QDir(workDir()).filePath(QStringLiteral("0.1.1/") + assetNameFor(PackageKind::WindowsInstall, kNew));
         QVERIFY(QDir().mkpath(QFileInfo(exe).absolutePath()));
         QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), exe));
         Installer installer({PackageKind::WindowsInstall, path(QStringLiteral("install")), true, {}}, kOld, workDir());

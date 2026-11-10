@@ -209,7 +209,8 @@ private slots:
         QVERIFY(updates.isValid());
         const gitbolt::ui::UpdateSetup setup =
             updateSetup(QUrl(QStringLiteral("http://127.0.0.1:9/repos/Inverian/GitBolt/releases/latest")),
-                        updates.path(), {gitbolt::update::PackageKind::Deb, updates.filePath(QStringLiteral("lib")), true, {}});
+                        updates.path(),
+                        {gitbolt::update::PackageKind::Deb, updates.filePath(QStringLiteral("lib")), true, {}});
         const QDir downloads(setup.config.downloadDir);
         QVERIFY(writeFile(downloads.filePath(QStringLiteral("install-result")),
                           "failed 0.1.1 apt-get failed with status 100\n"));

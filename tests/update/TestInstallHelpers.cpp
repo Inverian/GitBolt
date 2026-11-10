@@ -936,8 +936,8 @@ private slots:
                                          << "in_use";
         QTest::newRow("Windows: not started") << "failed 0.1.1 the installer could not be started"
                                               << "installer_not_started";
-        QTest::newRow("Windows: wrong version") << "failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1"
-                                                << "wrong_version";
+        QTest::newRow("Windows: wrong version")
+            << "failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1" << "wrong_version";
         QTest::newRow("Windows: elevated error") << "failed 0.1.1 the administrator part of the update failed"
                                                  << "elevated_error";
         QTest::newRow("Windows: exit code") << "failed 0.1.1 the installer exited with code 2" << "installer_exit";

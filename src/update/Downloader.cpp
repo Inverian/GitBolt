@@ -166,7 +166,8 @@ void Downloader::fetchChecksums() {
         }
         checksumsBody_ += reply->readAll();
         if (checksumsBody_.size() > checksums_.size)
-            fail({Failure::SizeMismatch, tr("%1 is larger than GitHub lists.").arg(QString::fromLatin1(kChecksumsAsset))});
+            fail({Failure::SizeMismatch,
+                  tr("%1 is larger than GitHub lists.").arg(QString::fromLatin1(kChecksumsAsset))});
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply] { onChecksumsFinished(reply); });
 }
@@ -247,7 +248,8 @@ Downloader::Problem Downloader::consume(QNetworkReply* reply) {
     if (chunk.isEmpty())
         return {};
     if (received_ + chunk.size() > asset_.size)
-        return {Failure::SizeMismatch, tr("%1 is larger than GitHub lists (%2 bytes).").arg(asset_.name).arg(asset_.size)};
+        return {Failure::SizeMismatch,
+                tr("%1 is larger than GitHub lists (%2 bytes).").arg(asset_.name).arg(asset_.size)};
     if (file_->write(chunk) != chunk.size())
         return {Failure::DiskError, tr("Couldn't save %1: %2.").arg(asset_.name, file_->errorString())};
     hash_->addData(chunk);

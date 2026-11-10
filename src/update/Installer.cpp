@@ -271,7 +271,8 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
         // would leave nothing that starts. No key: no check, as on macOS.
         const QString minimum = windowsMinimumOf(file_);
         const QOperatingSystemVersion os = QOperatingSystemVersion::current();
-        const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
+        const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()),
+                                     qMax(0, os.microVersion()));
         if (systemTooOld(minimum, running)) {
             const QVersionNumber needs = QVersionNumber::fromString(minimum.trimmed());
             const QString build = needs.segmentCount() >= 3 ? QString::number(needs.microVersion()) : needs.toString();
@@ -734,7 +735,8 @@ void Installer::askApt() {
         return;   // cancelled by a slot
     const QString aptGet = QStandardPaths::findExecutable(QStringLiteral("apt-get"));
     if (aptGet.isEmpty()) {
-        fail(Failure::AptRefused, tr("GitBolt %1 can't be installed: apt-get isn't installed.").arg(version_.toString()));
+        fail(Failure::AptRefused,
+             tr("GitBolt %1 can't be installed: apt-get isn't installed.").arg(version_.toString()));
         return;
     }
     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
@@ -865,7 +867,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     helper.setArguments({helperScriptPath()});
     detachFromGitBolt(helper);
     if (!helper.startDetached())
-        return failWith(Failure::HelperStartFailed, tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
+        return failWith(Failure::HelperStartFailed,
+                        tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
 #endif
     launched_ = true;
     ready_ = false;
@@ -891,7 +894,8 @@ QString windowsMinimumOf(const QString& file) {
     };
     LanguageAndCodePage* pairs = nullptr;
     UINT bytes = 0;
-    if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<LPVOID*>(&pairs), &bytes) && pairs) {
+    if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<LPVOID*>(&pairs), &bytes)
+        && pairs) {
         for (UINT i = 0; i < bytes / sizeof(LanguageAndCodePage); ++i)
             blocks << QStringLiteral("%1%2")
                           .arg(uint(pairs[i].language), 4, 16, QLatin1Char('0'))

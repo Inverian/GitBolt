@@ -1412,8 +1412,8 @@ private slots:
             << QByteArray("0.1.0 0.1.1 <now>") << deb << "declined install permission_declined 0.1.0 0.1.1 deb"
             << false;
         QTest::newRow("gave up") << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n")
-                                 << QByteArray("0.1.0 0.1.1 <now>") << deb << "gave_up quit quit_timeout 0.1.0 0.1.1 deb"
-                                 << false;
+                                 << QByteArray("0.1.0 0.1.1 <now>") << deb
+                                 << "gave_up quit quit_timeout 0.1.0 0.1.1 deb" << false;
         QTest::newRow("Windows: the installer failed")
             << QByteArray("failed 0.1.1 the installer exited with code 2\n") << QByteArray("0.1.0 0.1.1 <now>")
             << int(PackageKind::WindowsInstall) << "failed install installer_exit 0.1.0 0.1.1 nsis" << false;
@@ -1521,7 +1521,8 @@ private slots:
         HttpServer server;
         const QString exe = QStringLiteral("GitBolt-0.1.1-Windows-AMD64.exe");
         if (how == QLatin1String("bad checksum")) {
-            serve(server, QStringLiteral("0.1.1"), {{exe, "exe"}}, true, QByteArray(64, 'a') + "  " + exe.toUtf8() + '\n');
+            serve(server, QStringLiteral("0.1.1"), {{exe, "exe"}}, true,
+                  QByteArray(64, 'a') + "  " + exe.toUtf8() + '\n');
         } else {
             serve(server, QStringLiteral("0.1.1"), {{exe, QByteArray(256 * 1024, 'x')}});
             auto& route = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(exe).toUtf8()];
