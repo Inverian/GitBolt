@@ -23,13 +23,13 @@
 #    Weak imports may be missing, as at run time.
 # 3. Warns when images need a newer macOS than the deployment target,
 #    i.e. than LSMinimumSystemVersion (Homebrew's Qt; CI's aqt Qt fits).
-# 4. Re-signs ad hoc and verifies. macdeployqt strips every framework
-#    and dylib it copies and rewrites their install names, which
-#    invalidates their signatures (as does step 1). macdeployqt signs
-#    ad hoc by default since Qt 6.11 (QTBUG-138019), but step 1 still
-#    changes binaries after it, and a Qt before 6.11 doesn't sign at
-#    all. An invalid signature is what Gatekeeper shows as "GitBolt is
-#    damaged".
+# 4. Re-signs, with GitBolt's certificate in CI (else ad hoc), and
+#    verifies. macdeployqt strips every framework and dylib it copies
+#    and rewrites their install names, which invalidates their
+#    signatures (as does step 1). macdeployqt signs ad hoc by default
+#    since Qt 6.11 (QTBUG-138019), but step 1 still changes binaries
+#    after it, and a Qt before 6.11 doesn't sign at all. An invalid
+#    signature is what Gatekeeper shows as "GitBolt is damaged".
 
 # cmake_install.cmake sets no policy version. 3.21 is the project's:
 # IN_LIST (CMP0057), and GLOB_RECURSE not following symlinks (CMP0009),
@@ -244,9 +244,20 @@ function(_gitbolt_finalize_bundle)
                         "raise CMAKE_OSX_DEPLOYMENT_TARGET.")
     endif()
 
-    message(STATUS "Ad-hoc signing ${GITBOLT_APP}")
+    # GITBOLT_MACOS_SIGN_IDENTITY: a keychain identity's SHA-1, as CI sets
+    # for GitBolt's certificate (src/app/platform/macos/codesign-certificate.pem).
+    # Its designated requirement pins that certificate, so macOS keeps folder
+    # access granted to one build for the next; ad hoc pins each build's
+    # cdhash. No timestamp: Apple's server may refuse a non-Apple identity.
+    set(_sign --sign -)
+    if(NOT "$ENV{GITBOLT_MACOS_SIGN_IDENTITY}" STREQUAL "")
+        set(_sign --sign "$ENV{GITBOLT_MACOS_SIGN_IDENTITY}" --timestamp=none)
+        message(STATUS "Signing ${GITBOLT_APP} with $ENV{GITBOLT_MACOS_SIGN_IDENTITY}")
+    else()
+        message(STATUS "Ad-hoc signing ${GITBOLT_APP} (GITBOLT_MACOS_SIGN_IDENTITY is not set)")
+    endif()
     execute_process(
-        COMMAND codesign --force --deep --sign - "${GITBOLT_APP}"
+        COMMAND codesign --force --deep ${_sign} "${GITBOLT_APP}"
         COMMAND_ERROR_IS_FATAL ANY)
     execute_process(
         COMMAND codesign --verify --deep --strict "${GITBOLT_APP}"

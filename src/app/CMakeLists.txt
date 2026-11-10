@@ -8,8 +8,8 @@ set(GITBOLT_APP_SOURCES
 # The single-instance guard (lock, hand-off, listener) and the queue of
 # folders the system asks a running GitBolt to open (OpenRequests): a
 # library of their own so tests/app/ runs them on every platform,
-# Windows' named pipes included. The e2e tests that launch the app
-# twice are Unix-only.
+# Windows' named pipes included, and drives busy owners and hang-ups
+# deterministically, which the e2e tests that launch the app can't.
 add_library(gitbolt_instance STATIC
     SingleInstance.cpp SingleInstance.h
     OpenRequests.cpp OpenRequests.h)
@@ -74,6 +74,11 @@ endif()
 
 qt_add_executable(gitbolt ${GITBOLT_APP_SOURCES})
 gitbolt_set_warnings(gitbolt)
+# The PDB for the release's symbol files (cmake/Symbols.cmake). /DEBUG
+# alone would switch /OPT to NOREF,NOICF and change the code.
+if(GITBOLT_RELEASE_SYMBOLS AND MSVC)
+    target_link_options(gitbolt PRIVATE "$<$<CONFIG:Release>:/DEBUG:FULL;/OPT:REF;/OPT:ICF>")
+endif()
 
 target_link_libraries(gitbolt PRIVATE
     gitbolt_ui
@@ -121,8 +126,7 @@ endif()
 
 # Linux executables are lowercase by convention, and gitbolt.desktop
 # (Exec=gitbolt), the Nautilus extension and the AppStream <binary> all
-# run `gitbolt`; linuxdeploy rejects an Exec= that names no file in
-# usr/bin (the match is case-sensitive).
+# run `gitbolt` (the match is case-sensitive).
 if(UNIX AND NOT APPLE)
     set_target_properties(gitbolt PROPERTIES OUTPUT_NAME "gitbolt")
 endif()
@@ -217,7 +221,7 @@ else()
     # desktop Git client doesn't need. The wayland-* ones are qtwayland's
     # client extensions, of no use without its platform plugin, which the
     # deploy doesn't ship (GitBolt runs on xcb, through XWayland in a
-    # Wayland session, as the AppImage does); they brought libQt6Wayland*
+    # Wayland session); they brought libQt6Wayland*
     # and libwayland-* into the package. NO_TRANSLATIONS: the default
     # target would be <prefix>/translations.
     qt_generate_deploy_script(
@@ -251,9 +255,9 @@ endif()
 
 # After the deploy script: delete LC_RPATHs that point outside the
 # bundle, fail on libraries that dyld wouldn't find inside it, warn
-# about images newer than the deployment target, then re-sign ad hoc
-# and verify
-# (platform/macos/FinalizeBundle.cmake says why each is needed). Also
+# about images newer than the deployment target, then re-sign and
+# verify (platform/macos/FinalizeBundle.cmake says why each is needed,
+# and with which identity). Also
 # runs inside CPack's staging install, so it is what the DMG ships.
 # "GitBolt.app" = OUTPUT_NAME above, installed to BUNDLE DESTINATION ".".
 if(APPLE)

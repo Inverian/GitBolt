@@ -12,7 +12,7 @@ namespace gitbolt::update {
 /// How the running copy of GitBolt was installed, which decides what
 /// the updater downloads and how it puts it in place. Each kind is one
 /// of the release's packages; anything else (a build tree, a
-/// `cmake --install` prefix, a self-built AppImage) is Unknown and is
+/// `cmake --install` prefix, someone else's package) is Unknown and is
 /// never replaced: the updater would be overwriting something it didn't
 /// install.
 enum class PackageKind { Unknown, MacBundle, WindowsInstall, Deb };

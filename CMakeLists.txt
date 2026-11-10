@@ -92,6 +92,8 @@ option(GITBOLT_REQUIRE_ENGLISH_PLURALS
     OFF)
 
 include(CompilerWarnings)
+# GITBOLT_RELEASE_SYMBOLS: line tables for the release's symbol files
+include(Symbols)
 # Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
 # Empty, the default, compiles telemetry out.
 include(Telemetry)
