@@ -4,8 +4,8 @@
 // Config with allowLoopback accepts.
 //
 //   - success: SHA256SUMS.txt first, then the installer, checked and
-//     renamed into <downloadDir>/<version>/ (or the folder given), with
-//     progress against the API's size; through redirects to allowed
+//     renamed into <downloadDir>/<version>/, with progress against the
+//     API's size; through redirects to allowed
 //     hosts too
 //   - every refusal leaves nothing behind (no final file, no .part):
 //     a checksum that doesn't match, the API's digest disagreeing, no
@@ -50,9 +50,9 @@ using gitbolt::test::Served;
 
 namespace {
 
-const QString kAsset = QStringLiteral("GitBolt-0.1.1-x86_64.AppImage");
+const QString kAsset = QStringLiteral("gitbolt_0.1.1_amd64.deb");
 const QString kSums = QString::fromLatin1(kChecksumsAsset);
-const QByteArray kAssetPath = "/Inverian/GitBolt/releases/download/v0.1.1/GitBolt-0.1.1-x86_64.AppImage";
+const QByteArray kAssetPath = "/Inverian/GitBolt/releases/download/v0.1.1/gitbolt_0.1.1_amd64.deb";
 const QByteArray kSumsPath = "/Inverian/GitBolt/releases/download/v0.1.1/SHA256SUMS.txt";
 const QString kUserAgent = QStringLiteral("GitBolt/0.1.0 (X11; Linux x86_64)");
 
@@ -72,7 +72,7 @@ QByteArray sha256Hex(const QByteArray& data) {
 // sha256sum's output for the installer, between two other installers'.
 QByteArray sumsFor(const QByteArray& file) {
     return QByteArray("1").repeated(64) + "  GitBolt-0.1.1-Darwin-arm64.dmg\n" + sha256Hex(file) + "  "
-           + kAsset.toLatin1() + "\n" + QByteArray("2").repeated(64) + "  gitbolt_0.1.1_amd64.deb\n";
+           + kAsset.toLatin1() + "\n" + QByteArray("2").repeated(64) + "  GitBolt-0.1.1-Windows-AMD64.exe\n";
 }
 
 ReleaseAsset* assetIn(Release& release, const QString& name) {
@@ -145,11 +145,10 @@ private:
 
     // Starts `release`'s installer and waits for the outcome: the
     // failure's message, or empty when it finished.
-    QString run(Downloader& downloader, const Release& release, const QString& name = kAsset,
-                const QString& dir = {}) {
+    QString run(Downloader& downloader, const Release& release, const QString& name = kAsset) {
         QSignalSpy finished(&downloader, &Downloader::finished);
         QSignalSpy failed(&downloader, &Downloader::failed);
-        downloader.start(release, name, dir);
+        downloader.start(release, name);
         if (!QTest::qWaitFor([&] { return finished.count() + failed.count() > 0; }, 10000))
             return QStringLiteral("(no outcome)");
         QTest::qWait(20);   // nothing else may follow
@@ -230,19 +229,6 @@ private slots:
         QCOMPARE(contentsOf(finalPath()), file);
     }
 
-    void intoTheFolderGiven() {
-        const QByteArray file = payload(10000);
-        const Release release = publish(file);
-        const QString folder = dir_->path() + QStringLiteral("/Applications");
-        Downloader downloader(config());
-        QSignalSpy finished(&downloader, &Downloader::finished);
-        QCOMPARE(run(downloader, release, kAsset, folder), QString());
-        QCOMPARE(finished.at(0).at(0).toString(), folder + QLatin1Char('/') + kAsset);
-        QCOMPARE(contentsOf(folder + QLatin1Char('/') + kAsset), file);
-        QCOMPARE(entriesOf(folder), QStringList{kAsset});
-        QVERIFY(!QFileInfo::exists(downloadDir()));
-    }
-
     void followsRedirectsToAllowedHosts() {
         const QByteArray file = payload(200 * 1024);
         Release release = publish(file);
@@ -320,7 +306,7 @@ private slots:
         const Release release = publish(file, sums);
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
-                 QStringLiteral("GitBolt-0.1.1-x86_64.AppImage doesn't match its checksum in SHA256SUMS.txt, so it "
+                 QStringLiteral("gitbolt_0.1.1_amd64.deb doesn't match its checksum in SHA256SUMS.txt, so it "
                                 "was deleted."));
         QCOMPARE(server_->hits(kAssetPath), 1);
         QVERIFY(leftNothing());
@@ -335,7 +321,7 @@ private slots:
         server_->routes.insert(kAssetPath, Served::ok(tampered));
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
-                 QStringLiteral("GitBolt-0.1.1-x86_64.AppImage doesn't match its checksum in SHA256SUMS.txt, so it "
+                 QStringLiteral("gitbolt_0.1.1_amd64.deb doesn't match its checksum in SHA256SUMS.txt, so it "
                                 "was deleted."));
         QVERIFY(leftNothing());
     }
@@ -345,7 +331,7 @@ private slots:
         const Release release = publish(file, {}, sha256Hex("another file"));
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
-                 QStringLiteral("GitHub's checksum for GitBolt-0.1.1-x86_64.AppImage differs from the one in "
+                 QStringLiteral("GitHub's checksum for gitbolt_0.1.1_amd64.deb differs from the one in "
                                 "SHA256SUMS.txt."));
         QCOMPARE(server_->hits(kSumsPath), 1);
         QCOMPARE(server_->hits(kAssetPath), 0);
@@ -355,11 +341,11 @@ private slots:
     void noChecksumLineNoDownload() {
         const QByteArray file = payload(1000);
         const QByteArray sums = QByteArray("1").repeated(64) + "  GitBolt-0.1.1-Darwin-arm64.dmg\n"
-                                + sha256Hex(file) + "  GitBolt-0.1.1-x86_64.AppImage.zsync\n";
+                                + sha256Hex(file) + "  gitbolt_0.1.1_amd64.deb.zsync\n";
         const Release release = publish(file, sums);
         Downloader downloader(config());
         QCOMPARE(run(downloader, release),
-                 QStringLiteral("SHA256SUMS.txt has no checksum for GitBolt-0.1.1-x86_64.AppImage."));
+                 QStringLiteral("SHA256SUMS.txt has no checksum for gitbolt_0.1.1_amd64.deb."));
         QCOMPARE(server_->hits(kAssetPath), 0);
         QVERIFY(leftNothing());
     }
@@ -387,9 +373,9 @@ private slots:
         QTest::addColumn<int>("listed");
         QTest::addColumn<QString>("message");
         QTest::newRow("shorter") << 50000 << 50001
-                                 << "GitBolt-0.1.1-x86_64.AppImage arrived with 50000 bytes; GitHub lists 50001.";
+                                 << "gitbolt_0.1.1_amd64.deb arrived with 50000 bytes; GitHub lists 50001.";
         QTest::newRow("longer") << 50001 << 50000
-                                << "GitBolt-0.1.1-x86_64.AppImage is larger than GitHub lists (50000 bytes).";
+                                << "gitbolt_0.1.1_amd64.deb is larger than GitHub lists (50000 bytes).";
     }
     void sizeOtherThanListed() {
         QFETCH(int, served);
@@ -422,7 +408,7 @@ private slots:
         config.maxDownloadBytes = 1024 * 1024;
         Downloader downloader(config);
         QCOMPARE(run(downloader, release),
-                 QStringLiteral("GitBolt-0.1.1-x86_64.AppImage is larger than GitBolt downloads (1 MiB)."));
+                 QStringLiteral("gitbolt_0.1.1_amd64.deb is larger than GitBolt downloads (1 MiB)."));
         QCOMPARE(server_->requests().size(), 0);
     }
 
@@ -431,11 +417,11 @@ private slots:
         QTest::addColumn<int>("status");
         QTest::addColumn<QString>("message");
         QTest::newRow("installer 404") << kAssetPath << 404
-                                       << "Couldn't download GitBolt-0.1.1-x86_64.AppImage: GitHub answered HTTP 404.";
+                                       << "Couldn't download gitbolt_0.1.1_amd64.deb: GitHub answered HTTP 404.";
         QTest::newRow("checksums 500") << kSumsPath << 500
                                        << "Couldn't download SHA256SUMS.txt: GitHub answered HTTP 500.";
         QTest::newRow("installer 403") << kAssetPath << 403
-                                       << "Couldn't download GitBolt-0.1.1-x86_64.AppImage: GitHub answered HTTP 403.";
+                                       << "Couldn't download gitbolt_0.1.1_amd64.deb: GitHub answered HTTP 403.";
     }
     void httpErrors() {
         QFETCH(QByteArray, path);
@@ -461,7 +447,7 @@ private slots:
         config.requestTimeoutMs = 300;
         Downloader downloader(config);
         const QString message = run(downloader, release);
-        QVERIFY2(message.startsWith(QLatin1String("Couldn't download GitBolt-0.1.1-x86_64.AppImage: ")),
+        QVERIFY2(message.startsWith(QLatin1String("Couldn't download gitbolt_0.1.1_amd64.deb: ")),
                  qPrintable(message));
         QVERIFY(leftNothing());
     }
@@ -480,7 +466,7 @@ private slots:
         server_.reset();   // closes every connection mid-body
         QTRY_COMPARE(failed.count(), 1);
         QVERIFY2(failed.at(0).at(0).toString().startsWith(
-                     QLatin1String("Couldn't download GitBolt-0.1.1-x86_64.AppImage: ")),
+                     QLatin1String("Couldn't download gitbolt_0.1.1_amd64.deb: ")),
                  qPrintable(failed.at(0).at(0).toString()));
         QVERIFY(leftNothing());
         server_ = std::make_unique<HttpServer>();   // for cleanup()
@@ -580,9 +566,8 @@ private slots:
         QVERIFY(!QFileInfo::exists(partPath()));
     }
 
-    // A link planted at the .part's name (an AppImage's folder may be
-    // writable by others: a shared, sticky group folder) sends nothing
-    // through it: the link goes, the .part is a new file, and the file
+    // A link planted at the .part's name (by anything that can write the
+    // downloads folder) sends nothing through it: the link goes, the .part is a new file, and the file
     // it pointed at is as it was. The final name holds a real file.
     void aLinkAtThePartsNameIsNeverFollowed() {
 #ifdef Q_OS_WIN
@@ -611,8 +596,7 @@ private slots:
 #endif
     }
 
-    // A link planted at the final name (another user, in a shared,
-    // sticky folder an AppImage is in), dangling to where a new file
+    // A link planted at the final name, dangling to where a new file
     // would do harm, or to a file: the checked download replaces the
     // link itself. Nothing is created or written where it points, as
     // QFile::rename's copy (which follows the link) would.
@@ -708,7 +692,7 @@ private slots:
 
     void unsafeNamesAreRefused_data() {
         QTest::addColumn<QString>("name");
-        for (const char* name : {"", "../GitBolt-0.1.1-x86_64.AppImage", "sub/GitBolt.AppImage",
+        for (const char* name : {"", "../gitbolt_0.1.1_amd64.deb", "sub/GitBolt.AppImage",
                                  "sub\\GitBolt.AppImage", ".hidden", "..", "a..b", "with space", "/abs"})
             QTest::newRow(*name ? name : "empty") << QString::fromLatin1(name);
     }
@@ -752,7 +736,7 @@ private slots:
 
     void removesTheRunningVersionsAndOlder() {
         const QString updates = downloadDir();
-        for (const char* path : {"0.1.0/GitBolt-0.1.0-x86_64.AppImage", "0.1.1/.GitBolt-0.1.1-x86_64.AppImage.part",
+        for (const char* path : {"0.1.0/GitBolt-0.1.0-x86_64.AppImage", "0.1.1/.gitbolt_0.1.1_amd64.deb.part",
                                  "0.1.1/sub/deeper", "0.1.2/GitBolt-0.1.2-x86_64.AppImage", "0.1.10/x", "v0.1.0/x",
                                  "01.1.0/x", "notes/x", "0.1/x"})
             QVERIFY(writeFile(updates + QLatin1Char('/') + QLatin1String(path), "x"));

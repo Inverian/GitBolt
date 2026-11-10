@@ -2,26 +2,25 @@
 """E2E: a real package updates itself in place, end to end.
 
 Skipped (exit 77) unless GITBOLT_E2E_INSTALL_APP names a packaged GitBolt
-installer of this platform: a .dmg on macOS, an .AppImage on Linux (CI's
-just-built package; locally, `cpack -G DragNDrop -C Release` in the
-build). Everything happens in scratch folders; nothing outside them is
-touched (no /Applications, no real Trash, no installed GitBolt).
+installer of this platform: a .dmg on macOS (CI's just-built package;
+locally, `cpack -G DragNDrop -C Release` in the build). Linux skips too:
+its package was the AppImage, which is no longer built. Everything
+happens in scratch folders; nothing outside them is touched (no
+/Applications, no real Trash, no installed GitBolt).
 
-1. The package's app is put where an install would be: on macOS the
-   DMG's GitBolt.app copied into a scratch "Applications" folder, with a
-   marker file planted inside the bundle; on Linux the AppImage copied
-   into a scratch folder.
+1. The package's app is put where an install would be: the DMG's
+   GitBolt.app copied into a scratch "Applications" folder, with a
+   marker file planted inside the bundle.
 2. That copy runs as version 0.1.0 (GITBOLT_TEST_APP_VERSION) against a
    loopback stub feed (update_stub.py) whose release is the package's
    real version, with the real installer and its SHA256SUMS.txt.
 3. Help › Check for Updates › Install and Restart, through the bridge:
    the app downloads and checks the installer, gets it ready, starts the
    helper and quits.
-4. The old copy was replaced: on macOS the marker is gone from the
-   bundle, and the old bundle, marker and all, is in the scratch HOME's
-   .Trash as GitBolt-0.1.0.app; the new bundle is the release's version
-   and its signature verifies. On Linux the AppImage at the same path is
-   a new file with the release's bytes.
+4. The old copy was replaced: the marker is gone from the bundle, and
+   the old bundle, marker and all, is in the scratch HOME's .Trash as
+   GitBolt-0.1.0.app; the new bundle is the release's version and its
+   signature verifies.
 5. The relaunched app answers the same bridge (the helper keeps
    GITBOLT_INSTANCE_NAME and the bridge's variables), from the same
    path, as a new process. The download, the staging and the helper's
@@ -31,9 +30,8 @@ touched (no /Applications, no real Trash, no installed GitBolt).
    (GITBOLT_TEST_UPDATE_DIR, inherited through the helper), where the
    helper leaves its install-result.
 
-The packaged app has no offscreen platform plugin (macdeployqt and
-linuxdeploy ship none), so it runs on the real one: cocoa on macOS, and
-on Linux whatever QT_QPA_PLATFORM says (xcb under xvfb-run in CI).
+The packaged app has no offscreen platform plugin (macdeployqt ships
+none), so it runs on the real one: cocoa.
 """
 
 from __future__ import annotations
@@ -42,8 +40,6 @@ import glob
 import hashlib
 import os
 import plistlib
-import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -137,39 +133,6 @@ class MacInstall:
             raise Failure(f"the new bundle doesn't verify: {verify.stderr.strip()}")
 
 
-class AppImageInstall:
-    """The AppImage, copied into a scratch folder under a name of its
-    own: one named like the release's asset would be refused (the
-    download would land on the running file)."""
-
-    def __init__(self, appimage: str, scratch: str) -> None:
-        match = re.search(r"GitBolt-(\d+\.\d+\.\d+)-x86_64\.AppImage$", os.path.basename(appimage))
-        self.version = os.environ.get("GITBOLT_E2E_INSTALL_VERSION") or (match and match.group(1))
-        if not self.version:
-            raise Failure(f"can't tell {appimage}'s version: name it GitBolt-<version>-x86_64.AppImage "
-                          "or set GITBOLT_E2E_INSTALL_VERSION")
-        self.asset = f"GitBolt-{self.version}-x86_64.AppImage"
-        self.folder = os.path.join(scratch, "apps")
-        os.makedirs(self.folder)
-        self.binary = os.path.join(self.folder, "GitBolt.AppImage")
-        shutil.copyfile(appimage, self.binary)
-        os.chmod(self.binary, 0o755)
-        self.old_inode = os.stat(self.binary).st_ino
-        self.release_sha = sha256(appimage)
-        self.platform = os.environ.get("QT_QPA_PLATFORM", "xcb")
-
-    def check_replaced(self, home: str) -> None:
-        if os.stat(self.binary).st_ino == self.old_inode:
-            raise Failure("the AppImage is the same file: the old copy wasn't replaced")
-        if sha256(self.binary) != self.release_sha:
-            raise Failure("the AppImage isn't the release's")
-        if not os.access(self.binary, os.X_OK):
-            raise Failure("the new AppImage isn't executable")
-        leftovers = [n for n in os.listdir(self.folder) if n != "GitBolt.AppImage"]
-        if leftovers:
-            raise Failure(f"left next to the AppImage: {leftovers}")
-
-
 def install_log(app: App | None) -> str:
     """The helper's log: a test session downloads into a folder of its
     own in its TMPDIR."""
@@ -190,7 +153,7 @@ def install_log(app: App | None) -> str:
 
 def test(_binary: str, scratch: str, apps: list) -> None:
     installer = os.path.abspath(os.environ["GITBOLT_E2E_INSTALL_APP"])
-    install = (MacInstall if sys.platform == "darwin" else AppImageInstall)(installer, scratch)
+    install = MacInstall(installer, scratch)
 
     stub = UpdateFeed(install.version)
     stub.add_asset(install.asset, path=installer)
@@ -298,10 +261,9 @@ def test(_binary: str, scratch: str, apps: list) -> None:
 
 if __name__ == "__main__":
     if not os.environ.get("GITBOLT_E2E_INSTALL_APP"):
-        print("SKIP: set GITBOLT_E2E_INSTALL_APP to a packaged GitBolt installer "
-              "(.dmg on macOS, .AppImage on Linux)")
+        print("SKIP: set GITBOLT_E2E_INSTALL_APP to a packaged GitBolt installer (.dmg on macOS)")
         sys.exit(SKIP)
-    if sys.platform not in ("darwin", "linux"):
-        print("SKIP: macOS and Linux only")
+    if sys.platform != "darwin":
+        print("SKIP: macOS only (Linux's AppImage is no longer built)")
         sys.exit(SKIP)
     run(test)

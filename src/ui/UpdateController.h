@@ -54,15 +54,13 @@ namespace gitbolt::ui {
 /// Installing, after Install and Restart: the Downloader fetches the
 /// package's asset (assetNameFor) and checks it, into <cache>/updates/
 /// <version>/ (a test session: its private gitbolt-updates-XXXXXX in
-/// the temporary folder, UpdateSetup.h; an AppImage: next to the
-/// running one, where the helper renames it over it); the Installer
-/// checks and stages it; its helper is started with this process's
-/// pid, and GitBolt quits, which the helper waits for. (Windows asks
-/// UAC first, over the dialog: a No leaves GitBolt running, the dialog
-/// Declined, and the update ready for Try Again.) Cancel, closing
-/// the dialog, a failure, or quitting first stops wherever it is and
-/// deletes what was downloaded: nothing is left beside the AppImage,
-/// nothing installs later. Once the helper runs there is nothing left
+/// the temporary folder, UpdateSetup.h); the Installer checks and stages
+/// it; its helper is started with this process's pid, and GitBolt
+/// quits, which the helper waits for. (Windows asks UAC first, over the
+/// dialog: a No leaves GitBolt running, the dialog Declined, and the
+/// update ready for Try Again.) Cancel, closing the dialog, a failure,
+/// or quitting first stops wherever it is and deletes what was
+/// downloaded: nothing installs later. Once the helper runs there is nothing left
 /// to cancel: the dialog says GitBolt restarts, and if GitBolt is still
 /// running kQuitGraceMs later (the quit was refused), that it has to
 /// quit for the update to go in; still running kHelperDeadlineMs after

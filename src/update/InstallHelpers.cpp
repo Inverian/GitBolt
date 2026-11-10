@@ -2,7 +2,6 @@
 
 #include <QDir>
 #include <QFileInfo>
-#include <QStorageInfo>
 #include <QStringList>
 
 namespace gitbolt::update {
@@ -187,34 +186,6 @@ QString macHelperScript(const HelperInputs& in) {
                "fi\n"
                "report ok \"\"\n"
                "start \"$target\"\n");
-}
-
-QString appImageHelperScript(const HelperInputs& in) {
-    const QString values = shellLine("target", in.target) + shellLine("staged", in.staged);
-    return shellPreamble("AppImage", in, values)
-           + QStringLiteral("say \"GitBolt update helper: $target, to be replaced by $staged\"\n")
-           + shellWait(QStringLiteral("rm -f \"$staged\""))
-           + QStringLiteral(
-               "# A rename within one folder: the new file takes the old one's\n"
-               "# path in one step (the old one, which its runtime no longer\n"
-               "# holds open, goes with it).\n"
-               "if [ -f \"$staged\" ] && [ ! -d \"$target\" ] && mv -f \"$staged\" \"$target\"; then\n"
-               "    say \"installed the new AppImage as $target\"\n"
-               "    report ok \"\"\n"
-               "else\n"
-               "    say \"couldn't move the new AppImage over $target: keeping the old one\"\n"
-               "    rm -f \"$staged\"\n"
-               "    report failed \"the new AppImage couldn't be moved over the old one\"\n"
-               "fi\n")
-           + (in.extractAndRun ? QStringLiteral(
-                  "# This GitBolt ran extracted (--appimage-extract-and-run: no FUSE\n"
-                  "# here), which the runtime doesn't pass on; so must the next one.\n"
-                  "APPIMAGE_EXTRACT_AND_RUN=1\n"
-                  "export APPIMAGE_EXTRACT_AND_RUN\n")
-                               : QString())
-           + QStringLiteral(
-               "say \"starting $target\"\n"
-               "exec \"$target\"\n");
 }
 
 QString debHelperScript(const HelperInputs& in) {
@@ -517,20 +488,6 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("Write-Log ''"),
     };
     return lines.join(u'\n') + u'\n';
-}
-
-bool appImageRunsExtracted(const QString& appDir, bool extractAndRunSet) {
-    if (extractAndRunSet)
-        return true;
-    if (appDir.isEmpty())
-        return false;
-    const QString canonical = QFileInfo(appDir).canonicalFilePath();
-    if (canonical.isEmpty() || !QFileInfo(canonical).isDir())
-        return false;
-    // Mounted, $APPDIR is a mount point (/tmp/.mount_X); extracted, a
-    // plain folder (<tmp>/appimage_extracted_<hash>).
-    const QStorageInfo volume(canonical);
-    return volume.isValid() && QFileInfo(volume.rootPath()).canonicalFilePath() != canonical;
 }
 
 } // namespace gitbolt::update

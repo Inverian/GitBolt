@@ -55,12 +55,12 @@ bool Downloader::busy() const {
     return busy_;
 }
 
-void Downloader::start(const Release& release, const QString& assetName, const QString& dir) {
+void Downloader::start(const Release& release, const QString& assetName) {
     if (busy_)
         return;
     busy_ = true;
     ++run_;
-    const QString why = prepare(release, assetName, dir);
+    const QString why = prepare(release, assetName);
     if (!why.isEmpty()) {
         failLater(why);
         return;
@@ -76,7 +76,7 @@ void Downloader::cancel() {
     reset();
 }
 
-QString Downloader::prepare(const Release& release, const QString& assetName, const QString& dir) {
+QString Downloader::prepare(const Release& release, const QString& assetName) {
     const QString sumsName = QString::fromLatin1(kChecksumsAsset);
     if (!config_.isUsable())
         return tr("Updates aren't set up in this copy of GitBolt.");
@@ -102,7 +102,7 @@ QString Downloader::prepare(const Release& release, const QString& assetName, co
             return tr("GitBolt doesn't download from %1.").arg(origin(url));
     }
 
-    const QString target = dir.isEmpty() ? QDir(config_.downloadDir).filePath(release.version.toString()) : dir;
+    const QString target = QDir(config_.downloadDir).filePath(release.version.toString());
     if (!QDir::isAbsolutePath(target))
         return tr("GitBolt can't download into %1.").arg(QDir::toNativeSeparators(target));
     if (!QDir().mkpath(target))
@@ -200,10 +200,8 @@ void Downloader::fetchAsset() {
     // first (a leftover, or a link someone planted; remove() unlinks a
     // link itself, never what it points to), and the open is NewOnly
     // (O_CREAT|O_EXCL, CREATE_NEW on Windows), which fails on any
-    // existing name, a link included, rather than follow it. For an
-    // AppImage the .part is in the AppImage's folder, which others may
-    // be able to write to. If the name can't be freed, the download
-    // fails rather than write anywhere else.
+    // existing name, a link included, rather than follow it. If the name
+    // can't be freed, the download fails rather than write anywhere else.
     QFile::remove(partPath_);
     file_ = std::make_unique<QFile>(partPath_);
     if (!file_->open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
@@ -284,9 +282,8 @@ void Downloader::onAssetFinished(QNetworkReply* reply) {
 
     // Into place, by the system's rename alone (rename(2); MoveFileExW
     // with MOVEFILE_REPLACE_EXISTING on Windows): it replaces whatever
-    // has the final name, an earlier copy or a link (the link itself,
-    // which another user may have planted in an AppImage's folder), in
-    // one step, and never writes through a link. Not QFile::rename: it
+    // has the final name, an earlier copy or a link (the link itself),
+    // in one step, and never writes through a link. Not QFile::rename: it
     // never replaces, and when the rename fails it copies instead,
     // through a link at the final name to wherever it points.
     std::error_code error;

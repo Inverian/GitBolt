@@ -7,15 +7,14 @@
 //     isn't this package's asset for that version (another name, a
 //     link, nothing there), is refused, and every outcome arrives from
 //     the event loop, never inside prepare();
-//   - the .deb and the Windows installer need nothing staged; the
-//     AppImage must have been downloaded beside the old one (the helper
-//     renames it over it) and is made executable;
+//   - the .deb and the Windows installer need nothing staged;
 //   - launchHelper() only after prepared(), and cancel() discards a
 //     prepared update;
-//   - Unix, end to end: an AppImage update with a real detached helper,
-//     which waits for a real pid, replaces the file, starts the new
-//     one in a session of its own with the test's environment, and
-//     leaves "ok" in install-result (an earlier result is gone first);
+//   - Unix, end to end: a deb update with a real detached helper, which
+//     waits for a real pid, runs (a stand-in) pkexec, starts the
+//     package's launcher beside lib/gitbolt in a session of its own
+//     with the test's environment, and leaves "ok" in install-result
+//     (an earlier result is gone first);
 //   - macOS, with real disk images made here (hdiutil create) from
 //     fake ad-hoc-signed bundles: a good one is attached read-only,
 //     checked, copied beside the installed bundle as .GitBolt-<v>.app,
@@ -28,18 +27,17 @@
 //     and starts the new one. A bundle run from a mounted disk image
 //     (/Volumes/…) is refused by detectPackage;
 //   - removeStaleInstallFiles: staged and swapped-aside copies beside
-//     the bundle, mount points in the work folder (a disk image still
-//     mounted there detached), the AppImage's .part files, and the one
-//     AppImage download GitBolt recorded (recordPendingDownload) while
-//     it is still that file, go; the user's own GitBolt AppImages of
-//     any version, the running copy, anything not named exactly so,
-//     and links (and what they point to) stay;
+//     the bundle, and mount points in the work folder (a disk image
+//     still mounted there detached), go; the running copy, anything not
+//     named exactly so, and links (and what they point to) stay;
 //   - a release that needs a newer macOS than this one is refused, and
 //     needsNewerSystem() says so (the UI then doesn't download it
 //     again).
 //
 // Nothing here touches /Applications, the real Trash or an installed
 // GitBolt: every bundle is in a temporary folder, and HOME is one too.
+// On Unix, PATH starts with stand-ins for pkexec (and apt-get), so no
+// test asks for root or changes a package.
 //
 
 #include <QDir>
@@ -125,12 +123,16 @@ private:
     std::unique_ptr<QTemporaryDir> dir_;
     QTemporaryDir images_;   // disk images, made once and reused
     std::unique_ptr<ScopedEnv> home_;
+    std::unique_ptr<ScopedEnv> path_;   // the stand-ins first
     QString homePath_;
     std::unique_ptr<QProcess> waited_;
 
     QString path(const QString& relative) const { return QDir::cleanPath(dir_->filePath(relative)); }
     QString workDir() const { return path(QStringLiteral("cache/updates")); }
     QString marker() const { return path(QStringLiteral("marker.txt")); }
+    // The deb's launcher, which its helper starts again (installsADebEndToEnd).
+    QString launcher() const { return path(QStringLiteral("My Apps/usr/bin/gitbolt")); }
+    QString pkexecArgs() const { return path(QStringLiteral("pkexec-args.txt")); }
 
     qint64 startWaited() {
         waited_ = std::make_unique<QProcess>();
@@ -227,12 +229,23 @@ private slots:
         dir_ = std::make_unique<QTemporaryDir>();
         QVERIFY(dir_->isValid());
         QVERIFY(!dir_->path().startsWith(QLatin1String("/Applications")));
+#if defined(Q_OS_UNIX)
+        // pkexec records its arguments and "installs" the .deb (its last
+        // one) as the launcher.
+        const QString bin = path(QStringLiteral("stand-ins"));
+        QVERIFY(writeFile(bin + QStringLiteral("/pkexec"),
+                          "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >" + shellQuote(pkexecArgs()).toUtf8()
+                              + "\nfor last in \"$@\"; do :; done\ncp \"$last\" " + shellQuote(launcher()).toUtf8() + "\n",
+                          true));
+        path_ = std::make_unique<ScopedEnv>("PATH", QFile::encodeName(bin) + ':' + qgetenv("PATH"));
+#endif
     }
 
     void cleanup() {
         if (waited_ && waited_->state() != QProcess::NotRunning)
             quitWaited();
         waited_.reset();
+        path_.reset();
         dir_.reset();
     }
 
@@ -260,7 +273,7 @@ private slots:
         Outcome outcome = prepareAndWait(installer, other, kNew);
         QVERIFY(!outcome.prepared);
         QVERIFY2(outcome.failed.contains(QLatin1String("gitbolt_0.1.1_amd64.deb")), qPrintable(outcome.failed));
-        outcome = prepareAndWait(installer, download(PackageKind::AppImage), kNew);
+        outcome = prepareAndWait(installer, download(PackageKind::WindowsInstall), kNew);
         QVERIFY(!outcome.failed.isEmpty());
         outcome = prepareAndWait(installer, QDir(workDir()).filePath(QStringLiteral("gone/gitbolt_0.1.1_amd64.deb")),
                                  kNew);
@@ -291,32 +304,6 @@ private slots:
         QVERIFY(outcome.statuses.isEmpty());
         QCOMPARE(readFile(file), QStringLiteral("installer"));
         QCOMPARE(QDir(QFileInfo(file).absolutePath()).entryList(QDir::Files | QDir::Hidden).size(), 1);
-    }
-
-    void appImageIsMadeExecutableBesideTheOldOne() {
-        const QString target = path(QStringLiteral("apps/GitBolt-0.1.0-x86_64.AppImage"));
-        QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        Installer installer({PackageKind::AppImage, target, true, {}}, kOld, workDir());
-
-        // Downloaded anywhere else, it can't be renamed over the old one.
-        Outcome outcome = prepareAndWait(installer, download(PackageKind::AppImage), kNew);
-        QVERIFY(!outcome.prepared);
-        QVERIFY2(outcome.failed.contains(QLatin1String("next to the old one")), qPrintable(outcome.failed));
-
-        const QString beside = path(QStringLiteral("apps/GitBolt-0.1.1-x86_64.AppImage"));
-        QVERIFY(writeFile(beside, fakeAppScript(QStringLiteral("0.1.1"))));
-        outcome = prepareAndWait(installer, beside, kNew);
-        QVERIFY2(outcome.prepared, qPrintable(outcome.failed));
-#if defined(Q_OS_UNIX)
-        QCOMPARE(QFileInfo(beside).permissions() & (QFile::ExeOwner | QFile::ExeGroup | QFile::ExeOther),
-                 QFile::ExeOwner | QFile::ExeGroup | QFile::ExeOther);
-#endif
-        // The running AppImage, renamed to the new one's name, is not
-        // replaced with itself.
-        Installer self({PackageKind::AppImage, beside, true, {}}, kOld, workDir());
-        outcome = prepareAndWait(self, beside, kNew);
-        QVERIFY(!outcome.prepared);
-        QVERIFY2(outcome.failed.contains(QLatin1String("itself")), qPrintable(outcome.failed));
     }
 
     void launchesOnlyAPreparedUpdate() {
@@ -350,16 +337,19 @@ private slots:
     // Unix, end to end
     // ---------------------------------------------------------------
 
-    void installsAnAppImageEndToEnd() {
+    // The deb's layout: <dir>/My Apps/usr/lib/gitbolt, with the launcher
+    // the helper starts again, usr/bin/gitbolt (0.1.0), beside it. The
+    // stand-in pkexec copies the .deb (a 0.1.1 stand-in) over it.
+    void installsADebEndToEnd() {
 #if !defined(Q_OS_UNIX)
         QSKIP("POSIX only");
 #else
-        const QString target = path(QStringLiteral("My Apps/GitBolt.AppImage"));
-        QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        const QString beside = path(QStringLiteral("My Apps/GitBolt-0.1.1-x86_64.AppImage"));
-        QVERIFY(writeFile(beside, fakeAppScript(QStringLiteral("0.1.1"))));
-        Installer installer({PackageKind::AppImage, target, true, {}}, kOld, workDir());
-        const Outcome outcome = prepareAndWait(installer, beside, kNew);
+        const QString target = path(QStringLiteral("My Apps/usr/lib/gitbolt"));
+        QVERIFY(QDir().mkpath(target));
+        QVERIFY(writeFile(launcher(), fakeAppScript(QStringLiteral("0.1.0")), true));
+        const QString deb = download(PackageKind::Deb, fakeAppScript(QStringLiteral("0.1.1")));
+        Installer installer({PackageKind::Deb, target, true, {}}, kOld, workDir());
+        const Outcome outcome = prepareAndWait(installer, deb, kNew);
         QVERIFY2(outcome.prepared, qPrintable(outcome.failed));
 
         ScopedEnv markerEnv("GITBOLT_TEST_MARKER", QFile::encodeName(marker()));
@@ -372,23 +362,27 @@ private slots:
         QVERIFY(installer.launchHelper(pid));
         QVERIFY(QFileInfo::exists(installer.helperScriptPath()));
         QVERIFY(!QFileInfo::exists(installer.resultPath()));
-        // The helper is told the version and where to report.
+        // The helper is told the version, where to report, and what to
+        // start again.
         const QString script = readFile(installer.helperScriptPath());
         QVERIFY(script.contains(QLatin1String("\nnew_version='0.1.1'\n")));
         QVERIFY(script.contains(QStringLiteral("\nresult_file='%1'\n").arg(installer.resultPath())));
+        QVERIFY(script.contains(QStringLiteral("\nrelaunch='%1'\n").arg(launcher())));
         // Launched once: the helper owns the update now.
         QVERIFY(!installer.launchHelper(pid));
 
         QVERIFY2(gitbolt::test::waitForLines(installer.logPath(), 2, 10000), qPrintable(diagnostics()));
         QTest::qWait(300);
-        QVERIFY(readFile(target).contains(QLatin1String("'0.1.0'")));
+        QVERIFY(!QFileInfo::exists(pkexecArgs()));
         QVERIFY(!QFileInfo::exists(marker()));
         QVERIFY(!QFileInfo::exists(installer.resultPath()));
 
         quitWaited();
         QVERIFY2(gitbolt::test::waitForLines(marker(), 1, 20000), qPrintable(diagnostics()));
-        QVERIFY(readFile(target).contains(QLatin1String("'0.1.1'")));
-        QVERIFY(!QFileInfo::exists(beside));
+        QCOMPARE(readFile(pkexecArgs()).split(u'\n', Qt::SkipEmptyParts),
+                 (QStringList{QStringLiteral("/usr/bin/apt-get"), QStringLiteral("install"), QStringLiteral("-y"),
+                              QStringLiteral("-o"), QStringLiteral("DPkg::Lock::Timeout=60"), deb}));
+        QVERIFY(readFile(launcher()).contains(QLatin1String("'0.1.1'")));
         // Started by a detached helper in a session (so a process
         // group) of its own, with the instance name passed on.
         const QString started = readFile(marker());
@@ -402,8 +396,7 @@ private slots:
         QCOMPARE(m.captured(1), m.captured(2));
 #endif
         QCOMPARE(m.captured(3), kInstance);
-        QVERIFY2(readFile(installer.logPath()).contains(QLatin1String("installed the new AppImage")),
-                 qPrintable(diagnostics()));
+        QVERIFY2(readFile(installer.logPath()).contains(QStringLiteral("installed ") + deb), qPrintable(diagnostics()));
         QCOMPARE(readFile(installer.resultPath()), QStringLiteral("ok 0.1.1 \n"));
 #endif
     }
@@ -845,160 +838,6 @@ private slots:
         QVERIFY(nothingMountedUnder(workDir()));
         QVERIFY(QFileInfo(dmg).isFile());
 #endif
-    }
-
-    // Beside the AppImage: the Downloader's .part files (of any
-    // version) go, and so does the one checked download GitBolt
-    // recorded and no helper took over (a crash's). Every other
-    // GitBolt-<v>-x86_64.AppImage stays, whatever its version: that is
-    // the name users keep their AppImages under, an older one kept to
-    // go back to, or their main copy, which an update leaves under the
-    // old version's name. So do names that aren't the release's, other
-    // files, folders and links, and the running AppImage.
-    void removesOnlyTheAppImageDownloadsGitBoltLeft() {
-        const QString apps = path(QStringLiteral("My Apps"));
-        const QString target = apps + QStringLiteral("/GitBolt.AppImage");
-        QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.1")), true));
-        for (const QString& name :
-             {QStringLiteral(".GitBolt-0.1.1-x86_64.AppImage.part"), QStringLiteral(".GitBolt-0.1.2-x86_64.AppImage.part"),
-              QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
-              QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"),
-              QStringLiteral("GitBolt-01.1.0-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage.zsync"),
-              QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"), QStringLiteral("notes.txt")})
-            QVERIFY(writeFile(apps + u'/' + name, "x"));
-        // What a GitBolt that crashed after its download left: recorded.
-        const QString download = apps + QStringLiteral("/GitBolt-0.1.2-x86_64.AppImage");
-        QVERIFY(writeFile(download, "checked download"));
-        recordPendingDownload(workDir(), download);
-        QVERIFY(QDir().mkpath(apps + QStringLiteral("/GitBolt-0.0.7-x86_64.AppImage")));
-        QStringList expected{QStringLiteral("GitBolt-0.0.7-x86_64.AppImage"), QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
-                             QStringLiteral("GitBolt-0.1.0-aarch64.AppImage"), QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
-                             QStringLiteral("GitBolt-0.1.0-x86_64.AppImage.zsync"),
-                             QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), QStringLiteral("GitBolt-0.1.10-x86_64.AppImage"),
-                             QStringLiteral("GitBolt-01.1.0-x86_64.AppImage"), QStringLiteral("GitBolt.AppImage"),
-                             QStringLiteral("notes.txt")};
-#if defined(Q_OS_UNIX)
-        const QString precious = path(QStringLiteral("precious.AppImage"));
-        QVERIFY(writeFile(precious, "mine"));
-        QVERIFY(QFile::link(precious, apps + QStringLiteral("/GitBolt-0.0.8-x86_64.AppImage")));
-        QVERIFY(QFile::link(precious, apps + QStringLiteral("/.GitBolt-0.0.8-x86_64.AppImage.part")));
-        expected << QStringLiteral(".GitBolt-0.0.8-x86_64.AppImage.part") << QStringLiteral("GitBolt-0.0.8-x86_64.AppImage");
-#endif
-        expected.sort();
-
-        removeStaleInstallFiles({PackageKind::AppImage, target, true, {}}, workDir());
-        QStringList left = QDir(apps).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot);
-        left.sort();
-        QCOMPARE(left, expected);
-        QCOMPARE(readFile(apps + QStringLiteral("/GitBolt-0.0.9-x86_64.AppImage")), QStringLiteral("x"));
-        QVERIFY(!QFileInfo::exists(workDir() + u'/' + QLatin1String(kPendingDownloadFile)));
-#if defined(Q_OS_UNIX)
-        QCOMPARE(readFile(precious), QStringLiteral("mine"));
-#endif
-
-        // The running AppImage named as the release names it: never
-        // removed. Nor does any other package's cleanup touch this
-        // folder.
-        const QString named = apps + QStringLiteral("/GitBolt-0.1.1-x86_64.AppImage");
-        QVERIFY(writeFile(named, fakeAppScript(QStringLiteral("0.1.1")), true));
-        removeStaleInstallFiles({PackageKind::AppImage, named, true, {}}, workDir());
-        QVERIFY(QFileInfo(named).isFile());
-        QVERIFY(writeFile(apps + QStringLiteral("/.GitBolt-0.1.3-x86_64.AppImage.part"), "x"));
-        removeStaleInstallFiles({PackageKind::Deb, apps, true, {}}, workDir());
-        removeStaleInstallFiles({PackageKind::WindowsInstall, apps, true, {}}, workDir());
-        QVERIFY(QFileInfo::exists(apps + QStringLiteral("/.GitBolt-0.1.3-x86_64.AppImage.part")));
-        QVERIFY(QFileInfo::exists(apps + QStringLiteral("/GitBolt-0.1.0-x86_64.AppImage")));
-    }
-
-    // The record of a download (recordPendingDownload): the file it
-    // names goes at the next start only while it is still the download
-    // GitBolt left, and the record goes whatever it names.
-    void aRecordedDownloadGoesOnlyWhileItIsGitBolts_data() {
-        QTest::addColumn<QString>("what");
-        QTest::addColumn<bool>("removed");
-        QTest::newRow("the download") << QStringLiteral("download") << true;
-        QTest::newRow("gone already") << QStringLiteral("missing") << false;
-        QTest::newRow("the running AppImage") << QStringLiteral("target") << false;
-        QTest::newRow("a name not the release's") << QStringLiteral("other name") << false;
-        QTest::newRow("a folder") << QStringLiteral("folder") << false;
-        QTest::newRow("a link") << QStringLiteral("link") << false;
-        QTest::newRow("a relative path") << QStringLiteral("relative") << false;
-        QTest::newRow("too long to be a record") << QStringLiteral("too long") << false;
-        QTest::newRow("two lines") << QStringLiteral("two lines") << false;
-        QTest::newRow("another package starts") << QStringLiteral("deb") << false;
-    }
-    void aRecordedDownloadGoesOnlyWhileItIsGitBolts() {
-        QFETCH(QString, what);
-        QFETCH(bool, removed);
-#if !defined(Q_OS_UNIX)
-        if (what == QLatin1String("link"))
-            QSKIP("QFile::link makes a .lnk shortcut on Windows");
-#endif
-        const QString apps = path(QStringLiteral("My Apps"));
-        const QString download = apps + QStringLiteral("/GitBolt-0.1.2-x86_64.AppImage");
-        const QString precious = path(QStringLiteral("precious.AppImage"));
-        QVERIFY(writeFile(precious, "mine"));
-        QString target = apps + QStringLiteral("/GitBolt.AppImage");
-        QString recorded = download;
-        if (what == QLatin1String("target")) {
-            target = download;
-            QVERIFY(writeFile(download, fakeAppScript(QStringLiteral("0.1.2")), true));
-        } else if (what == QLatin1String("other name")) {
-            recorded = apps + QStringLiteral("/GitBolt-0.1.2-aarch64.AppImage");
-            QVERIFY(writeFile(recorded, "x"));
-        } else if (what == QLatin1String("folder")) {
-            QVERIFY(QDir().mkpath(download));
-        } else if (what == QLatin1String("link")) {
-            QVERIFY(QDir().mkpath(apps));
-            QVERIFY(QFile::link(precious, download));
-        } else if (what != QLatin1String("missing")) {
-            QVERIFY(writeFile(download, "checked download"));
-        }
-        if (target != download)
-            QVERIFY(writeFile(target, fakeAppScript(QStringLiteral("0.1.1")), true));
-        recordPendingDownload(workDir(), recorded);
-        const QString record = workDir() + u'/' + QLatin1String(kPendingDownloadFile);
-        QCOMPARE(readFile(record), recorded + u'\n');
-        if (what == QLatin1String("relative"))
-            QVERIFY(writeFile(record, "My Apps/GitBolt-0.1.2-x86_64.AppImage\n"));
-        else if (what == QLatin1String("too long"))
-            QVERIFY(writeFile(record, (download + u'\n').toUtf8() + QByteArray(70 * 1024, ' ')));
-        else if (what == QLatin1String("two lines"))
-            QVERIFY(writeFile(record, (download + u'\n' + download + u'\n').toUtf8()));
-
-        const PackageInfo package = what == QLatin1String("deb")
-                                        ? PackageInfo{PackageKind::Deb, QStringLiteral("/usr/lib/gitbolt"), true, {}}
-                                        : PackageInfo{PackageKind::AppImage, target, true, {}};
-        removeStaleInstallFiles(package, workDir());
-        QVERIFY(!QFileInfo::exists(record) && !QFileInfo(record).isSymLink());
-        QCOMPARE(QFileInfo::exists(recorded) || QFileInfo(recorded).isSymLink(),
-                 !removed && what != QLatin1String("missing"));
-        QCOMPARE(readFile(precious), QStringLiteral("mine"));
-        QVERIFY(QFileInfo(target).isFile());
-    }
-
-    // The record is a file of its own, made anew: a link planted at its
-    // name is replaced, never written through; forgetting it removes it.
-    void recordsAndForgetsADownload() {
-        const QString record = workDir() + u'/' + QLatin1String(kPendingDownloadFile);
-        const QString download = path(QStringLiteral("My Apps/GitBolt-0.1.2-x86_64.AppImage"));
-        recordPendingDownload(workDir(), download);
-        QCOMPARE(readFile(record), download + u'\n');
-        forgetPendingDownload(workDir());
-        QVERIFY(!QFileInfo::exists(record));
-        forgetPendingDownload(workDir());   // nothing to forget: fine
-#if defined(Q_OS_UNIX)
-        const QString precious = path(QStringLiteral("precious.txt"));
-        QVERIFY(writeFile(precious, "mine"));
-        QVERIFY(QFile::link(precious, record));
-        recordPendingDownload(workDir(), download);
-        QVERIFY(!QFileInfo(record).isSymLink());
-        QCOMPARE(readFile(record), download + u'\n');
-        QCOMPARE(readFile(precious), QStringLiteral("mine"));
-#endif
-        // No folder to record in: nothing written anywhere.
-        recordPendingDownload(QStringLiteral("relative"), download);
-        QVERIFY(!QFileInfo::exists(QStringLiteral("relative")));
     }
 };
 

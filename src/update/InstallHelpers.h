@@ -17,13 +17,12 @@ struct HelperInputs {
     int waitSeconds = 600;
     QString logFile;
     /// What is replaced. MacBundle: the bundle (…/GitBolt.app);
-    /// AppImage: the .AppImage file ($APPIMAGE); WindowsInstall: the
-    /// install folder (NSIS's /D=). Unused for Deb.
+    /// WindowsInstall: the install folder (NSIS's /D=). Unused for Deb.
     QString target;
     /// The new copy. MacBundle: the checked bundle staged beside the
-    /// target (<folder>/.GitBolt-<v>.app); AppImage: the checked file
-    /// beside the old one; WindowsInstall: the installer .exe; Deb: the
-    /// .deb, by absolute path (apt-get takes a path only with a slash).
+    /// target (<folder>/.GitBolt-<v>.app); WindowsInstall: the
+    /// installer .exe; Deb: the .deb, by absolute path (apt-get takes a
+    /// path only with a slash).
     QString staged;
     /// MacBundle: the running version, which names the old copy in the
     /// Trash (GitBolt-<old>.app) and beside the target while it is
@@ -35,8 +34,8 @@ struct HelperInputs {
     QString trashDir;
     /// What is started afterwards. MacBundle: the binary inside the
     /// bundle, relative to it (Contents/MacOS/GitBolt), used when
-    /// `execDirectly`; Deb: /usr/bin/gitbolt. Unused for AppImage (the
-    /// target is started) and WindowsInstall (<target>\bin\GitBolt.exe).
+    /// `execDirectly`; Deb: /usr/bin/gitbolt. Unused for WindowsInstall
+    /// (<target>\bin\GitBolt.exe).
     QString executable;
     /// MacBundle: exec the binary itself, keeping the environment, as
     /// test sessions (GITBOLT_INSTANCE_NAME set) need; otherwise
@@ -51,10 +50,6 @@ struct HelperInputs {
     /// Where the install result (below) goes: Installer::resultPath.
     /// Empty: none is written.
     QString resultFile;
-    /// AppImage: this GitBolt runs extracted (--appimage-extract-and-run),
-    /// which the runtime doesn't pass on, so the new one is started with
-    /// APPIMAGE_EXTRACT_AND_RUN=1. See appImageRunsExtracted.
-    bool extractAndRun = false;
     /// Windows: the administrator part's pid from ShellExecuteExW, or 0.
     /// Once that process has been gone a few seconds with no install
     /// result, the helper stops waiting for one.
@@ -78,10 +73,6 @@ struct HelperInputs {
 /// delete it) and start the new one. If the new one can't be put in
 /// place, the old one is moved back and started.
 QString macHelperScript(const HelperInputs& in);
-/// AppImage: after GitBolt quits, rename the new file over $APPIMAGE
-/// (the same path, so desktop entries and launchers keep working) and
-/// start it, extracted again if this one was (`extractAndRun`).
-QString appImageHelperScript(const HelperInputs& in);
 /// Deb: after GitBolt quits, `pkexec /usr/bin/apt-get install -y` the
 /// .deb (apt-get, not dpkg -i, so new dependencies are resolved), then
 /// start /usr/bin/gitbolt either way. pkexec's 126 (dialog dismissed)
@@ -132,13 +123,6 @@ inline constexpr int kWindowsExitNoInstaller = 1002;   ///< the installer didn't
 inline constexpr int kWindowsExitWrongVersion = 1003;  ///< installed, but GitBolt.exe isn't newVersion
 inline constexpr int kWindowsExitError = 1004;         ///< the script itself failed
 inline constexpr int kWindowsExitGaveUp = 1005;        ///< GitBolt didn't quit within waitSeconds
-
-/// Whether an AppImage runs extracted rather than from its FUSE mount:
-/// `extractAndRunSet` (APPIMAGE_EXTRACT_AND_RUN set, to any value, as the
-/// runtime checks), or `appDir` ($APPDIR) is an existing folder that
-/// isn't a mount point, as after --appimage-extract-and-run, which the
-/// runtime consumes without setting the variable.
-bool appImageRunsExtracted(const QString& appDir, bool extractAndRunSet);
 
 /// `text` as one POSIX shell word: in single quotes, each ' written as
 /// '\''. Safe for any text, newlines included.

@@ -19,7 +19,6 @@
 #include <QtGlobal>
 
 #include <memory>
-#include <optional>
 #include <utility>
 
 #if defined(Q_OS_UNIX)
@@ -237,29 +236,6 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
 #else
         fail(tr("A disk image can only be installed on macOS."));
 #endif
-        return;
-    }
-    case PackageKind::AppImage: {
-        // The helper renames it over the old one, so it must be in the
-        // same folder (a rename, not a copy), and not be the old one.
-        const QFileInfo target(package_.target);
-        if (!samePath(info.absolutePath(), target.absolutePath())) {
-            fail(tr("The new AppImage must be downloaded next to the old one, in %1.").arg(target.absolutePath()));
-            return;
-        }
-        if (samePath(file_, package_.target)) {
-            fail(tr("The download has the running AppImage's name, %1: GitBolt can't replace a file with itself.")
-                     .arg(target.fileName()));
-            return;
-        }
-        const auto mode = QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner | QFile::ReadGroup
-                          | QFile::ExeGroup | QFile::ReadOther | QFile::ExeOther;
-        if (!QFile::setPermissions(file_, mode)) {
-            fail(tr("Couldn't make the new AppImage executable."));
-            return;
-        }
-        staged_ = file_;
-        succeed();
         return;
     }
     case PackageKind::WindowsInstall:
@@ -701,13 +677,11 @@ QString Installer::helperScript(qint64 pid) const {
         // and the bridge, which a LaunchServices launch wouldn't pass.
         in.execDirectly = !qEnvironmentVariable("GITBOLT_INSTANCE_NAME").isEmpty();
         return macHelperScript(in);
-    case PackageKind::AppImage:
-        in.extractAndRun = appImageRunsExtracted(qEnvironmentVariable("APPDIR"),
-                                                 qEnvironmentVariableIsSet("APPIMAGE_EXTRACT_AND_RUN"));
-        return appImageHelperScript(in);
     case PackageKind::Deb:
         in.pkexec = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
-        in.executable = QStringLiteral("/usr/bin/gitbolt");
+        // The package's launcher beside lib/gitbolt (/usr/bin/gitbolt); a
+        // test lays out its own.
+        in.executable = QDir::cleanPath(package_.target + QStringLiteral("/../../bin/gitbolt"));
         return debHelperScript(in);
     case PackageKind::WindowsInstall:
         return windowsHelperScript(in);
@@ -730,8 +704,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         emit failed(tr("Couldn't create %1.").arg(workDir_));
         return false;
     }
-    // One update per log: a relaunched AppImage or deb copy keeps writing
-    // its output to it.
+    // One update per log: a relaunched deb copy keeps writing its output
+    // to it.
     if (QFile logFile(logPath()); logFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         logFile.close();
     // An earlier update's result would pass for this one's.
@@ -917,72 +891,7 @@ void forceDetach(const QString& mountPoint) {
 }
 #endif
 
-// A path, and a newline: anything longer isn't a record of ours.
-constexpr qint64 kMaxPendingRecordBytes = 64 * 1024;
-
-QString pendingRecordPath(const QString& workDir) {
-    return QDir(workDir).filePath(QLatin1String(kPendingDownloadFile));
-}
-
-// Removes the download a leftover record names (its GitBolt crashed or
-// was killed) only if it is still a regular file of this user's, with
-// the release's AppImage name, and not the running AppImage (the user
-// may have started that very file). The record goes either way.
-void removePendingDownload(const PackageInfo& package, const QString& workDir) {
-    const QString record = pendingRecordPath(workDir);
-    const QFileInfo recordInfo(record);
-    if (!recordInfo.exists() && !recordInfo.isSymLink())
-        return;
-    QByteArray bytes;
-    if (QFile file(record); !recordInfo.isSymLink() && file.open(QIODevice::ReadOnly))
-        bytes = file.read(kMaxPendingRecordBytes + 1);
-    if (!QFile::remove(record))
-        qWarning("update: couldn't remove %s", qPrintable(record));
-    if (package.kind != PackageKind::AppImage || package.target.isEmpty() || bytes.size() > kMaxPendingRecordBytes)
-        return;
-    const QString path = QString::fromUtf8(bytes).trimmed();
-    if (path.isEmpty() || path.contains(u'\n') || !QDir::isAbsolutePath(path))
-        return;
-    const QFileInfo entry(path);
-    static const QRegularExpression image(QStringLiteral("^GitBolt-(.+)-x86_64\\.AppImage$"));
-    const QRegularExpressionMatch named = image.match(entry.fileName());
-    const std::optional<Version> version = named.hasMatch() ? Version::parse(named.captured(1)) : std::nullopt;
-    if (!version || assetNameFor(PackageKind::AppImage, *version) != entry.fileName())
-        return;
-    if (entry.isSymLink() || entry.isJunction() || !entry.isFile() || isTarget(entry, package.target))
-        return;
-#if defined(Q_OS_UNIX)
-    if (entry.ownerId() != ::getuid())
-        return;
-#endif
-    if (!QFile::remove(path))
-        qWarning("update: couldn't remove %s", qPrintable(path));
-}
-
 } // namespace
-
-void recordPendingDownload(const QString& workDir, const QString& file) {
-    if (workDir.isEmpty() || !QDir::isAbsolutePath(workDir) || !QDir().mkpath(workDir)) {
-        qWarning("update: no folder to record the download %s in", qPrintable(file));
-        return;
-    }
-    // A new file of its own: whatever has the name goes first (a link
-    // itself, never what it points to).
-    forgetPendingDownload(workDir);
-    QFile record(pendingRecordPath(workDir));
-    if (!record.open(QIODevice::WriteOnly | QIODevice::NewOnly)
-        || record.write(QFileInfo(file).absoluteFilePath().toUtf8() + '\n') < 0 || !record.flush())
-        qWarning("update: couldn't record the download %s in %s", qPrintable(file), qPrintable(record.fileName()));
-}
-
-void forgetPendingDownload(const QString& workDir) {
-    if (workDir.isEmpty())
-        return;
-    const QString record = pendingRecordPath(workDir);
-    const QFileInfo info(record);
-    if ((info.exists() || info.isSymLink()) && !QFile::remove(record))
-        qWarning("update: couldn't remove %s", qPrintable(record));
-}
 
 void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir) {
     if (package.kind == PackageKind::MacBundle && !package.target.isEmpty()) {
@@ -1019,25 +928,6 @@ void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir)
                 QDir().rmdir(entry.absoluteFilePath());
         }
     }
-
-    if (package.kind == PackageKind::AppImage && !package.target.isEmpty()) {
-        // This user's unfinished downloads beside the AppImage (another
-        // user's may be downloading there now). A finished one goes only
-        // if recorded (below): users keep their AppImages under that name.
-        static const QRegularExpression part(QStringLiteral("^\\.GitBolt-.+-x86_64\\.AppImage\\.part$"));
-        const QString folder = QFileInfo(package.target).absolutePath();
-        for (const QFileInfo& entry : ownEntries(folder, part, QDir::Files)) {
-            if (isTarget(entry, package.target))
-                continue;
-#if defined(Q_OS_UNIX)
-            if (entry.ownerId() != ::getuid())
-                continue;
-#endif
-            QFile::remove(entry.absoluteFilePath());
-        }
-    }
-    if (!workDir.isEmpty() && QDir::isAbsolutePath(workDir))
-        removePendingDownload(package, workDir);
 }
 
 } // namespace gitbolt::update

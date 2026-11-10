@@ -225,8 +225,6 @@ private slots:
             << QStringLiteral("GitBolt/THIRD-PARTY-NOTICES.txt") << true;
         QTest::newRow(".deb") << QStringLiteral("usr/lib/gitbolt")
             << QStringLiteral("usr/share/doc/gitbolt/copyright") << true;
-        QTest::newRow("AppImage") << QStringLiteral("squashfs-root/usr/bin")
-            << QStringLiteral("squashfs-root/usr/share/doc/gitbolt/copyright") << true;
         QTest::newRow("build tree") << QStringLiteral("build/src/app")
             << QStringLiteral("build/THIRD-PARTY-NOTICES.txt") << false;
     }

@@ -46,10 +46,10 @@ const QString kUserAgent = QStringLiteral("GitBolt/0.1.0 (Macintosh; Mac OS X 15
 QByteArray releaseJson(const QString& tag) {
     const QString version = tag.mid(1);
     QJsonObject asset{
-        {QStringLiteral("name"), QStringLiteral("GitBolt-%1-x86_64.AppImage").arg(version)},
+        {QStringLiteral("name"), QStringLiteral("gitbolt_%1_amd64.deb").arg(version)},
         {QStringLiteral("size"), 1234},
         {QStringLiteral("browser_download_url"),
-         QStringLiteral("https://github.com/Inverian/GitBolt/releases/download/%1/GitBolt-%2-x86_64.AppImage")
+         QStringLiteral("https://github.com/Inverian/GitBolt/releases/download/%1/gitbolt_%2_amd64.deb")
              .arg(tag, version)},
     };
     QJsonObject release{
@@ -128,7 +128,7 @@ private slots:
         QCOMPARE(release.version, (Version{0, 1, 1}));
         QCOMPARE(release.tag, QStringLiteral("v0.1.1"));
         QCOMPARE(release.notes, QStringLiteral("Notes for v0.1.1, with <i>markup</i>."));
-        QVERIFY(release.asset(QStringLiteral("GitBolt-0.1.1-x86_64.AppImage")));
+        QVERIFY(release.asset(QStringLiteral("gitbolt_0.1.1_amd64.deb")));
         QCOMPARE(available.at(0).at(1).toBool(), false);
     }
 

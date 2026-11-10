@@ -30,9 +30,8 @@ public:
     /// (QCoreApplication::applicationDirPath()): Contents/Resources/
     /// THIRD-PARTY-NOTICES.txt in the macOS bundle, THIRD-PARTY-
     /// NOTICES.txt above Windows's bin folder, and share/doc/gitbolt/
-    /// copyright on Linux, from /usr/lib/gitbolt (the .deb) or usr/bin
-    /// (the AppImage). Empty when none is there, as in a build tree on
-    /// Linux or Windows.
+    /// copyright on Linux, from /usr/lib/gitbolt (the .deb). Empty when
+    /// none is there, as in a build tree on Linux or Windows.
     static QString thirdPartyNoticesPath(const QString& appDir);
 
 private:

@@ -245,7 +245,6 @@ private:
         env.insert(QStringLiteral("GITBOLT_TEST_MARKER"), marker());
         env.insert(QStringLiteral("GITBOLT_TEST_RESULT"), result());
         env.insert(QStringLiteral("GITBOLT_INSTANCE_NAME"), kInstance);
-        env.remove(QStringLiteral("APPIMAGE_EXTRACT_AND_RUN"));
         helper_->setProcessEnvironment(env);
         helper_->setWorkingDirectory(path(QStringLiteral("updates")));
         helper_->start(shell, {file});
@@ -307,23 +306,6 @@ private:
     QStringList entries(const QString& relative) const {
         return QDir(path(relative)).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
                                               QDir::Name);
-    }
-
-    // AppImage: the old one and the new one, side by side.
-    HelperInputs appImageInputs(qint64 pid) const {
-        HelperInputs in;
-        in.pid = pid;
-        in.waitSeconds = 30;
-        in.logFile = log();
-        reportTo(in);
-        in.target = path(QStringLiteral("My Apps/GitBolt-0.1.0-x86_64.AppImage"));
-        in.staged = path(QStringLiteral("My Apps/GitBolt-0.1.1-x86_64.AppImage"));
-        return in;
-    }
-
-    bool layOutAppImage(const HelperInputs& in) {
-        return writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true)
-               && writeFile(in.staged, fakeAppScript(QStringLiteral("0.1.1")), true);
     }
 
     // Deb: the .deb (in a folder named with a ' and a $), and stand-ins
@@ -574,7 +556,7 @@ private slots:
         QFETCH(QString, shell);
         const HelperInputs in = nastyInputs();
         const QList<QPair<const char*, QString>> scripts = {
-            {"macOS", macHelperScript(in)}, {"AppImage", appImageHelperScript(in)}, {"deb", debHelperScript(in)}};
+            {"macOS", macHelperScript(in)}, {"deb", debHelperScript(in)}};
         for (const auto& [name, script] : scripts) {
             const QString file = path(QStringLiteral("syntax-%1.sh").arg(QLatin1String(name)));
             QVERIFY(writeFile(file, script.toUtf8()));
@@ -593,7 +575,7 @@ private slots:
             R"((\[\[|\]\]|\s==\s|^\s*function\s|\blocal\s|\$'|<<<|&>|\bsource\s|\becho\s+-[en]|\bdeclare\s|\btypeset\s|)"
             R"(\$RANDOM|\$\{[A-Za-z_]+(:[0-9]|/|\^|,)|\bpushd\b|\bpopd\b|\bselect\s))"),
             QRegularExpression::MultilineOption);
-        for (const QString& script : {macHelperScript(in), appImageHelperScript(in), debHelperScript(in)}) {
+        for (const QString& script : {macHelperScript(in), debHelperScript(in)}) {
             QVERIFY(script.startsWith(QLatin1String("#!/bin/sh\n")));
             const QRegularExpressionMatch match = bashism.match(script);
             QVERIFY2(!match.hasMatch(), qPrintable(match.captured(0)));
@@ -810,125 +792,6 @@ private slots:
         QVERIFY(script.contains(QLatin1String("\ntrash='/Users/o'\\''brien/.Trash'\n")));
     }
 
-    // ---------------------------------------------------------------
-    // AppImage
-    // ---------------------------------------------------------------
-
-    void appImageReplacesTheFileAndStartsIt_data() { addShellRows(); }
-
-    void appImageReplacesTheFileAndStartsIt() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        const HelperInputs in = appImageInputs(startWaited());
-        QVERIFY(layOutAppImage(in));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.1'")));
-        QVERIFY(QFileInfo(in.target).isExecutable());
-        QVERIFY(!QFileInfo::exists(in.staged));
-        const QString started = readFile(marker());
-        QVERIFY2(started.startsWith(QLatin1String("0.1.1 ")), qPrintable(started));
-        QVERIFY2(started.contains(QStringLiteral("instance=") + kInstance), qPrintable(started));
-        QCOMPARE(readFile(result()), QStringLiteral("ok 0.1.1 \n"));
-        QCOMPARE(resultAtRelaunch(), QStringLiteral("ok 0.1.1 \n"));
-#endif
-    }
-
-    void appImageKeepsTheOldOneWhenItCantReplaceIt_data() { addShellRows(); }
-
-    // Something other than a file where the new one should be: the old
-    // AppImage stays and starts.
-    void appImageKeepsTheOldOneWhenItCantReplaceIt() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        const HelperInputs in = appImageInputs(startWaited());
-        QVERIFY(writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        QVERIFY(QDir().mkpath(in.staged));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        QVERIFY(readFile(marker()).startsWith(QLatin1String("0.1.0 ")));
-        QVERIFY2(readFile(log()).contains(QLatin1String("keeping the old one")), qPrintable(diagnostics()));
-        QCOMPARE(resultAtRelaunch(),
-                 QStringLiteral("failed 0.1.1 the new AppImage couldn't be moved over the old one\n"));
-#endif
-    }
-
-    void appImageGivesUpAfterTheTimeout() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        HelperInputs in = appImageInputs(startWaited());
-        in.waitSeconds = 1;
-        QVERIFY(layOutAppImage(in));
-        QVERIFY(startHelper(QStringLiteral("/bin/sh"), appImageHelperScript(in)));
-        QVERIFY2(helperFinished(10000), qPrintable(diagnostics()));
-        QCOMPARE(helper_->exitCode(), 1);
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        QVERIFY(!QFileInfo::exists(in.staged));
-        QVERIFY(!QFileInfo::exists(marker()));
-        QVERIFY2(readFile(log()).contains(QLatin1String("giving up")), qPrintable(diagnostics()));
-        QCOMPARE(readFile(result()), QStringLiteral("gave-up 0.1.1 GitBolt didn't quit within 1 seconds\n"));
-#endif
-    }
-
-    // Started with --appimage-extract-and-run (no FUSE), which the
-    // runtime consumes without setting APPIMAGE_EXTRACT_AND_RUN: the new
-    // copy is started with it, or it would try FUSE and never come up.
-    void appImageRestartsExtractedWhenThisOneWas_data() { addShellRows(); }
-
-    void appImageRestartsExtractedWhenThisOneWas() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        HelperInputs in = appImageInputs(startWaited());
-        in.extractAndRun = true;
-        QVERIFY(writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        const QByteArray reportsIt = "#!/bin/sh\n"
-                                     "printf 'extract=%s\\n' \"${APPIMAGE_EXTRACT_AND_RUN-unset}\" >>\"$GITBOLT_TEST_MARKER\"\n";
-        QVERIFY(writeFile(in.staged, reportsIt, true));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-        QCOMPARE(readFile(marker()), QStringLiteral("extract=1\n"));
-
-        // Not asked for, not set (startHelper's environment has none).
-        in.extractAndRun = false;
-        QVERIFY(!appImageHelperScript(in).contains(QLatin1String("APPIMAGE_EXTRACT_AND_RUN")));
-        in.extractAndRun = true;
-        const QString script = appImageHelperScript(in);
-        QVERIFY(script.contains(QLatin1String("\nAPPIMAGE_EXTRACT_AND_RUN=1\nexport APPIMAGE_EXTRACT_AND_RUN\n")));
-        QVERIFY(script.indexOf(QLatin1String("export APPIMAGE_EXTRACT_AND_RUN"))
-                < script.indexOf(QLatin1String("exec \"$target\"")));
-#endif
-    }
-
-    // Extracted: asked to (the variable, set to anything), or $APPDIR is
-    // a plain folder (the runtime's appimage_extracted_<hash>). From
-    // its FUSE mount, $APPDIR is a mount point, as / is.
-    void tellsAnExtractedAppImageFromAMountedOne() {
-        QVERIFY(appImageRunsExtracted(QString(), true));
-        QVERIFY(appImageRunsExtracted(QStringLiteral("/"), true));
-        QVERIFY(!appImageRunsExtracted(QString(), false));
-        QVERIFY(!appImageRunsExtracted(QStringLiteral("/"), false));
-        const QString extracted = path(QStringLiteral("tmp/appimage_extracted_0123456789abcdef"));
-        QVERIFY(QDir().mkpath(extracted + QStringLiteral("/usr/bin")));
-        QVERIFY(appImageRunsExtracted(extracted, false));
-        QVERIFY(!appImageRunsExtracted(path(QStringLiteral("tmp/not-there")), false));
-    }
-
     // A GitBolt its parent hasn't reaped yet is a zombie, which kill -0
     // still finds: the helper counts it as quit, or a launcher that never
     // calls wait() would hold every update for the full ten minutes.
@@ -952,15 +815,15 @@ private slots:
         QVERIFY2(state.startsWith(u'Z'), qPrintable(state));
         QVERIFY(gitbolt::test::processAlive(child));   // kill -0 alone says it lives
 
-        HelperInputs in = appImageInputs(child);
+        HelperInputs in = debInputs(child);
         in.waitSeconds = 60;
-        QVERIFY(layOutAppImage(in));
+        QVERIFY(layOutDeb(in, 0));
         QElapsedTimer clock;
         clock.start();
-        QVERIFY(startHelper(QStringLiteral("/bin/sh"), appImageHelperScript(in)));
+        QVERIFY(startHelper(QStringLiteral("/bin/sh"), debHelperScript(in)));
         QVERIFY2(helperFinished(20000), qPrintable(diagnostics()));
         QVERIFY2(clock.elapsed() < 15000, qPrintable(QString::number(clock.elapsed())));
-        QVERIFY(readFile(marker()).startsWith(QLatin1String("0.1.1 ")));
+        QVERIFY(readFile(marker()).startsWith(QLatin1String("relaunched ")));
 #endif
     }
 

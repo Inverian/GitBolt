@@ -37,8 +37,7 @@ namespace gitbolt::update {
 /// does), check GitBolt.app there, ditto it to <folder>/.GitBolt-<v>.app
 /// beside the installed bundle (same volume, so the helper's swap is
 /// two renames), check the copy, detach. Other packages need nothing
-/// staged: the AppImage was downloaded beside the old one and is made
-/// executable; the .deb and the Windows installer stay where they are.
+/// staged: the .deb and the Windows installer stay where they are.
 ///
 /// GUI thread; one prepare() at a time. Every step runs in a QProcess,
 /// and every outcome is signalled from the event loop, never from
@@ -220,33 +219,10 @@ WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProce
 ///     user owns; and in `workDir`, the disk image mount points
 ///     (mount-XXXXXX), detached first (forced) if still mounted, then
 ///     removed only if empty;
-///   - AppImage: in the AppImage's folder, the Downloader's
-///     .GitBolt-<v>-x86_64.AppImage.part files that this user owns, and
-///     the download recordPendingDownload() named, if it is still a
-///     file of this user's named as the release names an AppImage
-///     (GitBolt-<v>-x86_64.AppImage); never the running AppImage
-///     (package.target), and never any other GitBolt-<v>-x86_64.AppImage:
-///     that is the name users keep their AppImages under (an update
-///     keeps the old one's name, too);
 ///   - nothing for the other packages: their downloads are in
 ///     workDir/<v>/, which removeOldDownloads clears.
-/// The record itself goes, whatever the package. Synchronous (a forced
-/// detach is bounded); the app calls it once, before any Installer
-/// exists.
+/// Synchronous (a forced detach is bounded); the app calls it once,
+/// before any Installer exists.
 void removeStaleInstallFiles(const PackageInfo& package, const QString& workDir);
-
-/// <workDir>/pending-download: the absolute path of an AppImage's
-/// checked download (beside the AppImage, outside GitBolt's folders)
-/// that no helper has taken over yet.
-inline constexpr char kPendingDownloadFile[] = "pending-download";
-/// UpdateController records the download when the Downloader finishes
-/// one for an AppImage, and forgets it once the helper takes the file
-/// over or the download is deleted. A record still there at the next
-/// start is a crash's (or a kill's) in between, and the next start
-/// removes that file (removeStaleInstallFiles): it is the one
-/// GitBolt-<v>-x86_64.AppImage beside the AppImage that GitBolt knows
-/// is its own.
-void recordPendingDownload(const QString& workDir, const QString& file);
-void forgetPendingDownload(const QString& workDir);
 
 } // namespace gitbolt::update

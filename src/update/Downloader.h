@@ -53,11 +53,11 @@ public:
     const Config& config() const;
 
     /// Gets SHA256SUMS.txt, then `assetName` (a plain file name, as
-    /// assetNameFor gives it) into `dir`, or, when `dir` is empty, into
-    /// Config::downloadDir/<version>/ (created as needed). Ignored while
-    /// busy(). Every outcome is a signal from the event loop, never from
-    /// inside start(), with busy() already false.
-    void start(const Release& release, const QString& assetName, const QString& dir = {});
+    /// assetNameFor gives it) into Config::downloadDir/<version>/
+    /// (created as needed). Ignored while busy(). Every outcome is a
+    /// signal from the event loop, never from inside start(), with
+    /// busy() already false.
+    void start(const Release& release, const QString& assetName);
     /// Stops the download and deletes its .part. Emits nothing.
     void cancel();
     bool busy() const;
@@ -71,7 +71,7 @@ signals:
     void failed(const QString& message);
 
 private:
-    QString prepare(const Release& release, const QString& assetName, const QString& dir);
+    QString prepare(const Release& release, const QString& assetName);
     QNetworkReply* get(const QUrl& url);
     void fetchChecksums();
     void onChecksumsFinished(QNetworkReply* reply);

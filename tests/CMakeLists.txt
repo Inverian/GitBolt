@@ -152,8 +152,8 @@ target_sources(test_update_package PRIVATE update/FakeApps.h)
 target_link_libraries(test_update_package PRIVATE gitbolt_update)
 # The helpers that finish an update once GitBolt has quit, run for real
 # on scratch folders with HOME a scratch folder too: macOS's (on macOS)
-# and the AppImage's under /bin/sh and dash, the deb's with a stand-in
-# pkexec; Windows' two PowerShell parts as text (quoting, /D= last, the
+# and the deb's (with a stand-in pkexec) under /bin/sh and dash; Windows'
+# two PowerShell parts as text (quoting, /D= last, the
 # -EncodedCommand round trip and ShellExecuteExW's parameters, the
 # administrator part that waits for the install folder to be free and
 # writes the result last, the helper that waits for it and starts GitBolt
@@ -165,10 +165,11 @@ gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
 target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_helpers PRIVATE gitbolt_update)
 # Installer::prepare for each package, and whole updates through a real
-# detached helper: an AppImage on any Unix; on macOS real disk images,
-# made here with hdiutil from fake ad-hoc-signed bundles, including a
-# wrong bundle id, a wrong version and a broken seal. About a minute on
-# macOS (each hdiutil create takes seconds), hence the longer TIMEOUT.
+# detached helper: a deb (stand-in pkexec) on any Unix; on macOS real
+# disk images, made here with hdiutil from fake ad-hoc-signed bundles,
+# including a wrong bundle id, a wrong version and a broken seal. About a
+# minute on macOS (each hdiutil create takes seconds), hence the longer
+# TIMEOUT.
 gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
@@ -333,7 +334,7 @@ target_link_libraries(test_update_setup PRIVATE gitbolt_ui)
 # MainWindow. Off screen; on macOS a disk image hdiutil refuses, and
 # one made here (update/FakeApps.h) for a newer macOS, take a moment.
 gitbolt_add_test(test_update_controller ui/TestUpdateController.cpp)
-target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h)
+target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_controller PRIVATE gitbolt_ui gitbolt_update Qt6::Network)
 set_property(TEST test_update_controller APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File > Recent Repositories following the recent list, and the

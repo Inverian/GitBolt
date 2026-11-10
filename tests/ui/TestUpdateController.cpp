@@ -13,12 +13,10 @@
 //     or anything with the switch off or GITBOLT_UPDATE_CHECK=0;
 //   - only an official build's setup schedules the timer; a test
 //     session's exists, stopped, and may be fired; start() clears old
-//     downloads, and beside the AppImage only what GitBolt left there
-//     (a .part, the download it recorded), never the user's AppImages;
-//   - Install and Restart downloads into the AppImage's folder, and
-//     records the download until the helper takes it; Cancel, closing
-//     the dialog, a failed download and a download abandoned after it
-//     finished all leave nothing there but the running AppImage, and
+//     downloads;
+//   - Install and Restart downloads into the version's folder of the
+//     downloads; Cancel, closing the dialog, a failed download and a
+//     download abandoned after it finished all leave nothing there, and
 //     never start the helper; on macOS, a disk image that won't attach
 //     is deleted too, and one for a newer macOS is remembered: shown as
 //     not installable with why, never downloaded again, until a newer
@@ -28,9 +26,10 @@
 //     answer says GitHub took it down), and a manual check whose dialog
 //     was taken over by the bar's View doesn't replace the install
 //     screen with its late answer;
-//   - once the helper runs (a real one, against a stand-in AppImage
-//     and a child process for it to wait for; the quit is caught, never
-//     done), the dialog has nothing to cancel, says so when GitBolt
+//   - once the helper runs (a real one, for a stand-in deb with
+//     stand-in pkexec and launcher, and a child process for it to wait
+//     for; the quit is caught, never done), the dialog has nothing to
+//     cancel, says so when GitBolt
 //     doesn't quit, and the download is the helper's; once the helper
 //     has given up (a short deadline here), the install is over and
 //     failed, and checks and Install work again;
@@ -49,6 +48,10 @@
 //     menu's About GitBolt and Check for Updates… have their roles as
 //     they join their placeholder menu, which then doesn't show in the
 //     menu bar.
+//
+// The deb is the package most tests install: it needs no platform's
+// tools. On Unix, PATH starts with stand-ins for apt-get and pkexec, so
+// nothing asks for root or changes a package.
 //
 
 #include <QAbstractButton>
@@ -79,6 +82,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "../TestProcessHelper.h"
 #include "../update/FakeApps.h"
 #include "../update/HttpServer.h"
 #include "conf/SettingsService.h"
@@ -107,7 +111,7 @@ using State = UpdateDialog::State;
 namespace {
 
 const QByteArray kFeedPath = "/repos/Inverian/GitBolt/releases/latest";
-const QString kAppImageAsset = QStringLiteral("GitBolt-0.1.1-x86_64.AppImage");
+const QString kDebAsset = QStringLiteral("gitbolt_0.1.1_amd64.deb");
 
 class UrlCatcher : public QObject {
     Q_OBJECT
@@ -231,9 +235,13 @@ QByteArray contents(const QString& path) {
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray("<missing>");
 }
 
-bool writeFile(const QString& path, const QByteArray& bytes) {
+bool writeFile(const QString& path, const QByteArray& bytes, bool executable = false) {
+    QDir().mkpath(QFileInfo(path).absolutePath());
     QFile file(path);
-    return file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(bytes) == bytes.size();
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(bytes) != bytes.size())
+        return false;
+    file.close();
+    return !executable || file.setPermissions(file.permissions() | QFile::ExeOwner | QFile::ExeGroup | QFile::ExeOther);
 }
 
 // The buttons the dialog shows, by objectName.
@@ -256,7 +264,6 @@ const QList<QPair<QString, QByteArray>> kEveryInstaller{
     {QStringLiteral("GitBolt-0.1.1-Darwin-arm64.dmg"), "dmg"},
     {QStringLiteral("GitBolt-0.1.1-Windows-AMD64.exe"), "exe"},
     {QStringLiteral("gitbolt_0.1.1_amd64.deb"), "deb"},
-    {QStringLiteral("GitBolt-0.1.1-x86_64.AppImage"), "AppImage"},
 };
 
 // The window's side of it, without a MainWindow: the controller with a
@@ -272,6 +279,10 @@ struct Harness {
     UpdateDialog* dialog() const { return controller->dialog(); }
     QTimer* timer() const { return window.findChild<QTimer*>(QStringLiteral("updateCheckTimer")); }
     gitbolt::update::Downloader* downloader() const { return window.findChild<gitbolt::update::Downloader*>(); }
+    // What is in the downloads' folder of `version` (absent: nothing).
+    QStringList downloads(const QString& version = QStringLiteral("0.1.1")) const {
+        return entries(QDir(controller->setup().config.downloadDir).filePath(version));
+    }
     gitbolt::update::Checker* checker() const { return window.findChild<gitbolt::update::Checker*>(); }
     // As the bridge's fire-timer does.
     void fire() const { QMetaObject::invokeMethod(timer(), "timeout"); }
@@ -296,11 +307,29 @@ private slots:
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir_.path());
     }
 
-    // A fresh GitBolt.ini and cache for each test.
+    // A fresh GitBolt.ini and cache for each test, and on Unix the
+    // stand-ins: apt-get's check says yes; pkexec "installs" the .deb
+    // (its last argument) as the launcher, and fails as apt-get would
+    // when it is gone; the launcher leaves "old" in started beside it.
     void init() {
         QSettings(SettingsService().fileName(), QSettings::IniFormat).clear();
         cache_ = std::make_unique<QTemporaryDir>();
         QVERIFY(cache_->isValid());
+#if defined(Q_OS_UNIX)
+        const QString bin = QDir(cache_->path()).filePath(QStringLiteral("stand-ins"));
+        QVERIFY(writeFile(bin + QStringLiteral("/apt-get"), "#!/bin/sh\nexit 0\n", true));
+        const QByteArray launcherPath = gitbolt::update::shellQuote(launcher()).toUtf8();
+        QVERIFY(writeFile(bin + QStringLiteral("/pkexec"),
+                          "#!/bin/sh\nfor last in \"$@\"; do :; done\n[ -f \"$last\" ] || exit 100\ncp \"$last\" "
+                              + launcherPath + "\n",
+                          true));
+        QVERIFY(writeFile(launcher(), "#!/bin/sh\necho old >\"$(dirname \"$0\")/started\"\n", true));
+        path_ = std::make_unique<gitbolt::test::ScopedEnv>("PATH", QFile::encodeName(bin) + ':' + qgetenv("PATH"));
+#endif
+    }
+
+    void cleanup() {
+        path_.reset();
     }
 
     // ---- checking ---------------------------------------------------------
@@ -323,7 +352,7 @@ private slots:
         if (served.isEmpty())
             server.routes.insert(kFeedPath, Served::withStatus(500, "{}"));
         else
-            serve(server, served, {{kAppImageAsset, "new"}});
+            serve(server, served, {{kDebAsset, "new"}});
         // The test binary is no package: Unknown, as a build tree is.
         Harness h(testSetup(server, cache_->path(), gitbolt::update::detectPackage(gitbolt::update::currentProbe())));
 
@@ -355,7 +384,7 @@ private slots:
     // goes to the bar.
     void closingWhileCheckingLeavesTheFindToTheBar() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         server.routes[kFeedPath].delayMs = 300;
         Harness h(testSetup(server, cache_->path()));
         h.controller->checkNow();
@@ -369,7 +398,7 @@ private slots:
 
     void automaticFindShowsTheBarOnceADay() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         Harness h(testSetup(server, cache_->path()));
 
         h.fire();
@@ -393,7 +422,7 @@ private slots:
 
     void skippedVersionIsQuietUntilANewerOne() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         Harness h(testSetup(server, cache_->path()));
         h.settings.setSkippedUpdateVersion(QStringLiteral("0.1.1"));
 
@@ -408,7 +437,7 @@ private slots:
         h.dialog()->reject();
 
         // A newer one is news again.
-        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), "new"}});
+        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("gitbolt_0.1.2_amd64.deb"), "new"}});
         h.settings.setUpdateLastCheck({});
         h.fire();
         QTRY_COMPARE(h.bar->isHidden(), false);
@@ -417,7 +446,7 @@ private slots:
 
     void skipThisVersionIsSaved() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         Harness h(testSetup(server, cache_->path()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::NotInstallable);
@@ -428,7 +457,7 @@ private slots:
 
     void dismissingLastsTheSession() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         {
             Harness h(testSetup(server, cache_->path()));
             h.fire();
@@ -452,7 +481,7 @@ private slots:
 
     void switchOffOrOptOutAsksNothingByItself() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         {
             Harness h(testSetup(server, cache_->path()));
             h.settings.setUpdateAutoCheck(false);
@@ -518,106 +547,69 @@ private slots:
         QCOMPARE(entries(updates), QStringList{QStringLiteral("0.1.1")});
     }
 
-    // What an update that crashed left beside the AppImage goes at the
-    // next start (removeStaleInstallFiles): its .part, and the download
-    // it recorded. The running copy and the user's own AppImages stay,
-    // named as the release names them or not, older than this one or
-    // newer: the one they keep to go back to, say.
-    void startClearsWhatACrashedUpdateLeftBehind() {
-        HttpServer server;
-        const QString apps = appImageFolder();
-        const QStringList left{QStringLiteral(".GitBolt-0.1.1-x86_64.AppImage.part"),
-                               QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
-                               QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
-                               QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), kAppImageAsset};
-        for (const QString& name : left)
-            QVERIFY(writeFile(QDir(apps).filePath(name), "x"));
-        UpdateSetup setup = testSetup(server, cache_->path(), appImage(apps));
-        const QString record = QDir(setup.config.downloadDir).filePath(QLatin1String(gitbolt::update::kPendingDownloadFile));
-        // The checked download of 0.1.1, which no helper took over.
-        QVERIFY(writeFile(record, QDir(apps).filePath(kAppImageAsset).toUtf8() + '\n'));
-        Harness h(setup);
-        h.controller->start();
-        QCOMPARE(entries(apps), (QStringList{QStringLiteral("GitBolt-0.0.9-x86_64.AppImage"),
-                                             QStringLiteral("GitBolt-0.1.0-x86_64.AppImage"),
-                                             QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"),
-                                             QStringLiteral("GitBolt.AppImage")}));
-        QVERIFY(!QFileInfo::exists(record));
-    }
-
     // ---- installing ---------------------------------------------------------
 
     void cancelLeavesNothingBehind() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, QByteArray(256 * 1024, 'n')}});
-        auto& slow = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8()];
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, QByteArray(256 * 1024, 'n')}});
+        auto& slow = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8()];
         slow.chunkBytes = 4096;
         slow.chunkDelayMs = 40;
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
 
         h.button("updateDialog.install")->click();
         QCOMPARE(h.dialog()->state(), State::Downloading);
-        // Into the AppImage's folder, as a .part, until Cancel.
-        QTRY_VERIFY(entries(apps).contains(QStringLiteral(".") + kAppImageAsset + QStringLiteral(".part")));
+        // Into the version's folder, as a .part, until Cancel.
+        QTRY_VERIFY(h.downloads().contains(QStringLiteral(".") + kDebAsset + QStringLiteral(".part")));
         h.button("updateDialog.cancel")->click();
         QCOMPARE(h.dialog()->state(), State::Available);
         QVERIFY(h.dialog()->isVisible());
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
-        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
+        QCOMPARE(h.downloads(), QStringList{});
     }
 
     void closingTheDialogStopsTheDownload() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, QByteArray(256 * 1024, 'n')}});
-        auto& slow = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8()];
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, QByteArray(256 * 1024, 'n')}});
+        auto& slow = server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8()];
         slow.chunkBytes = 4096;
         slow.chunkDelayMs = 40;
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
         h.button("updateDialog.install")->click();
-        QTRY_VERIFY(entries(apps).size() == 2);
+        QTRY_VERIFY(h.downloads().size() == 1);
         h.dialog()->reject();
         QVERIFY(!h.downloader()->busy());
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QCOMPARE(h.downloads(), QStringList{});
     }
 
     // The download finished and was checked, and then the user walked
-    // away (closed the dialog) before it was installed: the new AppImage
-    // doesn't stay next to the old one, and no helper is started.
+    // away (closed the dialog) before it was installed: the new deb
+    // doesn't stay, and no helper is started.
     void anAbandonedDownloadIsDeleted() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "the new AppImage"}});
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "the new deb"}});
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
 
         // Right after the controller takes the download (it connected
-        // first), before the Installer's queued outcome. Until a helper
-        // takes it over, it is recorded as GitBolt's: a crash now would
-        // leave it to the next start to remove.
+        // first), before the Installer's queued outcome.
         const QString updates = h.controller->setup().config.downloadDir;
-        const QString record = QDir(updates).filePath(QLatin1String(gitbolt::update::kPendingDownloadFile));
         bool abandoned = false;
         connect(h.downloader(), &gitbolt::update::Downloader::finished, this,
                 [&](const QString& path) {
-                    QCOMPARE(path, QDir(apps).filePath(kAppImageAsset));
+                    QCOMPARE(path, QDir(updates).filePath(QStringLiteral("0.1.1/") + kDebAsset));
                     QVERIFY(QFile::exists(path));
-                    QCOMPARE(contents(record), path.toUtf8() + '\n');
                     h.dialog()->reject();
                     abandoned = true;
                 });
         h.button("updateDialog.install")->click();
         QTRY_VERIFY(abandoned);
         QTest::qWait(300);   // anything queued has run
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
-        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
-        QVERIFY(!QFile::exists(record));
+        QCOMPARE(h.downloads(), QStringList{});
         QVERIFY(!QFile::exists(QDir(updates).filePath(QStringLiteral("install-helper.sh"))));
         QVERIFY(!QFile::exists(QDir(updates).filePath(QStringLiteral("install.log"))));
     }
@@ -625,20 +617,19 @@ private slots:
     void aBadDownloadFailsCleanlyAndCanBeRetried() {
         HttpServer server;
         // SHA256SUMS.txt says something else.
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "the new AppImage"}}, true,
-              QByteArray(64, 'a') + "  " + kAppImageAsset.toUtf8() + '\n');
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "the new deb"}}, true,
+              QByteArray(64, 'a') + "  " + kDebAsset.toUtf8() + '\n');
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
         h.button("updateDialog.install")->click();
         QTRY_COMPARE(h.dialog()->state(), State::Failed);
         QVERIFY2(h.dialog()->shownText().contains(QStringLiteral("Couldn't install GitBolt 0.1.1")),
                  qPrintable(h.dialog()->shownText()));
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QCOMPARE(h.downloads(), QStringList{});
 
         // Try Again installs again (it doesn't just check).
-        const QByteArray assetPath = QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8();
+        const QByteArray assetPath = QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8();
         const int before = server.hits(assetPath);
         h.button("updateDialog.retry")->click();
         QTRY_COMPARE(h.dialog()->state(), State::Failed);
@@ -646,28 +637,12 @@ private slots:
         QCOMPARE(server.hits(kFeedPath), 1);
     }
 
-    // The new AppImage's name is the running one's: it would download
-    // over itself. Refused before anything is asked for.
-    void anAppImageNamedLikeTheNewOneIsRefused() {
-        HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
-        const QString apps = appImageFolder(kAppImageAsset);
-        Harness h(testSetup(server, cache_->path(), appImage(apps, kAppImageAsset)));
-        h.controller->checkNow();
-        QTRY_COMPARE(h.dialog()->state(), State::Available);
-        h.button("updateDialog.install")->click();
-        QCOMPARE(h.dialog()->state(), State::Failed);
-        QVERIFY(h.dialog()->shownText().contains(QStringLiteral("has this one's name")));
-        QCOMPARE(server.requests().size(), 1);
-        QCOMPARE(contents(QDir(apps).filePath(kAppImageAsset)), QByteArray("old"));
-    }
-
     void whatTheReleaseLacksIsSaid_data() {
         QTest::addColumn<bool>("withInstaller");
         QTest::addColumn<bool>("withChecksums");
         QTest::addColumn<QString>("says");
         QTest::newRow("no installer for this system") << false << true
-                                                      << "no installer for this system (GitBolt-0.1.1-x86_64.AppImage)";
+                                                      << "no installer for this system (gitbolt_0.1.1_amd64.deb)";
         QTest::newRow("no checksums") << true << false << "lists no checksums (SHA256SUMS.txt)";
     }
     void whatTheReleaseLacksIsSaid() {
@@ -677,9 +652,9 @@ private slots:
         HttpServer server;
         QList<QPair<QString, QByteArray>> assets{{QStringLiteral("GitBolt-0.1.1-Darwin-arm64.dmg"), "dmg"}};
         if (withInstaller)
-            assets.append({kAppImageAsset, "new"});
+            assets.append({kDebAsset, "new"});
         serve(server, QStringLiteral("0.1.1"), assets, withChecksums);
-        Harness h(testSetup(server, cache_->path(), appImage(appImageFolder())));
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::NotInstallable);
         QVERIFY2(h.dialog()->shownText().contains(says), qPrintable(h.dialog()->shownText()));
@@ -711,8 +686,8 @@ private slots:
     void aReleaseThisSystemIsTooOldForIsntDownloadedAgain() {
         QFETCH(bool, sameSystem);
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
-        Harness h(testSetup(server, cache_->path(), appImage(appImageFolder())));
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
+        Harness h(testSetup(server, cache_->path(), deb()));
         const QString why = QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this Mac has macOS 15.6, "
                                            "so it can't be installed here.");
         h.settings.setIncompatibleUpdate(QStringLiteral("0.1.1"), why,
@@ -727,13 +702,13 @@ private slots:
         QCOMPARE(h.dialog()->state(), State::NotInstallable);
         QVERIFY2(h.dialog()->shownText().contains(why), qPrintable(h.dialog()->shownText()));
         QVERIFY(h.button("updateDialog.install")->isHidden());
-        QCOMPARE(server.hits(QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8()), 0);
+        QCOMPARE(server.hits(QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8()), 0);
         QCOMPARE(h.settings.incompatibleUpdateVersion(), QStringLiteral("0.1.1"));
 
         // A newer release is news again: installable, and the refusal
         // is forgotten.
         h.dialog()->reject();
-        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), "newer"}});
+        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("gitbolt_0.1.2_amd64.deb"), "newer"}});
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
         QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.2 is available"));
@@ -921,12 +896,11 @@ private slots:
     void viewDuringAManualCheckKeepsTheInstall() {
         QFETCH(bool, fails);
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, QByteArray(64 * 1024, 'n')}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, QByteArray(64 * 1024, 'n')}});
         // The download stops after a little: no progress() puts the
         // dialog right again.
-        server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8()].stallAfter = 1024;
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        server.routes[QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8()].stallAfter = 1024;
+        Harness h(testSetup(server, cache_->path(), deb()));
 
         h.fire();
         QTRY_COMPARE(h.bar->isHidden(), false);
@@ -955,7 +929,7 @@ private slots:
         // release, and a later check still answers in the dialog.
         h.button("updateDialog.cancel")->click();
         QCOMPARE(h.dialog()->state(), State::Available);
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QCOMPARE(h.downloads(), QStringList{});
         server.routes.insert(kFeedPath, Served::withStatus(500, "{}"));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Failed);
@@ -967,17 +941,16 @@ private slots:
     // dialog closes.
     void theDialogsReleaseIsTheOneActedOn() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, QByteArray(256 * 1024, 'n')}});
-        const QByteArray oldAsset = QStringLiteral("/download/v0.1.1/%1").arg(kAppImageAsset).toUtf8();
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, QByteArray(256 * 1024, 'n')}});
+        const QByteArray oldAsset = QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8();
         server.routes[oldAsset].chunkBytes = 4096;
         server.routes[oldAsset].chunkDelayMs = 40;
-        const QString apps = appImageFolder();
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
         QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.1 is available"));
 
-        const QString newAsset = QStringLiteral("GitBolt-0.1.2-x86_64.AppImage");
+        const QString newAsset = QStringLiteral("gitbolt_0.1.2_amd64.deb");
         serve(server, QStringLiteral("0.1.2"), {{newAsset, "newer"}});
         h.settings.setUpdateLastCheck({});
         h.fire();
@@ -1013,18 +986,18 @@ private slots:
     void aWithdrawnReleaseIsntOfferedOnceTheDialogCloses() {
         QFETCH(bool, manual);
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
-        Harness h(testSetup(server, cache_->path(), appImage(appImageFolder())));
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
+        Harness h(testSetup(server, cache_->path(), deb()));
         h.controller->checkNow();
         QTRY_COMPARE(h.dialog()->state(), State::Available);
 
-        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("GitBolt-0.1.2-x86_64.AppImage"), "newer"}});
+        serve(server, QStringLiteral("0.1.2"), {{QStringLiteral("gitbolt_0.1.2_amd64.deb"), "newer"}});
         h.settings.setUpdateLastCheck({});
         h.fire();
         QTRY_COMPARE(server.hits(kFeedPath), 2);
         QTRY_VERIFY(!h.checker()->busy());
 
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         if (manual) {
             h.controller->checkNow();
         } else {
@@ -1044,18 +1017,17 @@ private slots:
 
     // ---- once the helper runs ------------------------------------------------
 
-    // A real helper for a stand-in AppImage, waiting on a child process
-    // in this process's place; the quit is caught, and never happens.
+    // A real helper for a stand-in deb, waiting on a child process in
+    // this process's place; the quit is caught, and never happens.
     void afterTheHelperStartsNothingIsLeftToCancel() {
 #if defined(Q_OS_WIN)
-        QSKIP("the AppImage helper is a /bin/sh script");
+        QSKIP("the deb helper is a /bin/sh script");
 #else
         HttpServer server;
-        // The "new AppImage": when the helper starts it, it leaves a
-        // marker, so the test knows the helper is done.
-        const QByteArray script = "#!/bin/sh\necho started > \"$(dirname \"$0\")/started\"\n";
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, script}});
-        const QString apps = appImageFolder();
+        // The "new deb": the stand-in pkexec puts it in place as the
+        // launcher, which the helper then starts, and it says so.
+        const QByteArray script = "#!/bin/sh\necho new >\"$(dirname \"$0\")/started\"\n";
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, script}});
         QProcess stand;   // GitBolt, for the helper to wait for
         stand.start(QStringLiteral("/bin/sleep"), {QStringLiteral("120")});
         QVERIFY(stand.waitForStarted());
@@ -1063,8 +1035,9 @@ private slots:
             stand.kill();
             stand.waitForFinished();
         });
+        QString downloaded;
         {
-            Harness h(testSetup(server, cache_->path(), appImage(apps)));
+            Harness h(testSetup(server, cache_->path(), deb()));
             int quits = 0;
             h.controller->setRestartHooks({[&] { return stand.processId(); }, [&] { ++quits; }, 300});
             h.controller->checkNow();
@@ -1078,8 +1051,7 @@ private slots:
             const QDir downloads(h.controller->setup().config.downloadDir);
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install-helper.sh"))));
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install.log"))));
-            // The download is the helper's now, no crash's to clear up.
-            QVERIFY(!QFile::exists(downloads.filePath(QLatin1String(gitbolt::update::kPendingDownloadFile))));
+            downloaded = downloads.filePath(QStringLiteral("0.1.1/") + kDebAsset);
             // Watched until the helper's own wait is over, and a margin.
             auto* deadline = h.window.findChild<QTimer*>(QStringLiteral("updateHelperDeadline"));
             QVERIFY(deadline && deadline->isActive());
@@ -1105,15 +1077,16 @@ private slots:
             // helper's, and stays.
             h.dialog()->reject();
         }
-        QCOMPARE(entries(apps), (QStringList{kAppImageAsset, QStringLiteral("GitBolt.AppImage")}));
-        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
+        QCOMPARE(contents(downloaded), script);
+        QVERIFY(!QFile::exists(started()));
 
-        // "GitBolt" quits: the helper puts the new AppImage in place and
-        // starts it.
+        // "GitBolt" quits: the helper installs the new deb and starts
+        // the launcher, now the new one.
         stand.kill();
         stand.waitForFinished();
-        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(QDir(apps).filePath(QStringLiteral("started"))), 15000);
-        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), script);
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(started()), 15000);
+        QCOMPARE(contents(started()), QByteArray("new\n"));
+        QCOMPARE(contents(launcher()), script);
 #endif
     }
 
@@ -1126,11 +1099,11 @@ private slots:
     // finds no download any more and changes nothing either.
     void anUpdateTheHelperGaveUpOnIsOver() {
 #if defined(Q_OS_WIN)
-        QSKIP("the AppImage helper is a /bin/sh script");
+        QSKIP("the deb helper is a /bin/sh script");
 #else
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "#!/bin/sh\nexit 0\n"}});
-        const QString apps = appImageFolder();
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "#!/bin/sh\nexit 0\n"}});
+        const QByteArray oldLauncher = contents(launcher());
         QProcess stand;
         stand.start(QStringLiteral("/bin/sleep"), {QStringLiteral("120")});
         QVERIFY(stand.waitForStarted());
@@ -1138,7 +1111,7 @@ private slots:
             stand.kill();
             stand.waitForFinished();
         });
-        Harness h(testSetup(server, cache_->path(), appImage(apps)));
+        Harness h(testSetup(server, cache_->path(), deb()));
         int quits = 0;
         h.controller->setRestartHooks({[&] { return stand.processId(); }, [&] { ++quits; }, 300, 1500});
         h.controller->checkNow();
@@ -1164,7 +1137,7 @@ private slots:
                                                          QStringLiteral("updateDialog.retry")}));
         QCOMPARE(quits, 1);
         // Nothing of it is left, and the next start doesn't say it again.
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QCOMPARE(h.downloads(), QStringList{});
         QVERIFY(!QFile::exists(downloads.filePath(QStringLiteral("install-result"))));
 
         // A check asks GitHub again, and offers the release again.
@@ -1182,8 +1155,7 @@ private slots:
         stand.waitForFinished();
         QTRY_VERIFY_WITH_TIMEOUT(contents(downloads.filePath(QStringLiteral("install-result"))).startsWith("failed 0.1.1 "),
                                  15000);
-        QCOMPARE(contents(QDir(apps).filePath(QStringLiteral("GitBolt.AppImage"))), QByteArray("old"));
-        QCOMPARE(entries(apps), QStringList{QStringLiteral("GitBolt.AppImage")});
+        QCOMPARE(contents(launcher()), oldLauncher);
 #endif
     }
 
@@ -1230,12 +1202,12 @@ private slots:
                                           "and drag GitBolt into your Applications folder.")}
             << "restarts GitBolt with it.";
         // What the helpers write: the reason, in seconds, isn't repeated.
-        QTest::newRow("AppImage: gave up")
-            << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::AppImage)
+        QTest::newRow("deb: gave up")
+            << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::Deb)
             << QStringList{QStringLiteral("\nGitBolt 0.1.1 wasn't installed: GitBolt didn't quit within 10 minutes "
                                           "of Install and Restart. GitBolt wasn't changed.\n"),
-                           QStringLiteral("download GitBolt-0.1.1-x86_64.AppImage")}
-            << "restarts GitBolt with it.";
+                           QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
+            << "You'll be asked for an administrator's password.";
     }
     void anEarlierFailureIsShown() {
         QFETCH(QByteArray, result);
@@ -1360,7 +1332,7 @@ private slots:
     void aStaleOrUnreadableResultIsDropped() {
         QFETCH(QByteArray, result);
         HttpServer server;
-        UpdateSetup setup = testSetup(server, cache_->path(), appImage(appImageFolder()));
+        UpdateSetup setup = testSetup(server, cache_->path(), deb());
         const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
         QVERIFY(writeFile(path, result));
         Harness h(setup);
@@ -1431,7 +1403,7 @@ private slots:
 
     void withTheCheckTheMenuAsks() {
         HttpServer server;
-        serve(server, QStringLiteral("0.1.1"), {{kAppImageAsset, "new"}});
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "new"}});
         UrlCatcher catcher;
         AppMenuWatcher appMenu;
         gitbolt::ui::MainWindow window;
@@ -1503,22 +1475,20 @@ private slots:
     }
 
 private:
-    // A folder with a running AppImage stand-in in it, named `name`.
-    QString appImageFolder(const QString& name = QStringLiteral("GitBolt.AppImage")) {
-        const QString apps = QDir(cache_->path()).filePath(QStringLiteral("apps"));
-        QDir().mkpath(apps);
-        QFile file(QDir(apps).filePath(name));
-        if (file.open(QIODevice::WriteOnly))
-            file.write("old");
-        return apps;
+    // The deb's layout in the cache folder: usr/lib/gitbolt, and its
+    // launcher usr/bin/gitbolt (made by init()), which the helper starts.
+    PackageInfo deb() const {
+        const QString target = QDir(cache_->path()).filePath(QStringLiteral("usr/lib/gitbolt"));
+        QDir().mkpath(target);
+        return {PackageKind::Deb, target, true, {}};
     }
-
-    static PackageInfo appImage(const QString& folder, const QString& name = QStringLiteral("GitBolt.AppImage")) {
-        return {PackageKind::AppImage, QDir(folder).filePath(name), true, {}};
-    }
+    QString launcher() const { return QDir(cache_->path()).filePath(QStringLiteral("usr/bin/gitbolt")); }
+    // What the launcher writes when the helper starts it.
+    QString started() const { return QDir(cache_->path()).filePath(QStringLiteral("usr/bin/started")); }
 
     QTemporaryDir settingsDir_;
     std::unique_ptr<QTemporaryDir> cache_;
+    std::unique_ptr<gitbolt::test::ScopedEnv> path_;   // the stand-ins first (Unix)
 };
 
 QTEST_MAIN(TestUpdateController)

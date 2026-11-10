@@ -203,7 +203,7 @@ void UpdateController::start()
     // The installers of this version and older ones are done with (a
     // finished update's, an abandoned one's), now that this one runs, and
     // so is whatever an update that crashed or was killed left beside
-    // this copy (a staged bundle, a part-downloaded AppImage, a mount).
+    // this copy (a staged bundle, a mount).
     update::removeOldDownloads(setup_.config.downloadDir, setup_.config.current);
     update::removeStaleInstallFiles(setup_.package, setup_.config.downloadDir);
     if (setup_.schedulesChecks())
@@ -276,11 +276,6 @@ void UpdateController::reportEarlierInstall()
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "
                     "sudo apt install ./%1")
-                     .arg(asset);
-        break;
-    case update::PackageKind::AppImage:
-        byHand = tr("To install it yourself, download %1 from the release page and use it in place of "
-                    "this AppImage.")
                      .arg(asset);
         break;
     case update::PackageKind::Unknown:
@@ -459,34 +454,14 @@ void UpdateController::install()
     const update::Release& release = *shownRelease_;
     const update::PackageInfo& package = setup_.package;
     const QString assetName = update::assetNameFor(package.kind, release.version);
-    QString dir;   // the Downloader's own: <cache>/updates/<version>/
-    if (package.kind == update::PackageKind::AppImage) {
-        // Next to the running AppImage, which the helper renames it
-        // over: same folder, same file system.
-        const QFileInfo target(package.target);
-        dir = target.absolutePath();
-        if (QDir(dir).filePath(assetName) == target.absoluteFilePath()) {
-            retryChecks_ = false;
-            openDialog()->showInstallFailed(
-                tr("The new AppImage has this one's name, %1, so it can't be downloaded next to it. "
-                   "Rename this AppImage, or download the new one from the release page.")
-                    .arg(assetName));
-            return;
-        }
-    }
     retryChecks_ = false;
     openDialog()->showDownloading(0, release.asset(assetName)->size);
-    downloader_->start(release, assetName, dir);
+    downloader_->start(release, assetName);
 }
 
 void UpdateController::onDownloaded(const QString& path)
 {
     downloaded_ = path;
-    // Beside the AppImage, under the name users keep theirs under: if
-    // this GitBolt dies before the helper takes it over, the next start
-    // knows it is GitBolt's to remove (removeStaleInstallFiles).
-    if (setup_.package.kind == update::PackageKind::AppImage)
-        update::recordPendingDownload(setup_.config.downloadDir, path);
     // workDir is the downloads folder: its mount point, helper script,
     // install.log and install-result are never version-named, so
     // removeOldDownloads leaves them alone.
@@ -550,9 +525,6 @@ void UpdateController::quitForHelper()
 
 void UpdateController::helperTookOver()
 {
-    // No longer a download a crash would leave beside the AppImage: the
-    // helper renames it, or deletes it as it gives up.
-    update::forgetPendingDownload(setup_.config.downloadDir);
     if (!helperDeadline_) {
         helperDeadline_ = new QTimer(this);
         helperDeadline_->setObjectName(QStringLiteral("updateHelperDeadline"));
@@ -634,7 +606,6 @@ void UpdateController::stopInstall()
     if (!downloaded_.isEmpty()) {
         QFile::remove(downloaded_);
         downloaded_.clear();
-        update::forgetPendingDownload(setup_.config.downloadDir);
     }
 }
 
