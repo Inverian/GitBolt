@@ -1655,6 +1655,9 @@ private slots:
             QSKIP("Runs only when GITBOLT_TEST_NSIS_INSTALLER and GITBOLT_TEST_NSIS_DIR name a GitBolt installer "
                   "and a folder it installed into (CI's NSIS smoke test sets them)");
         QVERIFY2(QFileInfo(installer).isFile(), qPrintable(installer));
+        // The updater's reader on the real installer: the minimum Windows
+        // the build gave it (cmake/Packaging.cmake), which prepare() checks.
+        QCOMPARE(windowsMinimumOf(installer), QStringLiteral(GITBOLT_WINDOWS_MINIMUM));
 
         // What the installed copy detects, from its own bin folder.
         PackageProbe probe;

@@ -68,7 +68,7 @@ namespace gitbolt::ui {
 /// was abandoned, and checks and Install work again.
 ///
 /// A release this system is too old for (Installer::needsNewerSystem:
-/// macOS's minimum, which only the downloaded disk image says) is
+/// the downloaded installer's minimum, macOS's or Windows') is
 /// remembered with why (updates/incompatibleVersion): shown again, it
 /// is one this copy can't install, without being downloaded again,
 /// until a newer one comes out or the system's version changes.

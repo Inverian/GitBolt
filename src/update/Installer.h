@@ -1,5 +1,6 @@
 #pragma once
 
+#include "update/Failure.h"
 #include "update/InstallHelpers.h"
 #include "update/Package.h"
 #include "update/Version.h"
@@ -8,6 +9,7 @@
 #include <QProcessEnvironment>
 #include <QString>
 #include <QStringList>
+#include <QVersionNumber>
 
 #include <functional>
 
@@ -60,9 +62,11 @@ public:
 
     /// Checks `downloadedFile` (already verified by the Downloader) as
     /// the installer of `version`, and stages it. Emits status() as it
-    /// goes, then prepared() or failed(). macOS also refuses, before
-    /// GitBolt quits, an app whose LSMinimumSystemVersion is above the
-    /// running macOS: once swapped in, it wouldn't start.
+    /// goes, then prepared() or failed(). Before GitBolt quits it also
+    /// refuses what wouldn't install or start here: a macOS app whose
+    /// LSMinimumSystemVersion, or a Windows installer whose
+    /// GitBoltMinimumWindows, is above this system (NeedsNewerSystem);
+    /// a .deb that `apt-get -s install` refuses (AptRefused).
     void prepare(const QString& downloadedFile, const Version& version);
     /// Stops prepare() and undoes it: kills the running step, detaches
     /// the disk image and removes the staged copy. Emits nothing. Also
@@ -91,10 +95,11 @@ public:
 
     /// prepare() is running.
     bool busy() const;
+    /// Why the last failed() was.
+    Failure failure() const;
     /// The last prepare() failed because the release needs a newer
-    /// system than this one (macOS: its app's LSMinimumSystemVersion is
-    /// above the running macOS): downloaded again, it would be refused
-    /// again.
+    /// system than this one (failure() is NeedsNewerSystem): downloaded
+    /// again, it would be refused again.
     bool needsNewerSystem() const;
     /// The helper's script and log, in workDir: install-helper.sh (or
     /// none on Windows, where the script is passed on the command line)
@@ -128,9 +133,11 @@ private:
     };
     using ToolDone = std::function<void(const ToolResult&)>;
 
-    void runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done);
+    /// `environment`: the tool's, when not empty; else GitBolt's.
+    void runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done,
+                 const QProcessEnvironment& environment = {});
     void succeed();
-    void fail(const QString& message);
+    void fail(Failure failure, const QString& message);
     void finishLater(const std::function<void()>& emitter);
     /// The destructor's cancel(): everything undone before it returns.
     void cancelNow();
@@ -150,9 +157,13 @@ private:
     void detach(int attempt, const std::function<void()>& then);
     void detachNow();
     bool mounted() const;
-    QString checkBundle(const QString& bundle, const QString& where);
+    /// A problem with the bundle, or empty; `why` its code when not the
+    /// default (NeedsNewerSystem).
+    QString checkBundle(const QString& bundle, const QString& where, Failure& why);
     void removeStaged();
     void removeMountPoint();
+    // deb
+    void askApt();
 
     QString helperScript(qint64 pid) const;
 
@@ -167,7 +178,7 @@ private:
     QString staged_;          ///< the new copy prepared() leaves for the helper
     bool stagedCreated_ = false;  ///< staged_ is a copy this Installer made (macOS)
     QString executable_;      ///< macOS: Contents/MacOS/<CFBundleExecutable> of the staged copy
-    bool needsNewerSystem_ = false;   ///< macOS: refused for its minimum macOS (checkBundle)
+    Failure failure_ = Failure::None;   ///< why the last failed() was
 
     QProcess* process_ = nullptr;
     quint64 run_ = 0;         ///< bumped by every prepare() and cancel(); stale callbacks see a new one
@@ -208,6 +219,20 @@ struct WindowsLaunch {
 /// the GitBolt it starts again. Neither is handed a handle of the
 /// other's. Elsewhere: Failed.
 WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment);
+
+/// The NSIS installer's version-resource key that holds the oldest
+/// Windows it installs on (cmake/Packaging.cmake writes it).
+inline constexpr char kWindowsMinimumKey[] = "GitBoltMinimumWindows";
+
+/// Windows: `file`'s kWindowsMinimumKey string, read from its version
+/// resource under each language it lists. Empty when it has none, and
+/// elsewhere.
+QString windowsMinimumOf(const QString& file);
+
+/// A minimum system version (LSMinimumSystemVersion, kWindowsMinimumKey)
+/// is above `running`; false when `minimum` isn't a version at all.
+/// Normalised, so 14.4 and 14.4.0 are the same.
+bool systemTooOld(const QString& minimum, const QVersionNumber& running);
 
 /// At startup, removes what an update that never finished left behind:
 /// a crash, a force quit or a logout during prepare() or while the

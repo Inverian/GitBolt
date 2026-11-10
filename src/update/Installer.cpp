@@ -31,10 +31,13 @@
 #include <windows.h>  // CREATE_NO_WINDOW
 #include <objbase.h>  // CoInitializeEx
 #include <shellapi.h> // ShellExecuteExW
+#include <winver.h>   // GetFileVersionInfoW, VerQueryValueW
 
 #include <QDateTime>
 
+#include <cwchar>
 #include <string>
+#include <vector>
 #endif
 
 namespace gitbolt::update {
@@ -52,6 +55,8 @@ constexpr int kAttachTimeoutMs = 3 * 60 * 1000;
 constexpr int kCodesignTimeoutMs = 5 * 60 * 1000;
 constexpr int kDittoTimeoutMs = 10 * 60 * 1000;
 constexpr int kDetachTimeoutMs = 60 * 1000;
+/// apt-get -s reads the package lists and solves; no download.
+constexpr int kAptCheckTimeoutMs = 2 * 60 * 1000;
 /// The longest tool output a message quotes.
 constexpr qsizetype kMaxQuoted = 400;
 
@@ -62,6 +67,21 @@ QString ditto() { return QStringLiteral("/usr/bin/ditto"); }
 QString quoted(const QString& output) {
     const QString text = output.trimmed();
     return text.size() > kMaxQuoted ? text.left(kMaxQuoted) + QStringLiteral("…") : text;
+}
+
+// The line of apt-get's output that says why: the unmet dependency,
+// else its last error, else its last line.
+QString aptReason(const QString& output) {
+    const QStringList lines = output.split(u'\n', Qt::SkipEmptyParts);
+    for (const QString& line : lines) {
+        if (line.contains(QLatin1String("Depends")))
+            return quoted(line);
+    }
+    for (auto it = lines.crbegin(); it != lines.crend(); ++it) {
+        if (it->trimmed().startsWith(QLatin1String("E:")))
+            return quoted(*it);
+    }
+    return lines.isEmpty() ? QString() : quoted(lines.last());
 }
 
 bool resourceBusy(int exitCode, const QString& output) {
@@ -176,8 +196,12 @@ bool Installer::busy() const {
     return busy_;
 }
 
+Failure Installer::failure() const {
+    return failure_;
+}
+
 bool Installer::needsNewerSystem() const {
-    return needsNewerSystem_;
+    return failure_ == Failure::NeedsNewerSystem;
 }
 
 QString Installer::helperScriptPath() const {
@@ -200,9 +224,11 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
     if (busy_ || launched_) {
         const quint64 run = run_;
         finishLater([this, run] {
-            if (run == run_)
-                emit failed(launched_ ? tr("The update is already being installed.")
-                                      : tr("GitBolt is already getting an update ready."));
+            if (run != run_)
+                return;
+            failure_ = Failure::Busy;
+            emit failed(launched_ ? tr("The update is already being installed.")
+                                  : tr("GitBolt is already getting an update ready."));
         });
         return;
     }
@@ -211,17 +237,18 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
     busy_ = true;
     file_ = QFileInfo(downloadedFile).absoluteFilePath();
     version_ = version;
-    needsNewerSystem_ = false;
+    failure_ = Failure::None;
 
     if (!package_.canInstall) {
-        fail(package_.whyNot.isEmpty() ? tr("This copy of GitBolt can't install updates.") : package_.whyNot);
+        fail(Failure::NotInstallable,
+             package_.whyNot.isEmpty() ? tr("This copy of GitBolt can't install updates.") : package_.whyNot);
         return;
     }
     const QString expected = assetNameFor(package_.kind, version);
     const QFileInfo info(file_);
     if (expected.isEmpty() || info.fileName() != expected || !info.isFile() || info.isSymLink()) {
-        fail(tr("The download isn't the installer of GitBolt %1 for this system (%2).")
-                 .arg(version.toString(), expected));
+        fail(Failure::WrongFile, tr("The download isn't the installer of GitBolt %1 for this system (%2).")
+                                     .arg(version.toString(), expected));
         return;
     }
 
@@ -234,19 +261,49 @@ void Installer::prepare(const QString& downloadedFile, const Version& version) {
                 attach(1);
         });
 #else
-        fail(tr("A disk image can only be installed on macOS."));
+        fail(Failure::NotInstallable, tr("A disk image can only be installed on macOS."));
 #endif
         return;
     }
-    case PackageKind::WindowsInstall:
-    case PackageKind::Deb:
+    case PackageKind::WindowsInstall: {
+#if defined(Q_OS_WIN)
+        // Before UAC and before GitBolt quits: uninstall-before-install
+        // would leave nothing that starts. No key: no check, as on macOS.
+        const QString minimum = windowsMinimumOf(file_);
+        const QOperatingSystemVersion os = QOperatingSystemVersion::current();
+        const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
+        if (systemTooOld(minimum, running)) {
+            const QVersionNumber needs = QVersionNumber::fromString(minimum.trimmed());
+            const QString build = needs.segmentCount() >= 3 ? QString::number(needs.microVersion()) : needs.toString();
+            fail(Failure::NeedsNewerSystem,
+                 tr("GitBolt %1 needs a newer version of Windows (build %2 or later), and this PC has build %3, so "
+                    "it can't be installed here.")
+                     .arg(version_.toString(), build)
+                     .arg(running.microVersion()));
+            return;
+        }
+#endif
         staged_ = file_;
         succeed();
         return;
+    }
+    case PackageKind::Deb: {
+#if defined(Q_OS_WIN)
+        staged_ = file_;
+        succeed();
+#else
+        const quint64 run = run_;
+        finishLater([this, run] {
+            if (run == run_)
+                askApt();
+        });
+#endif
+        return;
+    }
     case PackageKind::Unknown:
         break;
     }
-    fail(package_.whyNot);
+    fail(Failure::NotInstallable, package_.whyNot);
 }
 
 void Installer::succeed() {
@@ -260,9 +317,9 @@ void Installer::succeed() {
     });
 }
 
-void Installer::fail(const QString& message) {
+void Installer::fail(Failure failure, const QString& message) {
     const quint64 run = run_;
-    auto finish = [this, run, message] {
+    auto finish = [this, run, failure, message] {
         if (run != run_)
             return;
         removeStaged();
@@ -270,6 +327,7 @@ void Installer::fail(const QString& message) {
         staged_.clear();
         busy_ = false;
         ready_ = false;
+        failure_ = failure;
         emit failed(message);
     };
     if (attached_)
@@ -380,11 +438,14 @@ bool Installer::cleanUpInBackground(qint64 killedPid) {
 #endif
 }
 
-void Installer::runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done) {
+void Installer::runTool(const QString& program, const QStringList& arguments, int timeoutMs, ToolDone done,
+                        const QProcessEnvironment& environment) {
     auto* process = new QProcess(this);
     process_ = process;
     process->setProgram(program);
     process->setArguments(arguments);
+    if (!environment.isEmpty())
+        process->setProcessEnvironment(environment);
     process->setProcessChannelMode(QProcess::MergedChannels);
     // No tool may wait on input (an image with a licence would).
     process->setStandardInputFile(QProcess::nullDevice());
@@ -439,7 +500,7 @@ void Installer::attach(int attempt) {
         QDir().mkpath(workDir_);
         QTemporaryDir mount(QDir(workDir_).filePath(QStringLiteral("mount-XXXXXX")));
         if (!mount.isValid()) {
-            fail(tr("Couldn't make a folder to open the disk image in, in %1.").arg(workDir_));
+            fail(Failure::DiskError, tr("Couldn't make a folder to open the disk image in, in %1.").arg(workDir_));
             return;
         }
         mount.setAutoRemove(false);
@@ -462,7 +523,7 @@ void Installer::attach(int attempt) {
                     });
                     return;
                 }
-                fail(tr("Couldn't open the disk image: %1").arg(quoted(result.output)));
+                fail(Failure::AttachFailed, tr("Couldn't open the disk image: %1").arg(quoted(result.output)));
             });
 }
 
@@ -470,18 +531,20 @@ void Installer::checkMounted() {
     const QString app = QDir(mountPoint_).filePath(QStringLiteral("GitBolt.app"));
     const QFileInfo info(app);
     if (info.isSymLink() || !info.isDir()) {
-        fail(tr("The disk image has no GitBolt.app."));
+        fail(Failure::BadBundle, tr("The disk image has no GitBolt.app."));
         return;
     }
-    const QString problem = checkBundle(app, tr("in the disk image"));
+    Failure why = Failure::BadBundle;
+    const QString problem = checkBundle(app, tr("in the disk image"), why);
     if (!problem.isEmpty()) {
-        fail(problem);
+        fail(why, problem);
         return;
     }
     runTool(codesign(), {QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"), app},
             kCodesignTimeoutMs, [this](const ToolResult& result) {
                 if (result.exitCode != 0) {
-                    fail(tr("GitBolt.app in the disk image fails its signature check, so something in it "
+                    fail(Failure::SignatureInvalid,
+                         tr("GitBolt.app in the disk image fails its signature check, so something in it "
                             "changed after it was built: %1")
                              .arg(quoted(result.output)));
                     return;
@@ -502,14 +565,15 @@ void Installer::stage() {
     // Left over from an update that stopped half-way.
     removePath(staged_);
     if (QFileInfo::exists(staged_) || QFileInfo(staged_).isSymLink()) {
-        fail(tr("Couldn't remove %1, left over from an earlier update.").arg(staged_));
+        fail(Failure::DiskError, tr("Couldn't remove %1, left over from an earlier update.").arg(staged_));
         return;
     }
     stagedCreated_ = true;
     runTool(ditto(), {QDir(mountPoint_).filePath(QStringLiteral("GitBolt.app")), staged_}, kDittoTimeoutMs,
             [this](const ToolResult& result) {
                 if (result.exitCode != 0) {
-                    fail(tr("Couldn't copy GitBolt next to the installed copy: %1").arg(quoted(result.output)));
+                    fail(Failure::CopyFailed,
+                         tr("Couldn't copy GitBolt next to the installed copy: %1").arg(quoted(result.output)));
                     return;
                 }
                 checkStaged();
@@ -517,15 +581,17 @@ void Installer::stage() {
 }
 
 void Installer::checkStaged() {
-    const QString problem = checkBundle(staged_, tr("in the copy"));
+    Failure why = Failure::BadBundle;
+    const QString problem = checkBundle(staged_, tr("in the copy"), why);
     if (!problem.isEmpty()) {
-        fail(problem);
+        fail(why, problem);
         return;
     }
     runTool(codesign(), {QStringLiteral("--verify"), QStringLiteral("--deep"), QStringLiteral("--strict"), staged_},
             kCodesignTimeoutMs, [this](const ToolResult& result) {
                 if (result.exitCode != 0) {
-                    fail(tr("The copy of GitBolt.app fails its signature check: %1").arg(quoted(result.output)));
+                    fail(Failure::SignatureInvalid,
+                         tr("The copy of GitBolt.app fails its signature check: %1").arg(quoted(result.output)));
                     return;
                 }
                 const quint64 run = run_;
@@ -538,7 +604,7 @@ void Installer::checkStaged() {
             });
 }
 
-QString Installer::checkBundle(const QString& bundle, const QString& where) {
+QString Installer::checkBundle(const QString& bundle, const QString& where, Failure& why) {
 #if defined(Q_OS_MACOS)
     const QString plist = QDir(bundle).filePath(QStringLiteral("Contents/Info.plist"));
     if (!QFileInfo(plist).isFile())
@@ -554,16 +620,14 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
         return tr("GitBolt.app %1 is version %2, not %3.").arg(where, quoted(shortVersion), version_.toString());
     // Checked now, while GitBolt runs: once swapped in, LaunchServices
     // wouldn't start it and the old copy would be in the Trash.
-    // Normalised, so 14.4 and 14.4.0 are the same.
     const QString minimum = info.value(QStringLiteral("LSMinimumSystemVersion")).toString().trimmed();
-    const QVersionNumber needs = QVersionNumber::fromString(minimum).normalized();
     const QOperatingSystemVersion os = QOperatingSystemVersion::current();
     const QVersionNumber running(qMax(0, os.majorVersion()), qMax(0, os.minorVersion()), qMax(0, os.microVersion()));
-    if (!needs.isNull() && running.normalized() < needs) {
+    if (systemTooOld(minimum, running)) {
         const QString shown = running.microVersion() > 0 ? running.toString()
                                                          : QStringLiteral("%1.%2").arg(running.majorVersion())
                                                                .arg(running.minorVersion());
-        needsNewerSystem_ = true;
+        why = Failure::NeedsNewerSystem;
         return tr("GitBolt %1 needs macOS %2 or later, and this Mac has macOS %3, so it can't be installed here.")
             .arg(version_.toString(), quoted(minimum), shown);
     }
@@ -576,6 +640,7 @@ QString Installer::checkBundle(const QString& bundle, const QString& where) {
     return {};
 #else
     Q_UNUSED(bundle)
+    Q_UNUSED(why)
     return tr("GitBolt.app %1 can only be checked on macOS.").arg(where);
 #endif
 }
@@ -656,6 +721,42 @@ void Installer::removeMountPoint() {
 }
 
 // ---------------------------------------------------------------------------
+// deb
+// ---------------------------------------------------------------------------
+
+void Installer::askApt() {
+    // As this user, before GitBolt quits and before pkexec's password:
+    // what the root install would refuse (an unmet Depends) is said now.
+    // By exit code, as apt 3's solver words its errors differently.
+    const quint64 run = run_;
+    emit status(tr("Checking that this system can install it…"));
+    if (run != run_)
+        return;   // cancelled by a slot
+    const QString aptGet = QStandardPaths::findExecutable(QStringLiteral("apt-get"));
+    if (aptGet.isEmpty()) {
+        fail(Failure::AptRefused, tr("GitBolt %1 can't be installed: apt-get isn't installed.").arg(version_.toString()));
+        return;
+    }
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(QStringLiteral("LC_ALL"), QStringLiteral("C.UTF-8"));
+    runTool(aptGet, {QStringLiteral("-s"), QStringLiteral("-q"), QStringLiteral("install"), file_}, kAptCheckTimeoutMs,
+            [this](const ToolResult& result) {
+                if (result.exitCode == 0) {
+                    staged_ = file_;
+                    succeed();
+                    return;
+                }
+                // Not remembered: apt's answer also depends on its lists
+                // and other packages, so Try Again may pass after apt update.
+                qWarning("update: apt-get -s install refused %s (%d):\n%s", qPrintable(file_), result.exitCode,
+                         qPrintable(result.output));
+                fail(Failure::AptRefused, tr("apt-get says this system can't install GitBolt %1: %2")
+                                              .arg(version_.toString(), aptReason(result.output)));
+            },
+            environment);
+}
+
+// ---------------------------------------------------------------------------
 // The helper
 // ---------------------------------------------------------------------------
 
@@ -692,18 +793,19 @@ QString Installer::helperScript(qint64 pid) const {
 }
 
 bool Installer::launchHelper(qint64 pid, quintptr window) {
-    if (!ready_ || launched_ || pid <= 0) {
-        emit failed(tr("There's no update ready to install."));
+    // Set just before each failed() and declined().
+    const auto failWith = [this](Failure failure, const QString& message) {
+        failure_ = failure;
+        emit failed(message);
         return false;
-    }
-    if (package_.kind == PackageKind::Deb && QStandardPaths::findExecutable(QStringLiteral("pkexec")).isEmpty()) {
-        emit failed(package_.whyNot.isEmpty() ? tr("Installing the update needs pkexec.") : package_.whyNot);
-        return false;
-    }
-    if (!QDir().mkpath(workDir_)) {
-        emit failed(tr("Couldn't create %1.").arg(workDir_));
-        return false;
-    }
+    };
+    if (!ready_ || launched_ || pid <= 0)
+        return failWith(Failure::NotReady, tr("There's no update ready to install."));
+    if (package_.kind == PackageKind::Deb && QStandardPaths::findExecutable(QStringLiteral("pkexec")).isEmpty())
+        return failWith(Failure::NoPkexec,
+                        package_.whyNot.isEmpty() ? tr("Installing the update needs pkexec.") : package_.whyNot);
+    if (!QDir().mkpath(workDir_))
+        return failWith(Failure::DiskError, tr("Couldn't create %1.").arg(workDir_));
     // One update per log: a relaunched deb copy keeps writing its output
     // to it.
     if (QFile logFile(logPath()); logFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -711,10 +813,8 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     // An earlier update's result would pass for this one's.
     QFile::remove(resultPath());
 #if defined(Q_OS_WIN)
-    if (package_.kind != PackageKind::WindowsInstall) {
-        emit failed(tr("This copy of GitBolt can't install updates."));
-        return false;
-    }
+    if (package_.kind != PackageKind::WindowsInstall)
+        return failWith(Failure::NotInstallable, tr("This copy of GitBolt can't install updates."));
     // Both parts start now, while GitBolt is still in front for UAC.
     HelperInputs in;
     in.pid = pid;
@@ -736,6 +836,7 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
             qWarning("update: GitBolt won't be started again after the update: %s", qPrintable(launch.error));
         break;
     case WindowsLaunch::Outcome::Declined:
+        failure_ = Failure::PermissionDeclined;
         emit declined(byHand);
         return false;
     case WindowsLaunch::Outcome::Failed: {
@@ -743,9 +844,9 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         QString why = launch.error.trimmed();
         if (!why.endsWith(u'.'))
             why += u'.';
-        emit failed(tr("Windows couldn't start GitBolt's installer as an administrator: %1").arg(why)
-                    + QLatin1Char(' ') + byHand);
-        return false;
+        return failWith(Failure::ElevationFailed,
+                        tr("Windows couldn't start GitBolt's installer as an administrator: %1").arg(why)
+                            + QLatin1Char(' ') + byHand);
     }
     }
 #else
@@ -755,24 +856,74 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     helper.setWorkingDirectory(workDir_);
     helper.setStandardInputFile(QProcess::nullDevice());
     QSaveFile file(helperScriptPath());
-    if (!file.open(QIODevice::WriteOnly) || file.write(script.toUtf8()) < 0 || !file.commit()) {
-        emit failed(tr("Couldn't write the installer helper, %1.").arg(helperScriptPath()));
-        return false;
-    }
+    if (!file.open(QIODevice::WriteOnly) || file.write(script.toUtf8()) < 0 || !file.commit())
+        return failWith(Failure::DiskError, tr("Couldn't write the installer helper, %1.").arg(helperScriptPath()));
     // Before the script's own redirect, sh's errors go there too.
     helper.setStandardOutputFile(logPath(), QIODevice::Append);
     helper.setStandardErrorFile(logPath(), QIODevice::Append);
     helper.setProgram(QStringLiteral("/bin/sh"));
     helper.setArguments({helperScriptPath()});
     detachFromGitBolt(helper);
-    if (!helper.startDetached()) {
-        emit failed(tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
-        return false;
-    }
+    if (!helper.startDetached())
+        return failWith(Failure::HelperStartFailed, tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
 #endif
     launched_ = true;
     ready_ = false;
     return true;
+}
+
+QString windowsMinimumOf(const QString& file) {
+#if defined(Q_OS_WIN)
+    const std::wstring path = QDir::toNativeSeparators(file).toStdWString();
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    if (size == 0)
+        return {};
+    std::vector<BYTE> data(size);
+    if (!GetFileVersionInfoW(path.c_str(), 0, size, data.data()))
+        return {};
+    // Each language and code page the file lists, then the usual ones
+    // (NSIS: US English, Unicode) for a file that lists none.
+    QStringList blocks;
+    struct LanguageAndCodePage {
+        WORD language;
+        WORD codePage;
+    };
+    LanguageAndCodePage* pairs = nullptr;
+    UINT bytes = 0;
+    if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation", reinterpret_cast<LPVOID*>(&pairs), &bytes) && pairs) {
+        for (UINT i = 0; i < bytes / sizeof(LanguageAndCodePage); ++i)
+            blocks << QStringLiteral("%1%2")
+                          .arg(pairs[i].language, 4, 16, QLatin1Char('0'))
+                          .arg(pairs[i].codePage, 4, 16, QLatin1Char('0'));
+    }
+    blocks << QStringLiteral("040904b0") << QStringLiteral("040904e4") << QStringLiteral("000004b0");
+    for (const QString& block : std::as_const(blocks)) {
+        const std::wstring key =
+            (QStringLiteral("\\StringFileInfo\\%1\\%2").arg(block, QLatin1String(kWindowsMinimumKey))).toStdWString();
+        wchar_t* value = nullptr;
+        UINT length = 0;
+        if (VerQueryValueW(data.data(), key.c_str(), reinterpret_cast<LPVOID*>(&value), &length) && value
+            && length > 0) {
+            const QString text = QString::fromWCharArray(value, qsizetype(wcsnlen(value, length))).trimmed();
+            if (!text.isEmpty())
+                return text;
+        }
+    }
+#else
+    Q_UNUSED(file)
+#endif
+    return {};
+}
+
+bool systemTooOld(const QString& minimum, const QVersionNumber& running) {
+    const QString text = minimum.trimmed();
+    qsizetype end = 0;
+    const QVersionNumber needs = QVersionNumber::fromString(text, &end).normalized();
+    // The whole text, or it isn't a minimum this understands.
+    if (needs.isNull() || end != text.size())
+        return false;
+    return running.normalized() < needs;
 }
 
 WindowsLaunch launchWindowsUpdate(HelperInputs in, quintptr window, const QProcessEnvironment& environment) {

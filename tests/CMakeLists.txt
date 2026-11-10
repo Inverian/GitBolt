@@ -164,16 +164,24 @@ target_link_libraries(test_update_package PRIVATE gitbolt_update)
 gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
 target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_helpers PRIVATE gitbolt_update)
+# What the real installer must carry (GitBoltMinimumWindows).
+target_compile_definitions(test_update_helpers PRIVATE
+    GITBOLT_WINDOWS_MINIMUM="${GITBOLT_WINDOWS_MINIMUM}")
 # Installer::prepare for each package, and whole updates through a real
-# detached helper: a deb (stand-in pkexec) on any Unix; on macOS real
-# disk images, made here with hdiutil from fake ad-hoc-signed bundles,
-# including a wrong bundle id, a wrong version and a broken seal. About a
-# minute on macOS (each hdiutil create takes seconds), hence the longer
-# TIMEOUT.
+# detached helper: a deb (stand-in pkexec and apt-get) on any Unix; on
+# macOS real disk images, made here with hdiutil from fake ad-hoc-signed
+# bundles, including a wrong bundle id, a wrong version and a broken
+# seal. About a minute on macOS (each hdiutil create takes seconds),
+# hence the longer TIMEOUT. On Windows the test exe carries a
+# GitBoltMinimumWindows above any Windows, as an installer for a newer
+# one would.
 gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
 set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
+if(WIN32)
+    target_sources(test_update_installer PRIVATE update/NeedsNewerWindows.rc)
+endif()
 if(NOT WIN32)
     add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
     # dladdr, as for gitbolt_util: in libdl before glibc 2.34

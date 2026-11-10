@@ -7,7 +7,13 @@
 //     isn't this package's asset for that version (another name, a
 //     link, nothing there), is refused, and every outcome arrives from
 //     the event loop, never inside prepare();
-//   - the .deb and the Windows installer need nothing staged;
+//   - the .deb and the Windows installer need nothing staged, but the
+//     .deb is first put to `apt-get -s install` as this user (a
+//     stand-in), and one apt refuses is refused before GitBolt quits;
+//     on Windows an installer whose GitBoltMinimumWindows is above this
+//     Windows is refused (a copy of this test, which carries one:
+//     NeedsNewerWindows.rc);
+//   - each refusal has its code (failure()), never just a sentence;
 //   - launchHelper() only after prepared(), and cancel() discards a
 //     prepared update;
 //   - Unix, end to end: a deb update with a real detached helper, which
@@ -40,6 +46,7 @@
 // test asks for root or changes a package.
 //
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -71,6 +78,8 @@ using gitbolt::test::readFile;
 using gitbolt::test::runTool;
 using gitbolt::test::ScopedEnv;
 using gitbolt::test::writeFile;
+
+Q_DECLARE_METATYPE(gitbolt::update::Failure)
 
 namespace {
 
@@ -133,6 +142,19 @@ private:
     // The deb's launcher, which its helper starts again (installsADebEndToEnd).
     QString launcher() const { return path(QStringLiteral("My Apps/usr/bin/gitbolt")); }
     QString pkexecArgs() const { return path(QStringLiteral("pkexec-args.txt")); }
+    QString aptArgs() const { return path(QStringLiteral("apt-args.txt")); }
+
+    // The stand-in apt-get: records its arguments and LC_ALL, prints
+    // `output` and exits with `status`.
+    bool aptSays(int status, const QByteArray& output = {}) const {
+        const QString said = path(QStringLiteral("apt-output.txt"));
+        return writeFile(said, output)
+               && writeFile(path(QStringLiteral("stand-ins/apt-get")),
+                            "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >" + shellQuote(aptArgs()).toUtf8()
+                                + "\nprintf 'LC_ALL=%s\\n' \"$LC_ALL\" >>" + shellQuote(aptArgs()).toUtf8() + "\ncat "
+                                + shellQuote(said).toUtf8() + "\nexit " + QByteArray::number(status) + "\n",
+                            true);
+    }
 
     qint64 startWaited() {
         waited_ = std::make_unique<QProcess>();
@@ -231,12 +253,13 @@ private slots:
         QVERIFY(!dir_->path().startsWith(QLatin1String("/Applications")));
 #if defined(Q_OS_UNIX)
         // pkexec records its arguments and "installs" the .deb (its last
-        // one) as the launcher.
+        // one) as the launcher; apt-get's check says yes (aptSays).
         const QString bin = path(QStringLiteral("stand-ins"));
         QVERIFY(writeFile(bin + QStringLiteral("/pkexec"),
                           "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >" + shellQuote(pkexecArgs()).toUtf8()
                               + "\nfor last in \"$@\"; do :; done\ncp \"$last\" " + shellQuote(launcher()).toUtf8() + "\n",
                           true));
+        QVERIFY(aptSays(0));
         path_ = std::make_unique<ScopedEnv>("PATH", QFile::encodeName(bin) + ':' + qgetenv("PATH"));
 #endif
     }
@@ -258,6 +281,7 @@ private slots:
         const Outcome outcome = prepareAndWait(installer, download(PackageKind::Deb), kNew);
         QVERIFY(!outcome.prepared);
         QCOMPARE(outcome.failed, QStringLiteral("Not from a package."));
+        QCOMPARE(installer.failure(), Failure::NotInstallable);
         QVERIFY(!installer.busy());
 
         Installer deb({PackageKind::Deb, QStringLiteral("/usr/lib/gitbolt"), false, QStringLiteral("No pkexec.")},
@@ -273,6 +297,7 @@ private slots:
         Outcome outcome = prepareAndWait(installer, other, kNew);
         QVERIFY(!outcome.prepared);
         QVERIFY2(outcome.failed.contains(QLatin1String("gitbolt_0.1.1_amd64.deb")), qPrintable(outcome.failed));
+        QCOMPARE(installer.failure(), Failure::WrongFile);
         outcome = prepareAndWait(installer, download(PackageKind::WindowsInstall), kNew);
         QVERIFY(!outcome.failed.isEmpty());
         outcome = prepareAndWait(installer, QDir(workDir()).filePath(QStringLiteral("gone/gitbolt_0.1.1_amd64.deb")),
@@ -301,9 +326,105 @@ private slots:
         const QString file = download(packageKind);
         const Outcome outcome = prepareAndWait(installer, file, kNew);
         QVERIFY2(outcome.prepared, qPrintable(outcome.failed));
+        QCOMPARE(installer.failure(), Failure::None);
+#if defined(Q_OS_WIN)
         QVERIFY(outcome.statuses.isEmpty());
+#else
+        // The deb's check with apt first (Windows has no apt).
+        QCOMPARE(outcome.statuses, packageKind == PackageKind::Deb
+                                       ? QStringList{QStringLiteral("Checking that this system can install it…")}
+                                       : QStringList{});
+#endif
         QCOMPARE(readFile(file), QStringLiteral("installer"));
         QCOMPARE(QDir(QFileInfo(file).absolutePath()).entryList(QDir::Files | QDir::Hidden).size(), 1);
+    }
+
+    // The .deb goes to apt-get -s install, as this user and in the C
+    // locale, before GitBolt quits: what it refuses (an unmet Depends)
+    // is refused now, with apt's line, and not remembered (apt update may
+    // change it). By its exit code, whatever its words.
+    void debAsksAptFirst_data() {
+        QTest::addColumn<int>("status");
+        QTest::addColumn<QByteArray>("output");
+        QTest::addColumn<QString>("says");
+        QTest::newRow("installable") << 0 << QByteArray("Inst gitbolt (0.1.1 local-deb [amd64])\n") << QString();
+        QTest::newRow("an unmet dependency")
+            << 100
+            << QByteArray("NOTE: This is only a simulation!\n"
+                          "The following packages have unmet dependencies:\n"
+                          " gitbolt : Depends: libc6 (>= 99) but 2.39-0ubuntu8 is to be installed\n"
+                          "E: Unable to correct problems, you have held broken packages.\n")
+            << QStringLiteral("apt-get says this system can't install GitBolt 0.1.1: gitbolt : Depends: libc6 (>= 99) "
+                              "but 2.39-0ubuntu8 is to be installed");
+        QTest::newRow("only an error") << 100 << QByteArray("Reading package lists...\nE: Broken lists\n")
+                                       << QStringLiteral("apt-get says this system can't install GitBolt 0.1.1: "
+                                                         "E: Broken lists");
+        QTest::newRow("words of another apt") << 1 << QByteArray("Solving dependencies... Error!\n")
+                                              << QStringLiteral("Solving dependencies... Error!");
+    }
+    void debAsksAptFirst() {
+#if defined(Q_OS_WIN)
+        QSKIP("a deb is never installed on Windows");
+#else
+        QFETCH(int, status);
+        QFETCH(QByteArray, output);
+        QFETCH(QString, says);
+        QVERIFY(aptSays(status, output));
+        Installer installer({PackageKind::Deb, path(QStringLiteral("install")), true, {}}, kOld, workDir());
+        const QString deb = download(PackageKind::Deb);
+        const Outcome outcome = prepareAndWait(installer, deb, kNew);
+        QCOMPARE(readFile(aptArgs()), QStringLiteral("-s\n-q\ninstall\n%1\nLC_ALL=C.UTF-8\n").arg(deb));
+        QCOMPARE(outcome.statuses, QStringList{QStringLiteral("Checking that this system can install it…")});
+        if (says.isEmpty()) {
+            QVERIFY2(outcome.prepared, qPrintable(outcome.failed));
+            return;
+        }
+        QVERIFY(!outcome.prepared);
+        QVERIFY2(outcome.failed.contains(says), qPrintable(outcome.failed));
+        QCOMPARE(installer.failure(), Failure::AptRefused);
+        QVERIFY(!installer.needsNewerSystem());
+        QVERIFY(QFileInfo::exists(deb));   // the controller's to delete
+#endif
+    }
+
+    // No apt-get to ask: refused too.
+    void aDebWithoutAptIsRefused() {
+#if defined(Q_OS_WIN)
+        QSKIP("a deb is never installed on Windows");
+#else
+        const QString empty = path(QStringLiteral("empty-bin"));
+        QVERIFY(QDir().mkpath(empty));
+        ScopedEnv noApt("PATH", QFile::encodeName(empty));
+        Installer installer({PackageKind::Deb, path(QStringLiteral("install")), true, {}}, kOld, workDir());
+        const Outcome outcome = prepareAndWait(installer, download(PackageKind::Deb), kNew);
+        QVERIFY(!outcome.prepared);
+        QVERIFY2(outcome.failed.contains(QLatin1String("apt-get isn't installed")), qPrintable(outcome.failed));
+        QCOMPARE(installer.failure(), Failure::AptRefused);
+#endif
+    }
+
+    // An installer whose GitBoltMinimumWindows is above this Windows:
+    // refused before UAC, and needsNewerSystem() (not downloaded again).
+    // This test's own exe carries one (NeedsNewerWindows.rc: 10.0.99999).
+    void refusesAnInstallerForANewerWindows() {
+#if !defined(Q_OS_WIN)
+        QVERIFY(windowsMinimumOf(QCoreApplication::applicationFilePath()).isEmpty());
+        QSKIP("Windows only: version resources");
+#else
+        QCOMPARE(windowsMinimumOf(QCoreApplication::applicationFilePath()), QStringLiteral("10.0.99999"));
+        const QString exe = QDir(workDir()).filePath(QStringLiteral("0.1.1/") + assetNameFor(PackageKind::WindowsInstall, kNew));
+        QVERIFY(QDir().mkpath(QFileInfo(exe).absolutePath()));
+        QVERIFY(QFile::copy(QCoreApplication::applicationFilePath(), exe));
+        Installer installer({PackageKind::WindowsInstall, path(QStringLiteral("install")), true, {}}, kOld, workDir());
+        const Outcome outcome = prepareAndWait(installer, exe, kNew);
+        QVERIFY(!outcome.prepared);
+        QVERIFY2(outcome.failed.contains(QLatin1String("needs a newer version of Windows (build 99999 or later)")),
+                 qPrintable(outcome.failed));
+        QCOMPARE(installer.failure(), Failure::NeedsNewerSystem);
+        QVERIFY(installer.needsNewerSystem());
+        // A file with no such key is not checked.
+        QCOMPARE(windowsMinimumOf(download(PackageKind::Deb)), QString());
+#endif
     }
 
     void launchesOnlyAPreparedUpdate() {
@@ -311,6 +432,7 @@ private slots:
         QSignalSpy failed(&installer, &Installer::failed);
         QVERIFY(!installer.launchHelper(12345));
         QCOMPARE(failed.size(), 1);
+        QCOMPARE(installer.failure(), Failure::NotReady);
 
         // Prepared, then cancelled: nothing to launch either.
         QVERIFY(prepareAndWait(installer, download(PackageKind::Deb), kNew).prepared);
@@ -456,22 +578,25 @@ private slots:
         QTest::addColumn<bool>("tamper");
         QTest::addColumn<QString>("minimumSystem");
         QTest::addColumn<QString>("reason");
+        QTest::addColumn<Failure>("failure");
         QTest::newRow("another app") << QStringLiteral("wrong-id") << QStringLiteral("0.1.1")
                                      << QStringLiteral("com.example.notgitbolt") << false << QStringLiteral("11.0")
-                                     << QStringLiteral("isn't GitBolt: its identifier is com.example.notgitbolt");
+                                     << QStringLiteral("isn't GitBolt: its identifier is com.example.notgitbolt")
+                                     << Failure::BadBundle;
         QTest::newRow("another version") << QStringLiteral("wrong-version") << QStringLiteral("0.1.9")
                                          << QStringLiteral("com.gitbolt.app") << false << QStringLiteral("11.0")
-                                         << QStringLiteral("is version 0.1.9, not 0.1.1");
+                                         << QStringLiteral("is version 0.1.9, not 0.1.1") << Failure::BadBundle;
         QTest::newRow("broken seal") << QStringLiteral("tampered") << QStringLiteral("0.1.1")
                                      << QStringLiteral("com.gitbolt.app") << true << QStringLiteral("11.0")
-                                     << QStringLiteral("fails its signature check");
+                                     << QStringLiteral("fails its signature check") << Failure::SignatureInvalid;
         // A release built for a newer macOS than this one: once swapped
         // in, LaunchServices wouldn't start it, so it is refused while
         // GitBolt still runs.
         QTest::newRow("needs a newer macOS") << QStringLiteral("newer-macos") << QStringLiteral("0.1.1")
                                              << QStringLiteral("com.gitbolt.app") << false << QStringLiteral("99.0")
                                              << QStringLiteral("GitBolt 0.1.1 needs macOS 99.0 or later, and this "
-                                                               "Mac has macOS ");
+                                                               "Mac has macOS ")
+                                             << Failure::NeedsNewerSystem;
     }
 
     void refusesABadDiskImage() {
@@ -484,6 +609,7 @@ private slots:
         QFETCH(bool, tamper);
         QFETCH(QString, minimumSystem);
         QFETCH(QString, reason);
+        QFETCH(Failure, failure);
         const QString dmg = diskImage(name, version, id, tamper, minimumSystem);
         QVERIFY(!dmg.isEmpty());
         const PackageInfo package = installedBundle();
@@ -493,6 +619,7 @@ private slots:
         QVERIFY2(outcome.failed.contains(reason), qPrintable(outcome.failed));
         // Only the minimum macOS would refuse the same download again.
         QCOMPARE(installer.needsNewerSystem(), minimumSystem == QLatin1String("99.0"));
+        QCOMPARE(installer.failure(), failure);
         // Nothing staged, nothing left mounted, the installed copy as
         // it was.
         QCOMPARE(QDir(path(QStringLiteral("Applications")))

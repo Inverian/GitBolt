@@ -572,10 +572,11 @@ QString UpdateController::refusedForThisSystem(const update::Version& version) c
 
 void UpdateController::failInstall(const QString& message)
 {
-    // A release that needs a newer system than this one (macOS's
-    // minimum, which only the disk image says): remembered, and shown
-    // as one this copy can't install, with why (whyNotInstallable),
-    // which it says again later without downloading it again.
+    // A release that needs a newer system than this one (the minimum
+    // only the downloaded installer says, macOS's or Windows'):
+    // remembered, and shown as one this copy can't install, with why
+    // (whyNotInstallable), which it says again later without
+    // downloading it again.
     if (installer_ && installer_->needsNewerSystem() && shownRelease_) {
         settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message, QSysInfo::productVersion());
         stopInstall();

@@ -673,6 +673,46 @@ private slots:
                  qPrintable(h.dialog()->shownText()));
     }
 
+    // apt-get -s refuses the .deb (an unmet dependency) before GitBolt
+    // quits: Failed, with apt's line, and nothing is remembered (apt
+    // update may change its answer), so Try Again downloads and asks
+    // again. No helper is started.
+    void aReleaseThisDebCantInstallIsSaid() {
+#if defined(Q_OS_WIN)
+        QSKIP("a deb is never installed on Windows");
+#else
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), {{kDebAsset, "deb"}});
+        QVERIFY(writeFile(QDir(cache_->path()).filePath(QStringLiteral("stand-ins/apt-get")),
+                          "#!/bin/sh\necho ' gitbolt : Depends: libc6 (>= 99) but 2.39 is to be installed'\n"
+                          "echo 'E: Unable to correct problems, you have held broken packages.'\nexit 100\n",
+                          true));
+        Harness h(testSetup(server, cache_->path(), deb()));
+        int launches = 0;
+        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64) {
+            ++launches;
+            return false;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE(h.dialog()->state(), State::Failed);
+        const QString shown = h.dialog()->shownText();
+        QVERIFY2(shown.contains(QStringLiteral("apt-get says this system can't install GitBolt 0.1.1: gitbolt : "
+                                               "Depends: libc6 (>= 99) but 2.39 is to be installed")),
+                 qPrintable(shown));
+        QVERIFY(h.settings.incompatibleUpdateVersion().isEmpty());
+        QCOMPARE(h.downloads(), QStringList{});
+        const QByteArray debPath = QStringLiteral("/download/v0.1.1/%1").arg(kDebAsset).toUtf8();
+        QCOMPARE(server.hits(debPath), 1);
+
+        h.button("updateDialog.retry")->click();
+        QTRY_COMPARE(server.hits(debPath), 2);
+        QTRY_COMPARE(h.dialog()->state(), State::Failed);
+        QCOMPARE(launches, 0);
+#endif
+    }
+
     // A release Install found this system too old for (macOS's minimum,
     // remembered in updates/incompatible*): shown as one this copy can't
     // install, with why, and not downloaded again; with the system

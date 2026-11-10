@@ -12,6 +12,10 @@
 //     the fields kept, GitHub's text kept as written, and every refusal
 //     (draft, pre-release, a bad tag, a foreign page, ...)
 //   - checksumFor on sha256sum's output
+//   - the installer of each package is picked by name, never the
+//     release's -symbols.zip files beside it
+//   - systemTooOld, the minimum-system comparison macOS's and Windows'
+//     checks share
 //
 
 #include <QDir>
@@ -22,6 +26,8 @@
 #include <QTest>
 #include <QTimeZone>
 
+#include "update/Installer.h"
+#include "update/Package.h"
 #include "update/Release.h"
 #include "update/UpdateConfig.h"
 #include "update/Version.h"
@@ -514,6 +520,38 @@ private slots:
         QCOMPARE(parsed.release->asset(QStringLiteral("g"))->sha256, QByteArray("not-hex"));
     }
 
+    // 1.0.0's releases carry symbol files beside the installers
+    // (GitBolt-<v>-<platform>-symbols.zip): each package still installs
+    // from its own installer, never a zip.
+    void symbolFilesAreNeverPicked() {
+        QJsonObject object = fixtureObject("release-v0.1.1.json");
+        QJsonArray assets = object.value(QStringLiteral("assets")).toArray();
+        const qsizetype before = assets.size();
+        const QStringList zips{QStringLiteral("GitBolt-0.1.1-Darwin-arm64-symbols.zip"),
+                               QStringLiteral("GitBolt-0.1.1-Windows-AMD64-symbols.zip"),
+                               QStringLiteral("GitBolt-0.1.1-Linux-x86_64-symbols.zip")};
+        for (const QString& zip : zips) {
+            assets.append(QJsonObject{
+                {QStringLiteral("name"), zip},
+                {QStringLiteral("size"), 1000},
+                {QStringLiteral("browser_download_url"),
+                 QStringLiteral("https://github.com/Inverian/GitBolt/releases/download/v0.1.1/") + zip},
+            });
+        }
+        object.insert(QStringLiteral("assets"), assets);
+        const ParsedRelease parsed = parseRelease(toJson(object), kRepo);
+        QVERIFY2(parsed.release, qPrintable(parsed.error));
+        QCOMPARE(qsizetype(parsed.release->assets.size()), before + zips.size());
+        for (const PackageKind kind : {PackageKind::MacBundle, PackageKind::WindowsInstall, PackageKind::Deb}) {
+            const QString name = assetNameFor(kind, parsed.release->version);
+            const ReleaseAsset* asset = parsed.release->asset(name);
+            QVERIFY2(asset, qPrintable(name));
+            QCOMPARE(asset->name, name);
+            QVERIFY(!asset->name.endsWith(QLatin1String(".zip")));
+        }
+        QVERIFY(assetNameFor(PackageKind::Unknown, parsed.release->version).isEmpty());
+    }
+
     void noAssetsIsStillARelease() {
         QJsonObject object = fixtureObject("release-v0.1.1.json");
         object.remove(QStringLiteral("assets"));
@@ -553,12 +591,41 @@ private slots:
                                      << QByteArray();
         QTest::newRow("empty file") << QByteArray() << "GitBolt.exe" << QByteArray();
         QTest::newRow("a path, not the name") << hex + "  dist/GitBolt.exe\n" << "GitBolt.exe" << QByteArray();
+        // A symbols zip's line, named like the installer and more, never
+        // answers for the installer's name.
+        QTest::newRow("a symbols zip beside it")
+            << hex + "  GitBolt-0.1.1-Darwin-arm64.dmg\n" + other + "  GitBolt-0.1.1-Darwin-arm64-symbols.zip\n"
+            << "GitBolt-0.1.1-Darwin-arm64.dmg" << hex;
     }
     void checksumFor() {
         QFETCH(QByteArray, file);
         QFETCH(QString, name);
         QFETCH(QByteArray, expected);
         QCOMPARE(gitbolt::update::checksumFor(file, name), expected);
+    }
+
+    // ---- systemTooOld -----------------------------------------------------
+
+    void systemTooOld_data() {
+        QTest::addColumn<QString>("minimum");
+        QTest::addColumn<QString>("running");
+        QTest::addColumn<bool>("tooOld");
+        QTest::newRow("Windows: an older build") << "10.0.22000" << "10.0.19045" << true;
+        QTest::newRow("Windows: that build") << "10.0.17763" << "10.0.17763" << false;
+        QTest::newRow("Windows: a newer build") << "10.0.17763" << "10.0.26100" << false;
+        QTest::newRow("macOS: 14.4 is 14.4.0") << "14.4" << "14.4.0" << false;
+        QTest::newRow("macOS: older") << "14.4" << "14.3.1" << true;
+        QTest::newRow("macOS: newer") << "14.4" << "15.0.0" << false;
+        QTest::newRow("spaces around it") << " 14.4 " << "14.3.1" << true;
+        QTest::newRow("no minimum") << "" << "10.0.17763" << false;
+        QTest::newRow("not a version") << "garbage" << "10.0.17763" << false;
+        QTest::newRow("a version and more") << "99.0 beta" << "10.0.17763" << false;
+    }
+    void systemTooOld() {
+        QFETCH(QString, minimum);
+        QFETCH(QString, running);
+        QFETCH(bool, tooOld);
+        QCOMPARE(gitbolt::update::systemTooOld(minimum, QVersionNumber::fromString(running)), tooOld);
     }
 };
 
