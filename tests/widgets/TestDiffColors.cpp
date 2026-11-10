@@ -21,9 +21,9 @@
 //   - the Commit tab's separators (its message's rule, and the frame
 //     over the message) are drawn in the theme's rule colour (#ddd,
 //     #3c3c3c), not in the text's (black, near-white) or #ccc;
-//   - secondary text (Settings' notes, the Commit dialog's ⓘ, the home
-//     screen's cards) reads at 4.5:1 or more in both themes: it was
-//     palette(mid), a border's grey;
+//   - secondary text (Settings' notes, the Commit dialog's ⓘ, the GPG
+//     placeholder, the home screen's cards) reads at 4.5:1 or more in
+//     both themes: it was palette(mid), a border's grey;
 //   - so do the light theme's own colours of the merge conflict
 //     headings, the Commit tab, the Clone status and an op's outcome;
 //   - the home screen's card descriptions, and the Submodules and
@@ -609,9 +609,9 @@ private slots:
 
     // Secondary text was palette(mid), a border's grey: 1.7:1 on the
     // light theme's window and 2.1:1 on the dark one's. Settings' notes
-    // (the usage statistics' among them), the Commit dialog's ⓘ and the
-    // home screen's card text read at 4.5:1 or more now, in both themes
-    // and across a switch.
+    // (the usage statistics' among them), the Commit dialog's ⓘ, the
+    // Commit tab's GPG placeholder and the home screen's card text read
+    // at 4.5:1 or more now, in both themes and across a switch.
     void secondaryTextReadsInBothThemes() {
         gitbolt::conf::SettingsService settings;
         gitbolt::dialogs::SettingsDialog settingsDialog(&settings, nullptr);
@@ -621,6 +621,10 @@ private slots:
         gitbolt::dialogs::CommitDialog commitDialog(&svc, &settings);
         commitDialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&commitDialog));
+        gitbolt::ui::RepositoryView view;
+        view.resize(900, 700);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
         gitbolt::ui::DashboardView home(&settings);
         home.resize(1100, 800);
         home.show();
@@ -638,6 +642,10 @@ private slots:
         QLabel* info = labelWithText(commitDialog, QStringLiteral("ⓘ"));
         QVERIFY(info);
         labels << info;
+        QLabel* gpg = labelWithText(
+            view, gitbolt::ui::RepositoryView::tr("GPG signature verification — coming soon"));
+        QVERIFY(gpg);
+        labels << gpg;
         QLabel* card = labelWithText(
             home, gitbolt::ui::DashboardView::tr("Open an existing local repository"));
         QVERIFY(card);

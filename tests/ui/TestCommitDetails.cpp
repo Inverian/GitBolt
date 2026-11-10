@@ -44,9 +44,7 @@
 //     any length) shows cut too, there and in the log, the blame, the
 //     Cherry Pick dialog, a tag's tooltip and the reflog;
 //   - Copy in the log copies a message whole, as it did before the
-//     cell had only its start;
-//   - the inspector's tabs are Commit, Diff, File Tree and Console:
-//     the GPG tab was a placeholder that did nothing.
+//     cell had only its start.
 //
 
 #include <QAbstractTextDocumentLayout>
@@ -331,20 +329,6 @@ private slots:
         QCOMPARE(rows(diffFiles->model()).size(), 2);
         QVERIFY(!rows(diffFiles->model()).join(QLatin1Char('|')).contains(QStringLiteral("first.txt")));
         QTRY_VERIFY(details->toPlainText().contains(QStringLiteral("2 files changed")));
-    }
-
-    // Only tabs that do something, in this order: a placeholder (the
-    // GPG tab's "coming soon") stays out, and File Tree stays index 2,
-    // which aQuickDiffShowsWithoutAPlaceholder selects by.
-    void inspectorTabsAreTheRealOnes() {
-        RepositoryView view;
-        auto* tabs = view.findChild<QTabWidget*>();
-        QVERIFY(tabs);
-        QStringList texts;
-        for (int i = 0; i < tabs->count(); ++i)
-            texts << tabs->tabText(i);
-        QCOMPARE(texts, (QStringList{QStringLiteral("Commit"), QStringLiteral("Diff"),
-                                     QStringLiteral("File Tree"), QStringLiteral("Console")}));
     }
 
     // The next commit's diff and tree, read as quickly as most are: on

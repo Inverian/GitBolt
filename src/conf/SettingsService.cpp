@@ -339,7 +339,7 @@ void SettingsService::setShowWhitespace(bool show)
 int SettingsService::bottomPanePercent() const
 {
     // Default chosen empirically: 45% for the bottom inspector (commit
-    // details / diff / file tree / console) leaves enough vertical
+    // details / diff / file tree / GPG / console) leaves enough vertical
     // room for a meaningful diff preview on a 1280-tall window without
     // crowding the revision graph above. Bumped from 40 → 45 so the
     // inspector tabs don't feel cramped at first launch.

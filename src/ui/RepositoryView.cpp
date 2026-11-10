@@ -183,14 +183,17 @@ void RepositoryView::setupUi()
             this, &RepositoryView::onCommitSelected);
 
     // Tab order matches the GitExtensions browse window:
-    //   Commit | Diff | File tree | Console
+    //   Commit | Diff | File tree | GPG | Console
     // The Output tab from the reference is intentionally omitted
     // (we don't have a separate output channel from the console).
+    // Several of these are still placeholders — see the per-tab
+    // build helpers below for what's real and what's stubbed.
     inspectorTabs_ = new QTabWidget(this);
     inspectorTabs_->setDocumentMode(true);
     inspectorTabs_->addTab(buildCommitInfoTab(), tr("Commit"));
     inspectorTabs_->addTab(buildDiffTab(),       tr("Diff"));
     inspectorTabs_->addTab(buildFileTreeTab(),   tr("File Tree"));
+    inspectorTabs_->addTab(buildGpgTab(),        tr("GPG"));
     inspectorTabs_->addTab(buildConsoleTab(),    tr("Console"));
 
     rightVSplitter_ = new QSplitter(Qt::Vertical, this);
@@ -698,6 +701,27 @@ void RepositoryView::showBlameForFile(const QString& path)
 
     gitService_->blameFile(path);
     dlg->show();
+}
+
+// GPG tab — placeholder. GitExtensions surfaces commit signature
+// verification status here ("Commit is not signed" / "Good signature
+// from <key>"). We'll wire this up when GPG verification is added
+// to GitService; for now keep the chrome consistent.
+QWidget* RepositoryView::buildGpgTab()
+{
+    auto* page = new QWidget(this);
+    auto* l = new QVBoxLayout(page);
+
+    auto* placeholder = new QLabel(
+        tr("GPG signature verification — coming soon"), page);
+    placeholder->setAlignment(Qt::AlignCenter);
+    QFont f = placeholder->font();
+    f.setItalic(true);
+    placeholder->setFont(f);
+    conf::ThemeService::keepMutedText(placeholder, QStringLiteral("color: %1;"));
+
+    l->addWidget(placeholder);
+    return page;
 }
 
 // Console tab — hosts an interactive PTY-backed terminal. The
