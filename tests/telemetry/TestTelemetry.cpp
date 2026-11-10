@@ -9,6 +9,8 @@
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
+//   - update outcomes: update_result's fixed fields, and an update_failed
+//     error for a failed or unfinished one, once per stage and code
 //   - pacing, the per-tick budget, the debounced first flush (a crash
 //     summary goes first, at once), retry and drop outcomes, backoff
 //     until the next tick, offline tries that cost no attempt
@@ -19,8 +21,6 @@
 //     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
 //     leave
-//   - update outcomes: update_result's fixed fields, and an update_failed
-//     error for a failed or unfinished one, once per stage and code
 //
 
 #include <QCryptographicHash>
@@ -1644,6 +1644,69 @@ private slots:
         QCOMPARE(provider.calls, 0);
     }
 
+    void crashReportIsQueuedAndSent() {
+        Provider provider;
+        auto service = makeService(testConfig(*stub_, dir_->path()), provider);
+        QString report = crashReport();
+        // Refused reports queue nothing, and say so: the crash box only
+        // mentions sending for a summary that was queued.
+        QVERIFY(!service->queueCrashReport(report.replace(QStringLiteral("Session: user"),
+                                                          QStringLiteral("Session: test"))));
+        QCOMPARE(service->queuedCount(), 0);
+        QVERIFY(service->queueCrashReport(report.replace(QStringLiteral("Session: test"),
+                                                         QStringLiteral("Session: user"))));
+        QCOMPARE(service->queuedCount(), 1);
+        service->start();
+        QTRY_COMPARE(stub_->requests().size(), 1);
+
+        const QJsonObject event = stub_->requests().first().json();
+        QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
+        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.1"));
+        QCOMPARE(event.value(QStringLiteral("timestamp")).toString(),
+                 QDateTime::fromSecsSinceEpoch(1760000000, QTimeZone::UTC)
+                     .toString(Qt::ISODateWithMs));
+        const QJsonArray frames = event.value(QStringLiteral("exception")).toObject()
+                                      .value(QStringLiteral("values")).toArray().first().toObject()
+                                      .value(QStringLiteral("stacktrace")).toObject()
+                                      .value(QStringLiteral("frames")).toArray();
+        QCOMPARE(frames.size(), 2);
+        QCOMPARE(frames.at(1).toObject().value(QStringLiteral("instruction_addr")).toString(),
+                 QStringLiteral("0x30"));
+        QCOMPARE(frames.at(1).toObject().value(QStringLiteral("function")).toString(),
+                 QStringLiteral("<unknown>"));
+        QVERIFY(!stub_->requests().first().body.contains(kInstallId.toLatin1()));
+        QCOMPARE(provider.calls, 0);
+    }
+
+    // The crash summary goes first, and at once: the crash may come
+    // back within seconds, and the next crash.log replaces a summary
+    // still queued, so a crash loop was never reported while the
+    // summary waited out the first-flush delay behind every record an
+    // earlier session left.
+    void crashSummaryGoesFirstAtOnce() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.firstFlushDelayMs = 10000;   // as shipped
+        {
+            // An earlier session that quit before sending.
+            auto earlier = makeService(config, provider);
+            earlier->recordLaunch();
+            earlier->recordRepoOpened(1, 1, 1);
+            QCOMPARE(earlier->queuedCount(), 2);
+        }
+        auto service = makeService(config, provider);
+        QVERIFY(service->queueCrashReport(crashReport()));
+        service->recordLaunch();
+        service->start();
+        QTRY_VERIFY_WITH_TIMEOUT(!stub_->requests().isEmpty(), 5000);
+        const StubRequest& first = stub_->requests().first();
+        QCOMPARE(first.path, QByteArray("/api/42/store/"));
+        QCOMPARE(first.json().value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
+        // The records behind it go in the same cycle.
+        QTRY_COMPARE(stub_->requests().size(), 4);
+        QTRY_COMPARE(service->queuedCount(), 0);
+    }
+
     // ---- update outcomes --------------------------------------------------
 
     // update_result has exactly its fixed fields; a failed (or
@@ -1754,69 +1817,6 @@ private slots:
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com", "feature/"})
                 QVERIFY2(!all.contains(sentinel), sentinel);
         }
-    }
-
-    void crashReportIsQueuedAndSent() {
-        Provider provider;
-        auto service = makeService(testConfig(*stub_, dir_->path()), provider);
-        QString report = crashReport();
-        // Refused reports queue nothing, and say so: the crash box only
-        // mentions sending for a summary that was queued.
-        QVERIFY(!service->queueCrashReport(report.replace(QStringLiteral("Session: user"),
-                                                          QStringLiteral("Session: test"))));
-        QCOMPARE(service->queuedCount(), 0);
-        QVERIFY(service->queueCrashReport(report.replace(QStringLiteral("Session: test"),
-                                                         QStringLiteral("Session: user"))));
-        QCOMPARE(service->queuedCount(), 1);
-        service->start();
-        QTRY_COMPARE(stub_->requests().size(), 1);
-
-        const QJsonObject event = stub_->requests().first().json();
-        QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
-        QCOMPARE(event.value(QStringLiteral("release")).toString(), QStringLiteral("gitbolt@0.1.1"));
-        QCOMPARE(event.value(QStringLiteral("timestamp")).toString(),
-                 QDateTime::fromSecsSinceEpoch(1760000000, QTimeZone::UTC)
-                     .toString(Qt::ISODateWithMs));
-        const QJsonArray frames = event.value(QStringLiteral("exception")).toObject()
-                                      .value(QStringLiteral("values")).toArray().first().toObject()
-                                      .value(QStringLiteral("stacktrace")).toObject()
-                                      .value(QStringLiteral("frames")).toArray();
-        QCOMPARE(frames.size(), 2);
-        QCOMPARE(frames.at(1).toObject().value(QStringLiteral("instruction_addr")).toString(),
-                 QStringLiteral("0x30"));
-        QCOMPARE(frames.at(1).toObject().value(QStringLiteral("function")).toString(),
-                 QStringLiteral("<unknown>"));
-        QVERIFY(!stub_->requests().first().body.contains(kInstallId.toLatin1()));
-        QCOMPARE(provider.calls, 0);
-    }
-
-    // The crash summary goes first, and at once: the crash may come
-    // back within seconds, and the next crash.log replaces a summary
-    // still queued, so a crash loop was never reported while the
-    // summary waited out the first-flush delay behind every record an
-    // earlier session left.
-    void crashSummaryGoesFirstAtOnce() {
-        Provider provider;
-        Config config = testConfig(*stub_, dir_->path());
-        config.firstFlushDelayMs = 10000;   // as shipped
-        {
-            // An earlier session that quit before sending.
-            auto earlier = makeService(config, provider);
-            earlier->recordLaunch();
-            earlier->recordRepoOpened(1, 1, 1);
-            QCOMPARE(earlier->queuedCount(), 2);
-        }
-        auto service = makeService(config, provider);
-        QVERIFY(service->queueCrashReport(crashReport()));
-        service->recordLaunch();
-        service->start();
-        QTRY_VERIFY_WITH_TIMEOUT(!stub_->requests().isEmpty(), 5000);
-        const StubRequest& first = stub_->requests().first();
-        QCOMPARE(first.path, QByteArray("/api/42/store/"));
-        QCOMPARE(first.json().value(QStringLiteral("level")).toString(), QStringLiteral("fatal"));
-        // The records behind it go in the same cycle.
-        QTRY_COMPARE(stub_->requests().size(), 4);
-        QTRY_COMPARE(service->queuedCount(), 0);
     }
 
     // ---- inert and off sessions ----------------------------------------

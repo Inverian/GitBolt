@@ -178,10 +178,10 @@ target_compile_definitions(test_update_helpers PRIVATE
 gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
-set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
 if(WIN32)
     target_sources(test_update_installer PRIVATE update/NeedsNewerWindows.rc)
 endif()
+set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
 if(NOT WIN32)
     add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
     # dladdr, as for gitbolt_util: in libdl before glibc 2.34

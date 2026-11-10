@@ -366,11 +366,11 @@ QJsonObject glitchTipError(const ClientInfo& client, ErrorKind kind, const QStri
     QJsonObject tags;
     tags.insert(QStringLiteral("kind"), kindName);
     QJsonArray fingerprint{kindName};
-    if (kind == ErrorKind::OperationFailed) {
+    if (kind == ErrorKind::OperationFailed)
         tags.insert(QStringLiteral("op"), clean);
-    } else if (kind == ErrorKind::RepoOpenFailed) {
+    else if (kind == ErrorKind::RepoOpenFailed)
         tags.insert(QStringLiteral("code"), clean);
-    } else if (kind == ErrorKind::UpdateFailed) {
+    else if (kind == ErrorKind::UpdateFailed) {
         tags.insert(QStringLiteral("stage"), clean.section(u'/', 0, 0));
         tags.insert(QStringLiteral("code"), clean.section(u'/', 1));
     }
