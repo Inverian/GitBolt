@@ -340,9 +340,11 @@ target_link_libraries(test_update_setup PRIVATE gitbolt_ui)
 # the loopback stub (update/HttpServer.h): the dialog for a manual check,
 # the notice bar for the daily one, Skip and dismiss, the schedule, and
 # installs stopped (Cancel, closing, a bad or abandoned download) with
-# nothing left behind; Help › Check for Updates through a real
-# MainWindow. Off screen; on macOS a disk image hdiutil refuses, and
-# one made here (update/FakeApps.h) for a newer macOS, take a moment.
+# nothing left behind, each attempt's outcome and the pending-install
+# marker for usage statistics; Help › Check for Updates through a real
+# MainWindow. A deb with stand-in apt-get and pkexec on Unix. Off screen;
+# on macOS a disk image hdiutil refuses, and one made here
+# (update/FakeApps.h) for a newer macOS, take a moment.
 gitbolt_add_test(test_update_controller ui/TestUpdateController.cpp)
 target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h
     ui/AppMenuWatcher.h)
