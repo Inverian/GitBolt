@@ -356,11 +356,12 @@ std::optional<CrashEvent> CrashLogParser::parse(QStringView log) {
         exceptionCode.match(code).hasMatch())
         event.exceptionCode = code;
 
-    // Frames, newest first as written, up to the end marker.
+    // Frames, newest first as written, up to the module list (Windows,
+    // local only) or the end marker.
     QList<RawFrame> raw;
     for (++i; i < lines.size(); ++i) {
         const QStringView line = lines.at(i).trimmed();
-        if (line == QLatin1String("=== End of Report ==="))
+        if (line == QLatin1String("=== End of Report ===") || line == QLatin1String("--- Modules ---"))
             break;
         if (auto frame = parseFrameLine(line))
             raw.append(*frame);

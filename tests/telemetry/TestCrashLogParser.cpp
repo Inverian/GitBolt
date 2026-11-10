@@ -402,7 +402,7 @@ private slots:
                  qPrintable(id));
 #elif defined(Q_OS_WIN)
         SYMSRV_INDEX_INFOW info{};
-        info.sizeofstruct = sizeof(info);
+        info.sizeofstruct = static_cast<DWORD>(sizeof(info));
         const std::wstring file =
             QDir::toNativeSeparators(QCoreApplication::applicationFilePath()).toStdWString();
         QVERIFY(SymSrvGetFileIndexInfoW(file.c_str(), &info, 0));

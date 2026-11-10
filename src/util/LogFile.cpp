@@ -4,8 +4,10 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QMutexLocker>
-#include <QStandardPaths>
 #include <QTimeZone>
+#ifdef Q_OS_WIN
+#include <QStandardPaths>
+#endif
 
 #include <atomic>
 #include <cstring>
@@ -63,7 +65,9 @@ QString logDirectory() {
     return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
            + QStringLiteral("/GitBolt/logs");
 #else
-    return QStandardPaths::writableLocation(QStandardPaths::GenericStateLocation)
+    // XDG: an absolute XDG_STATE_HOME, else ~/.local/state.
+    const QString state = qEnvironmentVariable("XDG_STATE_HOME");
+    return (QDir::isAbsolutePath(state) ? state : QDir::homePath() + QStringLiteral("/.local/state"))
            + QStringLiteral("/GitBolt");
 #endif
 }

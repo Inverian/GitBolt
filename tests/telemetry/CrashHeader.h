@@ -3,9 +3,10 @@
 //
 // CrashHandler::renderHeader writes the host's "OS:" line, and
 // CrashLogParser picks its handler-frame rules by that line: a Windows
-// report drops the CRT and loader frames, a POSIX one the signal
-// trampoline. A synthetic POSIX report has to say which OS it comes
-// from, or the same test expects other frames on the Windows runner.
+// report drops the CRT and loader frames (one with "Stack: exception"
+// drops none), a POSIX one the signal trampoline. A synthetic POSIX
+// report has to say which OS it comes from, or the same test expects
+// other frames on the Windows runner.
 //
 
 #pragma once

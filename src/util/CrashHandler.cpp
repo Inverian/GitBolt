@@ -437,11 +437,13 @@ void writeModule(HANDLE file, const void* base) {
     writeHex(file, nt->FileHeader.TimeDateStamp, 8);
     CodeView cv;
     if (readCodeView(static_cast<const unsigned char*>(base), cv)) {
+        const size_t pdbLen = std::min(cv.pdbLen, sizeof(name));
+        for (size_t i = 0; i < pdbLen; ++i)
+            name[i] = cv.pdb[i] == ' ' || cv.pdb[i] == '\t' ? '_' : cv.pdb[i];
         writeStr(file, " pdb=");
-        for (size_t i = 0; i < cv.pdbLen; ++i)
-            writeRaw(file, cv.pdb[i] == ' ' || cv.pdb[i] == '\t' ? "_" : cv.pdb + i, 1);
-        if (cv.pdbLen == 0)
+        if (pdbLen == 0)
             writeStr(file, "?");
+        writeRaw(file, name, pdbLen);
         writeStr(file, " id=");
         writeRaw(file, cv.id, cv.idLen);
     }
