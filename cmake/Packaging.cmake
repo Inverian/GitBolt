@@ -36,12 +36,10 @@ if(APPLE)
     #
     # The bundle is signed by src/app/platform/macos/FinalizeBundle.cmake
     # (GitBolt's certificate in CI, else ad hoc), an install(SCRIPT) rule
-    # after the Qt deploy step in src/app/CMakeLists.txt. CPack re-stages
-    # the .app itself, so signing has to happen at install time, not
-    # "before cpack". Developer ID signing + notarization are not wired:
-    # they need an Apple-issued identity, inside-out signing with
-    # -o runtime --timestamp in that same hook, then `notarytool submit` +
-    # `stapler staple` on the finished DMG.
+    # after the Qt deploy step in src/app/CMakeLists.txt: CPack re-stages
+    # the .app itself, so signing happens at install time. Notarization is
+    # not wired: it needs an Apple-issued Developer ID, -o runtime
+    # --timestamp, then notarytool and stapler on the finished DMG.
 
 # ============================================================================
 # Windows — NSIS installer
@@ -181,23 +179,24 @@ set(CPACK_SOURCE_IGNORE_FILES "/\\\\.git/;/build/;/\\\\.cache/")
 # ============================================================================
 # Symbol files (GITBOLT_RELEASE_SYMBOLS, cmake/Symbols.cmake): the
 # gitbolt_symbols target writes <build>/${CPACK_PACKAGE_FILE_NAME}-symbols.zip,
-# which CI publishes beside the installers. Made from the build tree's
-# binary, the one CPack ships: macOS's GitBolt.dSYM (macdeployqt strips only
-# the installed copy; the UUID survives that and signing), Linux's
-# gitbolt.debug (the binary gets a debug link to it, which CPack's strip
-# keeps; -R first, so a second run links the new file), Windows' GitBolt.exe
-# and GitBolt.pdb (llvm-symbolizer wants both).
+# which CI publishes beside the installers. It reads the build tree's
+# binary, the one CPack installs (and strips), so the zip matches it.
 # ============================================================================
 if(GITBOLT_RELEASE_SYMBOLS)
     if(APPLE)
+        # macdeployqt strips only the installed copy; the UUID survives
+        # that and signing.
         find_program(GITBOLT_DSYMUTIL dsymutil REQUIRED)
         set(_gitbolt_split COMMAND ${GITBOLT_DSYMUTIL} $<TARGET_FILE:gitbolt> -o symbols/GitBolt.dSYM)
         set(_gitbolt_symbol_files GitBolt.dSYM)
     elseif(WIN32)
+        # llvm-symbolizer wants the .exe beside its .pdb.
         set(_gitbolt_split COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE:gitbolt> $<TARGET_PDB_FILE:gitbolt> symbols/)
         set(_gitbolt_symbol_files $<TARGET_FILE_NAME:gitbolt> $<TARGET_PDB_FILE_NAME:gitbolt>)
     else()
+        # The binary gets a debug link to gitbolt.debug, which CPack's
+        # strip keeps; the old link goes first, so a rerun links the new file.
         set(_gitbolt_split
             COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:gitbolt> symbols/gitbolt.debug
             COMMAND ${CMAKE_OBJCOPY} --remove-section=.gnu_debuglink

@@ -405,6 +405,7 @@ jobs:
       - name: Check English plural forms (Linux)
         if: runner.os == 'Linux'
         run: |
+          touch -r translations/gitbolt_en.ts "$RUNNER_TEMP/gitbolt_en.ts.time"
           cmake --build build --target update_translations
           if ! git diff --exit-code -- translations/; then
             echo "::error::translations/gitbolt_en.ts is stale: run 'cmake --build build --target update_translations', fill in the new forms and commit it"
@@ -414,6 +415,9 @@ jobs:
             echo "::error::translations/gitbolt_en.ts has %n texts without their English forms"
             exit 1
           fi
+          # lupdate rewrote the file unchanged. Its old time keeps the .qm,
+          # and so gitbolt, up to date: the tests run on the binary that ships.
+          touch -r "$RUNNER_TEMP/gitbolt_en.ts.time" translations/gitbolt_en.ts
 
       # Windows: a unit test that crashes leaves a minidump (Windows
       # Error Reporting's LocalDumps), uploaded below with its binary.
@@ -573,17 +577,19 @@ jobs:
       # ==================================================================
 
       # ---- all: symbol files -------------------------------------------
-      # The binary just tested, split into GitBolt-<version>-<platform>-
-      # symbols.zip (gitbolt_symbols, cmake/Packaging.cmake), which the
-      # release publishes so its crash reports can be read
-      # (tools/symbolize.py). Before packaging: on Linux it adds the debug
-      # link the .deb's binary carries. Each smoke test checks the zip
-      # against the packaged binary.
+      # The binary just tested (this fails if a step since Build would
+      # rebuild it), split into GitBolt-<version>-<platform>-symbols.zip
+      # (gitbolt_symbols, cmake/Packaging.cmake) for tools/symbolize.py.
+      # Before packaging: on Linux it adds the .deb binary's debug link.
+      # Each smoke test checks the zip against the packaged binary.
       - name: Symbol files
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
+          up=$(cmake --build build --target gitbolt)
+          grep -q 'no work to do' <<<"$up" \
+            || { echo "$up"; echo "::error::a step since Build changed gitbolt's inputs: the tests didn't run on the binary that ships"; exit 1; }
           cmake --build build --target gitbolt_symbols
           ls -l build/GitBolt-*-symbols.zip
 
@@ -1267,7 +1273,7 @@ jobs:
           }
           Assert-Updated "updated by the updater's helper"
 
-      # ---- Linux: DEB ------------------------------------------------
+      # ---- Linux: DEB + AppImage ---------------------------------------
       # appstream + desktop-file-utils: the metadata lint. xvfb: the DEB
       # update test's display.
       - name: Packaging tools (Linux)
@@ -1414,8 +1420,9 @@ jobs:
                 # The updater asks apt before it quits (src/update/
                 # Installer.cpp): as the user, no root, by the exit code.
                 # This stock system must take the DEB, and refuse a copy
-                # of it that needs libc6 (>= 99); both answers are printed,
-                # so the wording of each apt generation is in the log.
+                # of it that needs libc6 (>= 99), naming that dependency;
+                # both answers are printed, so the wording of each apt
+                # generation is in the log.
                 ask() { LC_ALL=C.UTF-8 runuser -u nobody -- apt-get -s -q install "$1" 2>&1; }
                 out=$(ask "/in/gitbolt_${VER}_amd64.deb") || { echo "$out"; echo "apt-get -s refused the DEB"; exit 1; }
                 echo "$out" | tail -n 3
@@ -1426,6 +1433,7 @@ jobs:
                 dpkg-deb -b /tmp/newer /tmp/newer.deb >/dev/null
                 if out=$(ask /tmp/newer.deb); then echo "$out"; echo "apt-get -s took a DEB that needs libc6 (>= 99)"; exit 1; fi
                 echo "$out"
+                grep -qF "libc6 (>= 99)" <<<"$out" || { echo "apt-get -s refused the DEB, but not for its libc6 (>= 99)"; exit 1; }
                 # xauth: xvfb-run needs it, and with --no-install-recommends
                 # not every release pulls it in with xvfb (Debian 13 does
                 # not, and xvfb-run then stops at "xauth command not found").
