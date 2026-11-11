@@ -29,7 +29,7 @@ Skipped (exit 77) without them.
    .Trash as GitBolt-0.1.0.app, and the new bundle has the offer's
    version and main binary, and verifies. Linux: dpkg has the offer's
    version, and the offer's binary is installed. Windows: the CI step
-   checks the install (registry, version resource).
+   checks the install (registry, version resource, GitBolt.exe's hash).
 4. The relaunched app answers the same bridge (the helper keeps
    GITBOLT_INSTANCE_NAME and the bridge's variables), from the same
    path, as a new process. The download, the staging and the helper's
@@ -39,8 +39,8 @@ Skipped (exit 77) without them.
    (GITBOLT_TEST_UPDATE_DIR, inherited through the helper). There it
    reads the helper's install-result and the launch's pending-install
    marker, both gone afterwards, says "GitBolt was updated to <v>.",
-   and logs the outcome: from 0.1.0, or from unknown after a 0.9.x
-   release, which writes no marker.
+   and logs the outcome: from 0.1.0, or from unknown after a release
+   up to 0.9.12, which writes no marker.
 5. macOS and Linux: the new binary's --version is the offer's.
 
 The packaged app has no offscreen platform plugin, so it runs on the
@@ -66,6 +66,7 @@ from update_stub import UpdateFeed  # noqa: E402
 
 SKIP = 77   # SKIP_RETURN_CODE in tests/e2e/CMakeLists.txt
 OLD_VERSION = "0.1.0"
+NO_MARKER_UP_TO = (0, 9, 12)    # the last release without the pending-install marker
 MARKER = "e2e-old-copy-marker"
 # assetNameFor (src/update/Package.cpp), the version captured.
 ASSET = {
@@ -239,7 +240,7 @@ class WindowsInstall:
         self.app_path = binary
 
     def check_replaced(self, _home: str, _offer: Offer) -> None:
-        pass    # the CI step's Assert-Updated: the registry, the version resource
+        pass    # the CI step's part 7: GitBolt.exe's hash, the registry, the version resource
 
 
 def same_file(a: str, b: str) -> bool:
@@ -302,9 +303,10 @@ def test(_binary: str, scratch: str, apps: list) -> None:
     install = make_install(scratch)
     offer = Offer(os.environ.get("GITBOLT_E2E_UPDATE_APP") or os.environ["GITBOLT_E2E_INSTALL_APP"],
                   scratch)
-    # 0.9.x releases leave no pending-install marker to say where from.
     published = os.environ.get("GITBOLT_E2E_PUBLISHED_VERSION", "")
-    from_version = "unknown" if published.startswith("0.") else OLD_VERSION
+    from_version = OLD_VERSION
+    if published and tuple(int(part) for part in published.split(".")) <= NO_MARKER_UP_TO:
+        from_version = "unknown"
 
     stub = UpdateFeed(offer.version)
     stub.add_asset(offer.name, path=offer.path)

@@ -455,7 +455,8 @@ jobs:
       # offscreen: the widget-linked QTEST_MAIN binaries need a QPA
       # platform, and the Linux runners have no display server. The e2e
       # tests run on every leg, Windows' included. CTEST_ONLY: a dry
-      # run's tests input, a ctest -R regex, kept out of the script text.
+      # run's tests input, a ctest -R regex, kept out of the script text;
+      # one that matches nothing fails the step (--no-tests=error).
       - name: Test
         id: test
         shell: pwsh
@@ -464,7 +465,7 @@ jobs:
           CTEST_ONLY: ${{ inputs.tests }}
         run: |
           $only = if ($env:CTEST_ONLY) { @('-R', $env:CTEST_ONLY) } else { @() }
-          ctest --test-dir build --output-on-failure @only
+          ctest --test-dir build --output-on-failure --no-tests=error @only
 
       # Folders opened through LaunchServices, as Finder and the Dock send
       # them, to the real cocoa app (tests/e2e/test_launchservices_open.py):
@@ -768,13 +769,10 @@ jobs:
           [ "$fail" = 0 ] && echo "DMG smoke test passed"
           exit "$fail"
 
-      # The latest published release's installer for this OS: the update
-      # steps below have it update to this build through its own Install
-      # and Restart. Always Inverian/GitBolt's, whichever repository runs
-      # this: those are the copies users have. Into RUNNER_TEMP, never
-      # build/, where Collect installers would take it. A release without
-      # this OS's asset (the first after a new format) skips only those
-      # cases, with a warning; a failed download or checksum fails here.
+      # The latest published release's installer for this OS, for the
+      # update steps below. Always Inverian/GitBolt's (the copies users
+      # have); into RUNNER_TEMP, as Collect installers takes build/'s. A
+      # release without this OS's asset skips those cases, with a warning.
       - name: Download the published release's installer
         id: published
         if: github.event_name != 'pull_request'
@@ -815,31 +813,12 @@ jobs:
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
           echo "$tag's $name: $path"
 
-      # The DMG updates in place, end to end
-      # (tests/e2e/test_update_install.py), twice: itself (self), and the
-      # published release's DMG to this one (published). The test copies
-      # the installed DMG's GitBolt.app into a scratch Applications folder
-      # and runs it as 0.1.0 against a loopback feed that offers this
-      # DMG, then clicks Help > Check for Updates > Install and Restart
-      # through the bridge. Afterwards the copy must be this DMG's bundle
-      # (codesign verifies it), the old one must be in a scratch HOME's
-      # Trash, and the relaunched copy must answer the bridge. A step of
-      # its own, after the smoke test's EXIT trap has detached the image:
-      # the test attaches the DMGs itself, read-only. It may only read
-      # this one, since Collect installers uploads it; the hash check
-      # holds it to that. No QT_QPA_PLATFORM here: the test runs the
-      # package on cocoa itself (no offscreen plugin in the bundle; the
-      # GUI session, as above). TMPDIR is each case's own folder: it holds
-      # all the test makes (no /Applications, no real Trash, no installed
-      # GitBolt) and tells its processes from others. Keep it short: the
-      # apps' unix sockets go in it, and sun_path is 104 bytes. The run is
-      # direct, not through ctest: ctest exits 0 when the test skips
-      # itself (exit 77, as without GITBOLT_E2E_INSTALL_APP), and here a
-      # skip fails. argv[1] is the build's binary, as ctest passes it;
-      # e2elib.run() wants one, but this test drives the DMG's copy.
-      # PYTHONUNBUFFERED: what the test printed survives a kill at the
-      # time limit. timeout-minutes: the test's own limits add up to
-      # about 10 minutes a case, so it reports its own timeout first.
+      # The DMG updates in place (tests/e2e/test_update_install.py): itself,
+      # and the published DMG to it. The test attaches the DMGs read-only,
+      # once the smoke test's trap has detached this one; the hash check
+      # holds it to only reading what Collect installers uploads. TMPDIR:
+      # each case's own, short for its unix sockets (sun_path: 104 bytes).
+      # Run directly, as ctest passes a skip (77), which fails here.
       - name: Update in place from the DMG, and the published DMG to this build (macOS)
         if: github.event_name != 'pull_request' && runner.os == 'macOS'
         timeout-minutes: 24
@@ -1244,24 +1223,21 @@ jobs:
           }
           Assert-Updated "updated by the updater's helper"
 
-          # 7) The published release updates to this build, as a user's
-          #    copy would (tests/e2e/test_update_install.py): its installer
-          #    over $dest (its .onInit uninstalls this build first), then
-          #    that copy run as 0.1.0 against a loopback feed offering this
-          #    installer, through Help > Check for Updates > Install and
-          #    Restart over the bridge's named pipe. Its administrator part
-          #    is granted unprompted (UAC is off), and the copy it starts
-          #    again inherits the bridge. TEMP and TMP: a private folder,
-          #    where the test's runtime folders go. No Qt from the build's
-          #    environment (as in 4). The test's PASS needs exit 0; 77 is a
-          #    skip, which fails here.
+          # 7) The published release, installed over $dest, updates to this
+          #    build through its own Install and Restart
+          #    (tests/e2e/test_update_install.py, run as 0.1.0 against a
+          #    loopback feed offering this installer). GitBolt.exe's hash
+          #    tells the two builds apart: their versions can be equal.
+          #    TEMP, TMP: the test's own folder. No Qt from the build (4).
           if (-not $env:PUBLISHED_INSTALLER) {
             Write-Host "::warning::no published installer (see the download step): part 7 skipped"
           } else {
+            $built = (Get-FileHash -LiteralPath $exe).Hash
             $pub = Start-Process -FilePath $env:PUBLISHED_INSTALLER -ArgumentList "/S /D=$dest" -Verb RunAs -Wait -PassThru
             if ($pub.ExitCode -ne 0) { throw "the published installer exited with $($pub.ExitCode)" }
-            $said = (Get-Item (Join-Path $bin 'GitBolt.exe')).VersionInfo.ProductVersion
+            $said = (Get-Item $exe).VersionInfo.ProductVersion
             if ($said -ne $env:PUBLISHED_VERSION) { throw "the published install's GitBolt.exe says version '$said', not $env:PUBLISHED_VERSION" }
+            if ((Get-FileHash -LiteralPath $exe).Hash -eq $built) { throw "the published installer left this build's GitBolt.exe in place" }
             Remove-Item -LiteralPath (Join-Path $dest 'LICENSE.txt')
             $tmp = Join-Path $env:RUNNER_TEMP ('gbup-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
             New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -1269,7 +1245,7 @@ jobs:
               TEMP = $tmp; TMP = $tmp
               PATH = (@($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path -LiteralPath "$_\Qt6Core.dll" -ErrorAction SilentlyContinue) }) -join ';')
               QT_PLUGIN_PATH = $null; QML2_IMPORT_PATH = $null; QT_QPA_PLATFORM_PLUGIN_PATH = $null; QT_QPA_PLATFORM = $null
-              GITBOLT_E2E_INSTALLED_APP = (Join-Path $bin 'GitBolt.exe')
+              GITBOLT_E2E_INSTALLED_APP = $exe
               GITBOLT_E2E_UPDATE_APP = $setup[0].FullName
               GITBOLT_E2E_PUBLISHED_VERSION = $env:PUBLISHED_VERSION
               PYTHONUNBUFFERED = '1'; PYTHONUTF8 = '1'
@@ -1281,7 +1257,7 @@ jobs:
               [Environment]::SetEnvironmentVariable($k, $vars[$k])
             }
             try {
-              & $python tests\e2e\test_update_install.py (Join-Path $bin 'GitBolt.exe')
+              & $python tests\e2e\test_update_install.py $exe
               $rc = $LASTEXITCODE
             } finally {
               foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
@@ -1296,6 +1272,7 @@ jobs:
             }
             if ($rc -eq 77) { throw 'test_update_install.py skipped itself (exit 77) instead of running' }
             if ($rc -ne 0) { throw "test_update_install.py failed (exit $rc). The FAIL line above carries the helper's install.log, and the old copy's log follows it." }
+            if ((Get-FileHash -LiteralPath $exe).Hash -ne $built) { throw "after the published release's update, GitBolt.exe isn't this build's" }
             Assert-Updated "updated by the published release's updater"
           }
 
@@ -1652,22 +1629,12 @@ jobs:
           fi
           rm -rf squashfs-root
 
-      # The .deb updates in place, end to end, as the DMG does above
-      # (tests/e2e/test_update_install.py), twice: itself (self), and the
-      # published release's .deb to this one (published). Each case
-      # installs its package with apt, relabelled 0.1.0, so that apt sees
-      # an upgrade even at the same version (a dry run's), and runs it as
-      # 0.1.0 against a loopback feed offering this .deb, then clicks
-      # Install and Restart. Its helper runs the real pkexec and apt-get:
-      # a polkit rule stands in for the agent's password prompt, for the
-      # runner's user. Afterwards dpkg must have this .deb's version and
-      # binary, and the relaunched copy must answer the bridge. As in the
-      # smoke test: xcb under xvfb-run (no offscreen plugin in the
-      # package), no Qt install's LD_LIBRARY_PATH. /usr/bin/python3, the
-      # image's own: setup-python's may need the LD_LIBRARY_PATH it
-      # exports, and every GitBolt the test starts would inherit that.
-      # -s: xvfb-run's default screen is 8-bit. TMPDIR, the direct run,
-      # argv[1] and timeout-minutes as in the macOS step.
+      # The .deb updates in place, as the DMG does: itself, and the
+      # published .deb to it, each installed relabelled 0.1.0 so apt sees
+      # an upgrade at a dry run's equal version. A polkit rule grants the
+      # helper's real pkexec to the runner's user. xcb under xvfb-run (-s:
+      # its default screen is 8-bit), no LD_LIBRARY_PATH, so the image's
+      # python3 (setup-python's needs that). TMPDIR, direct run: as macOS.
       - name: Update in place from the DEB, and the published DEB to this build (Linux)
         if: github.event_name != 'pull_request' && runner.os == 'Linux'
         timeout-minutes: 25

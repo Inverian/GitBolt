@@ -497,9 +497,6 @@ int main(int argc, char* argv[]) {
     if (gitbolt::util::shouldLookUpLoginPath())
         gitbolt::util::startLoginPathLookup();
 
-    // Settings service — constructed before the theme so the saved
-    // theme choice is restored before any window paints. Also used
-    // further down for window-geometry persistence.
 #ifdef Q_OS_WIN
     // Windows' QSettings reads only the %APPDATA% known folder, which no
     // variable moves: an e2e app's GitBolt.ini goes where XDG_CONFIG_HOME
@@ -507,6 +504,9 @@ int main(int argc, char* argv[]) {
     if (const QString dir = gitbolt::util::testSettingsDir(); !dir.isEmpty())
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir);
 #endif
+    // Settings service — constructed before the theme so the saved
+    // theme choice is restored before any window paints. Also used
+    // further down for window-geometry persistence.
     gitbolt::conf::SettingsService settings;
 
     // Let QStyleHints report the real OS scheme — applyTheme's

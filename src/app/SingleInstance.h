@@ -15,9 +15,10 @@ namespace gitbolt::app {
 // launch (the shell extensions, a plain CLI launch) hands its
 // repository path to instead of opening a second window. A library of
 // its own so tests/app/TestSingleInstance.cpp runs it on every
-// platform and drives busy owners and hang-ups deterministically (the
-// e2e tests launch the app itself), Windows' named pipes, which behave
-// unlike Unix sockets here, included. main() keeps what the user sees.
+// platform, Windows' named pipes (unlike Unix sockets here) included,
+// and drives busy owners and hang-ups deterministically, which the
+// e2e tests, launching the app itself, can't. main() keeps what the
+// user sees.
 
 /// Per-user directory for the single-instance lock and forwarding
 /// socket. Linux/BSD: $XDG_RUNTIME_DIR, private to the user and never
