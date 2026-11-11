@@ -6089,6 +6089,33 @@ void MainWindow::showPickDialog(bool revert, const QString& commit)
 {
     if (!gitService_ || !gitService_->isOpen())
         return;
+    // Not while another operation waits: the pick or the revert would be
+    // refused only once the dialog was filled in.
+    QString busy;
+    switch (gitService_->withRepository([](git::Repository& r) { return r.state(); })) {
+    case git::RepoState::None:
+        break;
+    case git::RepoState::Merge:
+        busy = tr("A merge is in progress. Finish or abort it first.");
+        break;
+    case git::RepoState::CherryPick:
+        busy = tr("A cherry-pick is in progress. Finish or abort it first.");
+        break;
+    case git::RepoState::Revert:
+        busy = tr("A revert is in progress. Finish or abort it first.");
+        break;
+    case git::RepoState::Rebase:
+        busy = tr("A rebase is in progress. Finish or abort it first.");
+        break;
+    case git::RepoState::Other:
+        busy = tr("Another git operation (git am or bisect) is in progress. Finish it first.");
+        break;
+    }
+    if (!busy.isEmpty()) {
+        widgets::PlainMessageBox::information(
+            this, revert ? tr("Revert Commit") : tr("Cherry Pick"), busy);
+        return;
+    }
     using Mode = dialogs::CherryPickDialog::Mode;
     auto* dlg = new dialogs::CherryPickDialog(this, revert ? Mode::Revert : Mode::CherryPick);
     dlg->setAttribute(Qt::WA_DeleteOnClose);
@@ -6096,16 +6123,15 @@ void MainWindow::showPickDialog(bool revert, const QString& commit)
     // resolved in the live repository under its lock: the dialog is
     // modeless, and a repository switch destroys a Repository*.
     connect(dlg, &dialogs::CherryPickDialog::commitHashChanged,
-            dlg, [dlg, revert, svc = gitService_](const QString& hash) {
+            dlg, [dlg, svc = gitService_](const QString& hash) {
         const std::string spec = hash.trimmed().toStdString();
         QStringList parents;
         auto found = svc->withRepository([&](git::Repository& r) -> git::Result<git::CommitData> {
             auto oid = r.resolveRef(spec);
             if (!oid.ok()) return oid.error();
             auto data = r.lookupCommit(oid.value());
-            // A merge's parents, for the revert's parent chooser.
-            for (size_t i = 0; revert && data.ok() && data->isMerge() && i < data->parentIds.size();
-                 ++i) {
+            // A merge's parents, for the parent chooser.
+            for (size_t i = 0; data.ok() && data->isMerge() && i < data->parentIds.size(); ++i) {
                 const auto parent = r.lookupCommit(data->parentIds[i]);
                 parents << QString::fromStdString(data->parentIds[i].toShortHex())
                                + QLatin1Char(' ')
@@ -6119,17 +6145,17 @@ void MainWindow::showPickDialog(bool revert, const QString& commit)
             dlg->setCommitDetails(found.value(), parents);
     });
     // In the repository the dialog was opened for, and not under a local
-    // op or a step that started meanwhile.
+    // op or a step that started meanwhile. The commit is the one the
+    // preview showed (its parent is the one chosen there), not what the
+    // field's text names now: a branch can move while the dialog is up.
     connect(dlg, &QDialog::accepted, this, [this, dlg, revert, key = gitService_->openKey()]() {
         if (!gitService_ || !gitService_->isOpen()
             || repositoryChangedSince(key, revert ? tr("nothing was reverted.")
                                                   : tr("nothing was cherry-picked."))
             || refuseWhileLocalOpRuns())
             return;
-        const std::string spec = dlg->commitHash().toStdString();
-        auto oid = gitService_->withRepository(
-            [&](git::Repository& r) { return r.resolveRef(spec); });
-        if (spec.empty() || !oid.ok()) {
+        const auto commit = dlg->previewedCommit();
+        if (!commit) {
             widgets::PlainMessageBox::information(this, revert ? tr("Revert Commit")
                                                                : tr("Cherry Pick"),
                 tr("Couldn't resolve that revision. Try a "
@@ -6137,9 +6163,9 @@ void MainWindow::showPickDialog(bool revert, const QString& commit)
             return;
         }
         if (revert)
-            gitService_->revertCommit(oid.value(), dlg->mainline());
+            gitService_->revertCommit(*commit, dlg->mainline());
         else
-            gitService_->cherryPick(oid.value());
+            gitService_->cherryPick(*commit, dlg->mainline());
     });
     dlg->setCommitHash(commit);
     dlg->open();

@@ -363,11 +363,12 @@ QString linkTarget(const QString& path) {
 
 } // namespace
 
-// cherryPick() takes one commit. It took a list, but libgit2's pick
-// only stages: the second met the first one's uncommitted changes,
-// failed, and took the first pick's state files down with it.
+// cherryPick() takes one commit (and a merge's parent). It took a list,
+// but libgit2's pick only stages: the second met the first one's
+// uncommitted changes, failed, and took the first pick's state files
+// down with it.
 static_assert(std::is_same_v<decltype(&GitService::cherryPick),
-                             void (GitService::*)(const gitbolt::git::ObjectId&)>);
+                             void (GitService::*)(const gitbolt::git::ObjectId&, unsigned)>);
 
 class TestGitService : public QObject {
     Q_OBJECT
@@ -5074,6 +5075,40 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(output(work.run({"rev-parse", "CHERRY_PICK_HEAD"})),
                  QString::fromStdString(a->toHex()));
+    }
+
+    // A merge is picked as seen from the parent the dialog's chooser
+    // names (git cherry-pick -m); libgit2 turned every merge down.
+    void cherryPickOfAMergeGoesByTheParentChosen() {
+        IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"branch", "target"})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        repo->writeFile(QStringLiteral("side.txt"), QByteArrayLiteral("side\n"));
+        QVERIFY(succeeded(work.run({"add", "side.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "side"})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        repo->writeFile(QStringLiteral("main.txt"), QByteArrayLiteral("main\n"));
+        QVERIFY(succeeded(work.run({"add", "main.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "main"})));
+        QVERIFY(succeeded(work.run({"merge", "-q", "--no-ff", "-m", "Merge side", "side"})));
+        auto merge = repo->repo().head();
+        QVERIFY(merge.ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "target"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy picks(&svc, &GitService::cherryPickComplete);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.cherryPick(*merge, 2);
+        QVERIFY(picks.waitForAny(10000));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(picks.at(0).at(0).toBool(), true);
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::CherryPick);
+        QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("A  main.txt"));
     }
 
     // revertCommit(), as cherryPick() goes: staged and said so (the bar

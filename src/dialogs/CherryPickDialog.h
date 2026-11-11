@@ -5,6 +5,7 @@
 
 #include <QDialog>
 #include <QStringList>
+#include <optional>
 #include <vector>
 
 class QComboBox;
@@ -17,7 +18,7 @@ class QPushButton;
 namespace gitbolt::dialogs {
 
 /// Commands › Cherry pick and Revert commit: a commit to pick or revert,
-/// with a preview of it. A revert of a merge asks which parent.
+/// with a preview of it. A merge's pick or revert asks which parent.
 class CherryPickDialog : public QDialog {
     Q_OBJECT
 public:
@@ -41,8 +42,12 @@ public:
     /// Clear the commit details display (e.g. when input is invalid).
     void clearCommitDetails();
 
-    /// The parent (from 1) a merge is reverted against; 0 for any other
-    /// commit, and in cherry-pick mode.
+    /// The commit the preview shows, which OK picks or reverts: the
+    /// field's text may name another by then (a branch that moved).
+    std::optional<gitbolt::git::ObjectId> previewedCommit() const { return previewed_; }
+
+    /// The parent (from 1) a merge is picked or reverted as seen from;
+    /// 0 for any other commit.
     unsigned mainline() const;
 
 signals:
@@ -64,10 +69,11 @@ private:
     QLabel* authorLabel_   = nullptr;
     QLabel* dateLabel_     = nullptr;
     QLabel* hashLabel_     = nullptr;
-    // A merge's parents (revert mode), a row shown only for a merge.
+    // A merge's parents, a row shown only for a merge.
     QFormLayout* detailsForm_ = nullptr;
     QComboBox*   parentCombo_ = nullptr;
     bool         merge_       = false;
+    std::optional<gitbolt::git::ObjectId> previewed_;
 };
 
 } // namespace gitbolt::dialogs

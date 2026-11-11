@@ -69,23 +69,25 @@ void CherryPickDialog::setupUi() {
     detailsLayout->addRow(tr("Author:"), authorLabel_);
     detailsLayout->addRow(tr("Date:"), dateLabel_);
 
-    // A merge is reverted against one of its parents (git revert -m):
-    // a row shown only for a merge's revert.
-    if (revert) {
-        parentCombo_ = new QComboBox(this);
-        parentCombo_->setObjectName(QStringLiteral("revert.parent"));
-        parentCombo_->setToolTip(
-            tr("The revert undoes the changes the merge brought in, as seen from this "
-               "parent. The first parent is usually the branch that was merged into."));
-        detailsLayout->addRow(tr("Parent:"), parentCombo_);
-        detailsLayout->setRowVisible(parentCombo_, false);
-    }
+    // A merge is picked or reverted as seen from one of its parents
+    // (git cherry-pick -m, git revert -m): a row shown only for a merge.
+    parentCombo_ = new QComboBox(this);
+    parentCombo_->setObjectName(revert ? QStringLiteral("revert.parent")
+                                       : QStringLiteral("cherryPick.parent"));
+    parentCombo_->setToolTip(
+        revert ? tr("The revert undoes the changes the merge brought in, as seen from this "
+                    "parent. The first parent is usually the branch that was merged into.")
+               : tr("The pick applies the changes the merge brought in, as seen from this "
+                    "parent. The first parent is usually the branch that was merged into."));
+    detailsLayout->addRow(tr("Parent:"), parentCombo_);
+    detailsLayout->setRowVisible(parentCombo_, false);
 
     mainLayout->addWidget(detailsGroup);
     if (revert) {
         auto* note = new QLabel(
-            tr("The changes that undo this commit are staged, not committed: commit them "
-               "to finish the revert, or Abort to go back."),
+            tr("Revert stages the changes that undo this commit; it doesn't commit them. "
+               "Commit them to finish the revert, or use Abort on the bar that appears "
+               "to go back."),
             this);
         note->setObjectName(QStringLiteral("revert.note"));
         note->setWordWrap(true);
@@ -111,12 +113,14 @@ QString CherryPickDialog::commitHash() const {
     return hashEdit_->text().trimmed();
 }
 
+// Selected, so that typing or pasting a hash replaces the one filled in.
 void CherryPickDialog::setCommitHash(const QString& hash) {
     hashEdit_->setText(hash);
+    hashEdit_->selectAll();
 }
 
 unsigned CherryPickDialog::mainline() const {
-    if (!parentCombo_ || !merge_ || parentCombo_->currentIndex() < 0)
+    if (!merge_ || parentCombo_->currentIndex() < 0)
         return 0;
     return static_cast<unsigned>(parentCombo_->currentIndex()) + 1;
 }
@@ -141,19 +145,22 @@ void CherryPickDialog::setCommitDetails(const git::CommitData& commit,
         static_cast<qint64>(epoch), QTimeZone::LocalTime);
     dateLabel_->setText(dt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss")));
 
-    if (parentCombo_) {
-        // The parents' subjects are their authors' text: a combo shows
-        // items as plain text, at most util::kMaxLineChars of each.
-        merge_ = commit.isMerge();
-        parentCombo_->clear();
-        for (size_t i = 0; merge_ && i < commit.parentIds.size(); ++i) {
-            const QString line = i < static_cast<size_t>(parentSummaries.size())
-                ? util::elided(parentSummaries.at(static_cast<qsizetype>(i)))
-                : QString::fromStdString(commit.parentIds[i].toShortHex());
-            parentCombo_->addItem(QStringLiteral("%1: %2").arg(i + 1).arg(line));
-        }
-        detailsForm_->setRowVisible(parentCombo_, merge_);
+    // The parents' subjects are their authors' text: a combo shows
+    // items as plain text, at most util::kMaxLineChars of each. The
+    // parent chosen stays while the field's edits name the same merge.
+    const int chosen = previewed_ == commit.id ? parentCombo_->currentIndex() : 0;
+    previewed_ = commit.id;
+    merge_ = commit.isMerge();
+    parentCombo_->clear();
+    for (size_t i = 0; merge_ && i < commit.parentIds.size(); ++i) {
+        const QString line = i < static_cast<size_t>(parentSummaries.size())
+            ? util::elided(parentSummaries.at(static_cast<qsizetype>(i)))
+            : QString::fromStdString(commit.parentIds[i].toShortHex());
+        parentCombo_->addItem(QStringLiteral("%1: %2").arg(i + 1).arg(line));
     }
+    if (chosen > 0 && chosen < parentCombo_->count())
+        parentCombo_->setCurrentIndex(chosen);
+    detailsForm_->setRowVisible(parentCombo_, merge_);
 
     if (buttonBox_)
         buttonBox_->button(QDialogButtonBox::Ok)->setEnabled(true);
@@ -164,11 +171,10 @@ void CherryPickDialog::clearCommitDetails() {
     summaryLabel_->clear();
     authorLabel_->clear();
     dateLabel_->clear();
-    if (parentCombo_) {
-        merge_ = false;
-        parentCombo_->clear();
-        detailsForm_->setRowVisible(parentCombo_, false);
-    }
+    previewed_.reset();
+    merge_ = false;
+    parentCombo_->clear();
+    detailsForm_->setRowVisible(parentCombo_, false);
 
     if (buttonBox_)
         buttonBox_->button(QDialogButtonBox::Ok)->setEnabled(false);

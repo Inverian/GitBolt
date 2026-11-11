@@ -2557,6 +2557,164 @@ private slots:
         QCOMPARE(readFile(repo.path(), QStringLiteral("a.txt")), QByteArray("mine\n"));
     }
 
+    // MERGE_MSG's first line, as git 2.56's revert writes it: the first
+    // line of the message (libgit2 took the whole first paragraph), and
+    // "Reapply" for a revert's revert, but not for one reverted twice.
+    void revertMessageIsGits_data() {
+        QTest::addColumn<QString>("message");
+        QTest::addColumn<QString>("subject");
+        QTest::newRow("first paragraph of two lines")
+            << QStringLiteral("first line\nsecond line\n\nbody")
+            << QStringLiteral("Revert \"first line\"");
+        QTest::newRow("a revert's revert")
+            << QStringLiteral("Revert \"foo\"\n\nThis reverts commit 1234.")
+            << QStringLiteral("Reapply \"foo\"");
+        QTest::newRow("reverted twice already")
+            << QStringLiteral("Revert \"Revert \"x\"\"")
+            << QStringLiteral("Revert \"Revert \"Revert \"x\"\"\"");
+    }
+
+    void revertMessageIsGits() {
+        QFETCH(QString, message);
+        QFETCH(QString, subject);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "one\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("a.txt", "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "--cleanup=verbatim", "-am",
+                                   message.toStdString()})));
+        auto two = repo.repo().resolveRef("HEAD");
+        QVERIFY(two.ok());
+
+        auto reverted = repo.repo().revert(*two);
+        QVERIFY2(reverted.ok(), reverted.ok() ? "" : reverted.error().message().c_str());
+        QCOMPARE(QString::fromUtf8(readFile(QString::fromStdString(repo.repo().path()),
+                                            QStringLiteral("MERGE_MSG"))),
+                 subject + QStringLiteral("\n\nThis reverts commit %1.\n")
+                               .arg(QString::fromStdString(two->toHex())));
+    }
+
+    // The conflict markers name the commits as git's do, "<short id>
+    // (<subject>)", its parent "parent of …": libgit2's "<id>... <first
+    // paragraph>" isn't what git, or a user who knows git's, reads.
+    void pickAndRevertLabelConflictsAsGitDoes_data() {
+        QTest::addColumn<bool>("revert");
+        QTest::newRow("cherry-pick") << false;
+        QTest::newRow("revert") << true;
+    }
+
+    void pickAndRevertLabelConflictsAsGitDoes() {
+        QFETCH(bool, revert);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("f", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        QVERIFY(succeeded(git.run({"config", "merge.conflictstyle", "diff3"})));
+        QVERIFY(succeeded(git.run({"branch", "other"})));
+        repo.writeFile("f", "b\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two\nmore"})));
+        auto two = repo.repo().resolveRef("HEAD");
+        QVERIFY(two.ok());
+        const std::string label = two->toShortHex() + " (two)";
+        if (revert) {
+            repo.writeFile("f", "c\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "three"})));
+        } else {
+            QVERIFY(succeeded(git.run({"checkout", "-q", "other"})));
+            repo.writeFile("f", "z\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "other"})));
+        }
+
+        if (revert) {
+            auto done = repo.repo().revert(*two);
+            QVERIFY(done.ok() && done->hasConflicts);
+        } else {
+            auto done = repo.repo().cherryPick(*two);
+            QVERIFY(done.ok() && done->hasConflicts);
+        }
+        const QByteArray expected = revert
+            ? QByteArray::fromStdString("<<<<<<< HEAD\nc\n||||||| " + label + "\nb\n=======\na\n"
+                                        ">>>>>>> parent of " + label + "\n")
+            : QByteArray::fromStdString("<<<<<<< HEAD\nz\n||||||| parent of " + label
+                                        + "\na\n=======\nb\n>>>>>>> " + label + "\n");
+        QCOMPARE(readFile(repo.path(), QStringLiteral("f")), expected);
+    }
+
+    // git cherry-pick -m: a merge is picked as seen from one of its
+    // parents, the first unless told, its message the merge's. libgit2
+    // turned any merge down ("mainline branch is not specified"), which
+    // the log's Cherry-Pick This Commit… offers on a merge's row too.
+    void cherryPickOfAMergeTakesAParent_data() {
+        QTest::addColumn<unsigned>("mainline");
+        QTest::addColumn<QString>("staged");
+        QTest::newRow("default: the first") << 0u << QStringLiteral("A  side.txt");
+        QTest::newRow("first") << 1u << QStringLiteral("A  side.txt");
+        QTest::newRow("second") << 2u << QStringLiteral("A  main.txt");
+        QTest::newRow("none such") << 3u << QString();
+    }
+
+    void cherryPickOfAMergeTakesAParent() {
+        QFETCH(unsigned, mainline);
+        QFETCH(QString, staged);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"branch", "target"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("side.txt", "side\n");
+        QVERIFY(succeeded(git.run({"add", "side.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "side"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("main.txt", "main\n");
+        QVERIFY(succeeded(git.run({"add", "main.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "main"})));
+        QVERIFY(succeeded(git.run({"merge", "-q", "--no-ff", "-m", "Merge side", "side"})));
+        auto merge = repo.repo().resolveRef("HEAD");
+        QVERIFY(merge.ok());
+        const QString id = QString::fromStdString(merge->toHex());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "target"})));
+
+        auto picked = repo.repo().cherryPick(*merge, mainline);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        if (staged.isEmpty()) {
+            QVERIFY(!picked.ok());
+            QCOMPARE(QString::fromStdString(picked.error().message()),
+                     QStringLiteral("Merge %1 has no parent 3.").arg(id.left(7)));
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+            QCOMPARE(readFile(gitDir, QStringLiteral("CHERRY_PICK_HEAD")), QByteArray("<missing>"));
+            return;
+        }
+        QVERIFY2(picked.ok(), picked.ok() ? "" : picked.error().message().c_str());
+        QVERIFY(!picked->hasConflicts && !picked->alreadyApplied);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::CherryPick);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), staged);
+        QCOMPARE(readFile(gitDir, QStringLiteral("MERGE_MSG")), QByteArray("Merge side\n"));
+    }
+
+    // A parent asked for a commit that isn't a merge is refused, as for
+    // a revert, with nothing in progress.
+    void cherryPickOfACommitWithOneParentTakesNoParent() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+        auto addB = repo.repo().resolveRef("HEAD");
+        QVERIFY(addB.ok());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+
+        auto refused = repo.repo().cherryPick(*addB, 1);
+        QVERIFY(!refused.ok());
+        QCOMPARE(QString::fromStdString(refused.error().message()),
+                 QStringLiteral("Commit %1 is not a merge: there is no parent to choose.")
+                     .arg(QString::fromStdString(addB->toShortHex())));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QString());
+    }
+
     // -----------------------------------------------------------------
     // `git cherry-pick A B C` (or a revert of several commits) that
     // stopped at B: once B is committed, the sequence is paused between

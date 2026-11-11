@@ -461,7 +461,8 @@ public:
     /// first one's uncommitted changes. While another operation is in
     /// progress (a merge, a pick not committed yet) it is refused with
     /// an operationFailed alone, as Repository::cherryPick refuses it.
-    void cherryPick(const git::ObjectId& commit);
+    /// `mainline`: Repository::cherryPick()'s (a merge's parent).
+    void cherryPick(const git::ObjectId& commit, unsigned mainline = 0);
 
     /// Stages the inverse of `commit`'s changes, as cherryPick() stages
     /// a pick: the user's commit concludes the revert, with git's

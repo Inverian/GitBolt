@@ -311,7 +311,9 @@ public:
 
     // Cherry-pick. Staged, not committed. One whose changes are on the
     // branch already leaves nothing in progress (alreadyApplied).
-    Result<CherryPickResult> cherryPick(const ObjectId& commitId);
+    // `mainline`: the parent (from 1) a merge is picked as seen from
+    // (git cherry-pick -m), 0 for its first; any other commit takes 0.
+    Result<CherryPickResult> cherryPick(const ObjectId& commitId, unsigned mainline = 0);
 
     // Revert: the inverse of the commit's changes, staged with
     // REVERT_HEAD and git's message (MERGE_MSG), as cherryPick() stages

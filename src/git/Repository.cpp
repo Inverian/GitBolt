@@ -120,26 +120,67 @@ bool indexHasHeadsTree(git_repository* repo, git_index* index) {
     return same;
 }
 
-// libgit2 writes "This reverts commit <id>." for a merge too; git adds
-// the parent it was reverted against, which matters for a merge.
-void nameRevertedMergesParent(git_repository* repo, const git_oid* commit,
-                              const git_oid* parent) {
+// git's subject of a commit (sequencer.c): the first line of its
+// message after any blank ones. libgit2's summary joins the lines of
+// the first paragraph, so its MERGE_MSG and labels differed from git's.
+std::string gitSubject(const git_commit* commit) {
+    std::string_view msg = git_commit_message(commit) ? git_commit_message(commit) : "";
+    while (!msg.empty()) {
+        const size_t eol = msg.find('\n');
+        const std::string_view line = msg.substr(0, eol);
+        if (line.find_first_not_of(" \t\r\f\v") != std::string_view::npos)
+            break;
+        msg = eol == std::string_view::npos ? std::string_view() : msg.substr(eol + 1);
+    }
+    return std::string(msg.substr(0, msg.find('\n')));
+}
+
+// The conflict markers' name for a picked commit, git's
+// "<short id> (<subject>)" (libgit2's is "<id>... <summary>").
+std::string gitLabel(const git_commit* commit) {
     char id[GIT_OID_MAX_HEXSIZE + 1];
-    char parentId[GIT_OID_MAX_HEXSIZE + 1];
-    git_oid_tostr(id, sizeof id, commit);
-    git_oid_tostr(parentId, sizeof parentId, parent);
+    git_oid_tostr(id, 8, git_commit_id(commit));
+    return std::string(id) + " (" + gitSubject(commit) + ")";
+}
+
+// The parent (from 1) a pick or a revert of `commit` goes by: a merge
+// needs one, the first unless told; any other commit takes none. Said
+// in the words of the dialog that asks for it.
+Result<unsigned> mainlineFor(const git_commit* commit, unsigned mainline,
+                             const std::string& shortId) {
+    const unsigned parents = git_commit_parentcount(commit);
+    if (parents < 2 && mainline > 0)
+        return GitError(GitErrorCode::Invalid,
+                        "Commit " + shortId + " is not a merge: there is no parent to choose.");
+    if (mainline > parents)
+        return GitError(GitErrorCode::Invalid,
+                        "Merge " + shortId + " has no parent " + std::to_string(mainline) + ".");
+    return parents >= 2 && mainline == 0 ? 1u : mainline;
+}
+
+// MERGE_MSG as git's revert writes it: libgit2's subject is the first
+// paragraph, it has no "Reapply" for a revert's revert, and a merge's
+// message doesn't name the parent it was reverted against.
+void writeGitsRevertMessage(git_repository* repo, const git_commit* commit,
+                            const git_oid* parent) {
+    constexpr std::string_view revert = "Revert \"";
+    const std::string subject = gitSubject(commit);
+    const std::string_view rest = std::string_view(subject).substr(
+        subject.rfind(revert, 0) == 0 ? revert.size() : 0);
+    std::string text = rest.size() < subject.size() && rest.substr(0, revert.size()) != revert
+        ? "Reapply \"" + std::string(rest)
+        : "Revert \"" + subject + "\"";
+    char id[GIT_OID_MAX_HEXSIZE + 1];
+    git_oid_tostr(id, sizeof id, git_commit_id(commit));
+    text += std::string("\n\nThis reverts commit ") + id;
+    if (parent) {
+        git_oid_tostr(id, sizeof id, parent);
+        text += std::string(", reversing\nchanges made to ") + id;
+    }
+    text += ".\n";
     QFile file(QString::fromUtf8(git_repository_path(repo)) + QLatin1String("MERGE_MSG"));
-    if (!file.open(QIODevice::ReadOnly))
-        return;
-    QByteArray text = file.readAll();
-    file.close();
-    const QByteArray plain = QByteArray("This reverts commit ") + id + ".\n";
-    const qsizetype at = text.indexOf(plain);
-    if (at < 0 || !file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-        return;
-    text.replace(at, plain.size(), QByteArray("This reverts commit ") + id
-                                       + ", reversing\nchanges made to " + parentId + ".\n");
-    file.write(text);
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        file.write(text.data(), static_cast<qint64>(text.size()));
 }
 // libgit2 lifecycle owner.
 //
@@ -2474,7 +2515,7 @@ Result<void> Repository::stashDrop(size_t index) {
     return Result<void>::success();
 }
 
-Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
+Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId, unsigned mainline) {
     // On top of an operation in progress, libgit2 writes its own
     // CHERRY_PICK_HEAD and MERGE_MSG over that operation's, and a pick
     // that then fails (an earlier pick's changes in the way) deletes
@@ -2495,10 +2536,19 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     git_commit* commit = nullptr;
     int err = git_commit_lookup(&commit, repo_, &oid);
     if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeCommit = qScopeGuard([commit] { git_commit_free(commit); });
+    // A merge is picked as seen from one of its parents (git cherry-pick -m).
+    auto parent = mainlineFor(commit, mainline, commitId.toShortHex());
+    if (!parent) return parent.error();
     git_cherrypick_options opts;
     git_cherrypick_options_init(&opts, GIT_CHERRYPICK_OPTIONS_VERSION);
+    opts.mainline = parent.value();
+    // The conflict markers' names, git's (sequencer.c).
+    const std::string label = gitLabel(commit);
+    const std::string parentLabel = "parent of " + label;
+    opts.checkout_opts.ancestor_label = parentLabel.c_str();
+    opts.checkout_opts.their_label = label.c_str();
     err = git_cherrypick(repo_, commit, &opts);
-    git_commit_free(commit);
     // A real failure (bad object, bare repo, OOM) is an ERROR with
     // git_error_last context; a conflicted index is the normal
     // "needs resolution" outcome and returns 0. The old code
@@ -2548,22 +2598,17 @@ Result<RevertResult> Repository::revert(const ObjectId& commitId, unsigned mainl
     int err = git_commit_lookup(&commit, repo_, &oid);
     if (err < 0) return GitError::fromLibgit2(err);
     const auto freeCommit = qScopeGuard([commit] { git_commit_free(commit); });
-    // libgit2 wants a parent for a merge and none for any other commit;
-    // said here in the words of the dialog that asks for it.
-    const unsigned parents = git_commit_parentcount(commit);
-    const std::string shortId = commitId.toShortHex();
-    if (parents < 2 && mainline > 0)
-        return GitError(GitErrorCode::Invalid,
-                        "Commit " + shortId + " is not a merge: there is no parent to choose.");
-    if (parents >= 2 && mainline == 0)
-        mainline = 1;
-    if (mainline > parents)
-        return GitError(GitErrorCode::Invalid,
-                        "Merge " + shortId + " has no parent " + std::to_string(mainline) + ".");
+    auto parent = mainlineFor(commit, mainline, commitId.toShortHex());
+    if (!parent) return parent.error();
 
     git_revert_options opts;
     git_revert_options_init(&opts, GIT_REVERT_OPTIONS_VERSION);
-    opts.mainline = mainline;
+    opts.mainline = parent.value();
+    // A pick's conflict-marker names, the other way round (sequencer.c).
+    const std::string label = gitLabel(commit);
+    const std::string parentLabel = "parent of " + label;
+    opts.checkout_opts.ancestor_label = label.c_str();
+    opts.checkout_opts.their_label = parentLabel.c_str();
     err = git_revert(repo_, commit, &opts);
     // As cherryPick(): a failure isn't a conflict, and can come partway
     // through the checkout (libgit2 drops REVERT_HEAD and MERGE_MSG).
@@ -2572,8 +2617,9 @@ Result<RevertResult> Repository::revert(const ObjectId& commitId, unsigned mainl
         reloadIndex(repo_);
         return error;
     }
-    if (parents >= 2)
-        nameRevertedMergesParent(repo_, &oid, git_commit_parent_id(commit, mainline - 1));
+    writeGitsRevertMessage(repo_, commit,
+                           opts.mainline ? git_commit_parent_id(commit, opts.mainline - 1)
+                                         : nullptr);
 
     git_index* index = nullptr;
     err = git_repository_index(&index, repo_);
