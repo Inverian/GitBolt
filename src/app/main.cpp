@@ -458,8 +458,8 @@ int main(int argc, char* argv[]) {
     // The log file (util/LogFile.h), local only: from here on every Qt
     // message goes there too, and on to stderr as before. Askpass,
     // --help and hand-off launches have returned by now, so the GitBolt
-    // that owns the window owns the file. A test session writes a file
-    // of its own. The session line goes in directly: stderr stays quiet.
+    // that owns the window owns the file; test sessions write
+    // GitBolt-test.log. The session line goes in directly: no stderr.
     gitbolt::util::RotatingLog appLog(gitbolt::util::logDirectory(),
                                       testSession ? QStringLiteral("GitBolt-test")
                                                   : QStringLiteral("GitBolt"));

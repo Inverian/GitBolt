@@ -5,6 +5,7 @@
 //     lines in <base>.log, the oldest file gone; an oversized file
 //     from an earlier session rotates at open
 //   - lines from many threads at once: every one intact, none lost
+//   - two logs on one file (two sessions): every line of both kept
 //   - the message handler: lines with a time, the level and the
 //     category, every message forwarded to the handler before it, and
 //     that handler back once it is uninstalled
@@ -150,6 +151,23 @@ private slots:
             seen.insert(m.captured(1) + QLatin1Char('/') + m.captured(2));
         }
         QCOMPARE(seen.size(), kThreads * kLines);
+    }
+
+    // Two sessions on one file (Windows: every test session's
+    // GitBolt-test.log). Both opened at the same size: each line must
+    // still land at the end, not over the other's.
+    void twoLogsOnOneFileKeepEveryLine() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        RotatingLog first(dir.path(), QStringLiteral("GitBolt"));
+        RotatingLog second(dir.path(), QStringLiteral("GitBolt"));
+        QList<QByteArray> expected;
+        for (int i = 0; i < 20; ++i) {
+            expected << QByteArray("first ") + QByteArray(i % 7 + 1, 'a') << numbered(i);
+            first.append(expected.at(expected.size() - 2));
+            second.append(expected.last());
+        }
+        QCOMPARE(linesOf(first.filePath()), expected);
     }
 
     // Every message goes to the file and on to the handler installed
