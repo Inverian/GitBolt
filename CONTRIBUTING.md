@@ -212,18 +212,22 @@ feature:
   right-click menu entry without one is never counted, and one with
   one is counted by that name ([PRIVACY.md](PRIVACY.md)), so never put
   a branch name, path or other user text in it. `MainWindow` runs an
-  `assignActionObjectNames()` safety net that auto-derives a name from
-  the menu path for anything left unnamed — **treat that as a backstop,
-  not a substitute**; a derived name breaks the moment someone reworks
-  the menu wording.
+  `assignActionObjectNames()` safety net that derives a name from the
+  menu path for a menu-bar or main-toolbar action left unnamed (a
+  right-click menu gets none) — **treat that as a backstop, not a
+  substitute**; a derived name breaks the moment someone reworks the
+  menu wording.
 - **Give the dialog / view / editor a name too** when a feature adds
   one the bridge needs to drive (`select-row` a table, `type` into an
   editor). `setObjectName()` on the widget; otherwise the bridge can
   only address it by `ClassName[:index]`, which is positional and
   fragile.
 - **Verify it:** run the app with `GITBOLT_TEST_BRIDGE=1`, then
-  `tools/bridge.py list-actions` — your new action must appear with an
-  `objectName`, and `tools/bridge.py trigger <name>` must fire it.
+  `tools/bridge.py list-actions` — your new menu-bar or toolbar action
+  must appear with an `objectName`, and `tools/bridge.py trigger <name>`
+  must fire it. The bridge doesn't reach right-click menus: a test that
+  opens the menu does (`clickInRowMenu` in
+  `tests/ui/TestTelemetrySwitch.cpp`).
 
 ---
 

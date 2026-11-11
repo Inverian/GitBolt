@@ -1389,7 +1389,7 @@ jobs:
             Assert-Updated "updated by the published release's updater"
           }
 
-      # ---- Linux: DEB + AppImage ---------------------------------------
+      # ---- Linux: DEB ------------------------------------------------
       # appstream + desktop-file-utils: the metadata lint. xvfb: the DEB
       # update test's display.
       - name: Packaging tools (Linux)

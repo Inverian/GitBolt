@@ -19,7 +19,8 @@ namespace gitbolt::update {
 
 namespace {
 
-// SHA256SUMS.txt lists four installers in under 400 bytes.
+// SHA256SUMS.txt lists three installers and three symbols zips in
+// about 600 bytes.
 constexpr qint64 kMaxChecksumsBytes = 64 * 1024;
 // github.com answers browser_download_url with one redirect to its
 // asset host; a few more leave room without allowing a loop.

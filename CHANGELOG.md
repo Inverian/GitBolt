@@ -81,8 +81,8 @@ need a newer version of macOS, Windows or Ubuntu.
   and Check for Updates…. They also say how each in-app update ended.
   A failed update or update check, and an unexpected error in
   background work, are reported as errors, with fixed codes and the
-  error's type only; being offline is never reported. PRIVACY.md lists
-  what each carries.
+  error's type only; an update check that fails because you are
+  offline is never reported. PRIVACY.md lists what each carries.
 - macOS: a second GitBolt started for a folder (by Finder, say, or with
   `open -n`) waits for macOS to hand the folder over, at most 3 s,
   before passing it on to the GitBolt that is open.
