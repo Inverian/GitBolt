@@ -292,13 +292,12 @@ private:
     /// note in CONTRIBUTING.md and docs/AGENT_TESTING.md.
     void assignActionObjectNames(QWidget* widget, const QString& pathPrefix);
 
-    /// Counts every menu and toolbar action's trigger by objectName
-    /// (TelemetryService::countCommand) — never by text or bridge
-    /// slug, which can hold paths and branch names. Each action once
-    /// (the menu and the toolbar share QActions), the macOS application
-    /// menu's too; Recent Repositories entries, whose texts are paths,
-    /// all count as "file.recent". Right-click menus too, in any of the
-    /// window's views and dialogs: see eventFilter().
+    /// Counts the menu bar's, the macOS application menu's and the
+    /// window's toolbars' triggers by objectName (countCommand), never
+    /// by text or bridge slug, which can hold paths and branch names;
+    /// Recent Repositories entries (paths) all as "file.recent". And,
+    /// app-wide, the area.command entries of right-click and other menus
+    /// as they open, not toolbars' » menus: see eventFilter().
     void instrumentActionsForTelemetry();
     /// Counts `action`'s triggers by objectName, once however many
     /// menus and toolbars it is in.

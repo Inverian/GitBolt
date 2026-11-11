@@ -19,7 +19,7 @@
 //     update dialog's buttons, and on macOS the application menu's items
 //     (a menu bar of their own, outside the window's);
 //   - right-click menus' entries, each once by its own name, Qt's own
-//     (Select All) never.
+//     (Select All) and a toolbar's » menu never.
 //
 
 #include <QAction>
@@ -39,6 +39,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QToolButton>
 #include <QTreeView>
 
 #include "../TestRepoHelper.h"
@@ -56,6 +57,7 @@
 #include "telemetry/TelemetryService.h"
 #include "ui/MainWindow.h"
 #include "ui/UpdateSetup.h"
+#include "widgets/WorktreeWidget.h"
 
 #include <functional>
 #include <string>
@@ -430,6 +432,41 @@ private slots:
                                            {QStringLiteral("file.recent"), 1}};
         QTRY_COMPARE(commandCounts(stub), expected);
         QTest::qWait(500);   // two count windows: nothing else, nothing twice
+        QCOMPARE(commandCounts(stub), expected);
+    }
+
+    // A toolbar's » menu is not a right-click menu: the Worktrees
+    // window's toolbar (made on demand, never walked) stays uncounted
+    // however narrow the window; its right-click Remove counts by name.
+    void toolbarOverflowMenuIsNotCounted() {
+        HttpStub stub;
+        QVERIFY(stub.isListening());
+        TelemetryService service(testConfig(stub, dataDir_.filePath(QStringLiteral("overflow"))),
+                                 [] { return kInstallId; }, true);
+        gitbolt::ui::MainWindow window;
+        window.setTelemetry(&service, Gate::Active);
+        service.start();
+
+        gitbolt::widgets::WorktreeWidget panel;
+        gitbolt::git::WorktreeInfo worktree;
+        worktree.name = worktree.path = "wt";
+        panel.setWorktrees({worktree});
+        panel.resize(60, 200);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        auto* more = panel.findChild<QToolButton*>(QStringLiteral("qt_toolbar_ext_button"));
+        QVERIFY(more && more->isVisible());
+        QVERIFY(clickInMenu([&] { QTest::mouseClick(more, Qt::LeftButton); },
+                            QStringLiteral("worktree.remove")));
+        panel.findChild<QAction*>(QStringLiteral("worktree.remove"))->trigger();
+
+        auto* table = panel.findChild<QTableView*>();
+        QVERIFY(table);
+        QVERIFY(clickInRowMenu(table, table->model()->index(0, 0), QStringLiteral("worktree-list.remove")));
+
+        const QHash<QString, int> expected{{QStringLiteral("worktree-list.remove"), 1}};
+        QTRY_COMPARE(commandCounts(stub), expected);
+        QTest::qWait(500);   // two count windows: nothing else
         QCOMPARE(commandCounts(stub), expected);
     }
 

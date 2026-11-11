@@ -5856,11 +5856,14 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event)
 {
     // A menu as it opens (right-click ones are mostly made per click):
     // entries named GitBolt's way, area.command, count like the menu
-    // bar's; Qt's own (edit-copy, select-all) have no dot. countTriggers
-    // skips what is counted already; Recent counts as one (above).
+    // bar's; Qt's own (edit-copy, select-all) have no dot. Not a narrow
+    // toolbar's » menu: its buttons, only counted where walked (above).
+    // countTriggers skips what is counted already; Recent counts as one.
     if (event->type() == QEvent::Show) {
         auto* menu = qobject_cast<QMenu*>(watched);
-        if (menu && menu != recentMenu_) {
+        const QObject* owner = menu ? menu->parent() : nullptr;
+        const bool overflow = owner && owner->objectName() == QLatin1String("qt_toolbar_ext_button");
+        if (menu && menu != recentMenu_ && !overflow) {
             for (QAction* a : menu->actions()) {
                 if (a->objectName().contains(QLatin1Char('.')))
                     countTriggers(a);
