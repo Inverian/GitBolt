@@ -451,7 +451,9 @@ void DiffViewerWidget::onUnifiedContextMenu(const QPoint& pos)
             menu->addAction(tr("%1 Hunk").arg(verb), this,
                             [this, hunkIdx]() {
                 emit hunkActionRequested(hunkIdx);
-            });
+            })->setObjectName(hunkAction_ == HunkAction::Stage
+                                  ? QStringLiteral("diff.stage-hunk")
+                                  : QStringLiteral("diff.unstage-hunk"));
 
             // Line-level entry only when a selection exists and
             // every selected block belongs to this same hunk.
@@ -478,7 +480,9 @@ void DiffViewerWidget::onUnifiedContextMenu(const QPoint& pos)
                         tr("%1 Selected Lines").arg(verb), this,
                         [this, hunkIdx, lineIdxs]() {
                         emit linesActionRequested(hunkIdx, lineIdxs);
-                    });
+                    })->setObjectName(hunkAction_ == HunkAction::Stage
+                                          ? QStringLiteral("diff.stage-lines")
+                                          : QStringLiteral("diff.unstage-lines"));
                 }
             }
         }

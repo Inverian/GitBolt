@@ -178,6 +178,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
     // Checkout
     auto* checkoutAction = menu.addAction(QIcon::fromTheme(QStringLiteral("go-jump")),
                                           tr("Checkout '%1'").arg(branchName));
+    checkoutAction->setObjectName(QStringLiteral("branches.checkout"));
     connect(checkoutAction, &QAction::triggered, this, [this, checkoutRef, key]() {
         emit checkoutRequested(checkoutRef, key);
     });
@@ -188,6 +189,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // New branch from this one
         auto* newAction = menu.addAction(QIcon::fromTheme(QStringLiteral("list-add")),
                                          tr("New Branch from '%1'...").arg(branchName));
+        newAction->setObjectName(QStringLiteral("branches.new-branch"));
         // The name, and Rename's and Set Upstream's below, are asked
         // for by MainWindow, as Delete's confirmation is: it knows the
         // repository the question is about, and whether that is still
@@ -200,12 +202,14 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
 
         // Rename
         auto* renameAction = menu.addAction(tr("Rename '%1'...").arg(branchName));
+        renameAction->setObjectName(QStringLiteral("branches.rename"));
         connect(renameAction, &QAction::triggered, this, [this, branchName, key]() {
             emit renameBranchRequested(branchName, key);
         });
 
         // Merge into current
         auto* mergeAction = menu.addAction(tr("Merge '%1' into current").arg(branchName));
+        mergeAction->setObjectName(QStringLiteral("branches.merge"));
         connect(mergeAction, &QAction::triggered, this, [this, branchName, key]() {
             emit mergeRequested(branchName, key);
         });
@@ -215,12 +219,14 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Push
         auto* pushAction = menu.addAction(QIcon::fromTheme(QStringLiteral("go-up")),
                                           tr("Push '%1'").arg(branchName));
+        pushAction->setObjectName(QStringLiteral("branches.push"));
         connect(pushAction, &QAction::triggered, this, [this, branchName, key]() {
             emit pushRequested(QStringLiteral("origin"), branchName, key);
         });
 
         // Set upstream
         auto* upstreamAction = menu.addAction(tr("Set Upstream..."));
+        upstreamAction->setObjectName(QStringLiteral("branches.set-upstream"));
         connect(upstreamAction, &QAction::triggered, this, [this, branchName, key]() {
             emit setUpstreamRequested(branchName, key);
         });
@@ -230,6 +236,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         // Delete
         auto* deleteAction = menu.addAction(QIcon::fromTheme(QStringLiteral("edit-delete")),
                                             tr("Delete '%1'").arg(branchName));
+        deleteAction->setObjectName(QStringLiteral("branches.delete"));
         // MainWindow asks, as for the remote Delete below: it knows the
         // repository the question is about, and that it's still open
         // once the answer comes.
@@ -241,6 +248,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
     if (isRemote) {
         // Checkout as local tracking branch
         auto* trackAction = menu.addAction(tr("Checkout as local branch"));
+        trackAction->setObjectName(QStringLiteral("branches.checkout-as-local"));
         connect(trackAction, &QAction::triggered, this, [this, branchName, key]() {
             emit checkoutRemoteRequested(branchName, key);
         });
@@ -252,6 +260,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
         auto* deleteRemoteAction = menu.addAction(
             QIcon::fromTheme(QStringLiteral("edit-delete")),
             tr("Delete '%1' from remote...").arg(branchName));
+        deleteRemoteAction->setObjectName(QStringLiteral("branches.delete-from-remote"));
         connect(deleteRemoteAction, &QAction::triggered, this, [this, branchName, key]() {
             emit deleteRemoteBranchRequested(branchName, key);
         });
@@ -259,6 +268,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
 
     if (isTag) {
         auto* checkoutTag = menu.addAction(tr("Checkout tag '%1'").arg(branchName));
+        checkoutTag->setObjectName(QStringLiteral("branches.checkout-tag"));
         connect(checkoutTag, &QAction::triggered, this, [this, checkoutRef, key]() {
             emit checkoutRequested(checkoutRef, key);
         });

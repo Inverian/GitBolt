@@ -5807,7 +5807,6 @@ void MainWindow::checkForUpdates()
 
 void MainWindow::instrumentActionsForTelemetry()
 {
-    QSet<QAction*> seen;
     std::function<void(QWidget*)> walk = [&](QWidget* widget) {
         for (QAction* a : widget->actions()) {
             if (!a || a->isSeparator())
@@ -5817,14 +5816,7 @@ void MainWindow::instrumentActionsForTelemetry()
                     walk(sub);
                 continue;
             }
-            if (seen.contains(a))
-                continue;
-            seen.insert(a);
-            // objectName at trigger time. commandName() drops anything
-            // that isn't a plain identifier, the unnamed included.
-            connect(a, &QAction::triggered, this, [this, a]() {
-                telemetry_->countCommand(a->objectName());
-            });
+            countTriggers(a);
         }
     };
     walk(menuBar());
@@ -5842,6 +5834,43 @@ void MainWindow::instrumentActionsForTelemetry()
             telemetry_->countCommand(QStringLiteral("file.recent"));
         });
     }
+
+    // Right-click menus, most made anew for each click: see eventFilter().
+    qApp->installEventFilter(this);
+}
+
+void MainWindow::countTriggers(QAction* action)
+{
+    static const char* const kCounted = "gitbolt.commandCounted";
+    if (action->property(kCounted).toBool())
+        return;
+    action->setProperty(kCounted, true);
+    // objectName at trigger time. commandName() drops anything
+    // that isn't a plain identifier, the unnamed included.
+    connect(action, &QAction::triggered, this, [this, action]() {
+        telemetry_->countCommand(action->objectName());
+    });
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event)
+{
+    // A menu as it opens (right-click ones are mostly made per click):
+    // entries named GitBolt's way, area.command, count like the menu
+    // bar's; Qt's own (edit-copy, select-all) have no dot. Not a narrow
+    // toolbar's » menu: its buttons, only counted where walked (above).
+    // countTriggers skips what is counted already; Recent counts as one.
+    if (event->type() == QEvent::Show) {
+        auto* menu = qobject_cast<QMenu*>(watched);
+        const QObject* owner = menu ? menu->parent() : nullptr;
+        const bool overflow = owner && owner->objectName() == QLatin1String("qt_toolbar_ext_button");
+        if (menu && menu != recentMenu_ && !overflow) {
+            for (QAction* a : menu->actions()) {
+                if (a->objectName().contains(QLatin1Char('.')))
+                    countTriggers(a);
+            }
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::createNewRepository()

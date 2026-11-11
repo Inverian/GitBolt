@@ -17,7 +17,9 @@
 //   - in-app updates reach the same service: an earlier install's
 //     outcome (update_result, and update_failed for a failure), the
 //     update dialog's buttons, and on macOS the application menu's items
-//     (a menu bar of their own, outside the window's).
+//     (a menu bar of their own, outside the window's);
+//   - right-click menus' entries, each once by its own name, Qt's own
+//     (Select All) and a toolbar's » menu never.
 //
 
 #include <QAction>
@@ -26,29 +28,45 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMenu>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
+#include <QTableView>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
+#include <QToolButton>
+#include <QTreeView>
 
+#include "../TestRepoHelper.h"
 #include "../telemetry/HttpStub.h"
 #include "../update/HttpServer.h"
 #include "AppMenuWatcher.h"
 #include "conf/SettingsService.h"
+#include "dialogs/CherryPickDialog.h"
 #include "dialogs/UpdateDialog.h"
+#include "git/GitProcess.h"
+#include "services/GitService.h"
 #include "telemetry/EventQueue.h"
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
 #include "telemetry/TelemetryService.h"
 #include "ui/MainWindow.h"
 #include "ui/UpdateSetup.h"
+#include "widgets/WorktreeWidget.h"
 
+#include <functional>
+#include <string>
 #include <utility>
+#include <vector>
 
 using namespace gitbolt::telemetry;
 using gitbolt::conf::SettingsService;
+using gitbolt::services::GitService;
 using gitbolt::test::HttpStub;
 using gitbolt::test::StubRequest;
 
@@ -56,18 +74,65 @@ namespace {
 
 const QString kInstallId = QStringLiteral("1b4e28ba-2fa1-4d2c-883f-0016d3cca427");
 
-// How many triggers of `command` the stub's command_used events add
-// up to.
-int commandCount(const HttpStub& stub, const QString& command) {
-    int n = 0;
+// Every command the stub's command_used events name, with the triggers
+// they add up to.
+QHash<QString, int> commandCounts(const HttpStub& stub) {
+    QHash<QString, int> counts;
     for (const StubRequest& request : stub.requests()) {
         const QJsonObject payload = request.json().value(QStringLiteral("payload")).toObject();
         const QJsonObject properties = payload.value(QStringLiteral("properties")).toObject();
-        if (payload.value(QStringLiteral("name")).toString() == QLatin1String("command_used")
-            && properties.value(QStringLiteral("command")).toString() == command)
-            n += properties.value(QStringLiteral("count")).toInt();
+        if (payload.value(QStringLiteral("name")).toString() == QLatin1String("command_used"))
+            counts[properties.value(QStringLiteral("command")).toString()] +=
+                properties.value(QStringLiteral("count")).toInt();
     }
-    return n;
+    return counts;
+}
+
+int commandCount(const HttpStub& stub, const QString& command) {
+    return commandCounts(stub).value(command);
+}
+
+// Opens a right-click menu with `open` (back once the menu is closed)
+// and clicks its entry `name`, as the user would, once it is up.
+bool clickInMenu(const std::function<void()>& open, const QString& name) {
+    bool clicked = false;
+    QTimer timer;
+    timer.setInterval(20);
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        if (!menu)
+            return;
+        timer.stop();
+        for (QAction* entry : menu->actions()) {
+            if (entry->objectName() == name && entry->isEnabled())
+                QTest::mouseClick(menu, Qt::LeftButton, {}, menu->actionGeometry(entry).center());
+        }
+        clicked = !menu->isVisible();   // a click on an entry closes it
+        menu->close();
+    });
+    timer.start();
+    open();
+    return clicked;
+}
+
+// Right-clicks `view`'s row `index` and clicks the menu's entry `name`.
+bool clickInRowMenu(QAbstractItemView* view, const QModelIndex& index, const QString& name) {
+    view->scrollTo(index);
+    const QPoint pos = view->visualRect(index).center();
+    return view->indexAt(pos) == index
+        && clickInMenu([&] { emit view->customContextMenuRequested(pos); }, name);
+}
+
+// The row of `name` in the branch tree, under whatever category.
+QModelIndex rowOf(const QAbstractItemModel* model, const QString& name, const QModelIndex& parent = {}) {
+    for (int row = 0; row < model->rowCount(parent); ++row) {
+        const QModelIndex index = model->index(row, 0, parent);
+        if (parent.isValid() && index.data().toString() == name)
+            return index;
+        if (const QModelIndex below = rowOf(model, name, index); below.isValid())
+            return below;
+    }
+    return {};
 }
 
 // What the stub got for `event`: an OpenPanel event's properties by its
@@ -286,6 +351,123 @@ private slots:
         QTRY_COMPARE(commandCount(stub, QStringLiteral("help.check-for-updates-app-menu")), 1);
         QCOMPARE(feed.hits(feedPath), 1);
 #endif
+    }
+
+    // Right-click menus, made anew for each click: an entry counts once,
+    // by its own name (the log's Revert, the branch tree's Checkout);
+    // Qt's own entries (the diff's Select All) not at all; a menu-bar
+    // action in such a menu once, not once per menu it is in.
+    void rightClickEntriesAreCounted() {
+        HttpStub stub;
+        QVERIFY(stub.isListening());
+        TelemetryService service(testConfig(stub, dataDir_.filePath(QStringLiteral("right-click"))),
+                                 [] { return kInstallId; }, true);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "a\n", QStringLiteral("base")).ok());
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "b\n", QStringLiteral("second")).ok());
+        const gitbolt::git::GitProcess git(repo.path().toStdString());
+        const auto run = [&](const std::vector<std::string>& args) {
+            const auto out = git.run(args);
+            return out.ok() && out.value().success() ? QString::fromStdString(out.value().stdoutData).trimmed()
+                                                     : QStringLiteral("failed");
+        };
+        QCOMPARE(run({"branch", "feature"}), QString());
+
+        gitbolt::ui::MainWindow window;
+        window.setTelemetry(&service, Gate::Active);
+        service.start();
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openRepositoryAtPath(repo.path());
+        auto* svc = window.findChild<GitService*>();
+        auto* commit = window.findChild<QAction*>(QStringLiteral("act.commit"));
+        QVERIFY(svc && commit);
+        QTRY_VERIFY_WITH_TIMEOUT(svc->isOpen() && !svc->openPending() && commit->isEnabled(), 15000);
+
+        // The log's Revert This Commit…: its dialog opens, modeless.
+        auto* log = window.findChild<QTableView*>(QStringLiteral("log.view"));
+        QVERIFY(log);
+        QTRY_VERIFY_WITH_TIMEOUT(log->model()->rowCount() > 0, 10000);
+        QVERIFY(clickInRowMenu(log, log->model()->index(0, 1), QStringLiteral("log.revert-commit")));
+        auto* pick = window.findChild<gitbolt::dialogs::CherryPickDialog*>();
+        QVERIFY(pick && pick->isVisible());
+        pick->close();
+
+        // The branch tree's Checkout 'feature'.
+        auto* branches = window.findChild<QTreeView*>(QStringLiteral("branchTree.view"));
+        QVERIFY(branches);
+        QModelIndex feature;
+        QTRY_VERIFY((feature = rowOf(branches->model(), QStringLiteral("feature"))).isValid());
+        QVERIFY(clickInRowMenu(branches, feature, QStringLiteral("branches.checkout")));
+        QTRY_COMPARE_WITH_TIMEOUT(run({"branch", "--show-current"}), QStringLiteral("feature"), 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(commit->isEnabled(), 15000);
+
+        // The diff's menu: Qt's Select All under GitBolt's entries.
+        auto* diff = window.findChild<QPlainTextEdit*>(QStringLiteral("diff.unifiedEditor"));
+        QVERIFY(diff);
+        diff->setPlainText(QStringLiteral("text"));
+        QVERIFY(clickInMenu([&] { emit diff->customContextMenuRequested(diff->rect().center()); },
+                            QStringLiteral("select-all")));
+        QCOMPARE(diff->textCursor().selectedText(), QStringLiteral("text"));
+
+        // A menu-bar action in a right-click menu.
+        auto* home = window.findChild<QAction*>(QStringLiteral("file.home"));
+        QVERIFY(home);
+        QMenu shared(&window);
+        shared.addAction(home);
+        QVERIFY(clickInMenu([&] { shared.exec(window.mapToGlobal(window.rect().center())); },
+                            QStringLiteral("file.home")));
+
+        // File › Recent Repositories, whose entries count as one name.
+        auto* recent = window.findChild<QAction*>(QStringLiteral("file.recent.0"));
+        auto* recentMenu = recent ? qobject_cast<QMenu*>(recent->parent()) : nullptr;
+        QVERIFY(recentMenu);
+        QVERIFY(clickInMenu([&] { recentMenu->exec(window.mapToGlobal(window.rect().center())); },
+                            QStringLiteral("file.recent.0")));
+        QTRY_VERIFY_WITH_TIMEOUT(svc->isOpen() && !svc->openPending() && commit->isEnabled(), 15000);
+
+        const QHash<QString, int> expected{{QStringLiteral("log.revert-commit"), 1},
+                                           {QStringLiteral("branches.checkout"), 1},
+                                           {QStringLiteral("file.home"), 1},
+                                           {QStringLiteral("file.recent"), 1}};
+        QTRY_COMPARE(commandCounts(stub), expected);
+        QTest::qWait(500);   // two count windows: nothing else, nothing twice
+        QCOMPARE(commandCounts(stub), expected);
+    }
+
+    // A toolbar's » menu is not a right-click menu: the Worktrees
+    // window's toolbar (made on demand, never walked) stays uncounted
+    // however narrow the window; its right-click Remove counts by name.
+    void toolbarOverflowMenuIsNotCounted() {
+        HttpStub stub;
+        QVERIFY(stub.isListening());
+        TelemetryService service(testConfig(stub, dataDir_.filePath(QStringLiteral("overflow"))),
+                                 [] { return kInstallId; }, true);
+        gitbolt::ui::MainWindow window;
+        window.setTelemetry(&service, Gate::Active);
+        service.start();
+
+        gitbolt::widgets::WorktreeWidget panel;
+        gitbolt::git::WorktreeInfo worktree;
+        worktree.name = worktree.path = "wt";
+        panel.setWorktrees({worktree});
+        panel.resize(60, 200);
+        panel.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&panel));
+        auto* more = panel.findChild<QToolButton*>(QStringLiteral("qt_toolbar_ext_button"));
+        QVERIFY(more && more->isVisible());
+        QVERIFY(clickInMenu([&] { QTest::mouseClick(more, Qt::LeftButton); },
+                            QStringLiteral("worktree.remove")));
+        panel.findChild<QAction*>(QStringLiteral("worktree.remove"))->trigger();
+
+        auto* table = panel.findChild<QTableView*>();
+        QVERIFY(table);
+        QVERIFY(clickInRowMenu(table, table->model()->index(0, 0), QStringLiteral("worktree-list.remove")));
+
+        const QHash<QString, int> expected{{QStringLiteral("worktree-list.remove"), 1}};
+        QTRY_COMPARE(commandCounts(stub), expected);
+        QTest::qWait(500);   // two count windows: nothing else
+        QCOMPARE(commandCounts(stub), expected);
     }
 
 private:

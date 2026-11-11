@@ -285,7 +285,9 @@ void DashboardView::setupUi()
 
         QMenu menu(this);
         auto* openAct = menu.addAction(tr("&Open"));
+        openAct->setObjectName(QStringLiteral("dashboard.open"));
         auto* forgetAct = menu.addAction(tr("&Forget this repository"));
+        forgetAct->setObjectName(QStringLiteral("dashboard.forget"));
         QAction* picked = menu.exec(
             recentList_->viewport()->mapToGlobal(pos));
         if (picked == openAct) {
