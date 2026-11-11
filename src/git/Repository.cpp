@@ -82,6 +82,65 @@ Result<void> refuseValueless(git_repository* repo, std::initializer_list<const c
     }
     return Result<void>::success();
 }
+
+// A pick or a revert on top of an operation in progress, refused before
+// anything is written (see Repository::cherryPick()).
+Result<void> refuseOperationInProgress(RepoState state) {
+    const char* operation = nullptr;
+    switch (state) {
+    case RepoState::None:       break;
+    case RepoState::Merge:      operation = "merge"; break;
+    case RepoState::Revert:     operation = "revert"; break;
+    case RepoState::CherryPick: operation = "cherry-pick"; break;
+    case RepoState::Rebase:     operation = "rebase"; break;
+    case RepoState::Other:
+        return GitError(GitErrorCode::Unmerged,
+                        "Another git operation (git am or bisect) is in progress. "
+                        "Finish it first.");
+    }
+    if (operation)
+        return GitError(GitErrorCode::Unmerged,
+                        std::string("A ") + operation + " is in progress. Finish or abort it first.");
+    return Result<void>::success();
+}
+
+// Whether `index`, as a pick or a revert left it, holds HEAD's tree:
+// the operation changed nothing.
+bool indexHasHeadsTree(git_repository* repo, git_index* index) {
+    git_oid treeOid;
+    git_reference* headRef = nullptr;
+    git_commit* head = nullptr;
+    const bool same = git_index_write_tree(&treeOid, index) == 0
+        && git_repository_head(&headRef, repo) == 0
+        && git_reference_peel(reinterpret_cast<git_object**>(&head), headRef,
+                              GIT_OBJECT_COMMIT) == 0
+        && git_oid_equal(&treeOid, git_commit_tree_id(head));
+    git_commit_free(head);
+    git_reference_free(headRef);
+    return same;
+}
+
+// libgit2 writes "This reverts commit <id>." for a merge too; git adds
+// the parent it was reverted against, which matters for a merge.
+void nameRevertedMergesParent(git_repository* repo, const git_oid* commit,
+                              const git_oid* parent) {
+    char id[GIT_OID_MAX_HEXSIZE + 1];
+    char parentId[GIT_OID_MAX_HEXSIZE + 1];
+    git_oid_tostr(id, sizeof id, commit);
+    git_oid_tostr(parentId, sizeof parentId, parent);
+    QFile file(QString::fromUtf8(git_repository_path(repo)) + QLatin1String("MERGE_MSG"));
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    QByteArray text = file.readAll();
+    file.close();
+    const QByteArray plain = QByteArray("This reverts commit ") + id + ".\n";
+    const qsizetype at = text.indexOf(plain);
+    if (at < 0 || !file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    text.replace(at, plain.size(), QByteArray("This reverts commit ") + id
+                                       + ", reversing\nchanges made to " + parentId + ".\n");
+    file.write(text);
+}
 // libgit2 lifecycle owner.
 //
 // The GitBolt application ALSO calls git_libgit2_init/shutdown from
@@ -2422,23 +2481,14 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     // them: the merge, or the earlier pick, was gone without a word,
     // and its commit went in as an ordinary one. Refused, as git
     // refuses it, before anything is written.
-    const char* operation = nullptr;
-    switch (state()) {
-    case RepoState::None:       break;
-    case RepoState::Merge:      operation = "merge"; break;
-    case RepoState::Revert:     operation = "revert"; break;
-    case RepoState::CherryPick: operation = "cherry-pick"; break;
-    case RepoState::Rebase:     operation = "rebase"; break;
-    case RepoState::Other:
-        return GitError(GitErrorCode::Unmerged,
-                        "Another git operation (git am or bisect) is in progress. "
-                        "Finish it first.");
-    }
-    if (operation)
-        return GitError(GitErrorCode::Unmerged,
-                        std::string("A ") + operation + " is in progress. Finish or abort it first.");
+    if (auto refused = refuseOperationInProgress(state()); !refused)
+        return refused.error();
     if (auto refused = refuseValueless(repo_, {"merge.conflictstyle", "merge.default"}); !refused)
         return refused.error();
+    // libgit2 checks the index for staged work in the way, in its copy:
+    // after a git (a terminal's, the Commit dialog's) wrote the file, a
+    // stale copy turned the pick down for changes no longer there.
+    reloadIndex(repo_);
 
     git_oid oid;
     std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
@@ -2474,20 +2524,68 @@ Result<CherryPickResult> Repository::cherryPick(const ObjectId& commitId) {
     // git then refused ("The previous cherry-pick is now empty…"), with
     // advice (--allow-empty, `git cherry-pick --skip`) GitBolt doesn't
     // offer. Nothing is left in progress: there's nothing to commit.
-    if (!result.hasConflicts) {
-        git_oid treeOid;
-        git_reference* headRef = nullptr;
-        git_commit* head = nullptr;
-        if (git_index_write_tree(&treeOid, index) == 0
-            && git_repository_head(&headRef, repo_) == 0
-            && git_reference_peel(reinterpret_cast<git_object**>(&head), headRef,
-                                  GIT_OBJECT_COMMIT) == 0
-            && git_oid_equal(&treeOid, git_commit_tree_id(head))) {
-            result.alreadyApplied = true;
-            git_repository_state_cleanup(repo_);
-        }
-        git_commit_free(head);
-        git_reference_free(headRef);
+    if (!result.hasConflicts && indexHasHeadsTree(repo_, index)) {
+        result.alreadyApplied = true;
+        git_repository_state_cleanup(repo_);
+    }
+    git_index_free(index);
+    return result;
+}
+
+Result<RevertResult> Repository::revert(const ObjectId& commitId, unsigned mainline) {
+    // As cherryPick(): libgit2's REVERT_HEAD and MERGE_MSG would go over
+    // those of the operation in progress, and its copy of the index may
+    // be stale.
+    if (auto refused = refuseOperationInProgress(state()); !refused)
+        return refused.error();
+    if (auto refused = refuseValueless(repo_, {"merge.conflictstyle", "merge.default"}); !refused)
+        return refused.error();
+    reloadIndex(repo_);
+
+    git_oid oid;
+    std::memcpy(oid.id, commitId.raw().data(), ObjectId::RAW_SIZE);
+    git_commit* commit = nullptr;
+    int err = git_commit_lookup(&commit, repo_, &oid);
+    if (err < 0) return GitError::fromLibgit2(err);
+    const auto freeCommit = qScopeGuard([commit] { git_commit_free(commit); });
+    // libgit2 wants a parent for a merge and none for any other commit;
+    // said here in the words of the dialog that asks for it.
+    const unsigned parents = git_commit_parentcount(commit);
+    const std::string shortId = commitId.toShortHex();
+    if (parents < 2 && mainline > 0)
+        return GitError(GitErrorCode::Invalid,
+                        "Commit " + shortId + " is not a merge: there is no parent to choose.");
+    if (parents >= 2 && mainline == 0)
+        mainline = 1;
+    if (mainline > parents)
+        return GitError(GitErrorCode::Invalid,
+                        "Merge " + shortId + " has no parent " + std::to_string(mainline) + ".");
+
+    git_revert_options opts;
+    git_revert_options_init(&opts, GIT_REVERT_OPTIONS_VERSION);
+    opts.mainline = mainline;
+    err = git_revert(repo_, commit, &opts);
+    // As cherryPick(): a failure isn't a conflict, and can come partway
+    // through the checkout (libgit2 drops REVERT_HEAD and MERGE_MSG).
+    if (err < 0) {
+        const GitError error = GitError::fromLibgit2(err);
+        reloadIndex(repo_);
+        return error;
+    }
+    if (parents >= 2)
+        nameRevertedMergesParent(repo_, &oid, git_commit_parent_id(commit, mainline - 1));
+
+    git_index* index = nullptr;
+    err = git_repository_index(&index, repo_);
+    if (err < 0)
+        return GitError::fromLibgit2(err);
+    RevertResult result;
+    result.hasConflicts = git_index_has_conflicts(index) != 0;
+    // Nothing to commit (the commit's changes aren't on the branch):
+    // nothing is left in progress, as for a pick already applied.
+    if (!result.hasConflicts && indexHasHeadsTree(repo_, index)) {
+        result.nothingToRevert = true;
+        git_repository_state_cleanup(repo_);
     }
     git_index_free(index);
     return result;

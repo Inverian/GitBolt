@@ -2929,76 +2929,23 @@ void MainWindow::buildCommandsMenu()
 
     cmdMenu->addSeparator();
     {
-        // CherryPickDialog emits commitHashChanged as the user types,
-        // and expects the host to resolve the entered hash to a commit
-        // preview via setCommitDetails(). We parse the text as a full
-        // 40-char hex sha via ObjectId::fromHex and look it up; short
-        // hashes and ref names aren't supported yet (no ref-resolver
-        // on Repository — Phase 2 polish). If the hash is malformed
-        // or doesn't resolve we just clear the preview; OK stays
-        // enabled and GitService will surface the failure.
         auto* a = new QAction(menuIcon(QStringLiteral("cherry_pick")),
                               tr("C&herry pick..."), this);
         a->setObjectName(QStringLiteral("commands.cherry-pick"));
+        // Filled with the commit selected in the log, if any.
         connect(a, &QAction::triggered, this, [this]() {
-            if (!gitService_ || !gitService_->isOpen())
-                return;
-            auto* dlg = new dialogs::CherryPickDialog(this);
-            dlg->setAttribute(Qt::WA_DeleteOnClose);
-
-            // Use Repository::resolveRef so the user can paste full
-            // SHAs, short SHAs (>=4 hex), branch names, tags,
-            // HEAD~3, etc. — anything libgit2's revparse accepts.
-            // The dialog is modeless, so these lambdas capture the
-            // service — never a raw Repository*, which a repo switch
-            // destroys — and resolve the live repo under its lock.
-            auto resolve = [svc = gitService_](const QString& spec)
-                    -> std::optional<git::ObjectId> {
-                const QString trimmed = spec.trimmed();
-                if (trimmed.isEmpty()) return std::nullopt;
-                auto res = svc->withRepository(
-                    [&](git::Repository& r) {
-                        return r.resolveRef(trimmed.toStdString());
-                    });
-                if (!res.ok()) return std::nullopt;
-                return res.value();
-            };
-
-            connect(dlg, &dialogs::CherryPickDialog::commitHashChanged,
-                    dlg, [dlg, svc = gitService_](const QString& hash) {
-                const QString trimmed = hash.trimmed();
-                if (trimmed.isEmpty()) {
-                    dlg->clearCommitDetails();
-                    return;
-                }
-                // Resolve + commit lookup under one lock.
-                auto cmtRes = svc->withRepository(
-                    [&](git::Repository& r)
-                        -> git::Result<git::CommitData> {
-                        auto oid = r.resolveRef(trimmed.toStdString());
-                        if (!oid.ok()) return oid.error();
-                        return r.lookupCommit(oid.value());
-                    });
-                if (!cmtRes.ok()) {
-                    dlg->clearCommitDetails();
-                    return;
-                }
-                dlg->setCommitDetails(cmtRes.value());
-            });
-
-            connect(dlg, &QDialog::accepted, this,
-                    [this, dlg, resolve]() {
-                auto oid = resolve(dlg->commitHash());
-                if (!oid) {
-                    widgets::PlainMessageBox::information(this, tr("Cherry Pick"),
-                        tr("Couldn't resolve that revision. Try a "
-                           "full or short SHA, branch name, or tag."));
-                    return;
-                }
-                gitService_->cherryPick(*oid);
-            });
-
-            dlg->open();
+            showPickDialog(/*revert=*/false, repoView_ && repoView_->revisionGraph()
+                               ? repoView_->revisionGraph()->currentCommitHash() : QString());
+        });
+        cmdMenu->addAction(a);
+    }
+    {
+        auto* a = new QAction(menuIcon(QStringLiteral("revert")),
+                              tr("Re&vert commit..."), this);
+        a->setObjectName(QStringLiteral("commands.revert-commit"));
+        connect(a, &QAction::triggered, this, [this]() {
+            showPickDialog(/*revert=*/true, repoView_ && repoView_->revisionGraph()
+                               ? repoView_->revisionGraph()->currentCommitHash() : QString());
         });
         cmdMenu->addAction(a);
     }
@@ -4196,6 +4143,9 @@ void MainWindow::setRepoActionsEnabled(bool on)
     // a confirmation, then threw it away (refuseWhileLocalOpRuns).
     if (repoView_ && repoView_->branchTree())
         repoView_->branchTree()->setRepoActionsEnabled(on);
+    // The log's context menu (Revert, Cherry-Pick), like the Commands menu.
+    if (repoView_ && repoView_->revisionGraph())
+        repoView_->revisionGraph()->setRepoActionsEnabled(on);
 }
 
 void MainWindow::collectAndApplyShortcuts()
@@ -4893,6 +4843,13 @@ void MainWindow::setupConnections()
         if (!success)
             offerConflictResolution(tr("cherry-pick"));
     });
+    // A revert's the same way: staged, or stopped on conflicts.
+    connect(gitService_, &services::GitService::revertComplete,
+            this, [this](bool success, const QString& message) {
+        statusBar()->showMessage(message, 4000);
+        if (!success)
+            offerConflictResolution(tr("revert"));
+    });
 
     connect(gitService_, &services::GitService::logReady,
             this, &MainWindow::onLogReady);
@@ -5110,6 +5067,27 @@ void MainWindow::setupConnections()
                 return;
             }
             pushHistory(hash);
+        });
+
+        // A log row's context menu: the Commands menu's dialogs, filled
+        // with that row's commit, for the repository the menu was for.
+        auto* graph = repoView_->revisionGraph();
+        graph->setRepositoryKeySource([this] {
+            return gitService_ ? gitService_->openKey() : std::string();
+        });
+        connect(graph, &widgets::RevisionGraphWidget::revertRequested,
+                this, [this](const QString& hash, const std::string& key) {
+            if (gitService_ && gitService_->isOpen()
+                && !repositoryChangedSince(key, tr("nothing was reverted."))
+                && !refuseWhileLocalOpRuns())
+                showPickDialog(/*revert=*/true, hash);
+        });
+        connect(graph, &widgets::RevisionGraphWidget::cherryPickRequested,
+                this, [this](const QString& hash, const std::string& key) {
+            if (gitService_ && gitService_->isOpen()
+                && !repositoryChangedSince(key, tr("nothing was cherry-picked."))
+                && !refuseWhileLocalOpRuns())
+                showPickDialog(/*revert=*/false, hash);
         });
     }
 
@@ -6105,6 +6083,66 @@ void MainWindow::offerConflictResolution(const QString& operation)
     if (answer == QMessageBox::Yes && !gitService_->openPending()
         && gitService_->openKey() == asked)
         showConflictResolver();
+}
+
+void MainWindow::showPickDialog(bool revert, const QString& commit)
+{
+    if (!gitService_ || !gitService_->isOpen())
+        return;
+    using Mode = dialogs::CherryPickDialog::Mode;
+    auto* dlg = new dialogs::CherryPickDialog(this, revert ? Mode::Revert : Mode::CherryPick);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    // Whatever libgit2's revparse takes (short SHAs, branches, HEAD~3),
+    // resolved in the live repository under its lock: the dialog is
+    // modeless, and a repository switch destroys a Repository*.
+    connect(dlg, &dialogs::CherryPickDialog::commitHashChanged,
+            dlg, [dlg, revert, svc = gitService_](const QString& hash) {
+        const std::string spec = hash.trimmed().toStdString();
+        QStringList parents;
+        auto found = svc->withRepository([&](git::Repository& r) -> git::Result<git::CommitData> {
+            auto oid = r.resolveRef(spec);
+            if (!oid.ok()) return oid.error();
+            auto data = r.lookupCommit(oid.value());
+            // A merge's parents, for the revert's parent chooser.
+            for (size_t i = 0; revert && data.ok() && data->isMerge() && i < data->parentIds.size();
+                 ++i) {
+                const auto parent = r.lookupCommit(data->parentIds[i]);
+                parents << QString::fromStdString(data->parentIds[i].toShortHex())
+                               + QLatin1Char(' ')
+                               + QString::fromStdString(parent.ok() ? parent->summary : "");
+            }
+            return data;
+        });
+        if (spec.empty() || !found.ok())
+            dlg->clearCommitDetails();
+        else
+            dlg->setCommitDetails(found.value(), parents);
+    });
+    // In the repository the dialog was opened for, and not under a local
+    // op or a step that started meanwhile.
+    connect(dlg, &QDialog::accepted, this, [this, dlg, revert, key = gitService_->openKey()]() {
+        if (!gitService_ || !gitService_->isOpen()
+            || repositoryChangedSince(key, revert ? tr("nothing was reverted.")
+                                                  : tr("nothing was cherry-picked."))
+            || refuseWhileLocalOpRuns())
+            return;
+        const std::string spec = dlg->commitHash().toStdString();
+        auto oid = gitService_->withRepository(
+            [&](git::Repository& r) { return r.resolveRef(spec); });
+        if (spec.empty() || !oid.ok()) {
+            widgets::PlainMessageBox::information(this, revert ? tr("Revert Commit")
+                                                               : tr("Cherry Pick"),
+                tr("Couldn't resolve that revision. Try a "
+                   "full or short SHA, branch name, or tag."));
+            return;
+        }
+        if (revert)
+            gitService_->revertCommit(oid.value(), dlg->mainline());
+        else
+            gitService_->cherryPick(oid.value());
+    });
+    dlg->setCommitHash(commit);
+    dlg->open();
 }
 
 // `git merge <branch>` as a local op. Run on the GUI thread, a slow

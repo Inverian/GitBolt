@@ -32,6 +32,9 @@
 //     on top of another is refused with a failure alone, and one whose
 //     change is on the branch already says so and leaves nothing in
 //     progress,
+//   - revertCommit stages a commit's inverse and says so, or that it
+//     stopped on conflicts or had nothing to revert, and is refused
+//     with a failure alone while a merge is in progress,
 //   - a cherry-pick of several commits paused between two: its state
 //     goes out as such, and Continue / Skip carry it on,
 //   - tag create / delete as the Commands menu drives them,
@@ -237,6 +240,7 @@ public:
         record(svc, &GitService::commitComplete, "commitComplete");
         record(svc, &GitService::rebaseStepFinished, "rebaseStep");
         record(svc, &GitService::cherryPickComplete, "cherryPickComplete");
+        record(svc, &GitService::revertComplete, "revertComplete");
         QObject::connect(&svc, &GitService::operationFailed, &context_,
                          [this](const QString& op, const QString& err) {
             append(QStringLiteral("operationFailed(%1: %2)").arg(op, err));
@@ -5070,6 +5074,90 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(output(work.run({"rev-parse", "CHERRY_PICK_HEAD"})),
                  QString::fromStdString(a->toHex()));
+    }
+
+    // revertCommit(), as cherryPick() goes: staged and said so (the bar
+    // then offers Commit…), stopped on conflicts (MainWindow offers the
+    // resolver), nothing to revert and nothing left in progress, or
+    // refused with an operationFailed alone while a merge waits.
+    void revertCommitReportsItsOutcome_data() {
+        QTest::addColumn<QString>("situation");
+        QTest::newRow("clean") << QStringLiteral("clean");
+        QTest::newRow("conflict") << QStringLiteral("conflict");
+        QTest::newRow("nothing to revert") << QStringLiteral("nothing");
+        QTest::newRow("during a merge") << QStringLiteral("merge");
+    }
+
+    void revertCommitReportsItsOutcome() {
+        QFETCH(QString, situation);
+        IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        repo->writeFile(QStringLiteral("a.txt"), QByteArrayLiteral("one\n"));
+        QVERIFY(succeeded(work.run({"add", "a.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "one"})));
+        auto target = repo->repo().head();
+        QVERIFY(target.ok());
+        if (situation == QLatin1String("conflict")) {
+            repo->writeFile(QStringLiteral("a.txt"), QByteArrayLiteral("two\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "two"})));
+        } else if (situation == QLatin1String("nothing")) {
+            QVERIFY(succeeded(work.run({"rm", "-q", "a.txt"})));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-m", "remove a"})));
+        } else if (situation == QLatin1String("merge")) {
+            QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side", "HEAD~1"})));
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("side\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "side"})));
+            QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("main\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "main"})));
+            QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        }
+        const QString shortId = QString::fromStdString(target->toShortHex());
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy reverts(&svc, &GitService::revertComplete);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        svc.revertCommit(*target);
+        if (situation == QLatin1String("merge")) {
+            const QString refused = QStringLiteral(
+                "operationFailed(revert: A merge is in progress. Finish or abort it first.)");
+            QVERIFY2(log.waitFor({refused}), qPrintable(log.join(QStringLiteral(", "))));
+            QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+            QTest::qWait(100);
+            QVERIFY(reverts.isEmpty());
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Merge);
+            QVERIFY(!QFileInfo::exists(repo->path() + QStringLiteral("/.git/REVERT_HEAD")));
+            return;
+        }
+        QVERIFY2(log.waitForAfter(QStringLiteral("revertComplete"), {"status"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(reverts.size(), 1);
+        const bool success = reverts.at(0).at(0).toBool();
+        const QString message = reverts.at(0).at(1).toString();
+        if (situation == QLatin1String("clean")) {
+            QVERIFY(success);
+            QCOMPARE(message, QStringLiteral("Revert of %1 staged. Commit to finish it.").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Revert);
+            QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("D  a.txt"));
+        } else if (situation == QLatin1String("conflict")) {
+            QVERIFY(!success);
+            QCOMPARE(message, QStringLiteral("Revert produced conflicts for commit %1").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Revert);
+            QCOMPARE(*repo->repo().conflictCount(), 1);
+        } else {
+            QVERIFY(success);
+            QCOMPARE(message, QStringLiteral("Commit %1's changes aren't on this branch: "
+                                             "nothing to revert.").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+            QVERIFY(!QFileInfo::exists(repo->path() + QStringLiteral("/.git/REVERT_HEAD")));
+        }
     }
 
     // -----------------------------------------------------------------

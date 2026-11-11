@@ -188,6 +188,14 @@ private slots:
         home->trigger();
         home->trigger();
         QTRY_COMPARE(commandCount(stub, QStringLiteral("file.home")), 2);
+        // Commands › Revert commit too, a menu-bar action. Off with no
+        // repository open (a trigger then does nothing): turned on here,
+        // it opens nothing and is counted all the same.
+        auto* revert = window.findChild<QAction*>(QStringLiteral("commands.revert-commit"));
+        QVERIFY(revert);
+        revert->setEnabled(true);
+        revert->trigger();
+        QTRY_COMPARE(commandCount(stub, QStringLiteral("commands.revert-commit")), 1);
         for (const StubRequest& request : stub.requests())
             QCOMPARE(request.path, QByteArray("/track"));
         QVERIFY2(stub.headerViolations().isEmpty(),

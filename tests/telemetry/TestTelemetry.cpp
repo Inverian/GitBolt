@@ -474,7 +474,7 @@ private slots:
             {"releaseFinish", "release_finish"}, {"releaseStart", "release_start"},
             {"removeWorktree", "remove_worktree"}, {"repack", "repack"},
             {"resolve conflicts", "resolve_conflicts"},
-            {"revert --abort", "revert_abort"},
+            {"revert", "revert"}, {"revert --abort", "revert_abort"},
             {"revert --continue", "revert_continue"}, {"revert --skip", "revert_skip"},
             {"stage", "stage"},
             {"stage all", "stage_all"}, {"stage hunk", "stage_hunk"},

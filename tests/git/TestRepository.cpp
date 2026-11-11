@@ -2263,6 +2263,301 @@ private slots:
     }
 
     // -----------------------------------------------------------------
+    // Revert (Commands › Revert commit, the log's context menu): the
+    // inverse of the commit's changes staged, as a pick is, with
+    // REVERT_HEAD and git's message; the user's commit concludes it.
+    // -----------------------------------------------------------------
+    void revertStagesTheInverseWithGitsMessage() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "one\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("a.txt", "two\n");
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "a.txt", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "second"})));
+        auto second = repo.repo().resolveRef("HEAD");
+        QVERIFY(second.ok());
+        const QString id = QString::fromStdString(second->toHex());
+
+        auto reverted = repo.repo().revert(*second);
+        QVERIFY2(reverted.ok(), reverted.ok() ? "" : reverted.error().message().c_str());
+        QVERIFY(!reverted->hasConflicts);
+        QVERIFY(!reverted->nothingToRevert);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Revert);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        QCOMPARE(readFile(gitDir, QStringLiteral("REVERT_HEAD")), (id + QLatin1Char('\n')).toUtf8());
+        QCOMPARE(readFile(gitDir, QStringLiteral("MERGE_MSG")),
+                 ("Revert \"second\"\n\nThis reverts commit " + id + ".\n").toUtf8());
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("M  a.txt\nD  b.txt"));
+        QCOMPARE(readFile(repo.path(), QStringLiteral("a.txt")), QByteArray("one\n"));
+        QVERIFY(QString::fromStdString(repo.repo().preparedMessage())
+                    .startsWith(QStringLiteral("Revert \"second\"\n\nThis reverts commit ") + id));
+
+        // git's commit concludes it, as the Commit dialog's does.
+        QVERIFY(succeeded(git.run({"commit", "-q", "--no-edit"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%s"})), QStringLiteral("Revert \"second\""));
+        QCOMPARE(output(git.run({"rev-parse", "HEAD^{tree}"})),
+                 output(git.run({"rev-parse", "HEAD~2^{tree}"})));
+    }
+
+    // A revert that conflicts with a later change stops, as git's does:
+    // REVERT_HEAD and the conflict stay for the resolver, and git's
+    // --abort (the bar's Abort) puts everything back.
+    void revertThatConflictsStaysInProgress() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "one\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("a.txt", "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two"})));
+        auto two = repo.repo().resolveRef("HEAD");
+        repo.writeFile("a.txt", "three\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "three"})));
+        QVERIFY(two.ok());
+        const QString head = output(git.run({"rev-parse", "HEAD"}));
+
+        auto reverted = repo.repo().revert(*two);
+        QVERIFY2(reverted.ok(), reverted.ok() ? "" : reverted.error().message().c_str());
+        QVERIFY(reverted->hasConflicts);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Revert);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        QCOMPARE(readFile(gitDir, QStringLiteral("REVERT_HEAD")),
+                 QByteArray::fromStdString(two->toHex() + "\n"));
+        QVERIFY(readFile(gitDir, QStringLiteral("MERGE_MSG")).startsWith("Revert \"two\"\n"));
+        auto conflicts = repo.repo().conflictCount();
+        QVERIFY(conflicts.ok());
+        QCOMPARE(*conflicts, 1);
+
+        QVERIFY(succeeded(git.run({"revert", "--abort"})));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
+        QCOMPARE(readFile(repo.path(), QStringLiteral("a.txt")), QByteArray("three\n"));
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QString());
+    }
+
+    // A merge is reverted against one of its parents (git revert -m):
+    // the first unless told, and git's message names it. A parent the
+    // merge doesn't have is refused, with nothing in progress.
+    void revertOfAMergeTakesAParent_data() {
+        QTest::addColumn<unsigned>("mainline");
+        QTest::addColumn<QString>("staged");
+        QTest::newRow("default: the first") << 0u << QStringLiteral("D  side.txt");
+        QTest::newRow("first") << 1u << QStringLiteral("D  side.txt");
+        QTest::newRow("second") << 2u << QStringLiteral("D  main.txt");
+        QTest::newRow("none such") << 3u << QString();
+    }
+
+    void revertOfAMergeTakesAParent() {
+        QFETCH(unsigned, mainline);
+        QFETCH(QString, staged);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
+        repo.writeFile("side.txt", "side\n");
+        QVERIFY(succeeded(git.run({"add", "side.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "side"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+        repo.writeFile("main.txt", "main\n");
+        QVERIFY(succeeded(git.run({"add", "main.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "main"})));
+        QVERIFY(succeeded(git.run({"merge", "-q", "--no-ff", "-m", "Merge side", "side"})));
+        auto merge = repo.repo().resolveRef("HEAD");
+        QVERIFY(merge.ok());
+        const QString id = QString::fromStdString(merge->toHex());
+
+        auto reverted = repo.repo().revert(*merge, mainline);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        if (staged.isEmpty()) {
+            QVERIFY(!reverted.ok());
+            QCOMPARE(QString::fromStdString(reverted.error().message()),
+                     QStringLiteral("Merge %1 has no parent 3.").arg(id.left(7)));
+            QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+            QCOMPARE(readFile(gitDir, QStringLiteral("REVERT_HEAD")), QByteArray("<missing>"));
+            return;
+        }
+        QVERIFY2(reverted.ok(), reverted.ok() ? "" : reverted.error().message().c_str());
+        QVERIFY(!reverted->hasConflicts && !reverted->nothingToRevert);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Revert);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), staged);
+        const QString parent = output(git.run({"rev-parse",
+                                               "HEAD^" + std::to_string(mainline ? mainline : 1)}));
+        QCOMPARE(QString::fromUtf8(readFile(gitDir, QStringLiteral("MERGE_MSG"))),
+                 QStringLiteral("Revert \"Merge side\"\n\nThis reverts commit %1, reversing\n"
+                                "changes made to %2.\n").arg(id, parent));
+    }
+
+    // As a pick is: refused while another operation waits, before
+    // anything is written over its state.
+    void revertRefusedWhileAnOperationIsInProgress_data() {
+        QTest::addColumn<QString>("operation");
+        QTest::newRow("merge") << QStringLiteral("merge");
+        QTest::newRow("revert") << QStringLiteral("revert");
+    }
+
+    void revertRefusedWhileAnOperationIsInProgress() {
+        QFETCH(QString, operation);
+        const bool merge = operation == QLatin1String("merge");
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "base\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+        auto b = repo.repo().resolveRef("HEAD");
+        repo.writeFile("c.txt", "c\n");
+        QVERIFY(succeeded(git.run({"add", "c.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add c"})));
+        auto c = repo.repo().resolveRef("HEAD");
+        QVERIFY(b.ok() && c.ok());
+        if (merge) {
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side", "HEAD~2"})));
+            repo.writeFile("a.txt", "side\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "side"})));
+            QVERIFY(succeeded(git.run({"checkout", "-q", "-"})));
+            repo.writeFile("a.txt", "main\n");
+            QVERIFY(succeeded(git.run({"commit", "-q", "-am", "main"})));
+            QVERIFY(!succeeded(git.run({"merge", "side"})));
+        } else {
+            auto first = repo.repo().revert(*c);
+            QVERIFY(first.ok() && !first->hasConflicts);
+        }
+        const auto state = repo.repo().state();
+        QCOMPARE(state, merge ? gitbolt::git::RepoState::Merge : gitbolt::git::RepoState::Revert);
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+        const auto stateFiles = [&] {
+            QStringList files;
+            for (const char* name : {"MERGE_HEAD", "REVERT_HEAD", "MERGE_MSG"})
+                files << QLatin1String(name) + QLatin1Char(' ')
+                             + QString::fromUtf8(readFile(gitDir, QLatin1String(name)));
+            return files;
+        };
+        const QStringList before = stateFiles();
+        const QString status = output(git.run({"status", "--porcelain"}));
+
+        auto refused = repo.repo().revert(*b);
+        QVERIFY(!refused.ok());
+        QCOMPARE(QString::fromStdString(refused.error().message()),
+                 merge ? QStringLiteral("A merge is in progress. Finish or abort it first.")
+                       : QStringLiteral("A revert is in progress. Finish or abort it first."));
+        QCOMPARE(repo.repo().state(), state);
+        QCOMPARE(stateFiles(), before);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), status);
+    }
+
+    // libgit2 looks for staged work in the way in its copy of the index,
+    // which a git commit (a terminal's, the Commit dialog's) left stale:
+    // a pick or a revert was turned down for "1 uncommitted change"
+    // that the index file no longer had.
+    void pickAndRevertReadTheIndexFile_data() {
+        QTest::addColumn<bool>("revert");
+        QTest::newRow("cherry-pick") << false;
+        QTest::newRow("revert") << true;
+    }
+
+    void pickAndRevertReadTheIndexFile() {
+        QFETCH(bool, revert);
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "one\n", "base").ok());   // libgit2's copy: one
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+        auto addB = repo.repo().resolveRef("HEAD");
+        QVERIFY(addB.ok());
+        if (!revert) {
+            QVERIFY(succeeded(git.run({"reset", "-q", "--hard", "HEAD~1"})));
+            QVERIFY(succeeded(git.run({"branch", "side", addB->toHex()})));
+        }
+        repo.writeFile("a.txt", "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two"})));
+
+        if (revert) {
+            auto done = repo.repo().revert(*addB);
+            QVERIFY2(done.ok(), done.ok() ? "" : done.error().message().c_str());
+            QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("D  b.txt"));
+        } else {
+            auto done = repo.repo().cherryPick(*addB);
+            QVERIFY2(done.ok(), done.ok() ? "" : done.error().message().c_str());
+            QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("A  b.txt"));
+        }
+        QCOMPARE(readFile(repo.path(), QStringLiteral("a.txt")), QByteArray("two\n"));
+    }
+
+    // A root commit has no parent: git's revert deletes what it added,
+    // and so does this one. A parent asked for is refused, as for any
+    // commit that isn't a merge.
+    void revertOfTheRootCommitDeletesItsFiles() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        auto root = repo.repo().resolveRef("HEAD");
+        QVERIFY(root.ok());
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "second"})));
+
+        auto refused = repo.repo().revert(*root, 1);
+        QVERIFY(!refused.ok());
+        QCOMPARE(QString::fromStdString(refused.error().message()),
+                 QStringLiteral("Commit %1 is not a merge: there is no parent to choose.")
+                     .arg(QString::fromStdString(root->toShortHex())));
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+
+        auto reverted = repo.repo().revert(*root);
+        QVERIFY2(reverted.ok(), reverted.ok() ? "" : reverted.error().message().c_str());
+        QVERIFY(!reverted->hasConflicts && !reverted->nothingToRevert);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::Revert);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("D  a.txt"));
+        QCOMPARE(readFile(repo.path(), QStringLiteral("b.txt")), QByteArray("b\n"));
+        QVERIFY(readFile(QString::fromStdString(repo.repo().path()), QStringLiteral("MERGE_MSG"))
+                    .startsWith("Revert \"base\"\n"));
+    }
+
+    // A revert that changes nothing (the change is gone already) leaves
+    // nothing in progress, as a pick already applied does; one whose
+    // files have staged changes of their own is refused by libgit2, as
+    // a pick is, and the staged work stays.
+    void revertWithNothingToRevertOrStagedWorkInTheWay() {
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile("b.txt", "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+        auto addB = repo.repo().resolveRef("HEAD");
+        QVERIFY(succeeded(git.run({"rm", "-q", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "remove b"})));
+        repo.writeFile("a.txt", "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two"})));
+        auto two = repo.repo().resolveRef("HEAD");
+        QVERIFY(addB.ok() && two.ok());
+        const QString gitDir = QString::fromStdString(repo.repo().path());
+
+        auto nothing = repo.repo().revert(*addB);
+        QVERIFY2(nothing.ok(), nothing.ok() ? "" : nothing.error().message().c_str());
+        QVERIFY(nothing->nothingToRevert);
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(readFile(gitDir, QStringLiteral("REVERT_HEAD")), QByteArray("<missing>"));
+        QCOMPARE(readFile(gitDir, QStringLiteral("MERGE_MSG")), QByteArray("<missing>"));
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QString());
+
+        repo.writeFile("a.txt", "mine\n");
+        QVERIFY(succeeded(git.run({"add", "a.txt"})));
+        auto inTheWay = repo.repo().revert(*two);
+        QVERIFY(!inTheWay.ok());
+        QCOMPARE(repo.repo().state(), gitbolt::git::RepoState::None);
+        QCOMPARE(readFile(gitDir, QStringLiteral("REVERT_HEAD")), QByteArray("<missing>"));
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("M  a.txt"));
+        QCOMPARE(readFile(repo.path(), QStringLiteral("a.txt")), QByteArray("mine\n"));
+    }
+
+    // -----------------------------------------------------------------
     // `git cherry-pick A B C` (or a revert of several commits) that
     // stopped at B: once B is committed, the sequence is paused between
     // commits, with C still to come. libgit2 calls that no operation at

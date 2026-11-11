@@ -8,6 +8,7 @@
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QKeyEvent>
+#include <QMenu>
 #include <QScrollBar>
 #include <QMouseEvent>
 #include <QTableView>
@@ -61,6 +62,11 @@ RevisionGraphWidget::RevisionGraphWidget(QWidget* parent)
     tableView_->viewport()->installEventFilter(this);
     // And the table's Copy (eventFilter() again).
     tableView_->installEventFilter(this);
+
+    tableView_->setObjectName(QStringLiteral("log.view"));
+    tableView_->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tableView_, &QTableView::customContextMenuRequested,
+            this, &RevisionGraphWidget::onContextMenu);
 
     layout->addWidget(tableView_);
 }
@@ -298,6 +304,49 @@ bool RevisionGraphWidget::selectFirstChild()
         }
     }
     return false;
+}
+
+void RevisionGraphWidget::setRepoActionsEnabled(bool on)
+{
+    repoActionsEnabled_ = on;
+}
+
+void RevisionGraphWidget::setRepositoryKeySource(std::function<std::string()> source)
+{
+    keySource_ = std::move(source);
+}
+
+void RevisionGraphWidget::onContextMenu(const QPoint& pos)
+{
+    // The row under the cursor, whatever is selected; the key is taken
+    // now, before the menu's event loop (see BranchTreeWidget's menu).
+    const QModelIndex proxyIdx = tableView_->indexAt(pos);
+    if (!model_ || !proxyIdx.isValid())
+        return;
+    const auto* commit = model_->commitAt(proxy_->mapToSource(proxyIdx).row());
+    if (!commit)
+        return;
+    const QString hash = QString::fromStdString(commit->id.toHex());
+    const std::string key = keySource_ ? keySource_() : std::string();
+
+    QMenu menu(this);
+    QAction* revert = menu.addAction(QIcon(QStringLiteral(":/icons/menu/revert.svg")),
+                                     tr("Revert This Commit..."));
+    revert->setObjectName(QStringLiteral("log.revert-commit"));
+    connect(revert, &QAction::triggered, this, [this, hash, key] {
+        emit revertRequested(hash, key);
+    });
+    QAction* pick = menu.addAction(QIcon(QStringLiteral(":/icons/menu/cherry_pick.svg")),
+                                   tr("Cherry-Pick This Commit..."));
+    pick->setObjectName(QStringLiteral("log.cherry-pick-commit"));
+    connect(pick, &QAction::triggered, this, [this, hash, key] {
+        emit cherryPickRequested(hash, key);
+    });
+    // Shown, so the menu still says what there is, but off while the
+    // window's repository actions are.
+    for (QAction* action : menu.actions())
+        action->setEnabled(repoActionsEnabled_);
+    menu.exec(tableView_->viewport()->mapToGlobal(pos));
 }
 
 void RevisionGraphWidget::onSelectionChanged()

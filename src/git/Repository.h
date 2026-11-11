@@ -14,6 +14,7 @@
 #include "git/Rebase.h"
 #include "git/Reflog.h"
 #include "git/Remote.h"
+#include "git/Revert.h"
 #include "git/Revwalk.h"
 #include "git/Stash.h"
 #include "git/Status.h"
@@ -311,6 +312,14 @@ public:
     // Cherry-pick. Staged, not committed. One whose changes are on the
     // branch already leaves nothing in progress (alreadyApplied).
     Result<CherryPickResult> cherryPick(const ObjectId& commitId);
+
+    // Revert: the inverse of the commit's changes, staged with
+    // REVERT_HEAD and git's message (MERGE_MSG), as cherryPick() stages
+    // a pick. `mainline` is the parent (from 1) a merge is reverted
+    // against, 0 for its first; a commit with one parent or none (a
+    // root's revert deletes its files, as git's) takes 0. Refused, like
+    // cherryPick(), while another operation is in progress.
+    Result<RevertResult> revert(const ObjectId& commitId, unsigned mainline = 0);
 
     // Submodules
     Result<std::vector<SubmoduleInfo>> submodules() const;

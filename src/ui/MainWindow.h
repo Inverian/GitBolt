@@ -324,6 +324,10 @@ private:
     /// failed operation, offer to open the conflict resolver.
     void offerConflictResolution(const QString& operation);
 
+    /// Commands › Cherry pick / Revert commit and the log's context
+    /// menu: the dialog, its field filled with `commit` (may be empty).
+    void showPickDialog(bool revert, const QString& commit);
+
     services::GitService*   gitService_   = nullptr;
     conf::SettingsService*  settingsService_ = nullptr;
     conf::ThemeService*     themeService_    = nullptr;  // owned by main()

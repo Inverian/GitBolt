@@ -52,6 +52,7 @@ set(SOURCES
     Reflog.h
     Remote.h
     Repository.h
+    Revert.h
     Revwalk.h
     Signature.h
     Stash.h

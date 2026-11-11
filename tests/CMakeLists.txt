@@ -321,6 +321,11 @@ set_property(TEST test_update_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATF
 gitbolt_add_test(test_commit_dialog dialogs/TestCommitDialog.cpp)
 target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs)
 set_property(TEST test_commit_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Commands › Cherry pick and Revert commit's dialog: each mode's texts,
+# OK only with a preview, a merge's parent chooser for a revert. Off screen.
+gitbolt_add_test(test_cherry_pick_dialog dialogs/TestCherryPickDialog.cpp)
+target_link_libraries(test_cherry_pick_dialog PRIVATE gitbolt_dialogs)
+set_property(TEST test_cherry_pick_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # Help › About's minimum size versus its wrapped text, on a short
 # off-screen screen (fixtures/short-screen.json). The config file is
