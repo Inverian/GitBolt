@@ -19,11 +19,12 @@ dialog, with the same offer.
 from __future__ import annotations
 
 import os
-import signal
+import pathlib
 import sys
 import time
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import (App, Failure, bridge_text, git, kill_pid, make_repo,
+                    pid_alive, run, write_script)
 
 # Records its pid (write-then-rename, so a reader never sees half of
 # it), then sleeps far longer than the test runs.
@@ -49,7 +50,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     head = git("rev-parse", "HEAD", cwd=src)
     origin = os.path.join(scratch, "origin.git")
     git("clone", "-q", "--bare", src, origin, cwd=scratch)
-    url = "file://" + origin
+    url = pathlib.Path(origin).as_uri()
 
     stub = os.path.join(scratch, "stall.py")
     with open(stub, "w") as fh:
@@ -69,17 +70,14 @@ def test(binary: str, scratch: str, apps: list) -> None:
     broken_head = git("rev-parse", "HEAD", cwd=broken_src)
     broken_origin = os.path.join(scratch, "broken.git")
     git("clone", "-q", "--bare", broken_src, broken_origin, cwd=scratch)
-    broken_url = "file://" + broken_origin
+    broken_url = pathlib.Path(broken_origin).as_uri()
 
     # A post-checkout hook, as core.hooksPath or init.templateDir can
     # give every clone, that fails in a clone named "hooked" and passes
     # everywhere else.
     hooks = os.path.join(scratch, "hooks")
     os.makedirs(hooks)
-    hook = os.path.join(hooks, "post-checkout")
-    with open(hook, "w") as fh:
-        fh.write(HOOK)
-    os.chmod(hook, 0o755)
+    write_script(os.path.join(hooks, "post-checkout"), HOOK)
 
     # git keeps ext:: off unless allowed. Only the app's git sees this,
     # the filter config and the hooks.
@@ -106,7 +104,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     dest = os.path.join(scratch, "cloned")
     _open_dialog(app)
     app.ok(f"type clone.url {url}")
-    app.ok(f"type clone.path {dest}")
+    app.ok(f"type clone.path {bridge_text(dest)}")
     app.ok("click Clone")
     state = app.wait_until(
         lambda s: s.get("repoOpen") and _same_path(s.get("repoPath", ""), dest),
@@ -123,8 +121,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
     pid = 0
     try:
         _open_dialog(app)
-        app.ok(f"type clone.url {stall_url}")
-        app.ok(f"type clone.path {stalled}")
+        app.ok(f"type clone.url {bridge_text(stall_url)}")
+        app.ok(f"type clone.path {bridge_text(stalled)}")
         app.ok("click Clone")
         pid = _wait_for_pid(pid_file)
         if not os.path.isdir(stalled):
@@ -133,7 +131,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
         app.ok("click Cancel")
         _wait(lambda: not os.path.exists(stalled),
               "the partial clone to be removed")
-        _wait(lambda: not _alive(pid), "the stalled transport to be killed")
+        _wait(lambda: not pid_alive(pid), "the stalled transport to be killed")
         app.wait_until(lambda s: _button_enabled(app, "Clone"),
                        "Clone to be enabled again")
         if "Clone Repository" not in app.state().get("windows", []):
@@ -145,21 +143,21 @@ def test(binary: str, scratch: str, apps: list) -> None:
             lambda s: "Clone Repository" not in s.get("windows", []),
             "the dialog to close")
     finally:
-        if pid and _alive(pid):
-            os.kill(pid, signal.SIGKILL)
+        if pid and pid_alive(pid):
+            kill_pid(pid)
 
     # 3. Fetched, but the checkout failed: git keeps the repository and
     #    the dialog offers it. Editing the path withdraws the offer.
     kept = os.path.join(scratch, "kept")
     _open_dialog(app)
     app.ok(f"type clone.url {broken_url}")
-    app.ok(f"type clone.path {kept}")
+    app.ok(f"type clone.path {bridge_text(kept)}")
     app.ok("click Clone")
     app.wait_until(lambda s: _button_enabled(app, "Open Repository"),
                    "Open Repository to be offered", timeout=30)
     if git("rev-parse", "HEAD", cwd=kept) != broken_head:
         raise Failure("the kept clone's HEAD differs from the source")
-    app.ok(f"type clone.path {kept}-2")
+    app.ok(f"type clone.path {bridge_text(kept)}-2")
     app.wait_until(lambda s: _button_enabled(app, "Clone"),
                    "editing the path to bring Clone back")
     if not os.path.isdir(os.path.join(kept, ".git")):
@@ -182,7 +180,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     hooked = os.path.join(scratch, "hooked")
     _open_dialog(app)
     app.ok(f"type clone.url {url}")
-    app.ok(f"type clone.path {hooked}")
+    app.ok(f"type clone.path {bridge_text(hooked)}")
     app.ok("click Clone")
     app.wait_until(lambda s: _button_enabled(app, "Open Repository"),
                    "Open Repository to be offered after the hook failed",
@@ -223,14 +221,6 @@ def _same_path(a: str, b: str) -> bool:
     # dump-state reports libgit2's workdir (trailing slash), and the
     # temp dir sits behind a symlink on macOS (/var -> /private/var).
     return bool(a) and os.path.realpath(a.rstrip("/")) == os.path.realpath(b)
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
 
 
 def _wait(pred, what: str, timeout: float = 10.0) -> None:

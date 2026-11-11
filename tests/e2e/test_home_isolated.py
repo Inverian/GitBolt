@@ -72,4 +72,10 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        print("SKIP: on Windows QDir::homePath() is the profile folder whatever "
+              "HOME says, so ~/.gitbolt can't move (a test session writes "
+              "crash-test.log there, never crash.log), and the log goes to the "
+              "real %LOCALAPPDATA%")
+        sys.exit(77)
     run(test)

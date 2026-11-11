@@ -49,6 +49,7 @@
 #include <QLockFile>
 #include <QProcessEnvironment>
 #include <QScopeGuard>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyleHints>
 #include <QSysInfo>
@@ -496,6 +497,13 @@ int main(int argc, char* argv[]) {
     if (gitbolt::util::shouldLookUpLoginPath())
         gitbolt::util::startLoginPathLookup();
 
+#ifdef Q_OS_WIN
+    // Windows' QSettings reads only the %APPDATA% known folder, which no
+    // variable moves: an e2e app's GitBolt.ini goes where XDG_CONFIG_HOME
+    // says, as Qt itself puts it on macOS and Linux.
+    if (const QString dir = gitbolt::util::testSettingsDir(); !dir.isEmpty())
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir);
+#endif
     // Settings service — constructed before the theme so the saved
     // theme choice is restored before any window paints. Also used
     // further down for window-geometry persistence.
