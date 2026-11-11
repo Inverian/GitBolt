@@ -35,6 +35,12 @@ void installServicesProvider(FolderHandler onFolders, bool registerWithSystem);
 /// Brings GitBolt in front of the app that asked it to open something.
 void activateApp();
 
+/// True once AppKit has posted NSApplicationDidFinishLaunchingNotification,
+/// which comes after a launch's folder (application:openFiles:). Call it
+/// before the event loop first turns, or the notification is missed.
+/// Always true off the cocoa platform, where there is no launch to wait for.
+std::function<bool()> launchFinishedProbe();
+
 /// Sends `folders` to the installed provider as Finder would, on a
 /// pasteboard of its own: the test bridge's service-open. False, with
 /// `error` set, if there is no provider or it refused them.

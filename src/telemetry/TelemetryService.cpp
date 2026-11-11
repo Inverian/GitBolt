@@ -6,8 +6,10 @@
 #include "telemetry/Transport.h"
 
 #include <QJsonDocument>
+#include <QMetaEnum>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QRegularExpression>
 
 #include <algorithm>
 #include <utility>
@@ -19,6 +21,19 @@ namespace {
 // Plenty for every action the window has; a cap all the same, so a
 // bug that counts something unbounded can't grow the hash forever.
 constexpr qsizetype kMaxDistinctCommands = 512;
+
+// A record's fixed name for the log: the OpenPanel event's name, or
+// the GlitchTip event's kind tag ("crash", "operation_failed"). A queue
+// file edited by hand can hold anything: then just "event".
+QString recordName(const QueuedRecord& record) {
+    static const QRegularExpression fixed(QStringLiteral("^[a-z_]{1,40}$"));
+    const QJsonObject& payload = record.payload;
+    const QString name =
+        record.sink == Sink::OpenPanel
+            ? payload.value(QStringLiteral("payload")).toObject().value(QStringLiteral("name")).toString()
+            : payload.value(QStringLiteral("tags")).toObject().value(QStringLiteral("kind")).toString();
+    return fixed.match(name).hasMatch() ? name : QStringLiteral("event");
+}
 
 } // namespace
 
@@ -123,6 +138,15 @@ void TelemetryService::recordError(ErrorKind kind, const QString& detail) {
             glitchTipError(client_, kind, detail, QDateTime::currentDateTimeUtc()));
 }
 
+void TelemetryService::recordUpdateResult(const UpdateResult& result) {
+    if (!isActive())
+        return;
+    if (std::optional<QJsonObject> event = updateResultEvent(client_, installId(), result))
+        enqueue(Sink::OpenPanel, std::move(*event));
+    if (result.status == QLatin1String("failed") || result.status == QLatin1String("no_result"))
+        recordError(ErrorKind::UpdateFailed, result.stage + u'/' + result.reason);
+}
+
 bool TelemetryService::queueCrashReport(const QString& crashLog) {
     if (!isActive())
         return false;
@@ -222,10 +246,13 @@ void TelemetryService::sendFront() {
     // By id, not "the front": a record appended meanwhile can push the
     // queue over its caps, which may drop this very record.
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, id = record.id] { onReplyFinished(reply, id); });
+            [this, reply, id = record.id, name = recordName(record)] {
+                onReplyFinished(reply, id, name);
+            });
 }
 
-void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
+void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId,
+                                       const QString& name) {
     reply->deleteLater();
     // abort() emits finished() synchronously, inside the call. The
     // service's own aborts (off switch, quit, destruction) clear
@@ -236,14 +263,29 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
     if (!isActive())
         return;
 
+    // One line per request, for the local log: the record's fixed name
+    // and the outcome, never a payload, an ID or a URL.
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     switch (classify(status, reply->error(), replySent_)) {
     case Outcome::Sent:
     case Outcome::Drop:
+        if (status >= 200 && status < 300)
+            qInfo("Telemetry: %s sent (HTTP %d)", qPrintable(name), status);
+        else
+            qWarning("Telemetry: %s dropped (HTTP %d)", qPrintable(name), status);
         queue_->remove(recordId);
         paceTimer_.start(config_.paceMs);
         return;
     case Outcome::Retry:
+        if (status > 0) {
+            qInfo("Telemetry: %s not sent (HTTP %d); retrying at the next tick",
+                  qPrintable(name), status);
+        } else {
+            const char* error =
+                QMetaEnum::fromType<QNetworkReply::NetworkError>().valueToKey(reply->error());
+            qInfo("Telemetry: %s not sent (%s); retrying at the next tick", qPrintable(name),
+                  error ? error : "network error");
+        }
         queue_->bumpAttempts(recordId);
         backingOff_ = true;
         endCycle();
@@ -251,6 +293,7 @@ void TelemetryService::onReplyFinished(QNetworkReply* reply, quint64 recordId) {
     case Outcome::Unreachable:
         // As a Retry, but the record keeps its attempts: time offline
         // costs it nothing, and adds nothing for endCycle to write.
+        qInfo("Telemetry: offline; %lld events wait", static_cast<long long>(queue_->size()));
         backingOff_ = true;
         endCycle();
         return;
@@ -297,6 +340,7 @@ void TelemetryService::setUserEnabled(bool enabled) {
             queue_->close();   // releases the lock, writes nothing
         queue_.reset();
         EventQueue::discard(config_.queueDir);
+        qInfo("Telemetry: turned off; the queue was deleted");
         return;
     }
 
@@ -327,6 +371,8 @@ void TelemetryService::persistPending() {
     stopTimers();
     inCycle_ = false;
     queue_->sync();
+    if (const qsizetype kept = queue_->size(); kept > 0)
+        qInfo("Telemetry: %lld events kept for the next start", static_cast<long long>(kept));
 }
 
 void TelemetryService::abortInFlight() {

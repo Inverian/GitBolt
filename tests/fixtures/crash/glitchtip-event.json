@@ -1,0 +1,37 @@
+{
+  "event_id": "2f0e4c7a9b1d4e3f8a6b5c4d3e2f1a0b",
+  "timestamp": "2025-10-09T08:53:20.000Z",
+  "platform": "native",
+  "logger": "gitbolt",
+  "level": "fatal",
+  "release": "gitbolt@0.1.5",
+  "environment": "production",
+  "contexts": {
+    "os": {"name": "macOS", "version": "15.6"},
+    "device": {"arch": "arm64"},
+    "runtime": {"name": "Qt", "version": "6.10.0"}
+  },
+  "exception": {
+    "values": [
+      {
+        "type": "SIGSEGV",
+        "value": "SIGSEGV",
+        "mechanism": {"type": "signalhandler", "handled": false,
+                      "meta": {"signal": {"number": 11, "name": "SIGSEGV"}}},
+        "stacktrace": {
+          "frames": [
+            {"package": "dyld", "function": "start", "instruction_addr": "0x6b98", "image_addr": "0x0", "in_app": false},
+            {"package": "GitBolt", "function": "<unknown>", "instruction_addr": "0x3e10", "image_addr": "0x0", "in_app": true},
+            {"package": "QtCore", "function": "QEventLoop::exec", "instruction_addr": "0x13a7f0", "image_addr": "0x0", "in_app": false},
+            {"package": "<other>", "in_app": false},
+            {"package": "QtCore", "function": "QMetaObject::activate", "instruction_addr": "0x2d1a40", "image_addr": "0x0", "in_app": false},
+            {"package": "GitBolt", "function": "<unknown>", "instruction_addr": "0x5b120", "image_addr": "0x0", "in_app": true},
+            {"package": "GitBolt", "function": "<unknown>", "instruction_addr": "0x5c3f0", "image_addr": "0x0", "in_app": true}
+          ]
+        }
+      }
+    ]
+  },
+  "fingerprint": ["crash", "SIGSEGV", "gitbolt@0.1.5:0123456789abcdef"],
+  "tags": {"kind": "crash", "build_id": "ec89b33079773318a1942396eef8118b"}
+}

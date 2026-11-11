@@ -1,6 +1,8 @@
 #pragma once
 
+#include "telemetry/EventSchema.h"
 #include "ui/UpdateSetup.h"
+#include "update/Failure.h"
 #include "update/Installer.h"
 #include "update/Release.h"
 #include "update/Version.h"
@@ -54,15 +56,13 @@ namespace gitbolt::ui {
 /// Installing, after Install and Restart: the Downloader fetches the
 /// package's asset (assetNameFor) and checks it, into <cache>/updates/
 /// <version>/ (a test session: its private gitbolt-updates-XXXXXX in
-/// the temporary folder, UpdateSetup.h; an AppImage: next to the
-/// running one, where the helper renames it over it); the Installer
-/// checks and stages it; its helper is started with this process's
-/// pid, and GitBolt quits, which the helper waits for. (Windows asks
-/// UAC first, over the dialog: a No leaves GitBolt running, the dialog
-/// Declined, and the update ready for Try Again.) Cancel, closing
-/// the dialog, a failure, or quitting first stops wherever it is and
-/// deletes what was downloaded: nothing is left beside the AppImage,
-/// nothing installs later. Once the helper runs there is nothing left
+/// the temporary folder, UpdateSetup.h); the Installer checks and stages
+/// it; its helper is started with this process's pid, and GitBolt
+/// quits, which the helper waits for. (Windows asks UAC first, over the
+/// dialog: a No leaves GitBolt running, the dialog Declined, and the
+/// update ready for Try Again.) Cancel, closing the dialog, a failure,
+/// or quitting first stops wherever it is and deletes what was
+/// downloaded: nothing installs later. Once the helper runs there is nothing left
 /// to cancel: the dialog says GitBolt restarts, and if GitBolt is still
 /// running kQuitGraceMs later (the quit was refused), that it has to
 /// quit for the update to go in; still running kHelperDeadlineMs after
@@ -70,7 +70,7 @@ namespace gitbolt::ui {
 /// was abandoned, and checks and Install work again.
 ///
 /// A release this system is too old for (Installer::needsNewerSystem:
-/// macOS's minimum, which only the downloaded disk image says) is
+/// the downloaded installer's minimum, macOS's or Windows') is
 /// remembered with why (updates/incompatibleVersion): shown again, it
 /// is one this copy can't install, without being downloaded again,
 /// until a newer one comes out or the system's version changes.
@@ -81,6 +81,11 @@ namespace gitbolt::ui {
 /// it once and deletes it: ok says so in the status bar (statusMessage);
 /// anything else, for a version newer than this one, opens the dialog
 /// on why, the end of install.log, and how to install by hand.
+///
+/// Usage statistics, fixed codes only: updateResult once per attempt (at
+/// once, or at the next start() for one the helper finishes), checkFailed
+/// for a failed check (never for being offline), commandUsed for the
+/// dialog's and the bar's buttons.
 class UpdateController : public QObject {
     Q_OBJECT
 public:
@@ -98,6 +103,12 @@ public:
     /// keeps them).
     static constexpr char kInstallResultFile[] = "install-result";
     static constexpr char kInstallLogFile[] = "install.log";
+    /// Also there, left by the launch: "<from> <to> <unix time>". With no
+    /// result once kResultPatienceSeconds are over, the attempt is no_result.
+    static constexpr char kInstallMarkerFile[] = "pending-install";
+    /// How long a marker without a result may be a helper still at work
+    /// (its wait for the quit, then Windows' install), with a margin.
+    static constexpr int kResultPatienceSeconds = update::Installer::kHelperWaitSeconds + 30 * 60;
 
     /// How this process steps aside for the helper. Tests replace them,
     /// to get as far as the helper without quitting themselves or having
@@ -143,6 +154,13 @@ public:
 signals:
     /// A line for the window's status bar: "GitBolt was updated to <v>."
     void statusMessage(const QString& text);
+    /// How an install attempt ended (fixed codes only).
+    void updateResult(const gitbolt::telemetry::UpdateResult& result);
+    /// A check GitHub answered with an error, a rate limit or something
+    /// that isn't a release: its failure code.
+    void checkFailed(const QString& reason);
+    /// One of the dialog's or the notice bar's buttons was clicked.
+    void commandUsed(const QString& objectName);
 
 private:
     void tick();
@@ -176,8 +194,16 @@ private:
     /// system, Installer::needsNewerSystem), or empty.
     QString refusedForThisSystem(const update::Version& version) const;
     void failInstall(const QString& message);
-    /// start(): reads and deletes the helper's install-result.
+    /// start(): reads and deletes the helper's install-result, and the
+    /// pending-install marker with it.
     void reportEarlierInstall();
+    /// Logs and emits updateResult; `from` and `to` as x.y.z or empty.
+    void reportResult(const char* status, const char* stage, update::Failure failure, const QString& from,
+                      const QString& to);
+    /// The marker for the next start, once the helper runs.
+    void writeInstallMarker();
+    /// Every button under `widget` emits commandUsed with its name.
+    void countClicks(QWidget* widget);
     /// Stops the download or the preparation, and deletes what was
     /// downloaded. Never after the helper was launched.
     void stopInstall();
@@ -223,6 +249,8 @@ private:
     bool launched_ = false;
     /// The quit went through (aboutToQuit): GitBolt is on its way out.
     bool quitting_ = false;
+    /// Where the running install is: download, prepare or launch.
+    const char* installStage_ = "download";
 };
 
 } // namespace gitbolt::ui

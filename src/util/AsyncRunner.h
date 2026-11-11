@@ -7,6 +7,8 @@
 #include <QThreadPool>
 #include <QtConcurrent>
 
+#include "util/WorkerExceptions.h"
+
 #include <algorithm>
 #include <exception>
 #include <functional>
@@ -27,7 +29,9 @@ namespace gitbolt::util {
 ///      the watcher slot, and an exception escaping a slot through
 ///      the event loop terminates the process. Fire-and-forget run()
 ///      conversely swallowed it without a trace. Both paths now trap,
-///      log via qWarning, and keep the app alive — workers are
+///      log via qWarning, report the exception's type (never its
+///      text) to usage statistics (util/WorkerExceptions.h), and keep
+///      the app alive — workers are
 ///      expected to report failures through their own channels
 ///      (Result<T>, operationFailed signals); an exception reaching
 ///      here is a bug, not a control path.
@@ -102,9 +106,9 @@ public:
                 try {
                     fn();
                 } catch (const std::exception& e) {
-                    qWarning("AsyncRunner: worker threw: %s", e.what());
+                    reportWorkerException(&e);
                 } catch (...) {
-                    qWarning("AsyncRunner: worker threw a non-std exception");
+                    reportWorkerException(nullptr);
                 }
             }));
     }
@@ -138,9 +142,9 @@ public:
                 try {
                     slot->emplace(fn());
                 } catch (const std::exception& e) {
-                    qWarning("AsyncRunner: worker threw: %s", e.what());
+                    reportWorkerException(&e);
                 } catch (...) {
-                    qWarning("AsyncRunner: worker threw a non-std exception");
+                    reportWorkerException(nullptr);
                 }
             });
         auto* watcher = new QFutureWatcher<void>(this);

@@ -107,12 +107,14 @@ void BlameWidget::onContextMenu(const QPoint& pos) {
 
     auto* viewCommitAction = menu.addAction(
         tr("View commit %1").arg(QString::fromStdString(commitId.toShortHex())));
+    viewCommitAction->setObjectName(QStringLiteral("blame.view-commit"));
     connect(viewCommitAction, &QAction::triggered, this, [this, commitId]() {
         emit commitSelected(commitId);
     });
 
     auto* blameBeforeAction = menu.addAction(
         tr("Blame before this commit"));
+    blameBeforeAction->setObjectName(QStringLiteral("blame.blame-before"));
     connect(blameBeforeAction, &QAction::triggered, this, [this, commitId]() {
         selectedCommitId_ = commitId;
         onBlameBeforeClicked();

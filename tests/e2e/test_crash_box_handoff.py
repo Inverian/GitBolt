@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 import e2elib
@@ -135,4 +136,9 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        print("SKIP: on Windows QDir::homePath() is the profile folder whatever "
+              "HOME says: this would read, and on OK delete, the user's real "
+              "~/.gitbolt/crash.log")
+        sys.exit(77)
     run(test)

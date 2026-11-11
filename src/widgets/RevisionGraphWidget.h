@@ -1,6 +1,8 @@
 #pragma once
 #include "models/CommitLogModel.h"
 #include <QWidget>
+#include <functional>
+#include <string>
 
 class QTableView;
 
@@ -80,6 +82,16 @@ public:
     bool selectNextMatch();
     bool selectPreviousMatch();
 
+    /// A row's context menu (Revert This Commit…, Cherry-Pick This
+    /// Commit…) is shown, but its entries are off, while this is off,
+    /// as the Commands menu's are (MainWindow::setRepoActionsEnabled).
+    void setRepoActionsEnabled(bool on);
+
+    /// The open repository's key (GitService::openKey()), which the
+    /// menu's requests carry: a second launch can hand another
+    /// repository over while the menu is up.
+    void setRepositoryKeySource(std::function<std::string()> source);
+
 signals:
     /// Emitted whenever the current selection changes. The hash is
     /// the full hex SHA of the newly-selected commit, or an empty
@@ -87,6 +99,11 @@ signals:
     /// click on the selected row). RepositoryView reacts to the
     /// empty-string case by blanking the inspector tabs.
     void commitSelected(const QString& commitHash);
+
+    /// The row's context menu: revert or cherry-pick that commit, in the
+    /// repository `key` names.
+    void revertRequested(const QString& commitHash, const std::string& key);
+    void cherryPickRequested(const QString& commitHash, const std::string& key);
 
 protected:
     /// Implements modifier-click-to-deselect on the table viewport.
@@ -99,6 +116,7 @@ protected:
 
 private slots:
     void onSelectionChanged();
+    void onContextMenu(const QPoint& pos);
     void resizeGraphColumn();
     /// Size Author/Date/Hash by content then add a padding margin so text
     /// isn't cramped against the next column. ResizeToContents alone packs
@@ -116,6 +134,8 @@ private:
     QTableView* tableView_ = nullptr;
     models::CommitLogModel* model_ = nullptr;
     CommitFilterProxy* proxy_ = nullptr;
+    bool repoActionsEnabled_ = false;
+    std::function<std::string()> keySource_;
 };
 
 } // namespace gitbolt::widgets

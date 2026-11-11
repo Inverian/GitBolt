@@ -8,14 +8,17 @@
 #include "update/Package.h"
 #include "widgets/UpdateNoticeBar.h"
 
+#include <QAbstractButton>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QSysInfo>
+#include <QSaveFile>
 #include <QTimer>
 #include <QWidget>
+
+#include <cstdlib>
 
 namespace gitbolt::ui {
 
@@ -75,6 +78,44 @@ std::optional<InstallResult> parseInstallResult(QByteArray bytes)
         reason = reason.left(kMaxReasonChars) + QStringLiteral("…");
     result.reason = reason;
     return result;
+}
+
+// x.y.z exactly, as the helpers and the marker write it.
+bool isPlainVersion(const QString& text)
+{
+    const auto version = update::Version::parse(text);
+    return version && version->toString() == text;
+}
+
+struct InstallMarker {
+    QString from;   ///< the version that launched the helper
+    QString to;     ///< the version it installs
+    qint64 at = 0;  ///< when, in seconds since the epoch
+};
+
+// "<from> <to> <unix-seconds>\n", strictly.
+std::optional<InstallMarker> parseInstallMarker(const QByteArray& bytes)
+{
+    if (bytes.size() > kMaxResultBytes)
+        return std::nullopt;
+    const QStringList parts = QString::fromUtf8(bytes).trimmed().split(QLatin1Char(' '));
+    bool ok = false;
+    const qint64 at = parts.size() == 3 ? parts.at(2).toLongLong(&ok) : 0;
+    if (!ok || !isPlainVersion(parts.at(0)) || !isPlainVersion(parts.at(1)))
+        return std::nullopt;
+    return InstallMarker{parts.at(0), parts.at(1), at};
+}
+
+// update_result's package for this kind of install.
+QString packageName(update::PackageKind kind)
+{
+    switch (kind) {
+    case update::PackageKind::MacBundle: return QStringLiteral("dmg");
+    case update::PackageKind::WindowsInstall: return QStringLiteral("nsis");
+    case update::PackageKind::Deb: return QStringLiteral("deb");
+    case update::PackageKind::Unknown: break;
+    }
+    return QStringLiteral("other");
 }
 
 // The last lines of the helper's log, or empty.
@@ -153,6 +194,7 @@ UpdateController::UpdateController(UpdateSetup setup, conf::SettingsService* set
     connect(downloader_, &update::Downloader::failed, this, &UpdateController::failInstall);
 
     if (bar_) {
+        countClicks(bar_);
         connect(bar_, &widgets::UpdateNoticeBar::viewRequested, this, [this] {
             if (!release_) {
                 checkNow();
@@ -203,7 +245,7 @@ void UpdateController::start()
     // The installers of this version and older ones are done with (a
     // finished update's, an abandoned one's), now that this one runs, and
     // so is whatever an update that crashed or was killed left beside
-    // this copy (a staged bundle, a part-downloaded AppImage, a mount).
+    // this copy (a staged bundle, a mount).
     update::removeOldDownloads(setup_.config.downloadDir, setup_.config.current);
     update::removeStaleInstallFiles(setup_.package, setup_.config.downloadDir);
     if (setup_.schedulesChecks())
@@ -213,18 +255,44 @@ void UpdateController::start()
 void UpdateController::reportEarlierInstall()
 {
     const QDir downloads(setup_.config.downloadDir);
+    // The marker the launch left: who launched it, for what, and when.
+    const QString markerPath = downloads.filePath(QLatin1String(kInstallMarkerFile));
+    const QFileInfo markerInfo(markerPath);
+    const bool markerThere = markerInfo.exists() || markerInfo.isSymLink();
+    std::optional<InstallMarker> marker;
+    if (QFile file(markerPath); markerThere && !markerInfo.isSymLink() && file.open(QIODevice::ReadOnly))
+        marker = parseInstallMarker(file.read(kMaxResultBytes + 1));
+    const auto removeMarker = [&] {
+        if (markerThere && !QFile::remove(markerPath))
+            qWarning("Update: couldn't remove %s", qPrintable(markerPath));
+    };
+
     const QString path = downloads.filePath(QLatin1String(kInstallResultFile));
     const QFileInfo info(path);
-    if (!info.exists() && !info.isSymLink())
+    if (!info.exists() && !info.isSymLink()) {
+        // No result yet: a helper may still be at work (a start by hand
+        // while pkexec or the installer waits), until the patience is
+        // over; then it never reported back. Either clock way.
+        if (!markerThere)
+            return;
+        if (marker && std::llabs(QDateTime::currentSecsSinceEpoch() - marker->at) <= kResultPatienceSeconds)
+            return;
+        removeMarker();
+        if (marker)
+            reportResult("no_result", "install", update::Failure::NoResult, marker->from, marker->to);
         return;
+    }
     std::optional<InstallResult> result;
     if (QFile file(path); file.open(QIODevice::ReadOnly))
         result = parseInstallResult(file.read(kMaxResultBytes + 1));
     // Said once: whatever it says, the next start doesn't say it again.
     if (!QFile::remove(path))
         qWarning("Update: couldn't remove %s", qPrintable(path));
+    removeMarker();
     if (!result) {
         qWarning("Update: %s isn't an install result; ignored", qPrintable(path));
+        if (marker)
+            reportResult("no_result", "install", update::Failure::NoResult, marker->from, marker->to);
         return;
     }
     // setup_.config.current, not applicationVersion(): a test session's
@@ -232,17 +300,27 @@ void UpdateController::reportEarlierInstall()
     // version as far as the updater goes.
     const update::Version& current = setup_.config.current;
     const QString version = result->version.toString();
+    // The marker's from, if it is this attempt's (0.9.x writes none).
+    const QString from = marker && marker->to == version ? marker->from : QString();
     if (result->status == QLatin1String("ok")) {
         // An older version's ok is from before an update made outside
         // GitBolt: stale.
-        if (result->version >= current)
+        if (result->version >= current) {
+            reportResult("ok", "install", update::Failure::None, from, version);
             emit statusMessage(tr("GitBolt was updated to %1.").arg(version));
+        }
         return;
     }
     // This version, or a newer one, runs now: whatever went wrong then
     // was put right since.
     if (!(result->version > current))
         return;
+    const update::Failure failure = update::installResultFailure(result->status, result->reason);
+    if (result->status == QLatin1String("gave-up"))
+        reportResult("gave_up", "quit", failure, from, version);
+    else
+        reportResult(result->status == QLatin1String("declined") ? "declined" : "failed", "install", failure, from,
+                     version);
 
     const auto withReason = [&](const QString& what) {
         return result->reason.isEmpty() ? what + QLatin1Char('.')
@@ -276,11 +354,6 @@ void UpdateController::reportEarlierInstall()
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "
                     "sudo apt install ./%1")
-                     .arg(asset);
-        break;
-    case update::PackageKind::AppImage:
-        byHand = tr("To install it yourself, download %1 from the release page and use it in place of "
-                    "this AppImage.")
                      .arg(asset);
         break;
     case update::PackageKind::Unknown:
@@ -353,7 +426,8 @@ void UpdateController::onAvailable(const update::Release& release, bool manual)
     // A release this system was too old for stays refused until a newer
     // one comes out, or the system changes (it may be new enough now).
     if (const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
-        refused && (release.version > *refused || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion()))
+        refused
+        && (release.version > *refused || settings_->incompatibleUpdateSystem() != update::runningSystem().toString()))
         settings_->setIncompatibleUpdate({}, {}, {});
     // An automatic check that ran on while an install started: the
     // install keeps the release it started with.
@@ -398,6 +472,12 @@ void UpdateController::offerInBar(const update::Release& release, bool manual)
 
 void UpdateController::onCheckFailed(const QString& message, bool manual)
 {
+    // Only what GitHub answered: being offline, or a refusal of GitBolt's
+    // own, isn't news.
+    const update::Failure failure = checker_->failure();
+    if (failure == update::Failure::HttpError || failure == update::Failure::RateLimited
+        || failure == update::Failure::BadResponse)
+        emit checkFailed(QString::fromLatin1(update::failureName(failure)));
     if (manual && dialogWaits_ && dialog_) {
         dialogWaits_ = false;
         // An install that started meanwhile keeps the dialog: Close on
@@ -459,34 +539,16 @@ void UpdateController::install()
     const update::Release& release = *shownRelease_;
     const update::PackageInfo& package = setup_.package;
     const QString assetName = update::assetNameFor(package.kind, release.version);
-    QString dir;   // the Downloader's own: <cache>/updates/<version>/
-    if (package.kind == update::PackageKind::AppImage) {
-        // Next to the running AppImage, which the helper renames it
-        // over: same folder, same file system.
-        const QFileInfo target(package.target);
-        dir = target.absolutePath();
-        if (QDir(dir).filePath(assetName) == target.absoluteFilePath()) {
-            retryChecks_ = false;
-            openDialog()->showInstallFailed(
-                tr("The new AppImage has this one's name, %1, so it can't be downloaded next to it. "
-                   "Rename this AppImage, or download the new one from the release page.")
-                    .arg(assetName));
-            return;
-        }
-    }
     retryChecks_ = false;
+    installStage_ = "download";
     openDialog()->showDownloading(0, release.asset(assetName)->size);
-    downloader_->start(release, assetName, dir);
+    downloader_->start(release, assetName);
 }
 
 void UpdateController::onDownloaded(const QString& path)
 {
     downloaded_ = path;
-    // Beside the AppImage, under the name users keep theirs under: if
-    // this GitBolt dies before the helper takes it over, the next start
-    // knows it is GitBolt's to remove (removeStaleInstallFiles).
-    if (setup_.package.kind == update::PackageKind::AppImage)
-        update::recordPendingDownload(setup_.config.downloadDir, path);
+    installStage_ = "prepare";
     // workDir is the downloads folder: its mount point, helper script,
     // install.log and install-result are never version-named, so
     // removeOldDownloads leaves them alone.
@@ -515,11 +577,13 @@ void UpdateController::onPrepared()
     // in front: the user just chose Install and Restart in it.
     const qint64 pid = hooks_.pid ? hooks_.pid() : QCoreApplication::applicationPid();
     declined_ = false;
+    installStage_ = "launch";
     const bool started = launchHook_ ? launchHook_(*installer_, pid)
                                      : installer_->launchHelper(pid, dialog_ ? quintptr(dialog_->winId()) : 0);
     if (!started)
         return;
     launched_ = true;
+    writeInstallMarker();
     helperTookOver();
     // Nothing is left to cancel: the helper installs once GitBolt has
     // quit, whatever this process does now.
@@ -533,6 +597,8 @@ void UpdateController::onDeclined(const QString& howToInstall)
     // Nothing was started: GitBolt doesn't quit, and the checked
     // download stays for Try Again (closing the dialog deletes it).
     declined_ = true;
+    reportResult("declined", "launch", update::Failure::PermissionDeclined, setup_.config.current.toString(),
+                 shownRelease_ ? shownRelease_->version.toString() : QString());
     if (dialog_)
         dialog_->showDeclined(howToInstall);
 }
@@ -550,9 +616,6 @@ void UpdateController::quitForHelper()
 
 void UpdateController::helperTookOver()
 {
-    // No longer a download a crash would leave beside the AppImage: the
-    // helper renames it, or deletes it as it gives up.
-    update::forgetPendingDownload(setup_.config.downloadDir);
     if (!helperDeadline_) {
         helperDeadline_ = new QTimer(this);
         helperDeadline_->setObjectName(QStringLiteral("updateHelperDeadline"));
@@ -584,6 +647,11 @@ void UpdateController::helperGaveUp()
     if (result && result->status == QLatin1String("gave-up") && shownRelease_
         && result->version == shownRelease_->version)
         QFile::remove(resultPath);
+    // Said now: the next start mustn't take it for an attempt that never
+    // reported back.
+    QFile::remove(QDir(setup_.config.downloadDir).filePath(QLatin1String(kInstallMarkerFile)));
+    reportResult("gave_up", "quit", update::Failure::QuitTimeout, setup_.config.current.toString(),
+                 shownRelease_ ? shownRelease_->version.toString() : QString());
     retryChecks_ = false;
     openDialog()->showInstallFailed(
         tr("GitBolt didn't quit within %1 minutes of Install and Restart, so the update was abandoned.")
@@ -593,24 +661,38 @@ void UpdateController::helperGaveUp()
 QString UpdateController::refusedForThisSystem(const update::Version& version) const
 {
     const auto refused = update::Version::parse(settings_->incompatibleUpdateVersion());
-    if (!refused || *refused != version || settings_->incompatibleUpdateSystem() != QSysInfo::productVersion())
+    if (!refused || *refused != version || settings_->incompatibleUpdateSystem() != update::runningSystem().toString())
         return {};
     return settings_->incompatibleUpdateReason();
 }
 
 void UpdateController::failInstall(const QString& message)
 {
-    // A release that needs a newer system than this one (macOS's
-    // minimum, which only the disk image says): remembered, and shown
-    // as one this copy can't install, with why (whyNotInstallable),
-    // which it says again later without downloading it again.
+    // The code first: stopInstall() deletes the Installer.
+    update::Failure failure = update::Failure::Other;
+    if (qstrcmp(installStage_, "download") == 0)
+        failure = downloader_->failure();
+    else if (installer_)
+        failure = installer_->failure();
+    if (failure == update::Failure::None)   // a launch hook's failed()
+        failure = update::Failure::Other;
+    const QString to = shownRelease_ ? shownRelease_->version.toString() : QString();
+    // A release that needs a newer system than this one (the minimum
+    // only the downloaded installer says, macOS's or Windows'):
+    // remembered, and shown as one this copy can't install, with why
+    // (whyNotInstallable), which it says again later without
+    // downloading it again.
     if (installer_ && installer_->needsNewerSystem() && shownRelease_) {
-        settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message, QSysInfo::productVersion());
+        reportResult("incompatible", "prepare", update::Failure::NeedsNewerSystem, setup_.config.current.toString(),
+                     to);
+        settings_->setIncompatibleUpdate(shownRelease_->version.toString(), message,
+                                         update::runningSystem().toString());
         stopInstall();
         retryChecks_ = false;
         showRelease(*shownRelease_);
         return;
     }
+    reportResult("failed", installStage_, failure, setup_.config.current.toString(), to);
     stopInstall();
     retryChecks_ = false;
     if (dialog_)
@@ -634,7 +716,44 @@ void UpdateController::stopInstall()
     if (!downloaded_.isEmpty()) {
         QFile::remove(downloaded_);
         downloaded_.clear();
-        update::forgetPendingDownload(setup_.config.downloadDir);
+    }
+}
+
+void UpdateController::reportResult(const char* status, const char* stage, update::Failure failure,
+                                    const QString& from, const QString& to)
+{
+    telemetry::UpdateResult result;
+    result.status = QString::fromLatin1(status);
+    result.stage = QString::fromLatin1(stage);
+    result.reason = QString::fromLatin1(update::failureName(failure));
+    result.fromVersion = from.isEmpty() ? QStringLiteral("unknown") : from;
+    result.toVersion = to.isEmpty() ? QStringLiteral("unknown") : to;
+    result.package = packageName(setup_.package.kind);
+    // Fixed codes and versions only: the e2e tests read this line.
+    qInfo("Update: %s (%s, %s), %s to %s, %s", status, stage, update::failureName(failure),
+          qPrintable(result.fromVersion), qPrintable(result.toVersion), qPrintable(result.package));
+    emit updateResult(result);
+}
+
+void UpdateController::writeInstallMarker()
+{
+    if (!shownRelease_)
+        return;
+    const QString path = QDir(setup_.config.downloadDir).filePath(QLatin1String(kInstallMarkerFile));
+    const QByteArray line = QStringLiteral("%1 %2 %3\n")
+                                .arg(setup_.config.current.toString(), shownRelease_->version.toString())
+                                .arg(QDateTime::currentSecsSinceEpoch())
+                                .toUtf8();
+    // Without it the outcome still comes, from the result alone.
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(line) != line.size() || !file.commit())
+        qWarning("Update: couldn't write %s", qPrintable(path));
+}
+
+void UpdateController::countClicks(QWidget* widget)
+{
+    for (QAbstractButton* button : widget->findChildren<QAbstractButton*>()) {
+        connect(button, &QAbstractButton::clicked, this, [this, button] { emit commandUsed(button->objectName()); });
     }
 }
 
@@ -647,6 +766,7 @@ dialogs::UpdateDialog* UpdateController::openDialog()
 {
     if (!dialog_) {
         dialog_ = new dialogs::UpdateDialog(window_);
+        countClicks(dialog_);
         connect(dialog_, &dialogs::UpdateDialog::installClicked, this, &UpdateController::install);
         connect(dialog_, &dialogs::UpdateDialog::skipClicked, this, [this] {
             // The version on screen, not a newer one found since.

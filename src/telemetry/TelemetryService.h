@@ -39,6 +39,10 @@ namespace gitbolt::telemetry {
 ///   - Command counts become command_used events every countWindowMs
 ///     and at quit.
 ///
+/// Each request's outcome goes to the log (qInfo, qWarning for a
+/// dropped record) with the event's fixed name only: no payload, ID or
+/// URL. So do turning it off and the events kept at quit.
+///
 /// Every record*, count* and flush entry point does nothing unless the
 /// service is active: enabled, not quitting, its queue lock held. The
 /// network stack is created at the first flush, so loading the TLS
@@ -83,6 +87,9 @@ public:
     /// One per (kind, sanitized detail) per session, at most
     /// maxErrorsPerSession.
     void recordError(ErrorKind kind, const QString& detail = {});
+    /// update_result, once per install attempt; a failed or unfinished
+    /// one (status failed, no_result) also as an UpdateFailed error.
+    void recordUpdateResult(const UpdateResult& result);
     /// Parses a crash.log (CrashLogParser) and queues the reduced event
     /// if the parser accepts it. Synchronous and network-free: main()
     /// calls it right before the "Crash Detected" box deletes the file.
@@ -120,7 +127,7 @@ private:
     void scheduleFlush();
     void beginCycle();
     void sendFront();
-    void onReplyFinished(QNetworkReply* reply, quint64 recordId);
+    void onReplyFinished(QNetworkReply* reply, quint64 recordId, const QString& name);
     void endCycle();
     void onRetryTick();
     void flushCounts();

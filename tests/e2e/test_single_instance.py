@@ -19,10 +19,9 @@ read it.
 from __future__ import annotations
 
 import os
-import signal
 import time
 
-from e2elib import App, Failure, make_repo, run
+from e2elib import App, Failure, make_repo, resume, run, suspend
 
 
 def _on(name: str):
@@ -61,8 +60,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
     # Busy owners (stopped here): the hand-off connects and its line is
     # sent, but no receipt comes while they are stopped.
-    os.kill(first.proc.pid, signal.SIGSTOP)
-    os.kill(dying.proc.pid, signal.SIGSTOP)
+    suspend(first.proc.pid)
+    suspend(dying.proc.pid)
     busy = first.start_second(repo_a)
     try:
         taker = App(binary, repo_b, instance_name=dying.instance_name,
@@ -76,7 +75,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
             if launch.poll() is not None:
                 raise Failure(f"launch gave up on the {owner} owner, "
                               f"alive: rc={launch.returncode}")
-        os.kill(first.proc.pid, signal.SIGCONT)
+        resume(first.proc.pid)
         _, err = busy.communicate(timeout=30)
         if busy.returncode != 0 or b"busy" not in err:
             raise Failure("launch against a busy instance should wait, with "
@@ -96,7 +95,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
             busy.kill()
             busy.wait()
         if first.proc.poll() is None:
-            os.kill(first.proc.pid, signal.SIGCONT)
+            resume(first.proc.pid)
     # It still owns the namespace: nothing took the lock or the socket
     # while it was stopped.
     again = first.launch_second(repo_b)

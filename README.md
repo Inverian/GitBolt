@@ -8,7 +8,7 @@
   <a href="https://github.com/Inverian/GitBolt/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/Inverian/GitBolt/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white"></a>
   <a href="https://github.com/Inverian/GitBolt/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Inverian/GitBolt?include_prereleases&sort=semver&label=release&color=ffb020"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/Inverian/GitBolt?color=blue"></a>
-  <a href="#download"><img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6b7280"></a>
+  <a href="#download"><img alt="Platforms: macOS, Windows 11, Ubuntu" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%2011%20%7C%20Ubuntu-6b7280"></a>
   <a href="https://www.gitbolt.com"><img alt="Website: gitbolt.com" src="https://img.shields.io/badge/website-gitbolt.com-ffb020?labelColor=0b0d10"></a>
   <br>
   <a href="https://www.qt.io"><img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white"></a>
@@ -55,19 +55,123 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 Installers for every release are on the
 [Releases page](https://github.com/Inverian/GitBolt/releases), newest first.
 
-| Platform | Download | Notes |
+| Platform | Download | Requirements |
 |---|---|---|
 | macOS | `GitBolt-<version>-Darwin-arm64.dmg` | Apple Silicon, macOS 13 (Ventura) or later |
-| Windows | `GitBolt-<version>-Windows-AMD64.exe` | 64-bit installer |
-| Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, on distributions with GCC 13's C++ runtime or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later); make it executable and run it |
-| Ubuntu / Debian | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 or later, Debian 13 and distributions based on them, such as Linux Mint 22 |
+| Windows | `GitBolt-<version>-Windows-AMD64.exe` | Windows 11, 64-bit (x64) |
+| Ubuntu | `gitbolt_<version>_amd64.deb` | Ubuntu 24.04 or later, x86-64 |
 
-Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
+These are the platforms GitBolt supports. GitBolt also installs and
+updates on Windows 10 (version 1809 or later), but Windows 10 isn't
+supported. The .deb also installs on Debian 13 and on distributions
+based on Ubuntu 24.04 or Debian 13, such as Linux Mint 22, but they
+aren't supported either. There is no AppImage any more: see
+[Install](#install) to switch to the .deb.
+
+Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`,
+and has a `-symbols.zip` for each platform: debug symbols the
+maintainers use to read crash reports. You don't need them to install
+or run GitBolt (the `GitBolt.exe` in the Windows one is not an
+installer).
 
 GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
 or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
 runs the git your login shell finds first, and says so when that git
 has known security flaws.
+
+### Install
+
+- **macOS**: open the .dmg and drag GitBolt to Applications, then open
+  it from there. A GitBolt that runs from the disk image can't update
+  itself.
+- **Windows**: run the installer (see [First launch](#first-launch) for
+  the prompts). It asks for administrator permission, installs GitBolt
+  (by default in Program Files), and adds it to the Start menu, and
+  **Open in GitBolt** to Explorer's right-click menu on folders (on
+  Windows 11, under **Show more options**).
+- **Ubuntu**: in the folder you downloaded it to, run
+  `sudo apt install ./gitbolt_<version>_amd64.deb` (the `./` matters).
+  apt also installs python3-nautilus, for **Open in GitBolt** in
+  Nautilus: restart Nautilus once (`nautilus -q`) to see it.
+
+**From the AppImage** (GitBolt 0.9.x): install the .deb as above, then
+delete the AppImage. Your settings carry over: both keep them in
+`~/.config/GitBolt`. The AppImage keeps working, but gets no more
+updates. On a distribution the .deb doesn't install on, such as Fedora,
+build GitBolt from source ([Linux notes](docs/BUILDING.md#linux-notes));
+such builds don't update themselves.
+
+### First launch
+
+The Windows installer isn't signed yet, and the Mac app isn't notarized
+by Apple, so the first time you open a download (the Windows installer,
+or GitBolt on a Mac), your system asks you to confirm it.
+
+- **macOS**: the app is signed with GitBolt's own certificate, which
+  macOS doesn't know, and isn't notarized by Apple. When you first open
+  it, macOS says it can't verify GitBolt and doesn't open it. Close
+  that message, open **System Settings › Privacy & Security**, scroll
+  down to **Security**, and click **Open Anyway** next to the message
+  about GitBolt. The button shows for about an hour after you tried to
+  open GitBolt. Confirm with **Open Anyway** and your login password.
+  When you open a repository in Documents, Desktop or Downloads, macOS
+  asks whether GitBolt may access that folder. After the update from
+  0.9.12 to 1.0.0 it may ask once more; from 1.0.0 on, updates keep
+  that access.
+- **Windows**: if SmartScreen says "Windows protected your PC", click
+  **More info**, then **Run anyway**. The administrator prompt says the
+  publisher is unknown: click **Yes**. While **Smart App Control** is on
+  (Windows 11), it blocks GitBolt, and it can't make an exception for
+  one app. Until GitBolt's installers are signed, GitBolt runs only
+  while Smart App Control is off or still in evaluation mode
+  (**Windows Security › App & browser control › Smart App Control
+  settings**).
+- **Ubuntu**: nothing more to do.
+
+### Updating
+
+GitBolt checks for a new release once a day, and a bar says when one
+is out. **Help › Check for updates** (on macOS also **GitBolt › Check
+for Updates…**) checks at once. The update window shows what's new;
+**Install and Restart** downloads the new version, checks it against
+the release's checksums, installs it and starts GitBolt again.
+
+- **macOS** replaces GitBolt.app where it is, so it can't update a
+  GitBolt that runs from the disk image, or from a folder you can't
+  change.
+- **Windows** asks for administrator permission. The prompt names
+  Windows PowerShell, which runs the installer.
+- **Ubuntu** first asks apt whether the new .deb can be installed, then
+  asks for your password. Without pkexec, GitBolt shows the `apt`
+  command to run instead.
+
+To stop the daily check, clear **Check for updates automatically** in
+**Tools › Settings › Updates**. Builds from source don't update
+themselves. [PRIVACY.md](PRIVACY.md#update-checks) says what a check
+sends.
+
+### Uninstalling
+
+- **macOS**: quit GitBolt and move it from Applications to the Trash.
+- **Windows**: in **Settings › Apps › Installed apps**, click **⋯** next
+  to GitBolt, then **Uninstall**.
+- **Ubuntu**: `sudo apt remove gitbolt`.
+
+This doesn't touch your repositories. It leaves GitBolt's settings,
+crash report, log and update downloads behind; to remove them too,
+delete these:
+
+- **macOS**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
+  report), `~/Library/Logs/GitBolt` (log), `~/Library/Caches/GitBolt`
+  (update downloads), and the file
+  `~/Library/Preferences/com.gitbolt.app.plist` (macOS's own record of
+  GitBolt's file dialogs).
+- **Windows**: `%APPDATA%\GitBolt` (settings), `%USERPROFILE%\.gitbolt`
+  (crash report) and `%LOCALAPPDATA%\GitBolt` (log and update
+  downloads).
+- **Ubuntu**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
+  report), `~/.local/state/GitBolt` (log) and `~/.cache/GitBolt`
+  (update downloads).
 
 ---
 
@@ -79,9 +183,14 @@ has known security flaws.
 - File-level staging with per-file and stage-all/unstage-all flows
 - Interactive rebase with drag-and-drop reordering and
   continue / skip / abort controls for conflicted rebases
-- Cherry-pick a commit, with a preview of its details; a
-  `git cherry-pick` of several commits started in a terminal can be
-  continued, skipped or aborted from the operation bar
+- Revert a commit (Commands › Revert commit..., or right-click it in
+  the history): the changes that undo it are staged with git's message
+  for you to commit, and for a merge commit you pick the parent to
+  revert against
+- Cherry-pick a commit, from Commands or the history's right-click
+  menu, with a preview of its details; a `git cherry-pick` of several
+  commits started in a terminal can be continued, skipped or aborted
+  from the operation bar
 - Stash save/apply/pop/drop with diff preview
 - Branch management (create, delete, rename, checkout, merge,
   push, set-upstream — from the sidebar context menu or Commands)
@@ -109,8 +218,8 @@ has known security flaws.
   worker threads (no UI freeze even on huge working trees)
 - Built-in terminal (Console tab, Tools → Git bash) opened in the
   repository: your login shell under a PTY on macOS and Linux, cmd.exe
-  under ConPTY on Windows (10 1809 or later). Plain text for now, no
-  colors or full-screen programs
+  under ConPTY on Windows. Plain text for now, no colors or full-screen
+  programs
 - Light, Dark, and System theme modes
 - Customizable code font and tab size
 - Configurable keyboard shortcuts
@@ -127,21 +236,22 @@ has known security flaws.
 - File-status legend tooltip in the Commit dialog headers (hover the
   ⓘ icon to see what M / A / D / R / U / ? mean)
 - Built-in background tools:
-  - Periodic fetch with new-commit notifications
+  - Periodic background fetch (Plugins › Periodic background fetch),
+    at an interval you choose
   - Repository statistics summary
 
 ### Platform Integration
 - macOS Finder "Open in GitBolt" on a folder's right-click menu (in its Services submenu when there are several), a macOS service that comes with GitBolt.app and works once GitBolt has been opened once. If it doesn't show, turn it on in System Settings › Keyboard › Keyboard Shortcuts… › Services › Files and Folders. Folders dropped on GitBolt's Dock icon, and `open -a GitBolt <folder>`, open too
-- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
+- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds (on Windows 11, under Show more options)
 - Linux Nautilus extension and `.desktop` file
 - A folder inside a repository opens that repository; a folder in none says so
-- Cross-platform installers (DMG, NSIS, DEB, AppImage)
+- Cross-platform installers (DMG, NSIS, DEB)
 
 ---
 
 ## Architecture
 
-GitBolt uses a **12-module architecture** following Qt convention with strict single-responsibility:
+GitBolt uses a **13-module architecture** following Qt convention with strict single-responsibility:
 
 ```
 src/
@@ -150,6 +260,7 @@ src/
 ├── watcher/    File system monitoring
 ├── util/       Threading, caching, performance, crash handling
 ├── telemetry/  Usage statistics and crash reports (see PRIVACY.md)
+├── update/     In-app updates (official builds only)
 ├── models/     Qt data models (QAbstractItemModel subclasses)
 ├── services/   Business logic orchestration (GitService, RepoManager)
 ├── editor/     Custom renderers (revision graph delegate, syntax highlighter)
@@ -172,6 +283,7 @@ flowchart TD
     models["<b>models/</b><br/>Qt data models"]
     git["<b>git/</b><br/>libgit2 + CLI fallback"]
     telemetry["<b>telemetry/</b><br/>usage statistics"]
+    update["<b>update/</b><br/>in-app updates"]
 
     subgraph foundation["Foundation · no internal dependencies"]
         direction LR
@@ -188,6 +300,7 @@ flowchart TD
     models --> git --> util
     dialogs --> conf
     ui --> telemetry --> util
+    dialogs --> update --> util
 
     classDef entry fill:#fde68a,stroke:#b45309,color:#1f2937
     classDef presentation fill:#ddd6fe,stroke:#6d28d9,color:#1f2937
@@ -196,7 +309,7 @@ flowchart TD
     classDef base fill:#e5e7eb,stroke:#4b5563,color:#1f2937
     class app entry
     class ui,dialogs,widgets,editor presentation
-    class services,telemetry logic
+    class services,telemetry,update logic
     class models,git core
     class util,conf,watcher base
     style foundation fill:none,stroke:#9ca3af,stroke-dasharray:4 4

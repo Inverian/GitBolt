@@ -8,21 +8,31 @@
 //     list from a pool thread,
 //   - a re-post still pending when the runner dies is dropped,
 //   - the destructor drain survives a job that submits more work while
-//     it is being drained.
+//     it is being drained,
+//   - an exception escaping a worker reaches the sink as its type alone
+//     (never what()), from run() and runWithResult(), and a cleared
+//     sink hears nothing.
 //
 
 #include <QCoreApplication>
+#include <QMutex>
 #include <QRegularExpression>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <QSet>
 #include <QTest>
 #include <QThread>
 #include <QThreadPool>
 
 #include "util/AsyncRunner.h"
+#include "util/WorkerExceptions.h"
 
 #include <atomic>
 #include <memory>
+#include <new>
+#include <stdexcept>
+#include <system_error>
+#include <vector>
 
 using gitbolt::util::AsyncRunner;
 
@@ -143,6 +153,82 @@ private slots:
 
         QCOMPARE(outer.load(), 0);
         QCOMPARE(inner.load(), 0);
+    }
+
+    // The sink gets a fixed token per exception, never its text: a
+    // runtime_error's what() can hold a path. The local log gets both.
+    // runWithResult's callback has no value to take, so it isn't called.
+    void workerExceptionsReachTheSink() {
+        QMutex mutex;
+        QStringList kinds;
+        const auto taken = [&] {
+            const QMutexLocker lock(&mutex);
+            return kinds;
+        };
+        gitbolt::util::setWorkerExceptionSink([&](const char* kind) {
+            const QMutexLocker lock(&mutex);
+            kinds << QString::fromLatin1(kind);
+        });
+        auto clear = qScopeGuard([] { gitbolt::util::setWorkerExceptionSink({}); });
+
+        const auto threw = [](const char* rest) {
+            QTest::ignoreMessage(QtWarningMsg, QRegularExpression(
+                QStringLiteral("^AsyncRunner: a worker threw %1").arg(QLatin1String(rest))));
+        };
+        threw("out_of_range: ");
+        threw("bad_alloc: ");
+        threw("runtime_error: /Users/alice/secret-repo$");
+        threw("non_std$");
+        bool called = false;
+        {
+            AsyncRunner runner;
+            runner.run([] {
+                std::vector<int> none;
+                static_cast<void>(none.at(3));
+            });
+            runner.runWithResult<int>([]() -> int { throw std::bad_alloc(); },
+                                      [&](int) { called = true; });
+            runner.run([] { throw std::runtime_error("/Users/alice/secret-repo"); });
+            runner.runWithResult<int>([]() -> int { throw 42; }, [&](int) { called = true; });
+            QTRY_COMPARE(taken().size(), 4);
+            QTest::qWait(50);   // the watchers' finished(), had they a value
+        }
+        QVERIFY(!called);
+        QStringList got = taken();
+        got.sort();
+        QCOMPARE(got, (QStringList{QStringLiteral("bad_alloc"), QStringLiteral("non_std"),
+                                   QStringLiteral("out_of_range"), QStringLiteral("runtime_error")}));
+        for (const QString& kind : got)
+            QVERIFY(gitbolt::util::workerExceptionKinds().contains(kind));
+
+        clear.dismiss();
+        gitbolt::util::setWorkerExceptionSink({});
+        threw("logic_error: x$");
+        {
+            AsyncRunner runner;
+            runner.run([] { throw std::logic_error("x"); });
+            QTRY_VERIFY(!runner.busy());
+        }
+        QCOMPARE(taken().size(), 4);
+    }
+
+    // Most derived first; a type outside the list is "std_exception".
+    void workerExceptionKinds() {
+        struct Custom : std::exception {};
+        const std::out_of_range outOfRange("x");
+        const std::bad_array_new_length badLength;
+        const std::system_error systemError(std::make_error_code(std::errc::io_error));
+        const Custom custom;
+        QCOMPARE(gitbolt::util::workerExceptionKind(&outOfRange), "out_of_range");
+        QCOMPARE(gitbolt::util::workerExceptionKind(&badLength), "bad_array_new_length");
+        QCOMPARE(gitbolt::util::workerExceptionKind(&systemError), "system_error");
+        QCOMPARE(gitbolt::util::workerExceptionKind(&custom), "std_exception");
+        QCOMPARE(gitbolt::util::workerExceptionKind(nullptr), "non_std");
+        const QStringList all = gitbolt::util::workerExceptionKinds();
+        QCOMPARE(QSet<QString>(all.cbegin(), all.cend()).size(), all.size());
+        static const QRegularExpression token(QStringLiteral("^[a-z_]{1,32}$"));
+        for (const QString& kind : all)
+            QVERIFY2(token.match(kind).hasMatch(), qPrintable(kind));
     }
 
     // A job that is already running is waited for: the owner's members

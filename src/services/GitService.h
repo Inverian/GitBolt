@@ -461,7 +461,14 @@ public:
     /// first one's uncommitted changes. While another operation is in
     /// progress (a merge, a pick not committed yet) it is refused with
     /// an operationFailed alone, as Repository::cherryPick refuses it.
-    void cherryPick(const git::ObjectId& commit);
+    /// `mainline`: Repository::cherryPick()'s (a merge's parent).
+    void cherryPick(const git::ObjectId& commit, unsigned mainline = 0);
+
+    /// Stages the inverse of `commit`'s changes, as cherryPick() stages
+    /// a pick: the user's commit concludes the revert, with git's
+    /// message. `mainline`: Repository::revert()'s. Refused the same
+    /// way while another operation is in progress ("revert").
+    void revertCommit(const git::ObjectId& commit, unsigned mainline = 0);
 
     // Stash
     void stashSave(const QString& message, bool includeUntracked = false,
@@ -597,6 +604,8 @@ signals:
     /// From the service's thread, to the repository the pick was made
     /// in, as rebaseStepFinished is (reportTo).
     void cherryPickComplete(bool success, const QString& message);
+    /// revertCommit()'s outcome, delivered as cherryPickComplete is.
+    void revertComplete(bool success, const QString& message);
     void stashesReady(std::vector<gitbolt::git::StashEntry> stashes);
 
     // Phase 7 signals

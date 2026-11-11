@@ -26,9 +26,10 @@
 //     not on the GUI thread, the bar busy meanwhile;
 //   - a second launch handing another repository over while a picker
 //     or a question is up changes nothing in either repository (Delete
-//     branch, Undo, Checkout, Merge, tags, remote Delete, the sidebar's
-//     Deletes, New Branch, Rename and Set Upstream, the Reflog and
-//     Worktrees windows, Skip, the Commit dialog's Discard), and the
+//     branch, Undo, Checkout, Merge, tags, remote Delete, Cherry pick,
+//     Revert commit, the sidebar's Deletes, New Branch, Rename and Set
+//     Upstream, the Reflog and Worktrees windows, Skip, the Commit
+//     dialog's Discard), and the
 //     modeless windows of the first one close, once a row's context
 //     menu up in them is gone (deleted under it, GitBolt crashed); an
 //     entry of the sidebar's branch menu picked once the hand-off is in
@@ -61,6 +62,10 @@
 //     and Delete from remote deletes it on the server, after "--", and
 //     an existing local one is checked out;
 //   - Format Patch takes a count ("-2") as git does;
+//   - the log's context menu reverts or cherry-picks the row's commit
+//     through the Commands menu's dialog, filled with it, and its
+//     entries are off while the repository's actions are; a revert
+//     started so concludes through the Commit dialog's git commit;
 //   - status that can't be read (a tree nested too deep for libgit2) is
 //     said on the status bar, once rather than at every refresh, and
 //     the Commit button says no count is known, why on hover; Manage
@@ -76,6 +81,7 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
+#include <QDialogButtonBox>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -105,12 +111,14 @@
 #include <QUrl>
 
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
 #include "../TestProcessHelper.h"
 #include "../TestRepoHelper.h"
 #include "git/GitProcess.h"
+#include "dialogs/CherryPickDialog.h"
 #include "dialogs/CommitDialog.h"
 #include "dialogs/ReflogDialog.h"
 #include "dialogs/TagDialog.h"
@@ -120,6 +128,7 @@
 #include "ui/RepositoryView.h"
 #include "widgets/BranchTreeWidget.h"
 #include "widgets/RepoOperationBar.h"
+#include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
 #include "widgets/WorktreeWidget.h"
@@ -238,7 +247,7 @@ private:
 
 // What a hand-off mustn't change: the branches and tags and where they
 // point, their upstreams, HEAD, the work tree and its changes (a linked
-// worktree's too), and the stashes.
+// worktree's too), the stashes, and a pick or revert in progress.
 QString fingerprint(const QString& repo) {
     gitbolt::git::GitProcess git(repo.toStdString());
     QStringList parts;
@@ -257,6 +266,9 @@ QString fingerprint(const QString& repo) {
                                         : QStringLiteral("review work GONE"));
     parts << (QFileInfo::exists(repo + QStringLiteral("/.git/rebase-merge"))
                   ? QStringLiteral("rebase stopped") : QStringLiteral("no rebase"));
+    for (const QString& head : {QStringLiteral("CHERRY_PICK_HEAD"), QStringLiteral("REVERT_HEAD")})
+        parts << head + (QFileInfo::exists(repo + QStringLiteral("/.git/") + head)
+                             ? QStringLiteral(" there") : QStringLiteral(" none"));
     return parts.join(QLatin1Char('\n'));
 }
 
@@ -306,6 +318,34 @@ bool pickFromContextMenu(QAbstractItemView* view, const QModelIndex& index,
     timer.start();
     emit view->customContextMenuRequested(pos);
     return picked;
+}
+
+// Right-clicks `view`'s row `index` and says whether the context menu's
+// entry starting with `entry` is on, picking nothing; nullopt where the
+// row isn't under the click or the menu has no such entry.
+std::optional<bool> contextMenuEntryEnabled(QAbstractItemView* view, const QModelIndex& index,
+                                            const QString& entry) {
+    view->scrollTo(index);
+    const QPoint pos = view->visualRect(index).center();
+    if (view->indexAt(pos) != index)
+        return std::nullopt;
+    std::optional<bool> enabled;
+    QTimer timer;
+    timer.setInterval(20);
+    QObject::connect(&timer, &QTimer::timeout, [&] {
+        auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        if (!menu)
+            return;
+        timer.stop();
+        for (QAction* a : menu->actions()) {
+            if (a->text().startsWith(entry))
+                enabled = a->isEnabled();
+        }
+        menu->close();
+    });
+    timer.start();
+    emit view->customContextMenuRequested(pos);
+    return enabled;
 }
 
 // Takes the file URLs QDesktopServices would hand the desktop.
@@ -381,8 +421,16 @@ private slots:
                                  15000);
         QVERIFY(!combo->isEnabled());
         QVERIFY(!newBranch->isEnabled());
-        for (const char* name : {"act.commit", "act.pull", "act.push", "act.fetch", "act.stash"})
+        for (const char* name : {"act.commit", "act.pull", "act.push", "act.fetch", "act.stash",
+                                 "commands.cherry-pick", "commands.revert-commit"})
             QVERIFY2(!action(window, name)->isEnabled(), name);
+        // The log's context menu says what there is, its entries off.
+        auto* log = window.findChild<QTableView*>(QStringLiteral("log.view"));
+        QVERIFY(log && log->model()->rowCount() > 0);
+        for (const QString& entry : {QStringLiteral("Revert This Commit"),
+                                     QStringLiteral("Cherry-Pick This Commit")})
+            QCOMPARE(contextMenuEntryEnabled(log, log->model()->index(0, 1), entry),
+                     std::optional<bool>(false));
         // The sidebar's checkout, and the service's own guard.
         emit tree->checkoutRequested(QStringLiteral("other"), tree->repositoryKey());
         QCOMPARE(window.statusBar()->currentMessage(),
@@ -406,6 +454,10 @@ private slots:
         QTRY_VERIFY(combo->isEnabled());
         QVERIFY(newBranch->isEnabled());
         QVERIFY(action(window, "act.commit")->isEnabled());
+        QVERIFY(action(window, "commands.revert-commit")->isEnabled());
+        QCOMPARE(contextMenuEntryEnabled(log, log->model()->index(0, 1),
+                                         QStringLiteral("Revert This Commit")),
+                 std::optional<bool>(true));
     }
 
     // The sidebar's "Checkout as local branch": git creates the branch,
@@ -1170,6 +1222,8 @@ private slots:
         QTest::newRow("Create tag") << QStringLiteral("commands.create-tag");
         QTest::newRow("Delete tag") << QStringLiteral("commands.delete-tag");
         QTest::newRow("Delete remote branch") << QStringLiteral("commands.delete-remote-branch");
+        QTest::newRow("Cherry pick") << QStringLiteral("commands.cherry-pick");
+        QTest::newRow("Revert commit") << QStringLiteral("commands.revert-commit");
         QTest::newRow("sidebar Delete") << QStringLiteral("sidebar.delete");
         QTest::newRow("sidebar Delete from remote") << QStringLiteral("sidebar.delete-remote");
         QTest::newRow("sidebar New Branch") << QStringLiteral("branchTree.newBranch");
@@ -1196,8 +1250,21 @@ private slots:
         QVERIFY(git(a, {"init", "-q"}));
         QVERIFY(git(a, {"commit", "-q", "--allow-empty", "-m", "base"}));
         QVERIFY(git(a, {"commit", "-q", "--allow-empty", "-m", "second"}));
+        // A pick of feature's commit, or a revert of HEAD, that went
+        // ahead would stage a file: both change one.
+        const bool picks = flow == QLatin1String("commands.cherry-pick")
+            || flow == QLatin1String("commands.revert-commit");
+        if (picks) {
+            QVERIFY(writeFile(a + QStringLiteral("/kept.txt"), "kept\n"));
+            QVERIFY(git(a, {"add", "kept.txt"}));
+            QVERIFY(git(a, {"commit", "-q", "-m", "kept"}));
+        }
         QVERIFY(git(a, {"branch", "release"}));
         QVERIFY(git(a, {"checkout", "-q", "-b", "feature"}));
+        if (picks) {
+            QVERIFY(writeFile(a + QStringLiteral("/unmerged.txt"), "unmerged\n"));
+            QVERIFY(git(a, {"add", "unmerged.txt"}));
+        }
         QVERIFY(git(a, {"commit", "-q", "--allow-empty", "-m", "unmerged"}));
         QVERIFY(git(a, {"checkout", "-q", "main"}));
         QVERIFY(git(a, {"tag", "v1"}));
@@ -1256,6 +1323,12 @@ private slots:
             } else if (qobject_cast<gitbolt::dialogs::TagDialog*>(dialog)) {
                 if (auto* name = dialog->findChild<QLineEdit*>(QStringLiteral("tag.name")))
                     name->setText(QStringLiteral("v2"));
+            } else if (auto* pick = qobject_cast<gitbolt::dialogs::CherryPickDialog*>(dialog)) {
+                // A commit both have, whose pick (feature's) or revert
+                // (HEAD's) would stage a file in either.
+                using Mode = gitbolt::dialogs::CherryPickDialog::Mode;
+                pick->setCommitHash(pick->mode() == Mode::Revert ? QStringLiteral("HEAD")
+                                                                 : QStringLiteral("feature"));
             }
         });
         auto* tree = window.findChild<gitbolt::widgets::BranchTreeWidget*>();
@@ -1310,6 +1383,10 @@ private slots:
             discard->click();
         } else {
             action(window, flow.toLatin1().constData())->trigger();
+            // The pick's and the revert's dialog is open()ed, not exec()ed.
+            if (flow == QLatin1String("commands.cherry-pick")
+                || flow == QLatin1String("commands.revert-commit"))
+                QTRY_VERIFY_WITH_TIMEOUT(handOff.handedOff && !handOff.asked.isEmpty(), 15000);
         }
         QVERIFY2(handOff.handedOff, qPrintable(handOff.asked.join(QStringLiteral(" | "))));
         QVERIFY(!handOff.asked.isEmpty());
@@ -1613,6 +1690,140 @@ private slots:
         QCOMPARE(localBranches(), (QStringList{QStringLiteral("refs/heads/-y"),
                                                QStringLiteral("refs/heads/fixed"),
                                                QStringLiteral("refs/heads/main")}));
+    }
+
+    // The log's context menu: Revert This Commit… opens Commands › Revert
+    // commit's dialog filled with the row's commit (not the one
+    // selected), and Revert stages its inverse; the bar then says a
+    // revert is in progress, the dialogs don't open while it is, and the
+    // Commit dialog's git commit concludes it with git's message.
+    // Cherry-Pick This Commit… fills its dialog the same way.
+    void logContextMenuRevertsTheRowsCommit() {
+        using gitbolt::dialogs::CherryPickDialog;
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "one\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile(QStringLiteral("a.txt"), "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two"})));
+        const QString two = output(git.run({"rev-parse", "HEAD"}));
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        auto* log = window.findChild<QTableView*>(QStringLiteral("log.view"));
+        QVERIFY(log);
+        QTRY_COMPARE_WITH_TIMEOUT(log->model()->rowCount(), 3, 10000);
+        // Newest first: "two" is the second row; the first is selected.
+        const QModelIndex row = log->model()->index(1, 1);
+        log->setCurrentIndex(log->model()->index(0, 1));
+
+        QVERIFY(pickFromContextMenu(log, row, QStringLiteral("Cherry-Pick This Commit")));
+        QPointer<CherryPickDialog> dialog = window.findChild<CherryPickDialog*>();
+        QVERIFY(dialog && dialog->isVisible());
+        QCOMPARE(dialog->mode(), CherryPickDialog::Mode::CherryPick);
+        QCOMPARE(dialog->commitHash(), two);
+        dialog->reject();
+        QTRY_VERIFY(dialog.isNull());
+
+        QVERIFY(pickFromContextMenu(log, row, QStringLiteral("Revert This Commit")));
+        dialog = window.findChild<CherryPickDialog*>();
+        QVERIFY(dialog && dialog->isVisible());
+        QCOMPARE(dialog->mode(), CherryPickDialog::Mode::Revert);
+        QCOMPARE(dialog->commitHash(), two);
+        auto* buttons = dialog->findChild<QDialogButtonBox*>();
+        QVERIFY(buttons);
+        QPushButton* revert = buttons->button(QDialogButtonBox::Ok);
+        QVERIFY(revert->isEnabled());   // the preview resolved it
+        QCOMPARE(revert->text(), QStringLiteral("Revert"));
+        revert->click();
+        QTRY_COMPARE_WITH_TIMEOUT(svc->withRepository([](gitbolt::git::Repository& r) {
+                                      return r.state();
+                                  }), gitbolt::git::RepoState::Revert, 10000);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("M  a.txt"));
+        QTRY_COMPARE(window.statusBar()->currentMessage(),
+                     QStringLiteral("Revert of %1 staged. Commit to finish it.").arg(two.left(7)));
+        auto* bar = window.findChild<gitbolt::widgets::RepoOperationBar*>();
+        QVERIFY(bar);
+        QTRY_VERIFY_WITH_TIMEOUT(bar->isVisible() && bar->state() == gitbolt::git::RepoState::Revert,
+                                 10000);
+
+        // While it waits, neither dialog opens, which would be refused
+        // only once filled in: a box says why.
+        QTRY_VERIFY(!window.findChild<CherryPickDialog*>());
+        for (const bool fromTheLog : {false, true}) {
+            BoxAnswerer box(QMessageBox::Ok);
+            // The log was read again: its oldest row, base.
+            if (fromTheLog)
+                QVERIFY(pickFromContextMenu(log, log->model()->index(log->model()->rowCount() - 1, 1),
+                                            QStringLiteral("Cherry-Pick This Commit")));
+            else
+                action(window, "commands.revert-commit")->trigger();
+            QCOMPARE(box.text, QStringLiteral("A revert is in progress. Finish or abort it first."));
+            QVERIFY(!window.findChild<CherryPickDialog*>());
+        }
+
+        action(window, "act.commit")->trigger();
+        auto* commit = window.findChild<gitbolt::dialogs::CommitDialog*>();
+        QVERIFY(commit);
+        auto* message = commit->findChild<QPlainTextEdit*>(QStringLiteral("commit.message"));
+        auto* commitButton = commit->findChild<QPushButton*>(QStringLiteral("commit.commitBtn"));
+        QVERIFY(message && commitButton);
+        QTRY_VERIFY_WITH_TIMEOUT(message->toPlainText().startsWith(QStringLiteral("Revert \"two\"")),
+                                 10000);
+        QTRY_VERIFY(commitButton->isEnabled());
+        commitButton->click();
+        QTRY_COMPARE_WITH_TIMEOUT(output(git.run({"log", "-1", "--format=%s"})),
+                                  QStringLiteral("Revert \"two\""), 15000);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%b"})),
+                 QStringLiteral("This reverts commit %1.").arg(two));
+        QTRY_COMPARE(svc->withRepository([](gitbolt::git::Repository& r) { return r.state(); }),
+                     gitbolt::git::RepoState::None);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QString());
+        QTRY_VERIFY(!bar->isVisible());
+    }
+
+    // Revert acts on the commit the preview showed. It resolved the
+    // field's text again: a branch moved meanwhile (a terminal's commit,
+    // a fetch) was reverted at its new tip, a commit the user never saw,
+    // with a merge's parent chosen for another commit.
+    void revertActsOnThePreviewedCommit() {
+        using gitbolt::dialogs::CherryPickDialog;
+        gitbolt::test::TestRepo repo;
+        QVERIFY(repo.writeAndCommit(QStringLiteral("a.txt"), "one\n", QStringLiteral("base")).ok());
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
+        repo.writeFile(QStringLiteral("a.txt"), "two\n");
+        QVERIFY(succeeded(git.run({"commit", "-q", "-am", "two"})));
+        const QString two = output(git.run({"rev-parse", "HEAD"}));
+        QVERIFY(succeeded(git.run({"branch", "target"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        action(window, "commands.revert-commit")->trigger();
+        auto* dialog = window.findChild<CherryPickDialog*>();
+        QVERIFY(dialog);
+        auto* field = dialog->findChild<QLineEdit*>(QStringLiteral("revert.commit"));
+        auto* buttons = dialog->findChild<QDialogButtonBox*>();
+        QVERIFY(field && buttons);
+        field->setText(QStringLiteral("target"));
+        QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+        QCOMPARE(dialog->previewedCommit()->toHex(), two.toStdString());
+
+        repo.writeFile(QStringLiteral("b.txt"), "b\n");
+        QVERIFY(succeeded(git.run({"add", "b.txt"})));
+        QVERIFY(succeeded(git.run({"commit", "-q", "-m", "add b"})));
+        QVERIFY(succeeded(git.run({"branch", "-f", "target", "HEAD"})));
+        buttons->button(QDialogButtonBox::Ok)->click();
+        QTRY_COMPARE_WITH_TIMEOUT(svc->withRepository([](gitbolt::git::Repository& r) {
+                                      return r.state();
+                                  }), gitbolt::git::RepoState::Revert, 10000);
+        QCOMPARE(output(git.run({"rev-parse", "REVERT_HEAD"})), two);
+        QCOMPARE(output(git.run({"status", "--porcelain"})), QStringLiteral("M  a.txt"));
     }
 
     // Commands > Format patch… with a count, "-2" (the last two commits),

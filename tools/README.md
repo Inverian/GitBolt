@@ -14,6 +14,7 @@ Everything here is optional — the main build and run instructions in [`docs/BU
 | [`click.py`](#clickpy) | macOS | Synthetic mouse click via Quartz CGEvents (bypasses overlay apps) |
 | [`check-ci-pins.py`](#check-ci-pinspy) | any | Find newer releases of what the builds pin, and advisories against them or the git GitBolt runs |
 | [`update-qt-notices.py`](#update-qt-noticespy) | any | Write the licences of the code of others in the Qt that GitBolt ships, for its packages' notices |
+| [`symbolize.py`](#symbolizepy) | any | Read a crash report's GitBolt frames with a release's symbol files |
 
 ---
 
@@ -130,7 +131,7 @@ tools/click.py 1269 668
 
 ## `check-ci-pins.py`
 
-What GitBolt's builds pin stays put until someone moves it: CI downloads its packaging tools (linuxdeploy, its Qt plugin, the AppImage runtime) from tagged GitHub releases and checks each against the sha256 it had when it was pinned, keeps actions on major tags, and pins Qt, NSIS and what installs Qt (`.github/qt-requirements.*`); the build pins libgit2. That keeps a re-uploaded asset out of our installers, but nothing bumps the pins, and nothing says when one of them, or the git GitBolt runs, has a security advisory. This script does both:
+What GitBolt's builds pin stays put until someone moves it: CI keeps actions on major tags, and pins Qt, NSIS and what installs Qt (`.github/qt-requirements.*`); the build pins libgit2. A tool CI downloads from a tagged GitHub release (`fetch <url> <sha256>` in a workflow) is checked against the sha256 it had when it was pinned; CI downloads none today, since the AppImage's tools went with the AppImage. That keeps a re-uploaded asset out of our installers, but nothing bumps the pins, and nothing says when one of them, or the git GitBolt runs, has a security advisory. This script does both:
 
 - **Pins:** the newest tagged release of each tool (never a `continuous` build, which is rebuilt in place, and the highest version where a project also releases fixes for an older major), with the new hash; a new major of each action; a newer patch release of libgit2's series, Qt's series (and whether its open-source support has ended) and NSIS; a release of aqtinstall that has the commit CI pins. A release on GitHub counts once it has been out 14 days, the wait `.github/qt-requirements.in` sets for the lock, so a bad upload can be noticed and pulled first; Qt's and NSIS's count at once, as nothing else here would show their security fixes. An action pinned other than by major tag (`@vN`) is reported, since it can't be followed. CI's Python is a minor version (`3.14`) that setup-python keeps on its newest patch release, so it isn't followed.
 - **Advisories**, reported as soon as they're published: libgit2's, git's, Git for Windows', Git LFS's, py7zr's and aqtinstall's since the date in a `check-ci-pins: <owner>/<repo> advisories reviewed <YYYY-MM-DD>` comment (in `cmake/Libgit2.cmake`, `src/git/GitVersion.cpp` and `.github/qt-requirements.in`; move it on once you've read what came after it, and the libgit2 and git ones must be there); and what GitHub's reviewed advisory database lists against every locked Python package (not their newest releases: the lock is refreshed on purpose).
@@ -145,7 +146,7 @@ tools/check-ci-pins.py --write    # also rewrite the fetch and uses: pins in .gi
 tools/check-ci-pins.py --offline  # only list the pins it finds
 ```
 
-A bumped linuxdeploy can change the AppImage, so run the workflow on the branch (Actions → CI → Run workflow builds every installer) before merging. libgit2, Qt, NSIS and the Python lock are bumped by hand (the report says where; `.github/qt-requirements.in` says how to refresh the lock). The ubuntu and debian image digests the DEB is tested in are not followed; the script prints a reminder.
+A bumped tool or action can change the installers, so run the workflow on the branch (Actions → CI → Run workflow builds every installer) before merging. libgit2, Qt, NSIS and the Python lock are bumped by hand (the report says where; `.github/qt-requirements.in` says how to refresh the lock). The ubuntu and debian image digests the DEB is tested in are not followed; the script prints a reminder.
 
 ### Requirements
 
@@ -182,3 +183,29 @@ python3 tools/update-qt-notices.py 6.11.3 --check    # exit 1 if the committed f
 It exits 1 when Qt's metadata needs a look: a component it lists is gone, or a new one turned up in a folder that goes into a shipped library. Add the new one to `SHIPPED` (with what it is used in) or `NOT_SHIPPED` (with why), then run it again. Standard library only; set `GITHUB_TOKEN` if the GitHub API's rate limit gets in the way.
 
 The other texts in `resources/licenses/` are fetched by hand at a pinned version; `resources/licenses/SOURCES.md` says from where.
+
+---
+
+## `symbolize.py`
+
+Reads the GitBolt frames of a crash report with the symbol files of the release that crashed. A crash summary's call stack has GitBolt's frames as positions only (see [PRIVACY.md](../PRIVACY.md#crash-reports)), and a `crash.log` names few of them, if any; this turns them into functions, files and lines. From 1.0.0 on, each release publishes `GitBolt-<version>-<platform>-symbols.zip` beside its installers: the macOS dSYM, the Windows `GitBolt.exe` with its `GitBolt.pdb`, or Linux's `gitbolt.debug`. Reports carry a `Build ID:` line (the crash summary's `build_id` tag), which must match the symbol files.
+
+### Usage
+
+```bash
+python3 tools/symbolize.py crash.log                    # prints the gh command that downloads the right zip
+python3 tools/symbolize.py crash.log GitBolt-1.0.0-Darwin-arm64-symbols.zip
+python3 tools/symbolize.py event.json symbols/          # a GlitchTip event's JSON; a folder of the zip's files
+python3 tools/symbolize.py --id build/src/app/GitBolt.app/Contents/MacOS/GitBolt   # a binary's build ID
+python3 tools/symbolize.py --check SYMBOLS SHIPPED      # CI: the symbol files belong to the shipped binary
+```
+
+The report is a `crash.log` (as the Crash Detected box or an issue shows it) or a GlitchTip event's JSON, as sent or from GlitchTip's API. The symbols are the release's zip, a folder of its files, a `.dSYM` or a binary. A build ID that doesn't match exits 1; `--force` symbolizes anyway. A report without a build ID (0.9.x, whose releases have no symbol files) gets a warning if you pass it symbols anyway, and the tool trusts its version, OS and architecture. `--tool auto|llvm-symbolizer|atos|addr2line` picks the lookup tool; `auto` takes llvm-symbolizer when it finds one, else atos for macOS and addr2line for Linux.
+
+Only GitBolt's own frames are looked up. Qt's and the system's frames keep what the report says: a function name at most on macOS and Linux, a position only on Windows. Reading a Qt frame needs Qt's own debug info for the Qt version the release was built with (Qt's installer offers it as debug information files), which GitBolt's symbol files don't include; a system frame needs the system's symbols.
+
+### Requirements
+
+- Python 3.9 or newer, standard library only.
+- macOS reports: `atos` (Xcode Command Line Tools). Windows reports: `llvm-symbolizer` (`brew install llvm`, or the LLVM installer on Windows). Linux reports: `addr2line` (binutils) or llvm-symbolizer.
+- `gh` (GitHub CLI) to download a release's symbol files.

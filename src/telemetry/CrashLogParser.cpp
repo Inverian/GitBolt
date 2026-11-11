@@ -199,7 +199,7 @@ std::optional<RawFrame> parseFrameLine(QStringView line) {
 
 bool isWindowsDispatchModule(const QString& module) {
     static const QRegularExpression dispatch(
-        QStringLiteral("^(ntdll|KERNELBASE|kernel32|ucrtbase|vcruntime140[_a-z0-9]*)\\.dll$"),
+        QStringLiteral("^(ntdll|KERNELBASE|kernel32|ucrtbased?|vcruntime140[_a-z0-9]*)\\.dll$"),
         QRegularExpression::CaseInsensitiveOption);
     return dispatch.match(fileName(module)).hasMatch();
 }
@@ -227,14 +227,14 @@ bool isWindowsRaisePoint(const RawFrame& f) {
 // Drops the frames the handler itself added, by position: names can
 // be wrong, positions can't. POSIX: #0 is the handler (backtrace()
 // runs in it) and #1 the kernel's trampoline (_sigtramp, __restore_rt).
-// Windows: #0 is signalHandler (CaptureStackBackTrace skips the
-// writer), then everything up to where the exception was raised: for
-// a fault, the CRT and loader frames that dispatched it up to
-// KiUserExceptionDispatcher; for an unhandled C++ exception, abort()
-// from terminate(), the CRT's unhandled-exception filter (inside
-// GitBolt.exe, so it would pass for the crash point), the dispatch and
-// the throw's own frames. For raise()/abort(), the CRT frames on top
-// of the caller.
+// Windows without "Stack: exception" (abort, an invalid parameter, and
+// every 0.9.x report): #0 is the handler, then everything up to where
+// the exception was raised: for a fault, the CRT and loader frames
+// that dispatched it up to KiUserExceptionDispatcher; for an unhandled
+// C++ exception, abort() from terminate(), the CRT's unhandled-
+// exception filter (inside GitBolt.exe, so it would pass for the crash
+// point), the dispatch and the throw's own frames. For raise()/abort(),
+// the CRT frames on top of the caller.
 QList<RawFrame> dropHandlerFrames(QList<RawFrame> frames, bool windows) {
     if (!windows) {
         frames.removeIf([](const RawFrame& f) { return f.index < 2; });
@@ -289,6 +289,8 @@ std::optional<CrashEvent> CrashLogParser::parse(QStringView log) {
     static const QRegularExpression osLine(
         QStringLiteral("^([a-z0-9_.-]{1,32}) ([0-9A-Za-z._-]{1,32})$"));
     static const QRegularExpression arch(QStringLiteral("^[a-z0-9_]{1,16}$"));
+    static const QRegularExpression buildId(QStringLiteral("^[0-9a-f]{16,64}$"));
+    static const QRegularExpression exceptionCode(QStringLiteral("^0x[0-9a-f]{8}$"));
 
     const QList<QStringView> lines = log.split(QLatin1Char('\n'));
     if (lines.isEmpty() || lines.first().trimmed() != QLatin1String("=== GitBolt Crash Report ==="))
@@ -346,17 +348,35 @@ std::optional<CrashEvent> CrashLogParser::parse(QStringView log) {
                               : os.captured(2);
     if (const QString a = header.value(QStringLiteral("CPU Arch")); arch.match(a).hasMatch())
         event.arch = a;
+    // Optional, and never a reason to refuse: 0.9.x reports have neither.
+    if (const QString id = header.value(QStringLiteral("Build ID")).toLower();
+        buildId.match(id).hasMatch())
+        event.buildId = id;
+    if (const QString code = header.value(QStringLiteral("Exception"));
+        exceptionCode.match(code).hasMatch())
+        event.exceptionCode = code;
 
-    // Frames, newest first as written, up to the end marker.
+    // Frames, newest first as written, up to the module list (Windows,
+    // local only) or the end marker.
     QList<RawFrame> raw;
     for (++i; i < lines.size(); ++i) {
         const QStringView line = lines.at(i).trimmed();
-        if (line == QLatin1String("=== End of Report ==="))
+        if (line == QLatin1String("=== End of Report ===") || line == QLatin1String("--- Modules ---"))
             break;
         if (auto frame = parseFrameLine(line))
             raw.append(*frame);
     }
-    raw = dropHandlerFrames(std::move(raw), event.os == QLatin1String("Windows"));
+    if (header.value(QStringLiteral("Stack")) == QLatin1String("exception")) {
+        // From the exception's context: #0 is where it happened. A C++
+        // throw happens in KERNELBASE's RaiseException, under the CRT's
+        // throw; the crash is the thrower's. A fault keeps every frame.
+        if (event.exceptionCode == QLatin1String("0xe06d7363")) {
+            while (!raw.isEmpty() && isWindowsDispatchModule(raw.first().module))
+                raw.removeFirst();
+        }
+    } else {
+        raw = dropHandlerFrames(std::move(raw), event.os == QLatin1String("Windows"));
+    }
 
     // Fingerprint from the crash point down: the first three GitBolt
     // frames' offsets.

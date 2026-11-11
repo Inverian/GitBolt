@@ -29,8 +29,7 @@ There are many ways to contribute to GitBolt:
 - **Improve documentation** — Fix typos, clarify confusing sections, add examples
 - **Write code** — Fix bugs or implement new features
 - **Review pull requests** — Help us review and test contributions from others
-- **Test pre-releases** — Try beta builds and report issues
-- **Create plugins** — Extend GitBolt's functionality via the plugin system
+- **Test new versions** — Try the latest release, or an installer CI built from `main` (the Actions tab, signed in to GitHub), and report issues
 - **Translate** — Help localize GitBolt into your language (when translation infrastructure is in place)
 
 ---
@@ -55,6 +54,7 @@ When reporting a bug, include:
 - **Expected behavior** vs **actual behavior**
 - **Screenshots or screen recordings** if relevant
 - **Stack trace or crash log** from `~/.gitbolt/crash.log` if the app crashed
+- **The log file**, or the part of it around the problem: `~/Library/Logs/GitBolt/GitBolt.log` (macOS), `%LOCALAPPDATA%\GitBolt\logs\GitBolt.log` (Windows) or `~/.local/state/GitBolt/GitBolt.log` (Linux). It can contain file and folder paths, so look through it first
 - **Repository details** that may be relevant (size, structure, special configurations)
 
 ---
@@ -64,8 +64,7 @@ When reporting a bug, include:
 Feature suggestions are welcome! Before opening a feature request, please:
 
 1. **Search existing issues** to see if the feature has been suggested before
-2. **Check the project roadmap** to see if it's already planned
-3. **Consider whether the feature fits the project's scope** — GitBolt aims to be a power-user Git GUI, comparable to GitExtensions
+2. **Consider whether the feature fits the project's scope** — GitBolt aims to be a power-user Git GUI, comparable to GitExtensions
 
 When suggesting a feature, include:
 
@@ -84,7 +83,7 @@ We welcome pull requests! To make the review process smooth:
 ### Before You Start
 
 1. **Open an issue first** for any non-trivial change. This lets us discuss the approach before you invest significant time in implementation.
-2. **Check the project structure** in the [README](README.md) to understand the 12-module architecture.
+2. **Check the project structure** in the [README](README.md) to understand the 13-module architecture.
 3. **Read the code style guidelines** below.
 
 ### Development Workflow
@@ -206,21 +205,29 @@ feature:
 
 - **Every `QAction` must be addressable.** Call `setObjectName()` on
   any new menu / toolbar / context-menu action, using the dotted
-  `area.action` convention (`"commands.resolveConflicts"`,
-  `"worktree.lockUnlock"`). Explicit names are required because they
-  stay stable when the display text changes. `MainWindow` runs an
-  `assignActionObjectNames()` safety net that auto-derives a name from
-  the menu path for anything left unnamed — **treat that as a backstop,
-  not a substitute**; a derived name breaks the moment someone reworks
-  the menu wording.
+  `area.action` convention, lower case with hyphens
+  (`"commands.resolve-conflicts"`, `"log.revert-commit"`). Explicit
+  names are required because they stay stable when the display text
+  changes. The dotted name is also what usage statistics count: a
+  right-click menu entry without one is never counted, and one with
+  one is counted by that name ([PRIVACY.md](PRIVACY.md)), so never put
+  a branch name, path or other user text in it. `MainWindow` runs an
+  `assignActionObjectNames()` safety net that derives a name from the
+  menu path for a menu-bar or main-toolbar action left unnamed (a
+  right-click menu gets none) — **treat that as a backstop, not a
+  substitute**; a derived name breaks the moment someone reworks the
+  menu wording.
 - **Give the dialog / view / editor a name too** when a feature adds
   one the bridge needs to drive (`select-row` a table, `type` into an
   editor). `setObjectName()` on the widget; otherwise the bridge can
   only address it by `ClassName[:index]`, which is positional and
   fragile.
 - **Verify it:** run the app with `GITBOLT_TEST_BRIDGE=1`, then
-  `tools/bridge.py list-actions` — your new action must appear with an
-  `objectName`, and `tools/bridge.py trigger <name>` must fire it.
+  `tools/bridge.py list-actions` — your new menu-bar or toolbar action
+  must appear with an `objectName`, and `tools/bridge.py trigger <name>`
+  must fire it. The bridge doesn't reach right-click menus: a test that
+  opens the menu does (`clickInRowMenu` in
+  `tests/ui/TestTelemetrySwitch.cpp`).
 
 ---
 

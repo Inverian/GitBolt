@@ -4,7 +4,9 @@
 // scratch folders, under /bin/sh and dash; Windows' PowerShell parts are
 // checked as text everywhere, and Write-Log runs for real on Windows. A
 // real NSIS update runs only when GITBOLT_TEST_NSIS_INSTALLER and
-// GITBOLT_TEST_NSIS_DIR are set, as CI's NSIS smoke test does.
+// GITBOLT_TEST_NSIS_DIR are set, as CI's NSIS smoke test does. Every
+// install result a helper can write has a fixed code
+// (installResultFailure), never "other".
 //
 
 #include <QDeadlineTimer>
@@ -245,7 +247,6 @@ private:
         env.insert(QStringLiteral("GITBOLT_TEST_MARKER"), marker());
         env.insert(QStringLiteral("GITBOLT_TEST_RESULT"), result());
         env.insert(QStringLiteral("GITBOLT_INSTANCE_NAME"), kInstance);
-        env.remove(QStringLiteral("APPIMAGE_EXTRACT_AND_RUN"));
         helper_->setProcessEnvironment(env);
         helper_->setWorkingDirectory(path(QStringLiteral("updates")));
         helper_->start(shell, {file});
@@ -307,23 +308,6 @@ private:
     QStringList entries(const QString& relative) const {
         return QDir(path(relative)).entryList(QDir::AllEntries | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
                                               QDir::Name);
-    }
-
-    // AppImage: the old one and the new one, side by side.
-    HelperInputs appImageInputs(qint64 pid) const {
-        HelperInputs in;
-        in.pid = pid;
-        in.waitSeconds = 30;
-        in.logFile = log();
-        reportTo(in);
-        in.target = path(QStringLiteral("My Apps/GitBolt-0.1.0-x86_64.AppImage"));
-        in.staged = path(QStringLiteral("My Apps/GitBolt-0.1.1-x86_64.AppImage"));
-        return in;
-    }
-
-    bool layOutAppImage(const HelperInputs& in) {
-        return writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true)
-               && writeFile(in.staged, fakeAppScript(QStringLiteral("0.1.1")), true);
     }
 
     // Deb: the .deb (in a folder named with a ' and a $), and stand-ins
@@ -574,7 +558,7 @@ private slots:
         QFETCH(QString, shell);
         const HelperInputs in = nastyInputs();
         const QList<QPair<const char*, QString>> scripts = {
-            {"macOS", macHelperScript(in)}, {"AppImage", appImageHelperScript(in)}, {"deb", debHelperScript(in)}};
+            {"macOS", macHelperScript(in)}, {"deb", debHelperScript(in)}};
         for (const auto& [name, script] : scripts) {
             const QString file = path(QStringLiteral("syntax-%1.sh").arg(QLatin1String(name)));
             QVERIFY(writeFile(file, script.toUtf8()));
@@ -593,7 +577,7 @@ private slots:
             R"((\[\[|\]\]|\s==\s|^\s*function\s|\blocal\s|\$'|<<<|&>|\bsource\s|\becho\s+-[en]|\bdeclare\s|\btypeset\s|)"
             R"(\$RANDOM|\$\{[A-Za-z_]+(:[0-9]|/|\^|,)|\bpushd\b|\bpopd\b|\bselect\s))"),
             QRegularExpression::MultilineOption);
-        for (const QString& script : {macHelperScript(in), appImageHelperScript(in), debHelperScript(in)}) {
+        for (const QString& script : {macHelperScript(in), debHelperScript(in)}) {
             QVERIFY(script.startsWith(QLatin1String("#!/bin/sh\n")));
             const QRegularExpressionMatch match = bashism.match(script);
             QVERIFY2(!match.hasMatch(), qPrintable(match.captured(0)));
@@ -810,125 +794,6 @@ private slots:
         QVERIFY(script.contains(QLatin1String("\ntrash='/Users/o'\\''brien/.Trash'\n")));
     }
 
-    // ---------------------------------------------------------------
-    // AppImage
-    // ---------------------------------------------------------------
-
-    void appImageReplacesTheFileAndStartsIt_data() { addShellRows(); }
-
-    void appImageReplacesTheFileAndStartsIt() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        const HelperInputs in = appImageInputs(startWaited());
-        QVERIFY(layOutAppImage(in));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.1'")));
-        QVERIFY(QFileInfo(in.target).isExecutable());
-        QVERIFY(!QFileInfo::exists(in.staged));
-        const QString started = readFile(marker());
-        QVERIFY2(started.startsWith(QLatin1String("0.1.1 ")), qPrintable(started));
-        QVERIFY2(started.contains(QStringLiteral("instance=") + kInstance), qPrintable(started));
-        QCOMPARE(readFile(result()), QStringLiteral("ok 0.1.1 \n"));
-        QCOMPARE(resultAtRelaunch(), QStringLiteral("ok 0.1.1 \n"));
-#endif
-    }
-
-    void appImageKeepsTheOldOneWhenItCantReplaceIt_data() { addShellRows(); }
-
-    // Something other than a file where the new one should be: the old
-    // AppImage stays and starts.
-    void appImageKeepsTheOldOneWhenItCantReplaceIt() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        const HelperInputs in = appImageInputs(startWaited());
-        QVERIFY(writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        QVERIFY(QDir().mkpath(in.staged));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        QVERIFY(readFile(marker()).startsWith(QLatin1String("0.1.0 ")));
-        QVERIFY2(readFile(log()).contains(QLatin1String("keeping the old one")), qPrintable(diagnostics()));
-        QCOMPARE(resultAtRelaunch(),
-                 QStringLiteral("failed 0.1.1 the new AppImage couldn't be moved over the old one\n"));
-#endif
-    }
-
-    void appImageGivesUpAfterTheTimeout() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        HelperInputs in = appImageInputs(startWaited());
-        in.waitSeconds = 1;
-        QVERIFY(layOutAppImage(in));
-        QVERIFY(startHelper(QStringLiteral("/bin/sh"), appImageHelperScript(in)));
-        QVERIFY2(helperFinished(10000), qPrintable(diagnostics()));
-        QCOMPARE(helper_->exitCode(), 1);
-        QVERIFY(readFile(in.target).contains(QLatin1String("'0.1.0'")));
-        QVERIFY(!QFileInfo::exists(in.staged));
-        QVERIFY(!QFileInfo::exists(marker()));
-        QVERIFY2(readFile(log()).contains(QLatin1String("giving up")), qPrintable(diagnostics()));
-        QCOMPARE(readFile(result()), QStringLiteral("gave-up 0.1.1 GitBolt didn't quit within 1 seconds\n"));
-#endif
-    }
-
-    // Started with --appimage-extract-and-run (no FUSE), which the
-    // runtime consumes without setting APPIMAGE_EXTRACT_AND_RUN: the new
-    // copy is started with it, or it would try FUSE and never come up.
-    void appImageRestartsExtractedWhenThisOneWas_data() { addShellRows(); }
-
-    void appImageRestartsExtractedWhenThisOneWas() {
-#if !defined(Q_OS_UNIX)
-        QSKIP("POSIX sh only");
-#else
-        QFETCH(QString, shell);
-        HelperInputs in = appImageInputs(startWaited());
-        in.extractAndRun = true;
-        QVERIFY(writeFile(in.target, fakeAppScript(QStringLiteral("0.1.0")), true));
-        const QByteArray reportsIt = "#!/bin/sh\n"
-                                     "printf 'extract=%s\\n' \"${APPIMAGE_EXTRACT_AND_RUN-unset}\" >>\"$GITBOLT_TEST_MARKER\"\n";
-        QVERIFY(writeFile(in.staged, reportsIt, true));
-        QVERIFY(startHelper(shell, appImageHelperScript(in)));
-        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
-        quitWaited();
-        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
-        QCOMPARE(readFile(marker()), QStringLiteral("extract=1\n"));
-
-        // Not asked for, not set (startHelper's environment has none).
-        in.extractAndRun = false;
-        QVERIFY(!appImageHelperScript(in).contains(QLatin1String("APPIMAGE_EXTRACT_AND_RUN")));
-        in.extractAndRun = true;
-        const QString script = appImageHelperScript(in);
-        QVERIFY(script.contains(QLatin1String("\nAPPIMAGE_EXTRACT_AND_RUN=1\nexport APPIMAGE_EXTRACT_AND_RUN\n")));
-        QVERIFY(script.indexOf(QLatin1String("export APPIMAGE_EXTRACT_AND_RUN"))
-                < script.indexOf(QLatin1String("exec \"$target\"")));
-#endif
-    }
-
-    // Extracted: asked to (the variable, set to anything), or $APPDIR is
-    // a plain folder (the runtime's appimage_extracted_<hash>). From
-    // its FUSE mount, $APPDIR is a mount point, as / is.
-    void tellsAnExtractedAppImageFromAMountedOne() {
-        QVERIFY(appImageRunsExtracted(QString(), true));
-        QVERIFY(appImageRunsExtracted(QStringLiteral("/"), true));
-        QVERIFY(!appImageRunsExtracted(QString(), false));
-        QVERIFY(!appImageRunsExtracted(QStringLiteral("/"), false));
-        const QString extracted = path(QStringLiteral("tmp/appimage_extracted_0123456789abcdef"));
-        QVERIFY(QDir().mkpath(extracted + QStringLiteral("/usr/bin")));
-        QVERIFY(appImageRunsExtracted(extracted, false));
-        QVERIFY(!appImageRunsExtracted(path(QStringLiteral("tmp/not-there")), false));
-    }
-
     // A GitBolt its parent hasn't reaped yet is a zombie, which kill -0
     // still finds: the helper counts it as quit, or a launcher that never
     // calls wait() would hold every update for the full ten minutes.
@@ -952,15 +817,15 @@ private slots:
         QVERIFY2(state.startsWith(u'Z'), qPrintable(state));
         QVERIFY(gitbolt::test::processAlive(child));   // kill -0 alone says it lives
 
-        HelperInputs in = appImageInputs(child);
+        HelperInputs in = debInputs(child);
         in.waitSeconds = 60;
-        QVERIFY(layOutAppImage(in));
+        QVERIFY(layOutDeb(in, 0));
         QElapsedTimer clock;
         clock.start();
-        QVERIFY(startHelper(QStringLiteral("/bin/sh"), appImageHelperScript(in)));
+        QVERIFY(startHelper(QStringLiteral("/bin/sh"), debHelperScript(in)));
         QVERIFY2(helperFinished(20000), qPrintable(diagnostics()));
         QVERIFY2(clock.elapsed() < 15000, qPrintable(QString::number(clock.elapsed())));
-        QVERIFY(readFile(marker()).startsWith(QLatin1String("0.1.1 ")));
+        QVERIFY(readFile(marker()).startsWith(QLatin1String("relaunched ")));
 #endif
     }
 
@@ -1039,6 +904,100 @@ private slots:
         QVERIFY(!QFileInfo::exists(in.staged));
         QCOMPARE(readFile(result()), QStringLiteral("gave-up 0.1.1 GitBolt didn't quit within 1 seconds\n"));
 #endif
+    }
+
+    // ---------------------------------------------------------------
+    // Install results as codes
+    // ---------------------------------------------------------------
+
+    // The lines the helpers write (as the real runs here produce them)
+    // and the code usage statistics get for each.
+    void installResultCodes_data() {
+        QTest::addColumn<QString>("line");
+        QTest::addColumn<QString>("code");
+        QTest::newRow("ok") << "ok 0.1.1 " << "none";
+        QTest::newRow("gave up") << "gave-up 0.1.1 GitBolt didn't quit within 1 seconds" << "quit_timeout";
+        QTest::newRow("Windows: gave up") << "gave-up 0.1.1 GitBolt did not quit within 600 seconds" << "quit_timeout";
+        QTest::newRow("deb: declined") << "declined 0.1.1 the administrator password prompt was dismissed"
+                                       << "permission_declined";
+        QTest::newRow("mac: missing") << "failed 0.1.1 the new copy was missing" << "new_copy_missing";
+        QTest::newRow("mac: aside") << "failed 0.1.1 the old copy couldn't be moved aside" << "move_aside_failed";
+        QTest::newRow("mac: put back")
+            << "failed 0.1.1 the new copy couldn't be moved into place, so the old one was put back"
+            << "move_into_place_failed";
+        QTest::newRow("mac: no rollback")
+            << "failed 0.1.1 the new copy couldn't be moved into place, nor the old one back" << "rollback_failed";
+        QTest::newRow("deb: no polkit")
+            << "failed 0.1.1 pkexec couldn't authenticate (no polkit authentication agent is running, or polkit "
+               "isn't set up to allow it)"
+            << "elevation_failed";
+        QTest::newRow("deb: apt") << "failed 0.1.1 apt-get failed with status 100" << "apt_failed";
+        QTest::newRow("Windows: in use") << "failed 0.1.1 another GitBolt kept running from the install folder"
+                                         << "in_use";
+        QTest::newRow("Windows: not started") << "failed 0.1.1 the installer could not be started"
+                                              << "installer_not_started";
+        QTest::newRow("Windows: wrong version")
+            << "failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1" << "wrong_version";
+        QTest::newRow("Windows: elevated error") << "failed 0.1.1 the administrator part of the update failed"
+                                                 << "elevated_error";
+        QTest::newRow("Windows: exit code") << "failed 0.1.1 the installer exited with code 2" << "installer_exit";
+        QTest::newRow("Windows: elevated timeout")
+            << "failed 0.1.1 the administrator part of the update did not finish within 900 seconds"
+            << "elevated_timeout";
+        QTest::newRow("Windows: no result")
+            << "failed 0.1.1 the administrator part of the update ended without a result" << "elevated_no_result";
+        QTest::newRow("something new") << "failed 0.1.1 a reason no helper writes yet" << "other";
+        QTest::newRow("no reason") << "failed 0.1.1" << "other";
+        QTest::newRow("an unknown status") << "maybe 0.1.1 the new copy was missing" << "other";
+    }
+    void installResultCodes() {
+        QFETCH(QString, line);
+        QFETCH(QString, code);
+        const QStringList parts = line.split(u' ');
+        const QString reason = parts.mid(2).join(u' ');
+        QCOMPARE(QString::fromLatin1(failureName(installResultFailure(parts.at(0), reason))), code);
+    }
+
+    // Every reason the helpers' scripts can write maps to a code of its
+    // own: a reworded reason would otherwise turn into "other" unseen.
+    void everyReasonAHelperWritesHasACode() {
+        HelperInputs in = nastyInputs();
+        QList<QPair<QString, QString>> written;   // status, reason
+        static const QRegularExpression shellReport(QStringLiteral("report (\\S+) \"([^\"]*)\""));
+        for (const QString& script : {macHelperScript(in), debHelperScript(in)}) {
+            for (auto it = shellReport.globalMatch(script); it.hasNext();) {
+                const QRegularExpressionMatch m = it.next();
+                if (m.captured(1) != QLatin1String("$1"))   // report() itself
+                    written.append({m.captured(1), m.captured(2)});
+            }
+        }
+        QCOMPARE(written.size(), 11);   // the mac helper's 6, the deb's 5
+        // PowerShell: $reason = '…' (its status from a $status line just
+        // before, else failed), and Write-Result '<status>' ['(]'…'.
+        static const QRegularExpression psStatus(QStringLiteral("^\\s*\\$status = '([^']+)'$"));
+        static const QRegularExpression psReason(QStringLiteral("^\\s*\\$reason = '([^']+)'"));
+        static const QRegularExpression psResult(QStringLiteral("Write-Result '([^']+)' \\(?'([^']*)'"));
+        const qsizetype shell = written.size();
+        for (const QString& script : {windowsElevatedScript(in), windowsHelperScript(in)}) {
+            QString status = QStringLiteral("failed");
+            for (const QString& scriptLine : script.split(u'\n')) {
+                if (const QRegularExpressionMatch m = psStatus.match(scriptLine); m.hasMatch()) {
+                    status = m.captured(1);
+                    continue;
+                }
+                if (const QRegularExpressionMatch m = psReason.match(scriptLine); m.hasMatch())
+                    written.append({status, m.captured(1)});
+                else if (const QRegularExpressionMatch r = psResult.match(scriptLine); r.hasMatch())
+                    written.append({r.captured(1), r.captured(2)});
+                status = QStringLiteral("failed");
+            }
+        }
+        QCOMPARE(written.size() - shell, 9);
+        for (const auto& [status, reason] : std::as_const(written)) {
+            const Failure failure = installResultFailure(status, reason);
+            QVERIFY2(failure != Failure::Other, qPrintable(status + QLatin1Char(' ') + reason));
+            QCOMPARE(failure == Failure::None, status == QLatin1String("ok"));
+        }
     }
 
     void debScriptNamesTheRealCommands() {
@@ -1792,6 +1751,9 @@ private slots:
             QSKIP("Runs only when GITBOLT_TEST_NSIS_INSTALLER and GITBOLT_TEST_NSIS_DIR name a GitBolt installer "
                   "and a folder it installed into (CI's NSIS smoke test sets them)");
         QVERIFY2(QFileInfo(installer).isFile(), qPrintable(installer));
+        // The updater's reader on the real installer: the minimum Windows
+        // the build gave it (cmake/Packaging.cmake), which prepare() checks.
+        QCOMPARE(windowsMinimumOf(installer), QStringLiteral(GITBOLT_WINDOWS_MINIMUM));
 
         // What the installed copy detects, from its own bin folder.
         PackageProbe probe;

@@ -104,6 +104,9 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* e) override;
+    /// Right-click menus' entries, counted as each menu opens (set up by
+    /// instrumentActionsForTelemetry).
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void openRepository();
@@ -289,12 +292,16 @@ private:
     /// note in CONTRIBUTING.md and docs/AGENT_TESTING.md.
     void assignActionObjectNames(QWidget* widget, const QString& pathPrefix);
 
-    /// Counts every menu and toolbar action's trigger by objectName
-    /// (TelemetryService::countCommand) — never by text or bridge
-    /// slug, which can hold paths and branch names. Each action once
-    /// (the menu and the toolbar share QActions); Recent Repositories
-    /// entries, whose texts are paths, all count as "file.recent".
+    /// Counts the menu bar's, the macOS application menu's and the
+    /// window's toolbars' triggers by objectName (countCommand), never
+    /// by text or bridge slug, which can hold paths and branch names;
+    /// Recent Repositories entries (paths) all as "file.recent". And,
+    /// app-wide, the area.command entries of right-click and other menus
+    /// as they open, not toolbars' » menus: see eventFilter().
     void instrumentActionsForTelemetry();
+    /// Counts `action`'s triggers by objectName, once however many
+    /// menus and toolbars it is in.
+    void countTriggers(QAction* action);
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();
@@ -322,6 +329,10 @@ private:
     /// If the repository is mid-merge/cherry-pick/rebase after a
     /// failed operation, offer to open the conflict resolver.
     void offerConflictResolution(const QString& operation);
+
+    /// Commands › Cherry pick / Revert commit and the log's context
+    /// menu: the dialog, its field filled with `commit` (may be empty).
+    void showPickDialog(bool revert, const QString& commit);
 
     services::GitService*   gitService_   = nullptr;
     conf::SettingsService*  settingsService_ = nullptr;
@@ -589,6 +600,10 @@ private:
     // Help › Check for Updates and the macOS app menu's copy: greyed out
     // unless updates_ is set.
     QList<QPointer<QAction>> updateActions_;
+    // macOS: the application menu's items (About, Check for Updates…),
+    // on a menu bar of their own, so usage statistics count them too.
+    // Null elsewhere.
+    QPointer<QMenu> appMenu_;
 };
 
 } // namespace gitbolt::ui

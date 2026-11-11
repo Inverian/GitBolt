@@ -47,6 +47,9 @@ project(GitBolt VERSION 0.9.12 LANGUAGES CXX)
 if(APPLE)
     enable_language(OBJCXX)
 endif()
+# Oldest Windows the app runs on: Qt 6.11's, Windows 10 1809. The NSIS
+# installer carries it for the updater (cmake/Packaging.cmake).
+set(GITBOLT_WINDOWS_MINIMUM 10.0.17763)
 
 # An empty build type builds with NO optimization and no debug info —
 # the worst of both worlds, and exactly what `cmake -B build` with no
@@ -89,6 +92,8 @@ option(GITBOLT_REQUIRE_ENGLISH_PLURALS
     OFF)
 
 include(CompilerWarnings)
+# GITBOLT_RELEASE_SYMBOLS: line tables for the release's symbol files
+include(Symbols)
 # Usage statistics endpoints: the GITBOLT_TELEMETRY_* cache entries.
 # Empty, the default, compiles telemetry out.
 include(Telemetry)

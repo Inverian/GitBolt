@@ -1,7 +1,7 @@
 # ============================================================================
 # GitBolt CPack Packaging Configuration
-# Supports: DMG (macOS), NSIS (Windows), DEB (Linux); the AppImage is
-# built by linuxdeploy in CI
+# Supports: DMG (macOS), NSIS (Windows), DEB (Linux), and the symbol
+# files of each (gitbolt_symbols, below)
 # ============================================================================
 
 set(CPACK_PACKAGE_NAME "GitBolt")
@@ -34,12 +34,12 @@ if(APPLE)
     # Qt is deployed into the bundle during CPack's staging install via
     # the qt_generate_deploy_app_script hook in src/app/CMakeLists.txt.
     #
-    # The bundle is ad-hoc signed by an install(CODE) rule after the Qt
-    # deploy step in src/app/CMakeLists.txt. CPack re-stages the .app
-    # itself, so signing has to happen at install time, not "before
-    # cpack". Developer ID signing + notarization are not wired: they need
-    # inside-out signing with -o runtime --timestamp in that same hook,
-    # then `notarytool submit` + `stapler staple` on the finished DMG.
+    # The bundle is signed by src/app/platform/macos/FinalizeBundle.cmake
+    # (GitBolt's certificate in CI, else ad hoc), an install(SCRIPT) rule
+    # after the Qt deploy step in src/app/CMakeLists.txt: CPack re-stages
+    # the .app itself, so signing happens at install time. Notarization is
+    # not wired: it needs an Apple-issued Developer ID, -o runtime
+    # --timestamp, then notarytool and stapler on the finished DMG.
 
 # ============================================================================
 # Windows — NSIS installer
@@ -62,6 +62,9 @@ elseif(WIN32)
     # gitbolt.rc.in). CPack puts CPACK_NSIS_DEFINES near the top of its
     # NSIS template, and sets it only for component installs, which
     # GitBolt's isn't; CI's NSIS smoke test reads the version back.
+    # GitBoltMinimumWindows: the oldest Windows this release runs on, which
+    # the updater reads before installing it (src/update/Installer.h's
+    # kWindowsMinimumKey).
     set(CPACK_NSIS_DEFINES "
   VIProductVersion '${PROJECT_VERSION}.0'
   VIFileVersion '${PROJECT_VERSION}.0'
@@ -70,6 +73,7 @@ elseif(WIN32)
   VIAddVersionKey 'FileDescription' 'GitBolt Setup'
   VIAddVersionKey 'FileVersion' '${PROJECT_VERSION}'
   VIAddVersionKey 'ProductVersion' '${PROJECT_VERSION}'
+  VIAddVersionKey 'GitBoltMinimumWindows' '${GITBOLT_WINDOWS_MINIMUM}'
 ")
 
     # Ship the MSVC runtime (msvcp140*.dll, vcruntime140*.dll,
@@ -106,7 +110,7 @@ elseif(WIN32)
     ")
 
 # ============================================================================
-# Linux — DEB, AppImage, and TGZ
+# Linux — DEB and TGZ
 # ============================================================================
 else()
     set(CPACK_GENERATOR "DEB;TGZ")
@@ -133,9 +137,12 @@ else()
     set(CPACK_DEBIAN_PACKAGE_DEPENDS "libssl3t64 | libssl3")
     set(CPACK_DEBIAN_PACKAGE_HOMEPAGE "https://www.gitbolt.com")
     set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
+    # Nautilus's Open in GitBolt (share/nautilus-python, below) needs it;
+    # apt installs Recommends by default, in-app updates included.
+    set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "python3-nautilus")
 
     # The licence texts in one file, where Debian keeps a package's
-    # (cmake/Notices.cmake); the AppImage step in CI puts it there too.
+    # (cmake/Notices.cmake).
     install(FILES "${GITBOLT_COPYRIGHT_FILE}" DESTINATION share/doc/gitbolt)
 
     # Install Linux desktop integration files
@@ -160,8 +167,6 @@ else()
                 DESTINATION "share/icons/hicolor/${_size}x${_size}/apps"
                 RENAME gitbolt.png)
     endforeach()
-
-    # The AppImage is assembled by linuxdeploy in CI, not by CPack.
 endif()
 
 # ============================================================================
@@ -170,5 +175,45 @@ endif()
 set(CPACK_PACKAGE_FILE_NAME "${CPACK_PACKAGE_NAME}-${CPACK_PACKAGE_VERSION}-${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 set(CPACK_STRIP_FILES ON)
 set(CPACK_SOURCE_IGNORE_FILES "/\\\\.git/;/build/;/\\\\.cache/")
+
+# ============================================================================
+# Symbol files (GITBOLT_RELEASE_SYMBOLS, cmake/Symbols.cmake): the
+# gitbolt_symbols target writes <build>/${CPACK_PACKAGE_FILE_NAME}-symbols.zip,
+# which CI publishes beside the installers. It reads the build tree's
+# binary, the one CPack installs (and strips), so the zip matches it.
+# ============================================================================
+if(GITBOLT_RELEASE_SYMBOLS)
+    if(APPLE)
+        # macdeployqt strips only the installed copy; the UUID survives
+        # that and signing.
+        find_program(GITBOLT_DSYMUTIL dsymutil REQUIRED)
+        set(_gitbolt_split COMMAND ${GITBOLT_DSYMUTIL} $<TARGET_FILE:gitbolt> -o symbols/GitBolt.dSYM)
+        set(_gitbolt_symbol_files GitBolt.dSYM)
+    elseif(WIN32)
+        # llvm-symbolizer wants the .exe beside its .pdb.
+        set(_gitbolt_split COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE:gitbolt> $<TARGET_PDB_FILE:gitbolt> symbols/)
+        set(_gitbolt_symbol_files $<TARGET_FILE_NAME:gitbolt> $<TARGET_PDB_FILE_NAME:gitbolt>)
+    else()
+        # The binary gets a debug link to gitbolt.debug, which CPack's
+        # strip keeps; the old link goes first, so a rerun links the new file.
+        set(_gitbolt_split
+            COMMAND ${CMAKE_OBJCOPY} --only-keep-debug $<TARGET_FILE:gitbolt> symbols/gitbolt.debug
+            COMMAND ${CMAKE_OBJCOPY} --remove-section=.gnu_debuglink
+                --add-gnu-debuglink=symbols/gitbolt.debug $<TARGET_FILE:gitbolt>)
+        set(_gitbolt_symbol_files gitbolt.debug)
+    endif()
+    add_custom_target(gitbolt_symbols
+        COMMAND ${CMAKE_COMMAND} -E rm -rf symbols
+        COMMAND ${CMAKE_COMMAND} -E make_directory symbols
+        ${_gitbolt_split}
+        COMMAND ${CMAKE_COMMAND} -E chdir symbols ${CMAKE_COMMAND} -E tar cf
+            "${CMAKE_BINARY_DIR}/${CPACK_PACKAGE_FILE_NAME}-symbols.zip" --format=zip --
+            ${_gitbolt_symbol_files}
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        COMMENT "Symbol files: ${CPACK_PACKAGE_FILE_NAME}-symbols.zip"
+        VERBATIM)
+    add_dependencies(gitbolt_symbols gitbolt)
+endif()
 
 include(CPack)

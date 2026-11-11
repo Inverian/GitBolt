@@ -12,9 +12,9 @@ namespace gitbolt::watcher {
 
 namespace {
 // How many directories to register with QFileSystemWatcher per
-// event-loop tick. Each addPaths() call restarts the underlying
-// FSEvents stream on macOS (and re-registers inotify watches on
-// Linux), so we want few, large batches — but a single 4096-path
+// event-loop tick. On macOS every addPaths() call first flushes the
+// FSEvents stream synchronously (waiting while a just-restarted stream
+// catches up), so we want few, large batches — but a single 4096-path
 // batch can still take long enough to stutter the UI right when
 // the repo view is animating in. 512 per tick keeps each slice
 // well under a frame while finishing the whole cap in 8 ticks.
@@ -50,6 +50,10 @@ void FileWatcher::watchGitInternals(const QString& repoPath, const QString& gitD
         gitDirGiven.isEmpty() ? repoPath + "/.git" : gitDirGiven);
     const QString commonDir = commonDirGiven.isEmpty()
                                   ? gitDir : QDir::cleanPath(commonDirGiven);
+    // All of it in one addPaths, in this order (FSEvents picks its stream
+    // roots by it): on macOS every call flushes the stream, and each one
+    // after a restart waited for its history replay, up to seconds.
+    QStringList paths;
     if (QDir(gitDir).exists()) {
         gitDir_ = gitDir;
         commonDir_ = QDir(commonDir).exists() ? commonDir : gitDir;
@@ -59,53 +63,62 @@ void FileWatcher::watchGitInternals(const QString& repoPath, const QString& gitD
         // onFileChanged, which re-adds each path after it fires.
         // index, HEAD and FETCH_HEAD are each worktree's own;
         // packed-refs and refs/ are shared, in the common dir.
-        addFileIfExists(gitDir_ + "/index");
-        addFileIfExists(gitDir_ + "/HEAD");
-        addFileIfExists(gitDir_ + "/FETCH_HEAD");
-        addFileIfExists(commonDir_ + "/packed-refs");
+        paths << unwatchedFiles({gitDir_ + "/index", gitDir_ + "/HEAD",
+                                 gitDir_ + "/FETCH_HEAD", commonDir_ + "/packed-refs"});
 
         // The git dir itself: catches creation of files that may not
         // exist yet (FETCH_HEAD before the first fetch, packed-refs
         // before the first pack) — onDirectoryChanged re-arms their
         // file watches when they appear.
-        watcher_.addPath(gitDir_);
+        paths << gitDir_;
         if (commonDir_ != gitDir_)
-            watcher_.addPath(commonDir_);
+            paths << commonDir_;
 
         // Every directory under refs/. directoryChanged only fires
         // for a watched directory's OWN listing: a watch on refs/
         // alone never reports `git fetch` writing
         // refs/remotes/origin/main two levels down.
-        watchRefsSubtree();
+        paths << refsSubtree();
     }
 
     // Watch the repo root immediately too — root-level edits are
     // noticed even while the full working-tree walk is still
     // running on a worker thread.
-    watcher_.addPath(repoPath);
+    paths << repoPath;
+    watcher_.addPaths(paths);
 }
 
 void FileWatcher::watchRefsSubtree() {
+    // Already-watched paths come back in addPaths' failure list,
+    // which is exactly what we want — re-running after every refs/
+    // change is cheap (the refs tree is tiny; most refs live in
+    // packed-refs anyway) and keeps new namespaces covered.
+    const QStringList dirs = refsSubtree();
+    if (!dirs.isEmpty())
+        watcher_.addPaths(dirs);
+}
+
+QStringList FileWatcher::refsSubtree() const {
     if (commonDir_.isEmpty())
-        return;
+        return {};
     const QString refsRoot = commonDir_ + "/refs";
     if (!QDir(refsRoot).exists())
-        return;
+        return {};
     QStringList dirs{refsRoot};
     QDirIterator it(refsRoot, QDir::Dirs | QDir::NoDotAndDotDot,
                     QDirIterator::Subdirectories);
     while (it.hasNext())
         dirs.append(it.next());
-    // Already-watched paths come back in addPaths' failure list,
-    // which is exactly what we want — re-running after every refs/
-    // change is cheap (the refs tree is tiny; most refs live in
-    // packed-refs anyway) and keeps new namespaces covered.
-    watcher_.addPaths(dirs);
+    return dirs;
 }
 
-void FileWatcher::addFileIfExists(const QString& path) {
-    if (QFile::exists(path))
-        watcher_.addPath(path);
+QStringList FileWatcher::unwatchedFiles(const QStringList& candidates) const {
+    QStringList files;
+    for (const QString& path : candidates) {
+        if (QFile::exists(path) && !watcher_.files().contains(path))
+            files << path;
+    }
+    return files;
 }
 
 QStringList FileWatcher::enumerateWatchDirs(
@@ -213,8 +226,9 @@ void FileWatcher::stop() {
     repoPath_.clear();
     gitDir_.clear();
     commonDir_.clear();
-    if (!watcher_.files().isEmpty()) watcher_.removePaths(watcher_.files());
-    if (!watcher_.directories().isEmpty()) watcher_.removePaths(watcher_.directories());
+    const QStringList watched = watcher_.files() + watcher_.directories();
+    if (!watched.isEmpty())
+        watcher_.removePaths(watched);
 }
 
 void FileWatcher::onFileChanged(const QString& path) {
@@ -237,8 +251,10 @@ void FileWatcher::onDirectoryChanged(const QString& path) {
         if (path == gitDir_ || path == commonDir_) {
             // FETCH_HEAD / packed-refs may have just been created
             // (first fetch, first ref pack) — arm their watches.
-            addFileIfExists(commonDir_ + "/packed-refs");
-            addFileIfExists(gitDir_ + "/FETCH_HEAD");
+            const QStringList appeared =
+                unwatchedFiles({commonDir_ + "/packed-refs", gitDir_ + "/FETCH_HEAD"});
+            if (!appeared.isEmpty())
+                watcher_.addPaths(appeared);
         } else if (path.startsWith(commonDir_ + QStringLiteral("/refs"))) {
             // A refs/ directory changed its listing — possibly a
             // brand-new subdirectory (first feature/* branch, a

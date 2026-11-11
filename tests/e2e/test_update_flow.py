@@ -22,7 +22,8 @@ no release package, so it can't install it (update/Package.h: Unknown).
    install-result there once: a failure opens the dialog on why, with
    install.log's path, and Try Again checks again; ok says "GitBolt was
    updated to <v>." in the status bar. Either way the file is gone
-   afterwards.
+   afterwards, and so is the pending-install marker the old copy left
+   (old or young), and the log says how the attempt ended.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from e2elib import App, Failure, run  # noqa: E402
+from e2elib import WINDOWS, App, Failure, run  # noqa: E402
 from update_stub import UpdateFeed  # noqa: E402
 
 TIMER = "updateCheckTimer"
@@ -44,7 +45,7 @@ NOTICE = "GitBolt 0.1.1 is available."
 def test(binary: str, scratch: str, apps: list) -> None:
     stub = UpdateFeed("0.1.1")
     for name in ("GitBolt-0.1.1-Darwin-arm64.dmg", "GitBolt-0.1.1-Windows-AMD64.exe",
-                 "gitbolt_0.1.1_amd64.deb", "GitBolt-0.1.1-x86_64.AppImage"):
+                 "gitbolt_0.1.1_amd64.deb"):
         stub.add_asset(name, f"not really {name}".encode())
     stub.add_checksums()
     config_home = os.path.join(scratch, "config")
@@ -116,9 +117,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
         # 4. What the install helper leaves for the copy it relaunches.
         result = os.path.join(update_dir, "install-result")
-        log = os.path.join(update_dir, "install.log")
+        marker = os.path.join(update_dir, "pending-install")
+        log = os.path.normpath(os.path.join(update_dir, "install.log"))
         with open(result, "w") as fh:
             fh.write("failed 0.1.1 the installer exited with code 2\n")
+        with open(marker, "w") as fh:
+            fh.write(f"0.1.0 0.1.1 {int(time.time()) - 3600}\n")
         with open(log, "w") as fh:
             fh.write("".join(f"10:00:{i:02} step {i}\n" for i in range(1, 16)))
         relaunched = relaunch(binary, app, stub, update_dir, apps, "failed install")
@@ -133,6 +137,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
                 raise Failure(f"the dialog doesn't say {expected!r}: {text!r}")
         if os.path.exists(result):
             raise Failure("install-result is still there after it was read")
+        said(relaunched, marker, "Update: failed (install, installer_exit), 0.1.0 to 0.1.1, other")
         hits = stub.feed_hits()
         relaunched.ok("click updateDialog.retry")
         relaunched.wait_until(lambda s: s.get("updateDialog") == "not-installable",
@@ -145,6 +150,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
         with open(result, "w") as fh:
             fh.write("ok 0.1.1\n")
+        with open(marker, "w") as fh:
+            fh.write(f"0.1.0 0.1.1 {int(time.time())}\n")
         relaunched = relaunch(binary, app, stub, update_dir, apps, "updated")
         relaunched.wait_until(lambda s: s.get("statusMessage") == "GitBolt was updated to 0.1.1.",
                               "the status bar's word on the update")
@@ -153,11 +160,21 @@ def test(binary: str, scratch: str, apps: list) -> None:
             raise Failure(f"an update that went in opened the dialog: {state['updateDialog']}")
         if os.path.exists(result):
             raise Failure("install-result is still there after it was read")
+        said(relaunched, marker, "Update: ok (install, none), 0.1.0 to 0.1.1, other")
         rc = relaunched.quit()
         if rc != 0:
             raise Failure(f"quit rc={rc}{relaunched.tail()}")
     finally:
         stub.close()
+
+
+def said(app: App, marker: str, line: str) -> None:
+    """The relaunched copy read the marker with the result: it is gone,
+    and the attempt's outcome is in the log."""
+    if os.path.exists(marker):
+        raise Failure("pending-install is still there after the result was read")
+    if line not in app.log_text():
+        raise Failure(f"the log lacks {line!r}:{app.tail()}")
 
 
 def check_private_dir(path: str, runtime_dir: str) -> None:
@@ -170,7 +187,10 @@ def check_private_dir(path: str, runtime_dir: str) -> None:
     if not os.path.basename(path).startswith("gitbolt-updates-"):
         raise Failure(f"updateDir {path!r} isn't a gitbolt-updates-XXXXXX folder")
     st = os.lstat(path)
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+    if not stat.S_ISDIR(st.st_mode):
+        raise Failure(f"updateDir {path!r} isn't a folder")
+    # Windows: no uid, and no mode says who may enter (ACLs do).
+    if not WINDOWS and (st.st_uid != os.getuid() or st.st_mode & 0o077):
         raise Failure(f"updateDir {path!r} isn't private: mode {oct(st.st_mode)}")
 
 

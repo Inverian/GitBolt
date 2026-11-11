@@ -227,32 +227,32 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
     // it shows, as Recent does.
     menu.addAction(tr("Open in GitBolt"), this, [this, path]() {
         emit openRequested(path);
-    });
+    })->setObjectName(QStringLiteral("worktree-list.open-in-gitbolt"));
     menu.addAction(tr("Open in File Explorer"), this, [this, path]() {
         emit revealRequested(path);
-    });
+    })->setObjectName(QStringLiteral("worktree-list.open-in-file-explorer"));
 
     menu.addSeparator();
 
     menu.addAction(tr("Remove"), this, [this, name, path]() {
         emit removeRequested(name, path);
-    });
+    })->setObjectName(QStringLiteral("worktree-list.remove"));
 
     if (locked) {
         menu.addAction(tr("Unlock"), this, [this, name]() {
             emit unlockRequested(name);
-        });
+        })->setObjectName(QStringLiteral("worktree-list.unlock"));
     } else {
         menu.addAction(tr("Lock"), this, [this, name]() {
             emit lockRequested(name);
-        });
+        })->setObjectName(QStringLiteral("worktree-list.lock"));
     }
 
     menu.addSeparator();
 
     menu.addAction(tr("Copy Path"), this, [path]() {
         QApplication::clipboard()->setText(path);
-    });
+    })->setObjectName(QStringLiteral("worktree-list.copy-path"));
 
     menu.exec(table_->viewport()->mapToGlobal(pos));
 }

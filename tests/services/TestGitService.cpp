@@ -32,6 +32,9 @@
 //     on top of another is refused with a failure alone, and one whose
 //     change is on the branch already says so and leaves nothing in
 //     progress,
+//   - revertCommit stages a commit's inverse and says so, or that it
+//     stopped on conflicts or had nothing to revert, and is refused
+//     with a failure alone while a merge is in progress,
 //   - a cherry-pick of several commits paused between two: its state
 //     goes out as such, and Continue / Skip carry it on,
 //   - tag create / delete as the Commands menu drives them,
@@ -89,7 +92,9 @@
 //     switched, or the service goes,
 //   - a commit in a submodule and an edit of .git/info/exclude
 //     refresh, and the watcher's walk goes into the directories it
-//     leaves out (.git, node_modules, build, …),
+//     leaves out (.git, node_modules, build, …); a repository switch
+//     sets the watcher up in one addPaths and drops the old watches in
+//     one removePaths,
 //   - removeWorktree deletes the folder the user was asked about or
 //     nothing, whatever the worktree's files in .git/worktrees say.
 //
@@ -102,6 +107,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFileInfo>
+#include <QLoggingCategory>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -183,6 +189,42 @@ std::unique_ptr<gitbolt::test::TestRepo> repoWithCommits(int n) {
     return repo;
 }
 
+// Counts QFileSystemWatcher's addPaths and removePaths calls while in
+// scope, from the "adding"/"removing" lines Qt logs under
+// qt.core.filesystemwatcher (debug). Every other message passes on.
+class WatcherCallCount {
+public:
+    WatcherCallCount() {
+        adds_ = removes_ = 0;
+        QLoggingCategory::setFilterRules(QStringLiteral("qt.core.filesystemwatcher.debug=true"));
+        previous_ = qInstallMessageHandler(&WatcherCallCount::handle);
+    }
+    ~WatcherCallCount() {
+        qInstallMessageHandler(previous_);
+        QLoggingCategory::setFilterRules(QString());
+    }
+    WatcherCallCount(const WatcherCallCount&) = delete;
+    WatcherCallCount& operator=(const WatcherCallCount&) = delete;
+
+    int adds() const { return adds_; }
+    int removes() const { return removes_; }
+
+private:
+    static void handle(QtMsgType type, const QMessageLogContext& context, const QString& message) {
+        if (qstrcmp(context.category, "qt.core.filesystemwatcher") != 0) {
+            previous_(type, context, message);
+        } else if (message.startsWith(QLatin1String("adding"))) {
+            ++adds_;
+        } else if (message.startsWith(QLatin1String("removing"))) {
+            ++removes_;
+        }
+    }
+
+    static inline QtMessageHandler previous_ = nullptr;
+    static inline int adds_ = 0;
+    static inline int removes_ = 0;
+};
+
 // The order in which the main thread receives GitService's completion
 // and refresh signals, by short name. The context object lives on the
 // main thread, so a worker's emit is queued here exactly as it is to
@@ -198,6 +240,7 @@ public:
         record(svc, &GitService::commitComplete, "commitComplete");
         record(svc, &GitService::rebaseStepFinished, "rebaseStep");
         record(svc, &GitService::cherryPickComplete, "cherryPickComplete");
+        record(svc, &GitService::revertComplete, "revertComplete");
         QObject::connect(&svc, &GitService::operationFailed, &context_,
                          [this](const QString& op, const QString& err) {
             append(QStringLiteral("operationFailed(%1: %2)").arg(op, err));
@@ -320,11 +363,12 @@ QString linkTarget(const QString& path) {
 
 } // namespace
 
-// cherryPick() takes one commit. It took a list, but libgit2's pick
-// only stages: the second met the first one's uncommitted changes,
-// failed, and took the first pick's state files down with it.
+// cherryPick() takes one commit (and a merge's parent). It took a list,
+// but libgit2's pick only stages: the second met the first one's
+// uncommitted changes, failed, and took the first pick's state files
+// down with it.
 static_assert(std::is_same_v<decltype(&GitService::cherryPick),
-                             void (GitService::*)(const gitbolt::git::ObjectId&)>);
+                             void (GitService::*)(const gitbolt::git::ObjectId&, unsigned)>);
 
 class TestGitService : public QObject {
     Q_OBJECT
@@ -707,6 +751,77 @@ private slots:
             QVERIFY2(dirs.contains(QString::fromLatin1(in)), in);
         for (const char* out : {".git", "node_modules", "build"})
             QVERIFY2(!dirs.contains(QString::fromLatin1(out)), out);
+    }
+
+    // A repository switch registers the new watches in one addPaths and
+    // drops the old ones in one removePaths. On macOS every call flushes
+    // the FSEvents stream, and each call after a restart waited for the
+    // stream's history replay: up to seconds with the window frozen.
+    // Counted from Qt's own debug lines, so it holds on every platform.
+    void watchSetupIsOneCallEach() {
+        auto a = repoWithCommits(1);
+        auto b = repoWithCommits(1);
+        QVERIFY(a && b);
+        gitbolt::watcher::FileWatcher watcher;
+        watcher.watchGitInternals(a->path());
+
+        int adds = 0;
+        int removes = 0;
+        {
+            const WatcherCallCount count;
+            watcher.watchGitInternals(b->path());
+            adds = count.adds();
+            removes = count.removes();
+        }
+        QCOMPARE(adds, 1);
+        QCOMPARE(removes, 1);
+    }
+
+    // Not a check: how long a repository switch blocks in the watcher
+    // here, for a before/after comparison of FileWatcher. Each new
+    // repository's .git gets ~20,000 fresh files, history a restarted
+    // FSEvents stream replays. GITBOLT_WATCHER_BENCH=1 runs it.
+    void switchTimings() {
+        if (qEnvironmentVariableIntValue("GITBOLT_WATCHER_BENCH") != 1)
+            QSKIP("set GITBOLT_WATCHER_BENCH=1 to time repository switches");
+        auto previous = repoWithCommits(1);
+        QVERIFY(previous);
+        gitbolt::watcher::FileWatcher watcher;
+        watcher.watchGitInternals(previous->path());
+        QTest::qWait(1000);
+
+        QList<qint64> switches;
+        QList<qint64> chunks;
+        for (int round = 0; round < 10; ++round) {
+            auto next = repoWithCommits(1);
+            QVERIFY(next);
+            const QString bench = next->path() + QStringLiteral("/.git/objects/bench");
+            QVERIFY(QDir().mkpath(bench));
+            for (int i = 0; i < 20000; ++i) {
+                QFile file(bench + QLatin1Char('/') + QString::number(i));
+                QVERIFY(file.open(QIODevice::WriteOnly));
+            }
+            QTest::qWait(1500);
+
+            const QStringList dirs = gitbolt::watcher::FileWatcher::enumerateWatchDirs(next->path());
+            QElapsedTimer timer;
+            timer.start();
+            watcher.watchGitInternals(next->path());
+            switches << timer.elapsed();
+            // The async open's first working-tree chunk comes a moment later.
+            QTest::qWait(30);
+            timer.restart();
+            watcher.addWatchPaths(next->path(), dirs);
+            chunks << timer.elapsed();
+            qInfo("round %d: watchGitInternals %lld ms, first chunk %lld ms",
+                  round, switches.last(), chunks.last());
+            previous = std::move(next);   // the one before goes, unwatched
+        }
+        std::sort(switches.begin(), switches.end());
+        std::sort(chunks.begin(), chunks.end());
+        qInfo("watchGitInternals: median %lld ms, max %lld ms; first chunk: median %lld ms, max %lld ms",
+              switches.at(switches.size() / 2), switches.last(),
+              chunks.at(chunks.size() / 2), chunks.last());
     }
 
     // -----------------------------------------------------------------
@@ -4960,6 +5075,124 @@ private slots:
                  qPrintable(log.join(QStringLiteral(", "))));
         QCOMPARE(output(work.run({"rev-parse", "CHERRY_PICK_HEAD"})),
                  QString::fromStdString(a->toHex()));
+    }
+
+    // A merge is picked as seen from the parent the dialog's chooser
+    // names (git cherry-pick -m); libgit2 turned every merge down.
+    void cherryPickOfAMergeGoesByTheParentChosen() {
+        IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"branch", "target"})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side"})));
+        repo->writeFile(QStringLiteral("side.txt"), QByteArrayLiteral("side\n"));
+        QVERIFY(succeeded(work.run({"add", "side.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "side"})));
+        QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+        repo->writeFile(QStringLiteral("main.txt"), QByteArrayLiteral("main\n"));
+        QVERIFY(succeeded(work.run({"add", "main.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "main"})));
+        QVERIFY(succeeded(work.run({"merge", "-q", "--no-ff", "-m", "Merge side", "side"})));
+        auto merge = repo->repo().head();
+        QVERIFY(merge.ok());
+        QVERIFY(succeeded(work.run({"checkout", "-q", "target"})));
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy picks(&svc, &GitService::cherryPickComplete);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        svc.cherryPick(*merge, 2);
+        QVERIFY(picks.waitForAny(10000));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(picks.at(0).at(0).toBool(), true);
+        QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::CherryPick);
+        QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("A  main.txt"));
+    }
+
+    // revertCommit(), as cherryPick() goes: staged and said so (the bar
+    // then offers Commit…), stopped on conflicts (MainWindow offers the
+    // resolver), nothing to revert and nothing left in progress, or
+    // refused with an operationFailed alone while a merge waits.
+    void revertCommitReportsItsOutcome_data() {
+        QTest::addColumn<QString>("situation");
+        QTest::newRow("clean") << QStringLiteral("clean");
+        QTest::newRow("conflict") << QStringLiteral("conflict");
+        QTest::newRow("nothing to revert") << QStringLiteral("nothing");
+        QTest::newRow("during a merge") << QStringLiteral("merge");
+    }
+
+    void revertCommitReportsItsOutcome() {
+        QFETCH(QString, situation);
+        IsolatedGitConfig isolated;
+        auto repo = repoWithCommits(1);
+        QVERIFY(repo);
+        gitbolt::git::GitProcess work(repo->path().toStdString());
+        QVERIFY(succeeded(work.run({"config", "core.autocrlf", "false"})));
+        repo->writeFile(QStringLiteral("a.txt"), QByteArrayLiteral("one\n"));
+        QVERIFY(succeeded(work.run({"add", "a.txt"})));
+        QVERIFY(succeeded(work.run({"commit", "-q", "-m", "one"})));
+        auto target = repo->repo().head();
+        QVERIFY(target.ok());
+        if (situation == QLatin1String("conflict")) {
+            repo->writeFile(QStringLiteral("a.txt"), QByteArrayLiteral("two\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "two"})));
+        } else if (situation == QLatin1String("nothing")) {
+            QVERIFY(succeeded(work.run({"rm", "-q", "a.txt"})));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-m", "remove a"})));
+        } else if (situation == QLatin1String("merge")) {
+            QVERIFY(succeeded(work.run({"checkout", "-q", "-b", "side", "HEAD~1"})));
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("side\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "side"})));
+            QVERIFY(succeeded(work.run({"checkout", "-q", "-"})));
+            repo->writeFile(QStringLiteral("f0.txt"), QByteArrayLiteral("main\n"));
+            QVERIFY(succeeded(work.run({"commit", "-q", "-am", "main"})));
+            QVERIFY(!succeeded(work.run({"merge", "-q", "side"})));
+        }
+        const QString shortId = QString::fromStdString(target->toShortHex());
+
+        GitService svc;
+        SignalLog log(svc);
+        MainThreadSpy reverts(&svc, &GitService::revertComplete);
+        QVERIFY(svc.openRepository(repo->path()));
+        QVERIFY(log.waitFor({"status", "log", "branches"}));
+        log.clear();
+        svc.revertCommit(*target);
+        if (situation == QLatin1String("merge")) {
+            const QString refused = QStringLiteral(
+                "operationFailed(revert: A merge is in progress. Finish or abort it first.)");
+            QVERIFY2(log.waitFor({refused}), qPrintable(log.join(QStringLiteral(", "))));
+            QVERIFY(QThreadPool::globalInstance()->waitForDone(10000));
+            QTest::qWait(100);
+            QVERIFY(reverts.isEmpty());
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Merge);
+            QVERIFY(!QFileInfo::exists(repo->path() + QStringLiteral("/.git/REVERT_HEAD")));
+            return;
+        }
+        QVERIFY2(log.waitForAfter(QStringLiteral("revertComplete"), {"status"}),
+                 qPrintable(log.join(QStringLiteral(", "))));
+        QVERIFY2(!log.hasFailure(), qPrintable(log.join(QStringLiteral(", "))));
+        QCOMPARE(reverts.size(), 1);
+        const bool success = reverts.at(0).at(0).toBool();
+        const QString message = reverts.at(0).at(1).toString();
+        if (situation == QLatin1String("clean")) {
+            QVERIFY(success);
+            QCOMPARE(message, QStringLiteral("Revert of %1 staged. Commit to finish it.").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Revert);
+            QCOMPARE(output(work.run({"status", "--porcelain"})), QStringLiteral("D  a.txt"));
+        } else if (situation == QLatin1String("conflict")) {
+            QVERIFY(!success);
+            QCOMPARE(message, QStringLiteral("Revert produced conflicts for commit %1").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::Revert);
+            QCOMPARE(*repo->repo().conflictCount(), 1);
+        } else {
+            QVERIFY(success);
+            QCOMPARE(message, QStringLiteral("Commit %1's changes aren't on this branch: "
+                                             "nothing to revert.").arg(shortId));
+            QCOMPARE(repo->repo().state(), gitbolt::git::RepoState::None);
+            QVERIFY(!QFileInfo::exists(repo->path() + QStringLiteral("/.git/REVERT_HEAD")));
+        }
     }
 
     // -----------------------------------------------------------------

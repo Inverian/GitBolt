@@ -16,9 +16,11 @@
 #include "update/UpdateConfig.h"
 #include "util/CrashHandler.h"
 #include "util/LockFiles.h"
+#include "util/LogFile.h"
 #include "util/LoginPath.h"
 #include "util/TestSession.h"
 #include "util/Translations.h"
+#include "util/WorkerExceptions.h"
 #include "widgets/PlainTextDialogs.h"
 
 #ifdef Q_OS_MACOS
@@ -47,8 +49,10 @@
 #include <QLockFile>
 #include <QProcessEnvironment>
 #include <QScopeGuard>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QStyleHints>
+#include <QSysInfo>
 #include <QTextStream>
 #include <QThreadPool>
 #include <QUrl>
@@ -373,15 +377,19 @@ int main(int argc, char* argv[]) {
     app.installEventFilter(&openRequests);
 #ifdef Q_OS_MACOS
     // A launch by Finder or LaunchServices has its folder in an event,
-    // not in argv, and the event comes once the event loop first
-    // turns. Turn it now, before the single-instance guard: a launch
-    // that finds GitBolt running hands its path over below and exits,
-    // and the folder would go with it. (BusyInstanceNotice turns the
-    // loop before any window exists, too.)
+    // not in argv: one that can come after the loop's first turn, but
+    // before AppKit finishes launching. Wait for it before the single-
+    // instance guard, or a launch that hands its path over below and
+    // exits would lose it. A quit meanwhile (a logout) ends this launch
+    // here, as it would end a running GitBolt.
     if (initialRepoPath.isEmpty()
         && QGuiApplication::platformName() == QLatin1String("cocoa")) {
-        QCoreApplication::processEvents();
-        initialRepoPath = openRequests.takePending();
+        constexpr int kLaunchFolderWaitMs = 3000;
+        const auto folder = openRequests.waitForLaunchFolder(
+            gitbolt::app::macos::launchFinishedProbe(), kLaunchFolderWaitMs);
+        if (!folder)
+            return 0;
+        initialRepoPath = *folder;
     }
     openRequests.setLaunchPath(initialRepoPath);
 #endif
@@ -442,6 +450,28 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    const gitbolt::util::TestSessionKind testSessionKind =
+        gitbolt::util::detectTestSession(QGuiApplication::platformName(),
+                                         app.arguments());
+    const bool testSession = gitbolt::util::isTestSession(testSessionKind);
+
+    // The log file (util/LogFile.h), local only: from here on every Qt
+    // message goes there too, and on to stderr as before. Askpass,
+    // --help and hand-off launches have returned by now, so the GitBolt
+    // that owns the window owns the file; test sessions write
+    // GitBolt-test.log. The session line goes in directly: no stderr.
+    gitbolt::util::RotatingLog appLog(gitbolt::util::logDirectory(),
+                                      testSession ? QStringLiteral("GitBolt-test")
+                                                  : QStringLiteral("GitBolt"));
+    appLog.append(gitbolt::util::logLine(
+        'I', QStringLiteral("GitBolt %1 started: %2, %3, Qt %4, pid %5%6")
+                 .arg(app.applicationVersion(), QSysInfo::prettyProductName(),
+                      QSysInfo::currentCpuArchitecture(), QString::fromLatin1(qVersion()))
+                 .arg(QCoreApplication::applicationPid())
+                 .arg(testSession ? QStringLiteral(", test session") : QString())));
+    gitbolt::util::installMessageLog(&appLog);
+    const auto messageLogGone = qScopeGuard([] { gitbolt::util::uninstallMessageLog(); });
+
 #ifdef Q_OS_MACOS
     // Finder's "Open in GitBolt", only now that this is the GitBolt
     // that opens things: macOS gives the service to the first process
@@ -467,6 +497,13 @@ int main(int argc, char* argv[]) {
     if (gitbolt::util::shouldLookUpLoginPath())
         gitbolt::util::startLoginPathLookup();
 
+#ifdef Q_OS_WIN
+    // Windows' QSettings reads only the %APPDATA% known folder, which no
+    // variable moves: an e2e app's GitBolt.ini goes where XDG_CONFIG_HOME
+    // says, as Qt itself puts it on macOS and Linux.
+    if (const QString dir = gitbolt::util::testSettingsDir(); !dir.isEmpty())
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, dir);
+#endif
     // Settings service — constructed before the theme so the saved
     // theme choice is restored before any window paints. Also used
     // further down for window-geometry persistence.
@@ -537,7 +574,22 @@ int main(int argc, char* argv[]) {
             [&settings]() { return settings.reloadUsageStatisticsEnabled(); });
         QObject::connect(&app, &QCoreApplication::aboutToQuit, telemetryService.get(),
                          &telemetry::TelemetryService::persistPending);
+        // An exception escaping background work: its type, as an error
+        // report (the dedupe and cap apply; inert and off send nothing).
+        // Queued: it comes from a worker thread.
+        telemetry::TelemetryService* service = telemetryService.get();
+        gitbolt::util::setWorkerExceptionSink([service](const char* kind) {
+            QMetaObject::invokeMethod(
+                service,
+                [service, type = QString::fromLatin1(kind)] {
+                    service->recordError(telemetry::ErrorKind::BackgroundException, type);
+                },
+                Qt::QueuedConnection);
+        });
     }
+    // Cleared before the service goes (declared after it); the sink's
+    // lock means nothing is posted once this has run.
+    const auto workerSinkGone = qScopeGuard([] { gitbolt::util::setWorkerExceptionSink({}); });
 
     // Check for crash report from a previous session. Not in a test
     // session: ~/.gitbolt/crash.log is the user's (a bridge run outside
@@ -548,10 +600,6 @@ int main(int argc, char* argv[]) {
     // The report is read here, before the telemetry service starts
     // below; the box that tells the user comes up once the window and
     // the hand-off listener are (see there).
-    const gitbolt::util::TestSessionKind testSessionKind =
-        gitbolt::util::detectTestSession(QGuiApplication::platformName(),
-                                         app.arguments());
-    const bool testSession = gitbolt::util::isTestSession(testSessionKind);
     const bool crashBoxOptIn =
         qEnvironmentVariable("GITBOLT_TEST_CRASH_BOX") == QLatin1String("1");
     const bool crashPending = (!testSession || crashBoxOptIn)

@@ -24,21 +24,17 @@ from there.
 from __future__ import annotations
 
 import os
-import stat
 import threading
 import time
 
 import e2elib
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import WINDOWS, App, Failure, git, make_repo, run, write_script
 
 REFUSAL = "pre-commit: secrets found in b.txt"
 
 
 def _hook(hooks: str, name: str, body: str) -> None:
-    path = os.path.join(hooks, name)
-    with open(path, "w") as fh:
-        fh.write("#!/bin/sh\n" + body)
-    os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+    write_script(os.path.join(hooks, name), "#!/bin/sh\n" + body)
 
 
 def _commit(app: App, message: str) -> None:
@@ -213,8 +209,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
     os.environ["GIT_CONFIG_GLOBAL"] = global_config
     os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
-    login_path(binary, scratch, apps)
-    commit_and_push_across_reopen(binary, scratch, apps)
+    if WINDOWS:
+        print("skipped on Windows: the login shell's PATH (macOS and Linux "
+              "only, util/LoginPath.h), and the reopen held at a FIFO")
+    else:
+        login_path(binary, scratch, apps)
+        commit_and_push_across_reopen(binary, scratch, apps)
 
     work = make_repo(os.path.join(scratch, "work"))
     hooks = os.path.join(work, ".git", "hooks")

@@ -115,7 +115,8 @@ inline int runTool(const QString& program, const QStringList& arguments, QString
     return process.exitStatus() == QProcess::NormalExit ? process.exitCode() : -1;
 }
 
-/// macOS: an ad-hoc signature, as the release's bundle has.
+/// macOS: an ad-hoc signature, as builds without GitBolt's certificate
+/// have; the Installer checks only the seal.
 inline bool adHocSign(const QString& bundle) {
     return runTool(QStringLiteral("/usr/bin/codesign"),
                    {QStringLiteral("--force"), QStringLiteral("--sign"), QStringLiteral("-"), bundle})

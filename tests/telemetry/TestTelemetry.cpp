@@ -9,6 +9,8 @@
 //   - what each event looks like on the wire: payload keys, the exact
 //     header set (HttpStub fails on any extra header), User-Agent,
 //     __deviceId, and no __timestamp on fresh events
+//   - update outcomes: update_result's fixed fields, and an update_failed
+//     error for a failed or unfinished one, once per stage and code
 //   - pacing, the per-tick budget, the debounced first flush (a crash
 //     summary goes first, at once), retry and drop outcomes, backoff
 //     until the next tick, offline tries that cost no attempt
@@ -18,7 +20,9 @@
 //   - the queue's caps, load-time rules and lock, and a stale lock no
 //     PID check can prove stale
 //   - sanitizers: paths, branches, emails and git's error text never
-//     leave
+//     leave; a background exception goes as its type alone
+//   - the log: one line per request's outcome, with the event's name
+//     and never a payload, an ID or a URL
 //
 
 #include <QCryptographicHash>
@@ -31,6 +35,7 @@
 #include <QLockFile>
 #include <QNetworkAccessManager>
 #include <QRegularExpression>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTemporaryDir>
@@ -48,6 +53,7 @@
 #include "telemetry/TelemetryService.h"
 #include "telemetry/Transport.h"
 #include "util/TestSession.h"
+#include "util/WorkerExceptions.h"
 
 #include <memory>
 #include <optional>
@@ -156,6 +162,18 @@ QString crashReport() {
                             "#2 GitBolt +0x30 ?\n"
                             "#3 dyld +0x40 start+0x2\n"
                             "\n=== End of Report ===\n");
+}
+
+// The "Telemetry: …" lines logged while installed (others go on).
+QStringList g_telemetryLines;
+QtMessageHandler g_handlerBefore = nullptr;
+
+void captureTelemetryLines(QtMsgType type, const QMessageLogContext& context,
+                           const QString& message) {
+    if (message.startsWith(QLatin1String("Telemetry: ")))
+        g_telemetryLines << message;
+    else if (g_handlerBefore)
+        g_handlerBefore(type, context, message);
 }
 
 // A new queue in `dir` holding one record.
@@ -364,6 +382,23 @@ private slots:
         QVERIFY(!gitbolt::util::isHeadlessPlatform(u""));
     }
 
+    // Windows' GitBolt.ini of an e2e app: its XDG_CONFIG_HOME, only with
+    // an instance name of its own.
+    void testSettingsDir() {
+        const QString dir = QStringLiteral("/tmp/gb-e2e/config");
+        QCOMPARE(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", "gb-e2e-inst"},
+                                                         {"XDG_CONFIG_HOME", dir}})),
+                 dir);
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_TEST_BRIDGE", "gb-e2e"},
+                                                        {"XDG_CONFIG_HOME", dir}}))
+                    .isEmpty());
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", ""},
+                                                        {"XDG_CONFIG_HOME", dir}}))
+                    .isEmpty());
+        QVERIFY(gitbolt::util::testSettingsDir(envFrom({{"GITBOLT_INSTANCE_NAME", "gb-e2e-inst"}}))
+                    .isEmpty());
+    }
+
     // ---- identifiers and sanitizers -----------------------------------
 
     void deviceIdIsDerivedAndDistinct() {
@@ -415,6 +450,7 @@ private slots:
         QTest::addColumn<QString>("expected");   // empty: rejected
         QTest::newRow("explicit") << "act.commit" << "act.commit";
         QTest::newRow("menu path") << "commands.resolve-conflicts" << "commands.resolve-conflicts";
+        QTest::newRow("right-click entry") << "file-tree.open-externally" << "file-tree.open-externally";
         QTest::newRow("recent entry") << "file.recent.3" << "file.recent";
         QTest::newRow("64 chars") << QString(64, u'a') << QString(64, u'a');
         QTest::newRow("65 chars") << QString(65, u'a') << QString();
@@ -456,7 +492,7 @@ private slots:
             {"releaseFinish", "release_finish"}, {"releaseStart", "release_start"},
             {"removeWorktree", "remove_worktree"}, {"repack", "repack"},
             {"resolve conflicts", "resolve_conflicts"},
-            {"revert --abort", "revert_abort"},
+            {"revert", "revert"}, {"revert --abort", "revert_abort"},
             {"revert --continue", "revert_continue"}, {"revert --skip", "revert_skip"},
             {"stage", "stage"},
             {"stage all", "stage_all"}, {"stage hunk", "stage_hunk"},
@@ -1524,6 +1560,7 @@ private slots:
         service->recordError(ErrorKind::OperationFailed,
                              QStringLiteral("push origin feature/secret-branch"));
         service->recordError(ErrorKind::RepoOpenFailed, input);
+        service->recordError(ErrorKind::BackgroundException, input);
         service->persistPending();   // counts out now, if any were kept
 
         // No command was counted; the errors went out sanitized.
@@ -1544,6 +1581,8 @@ private slots:
                 QCOMPARE(tags.value(QStringLiteral("op")).toString(), QStringLiteral("other"));
             if (tags.contains(QStringLiteral("code")))
                 QCOMPARE(tags.value(QStringLiteral("code")).toString(), QStringLiteral("other"));
+            if (tags.contains(QStringLiteral("type")))
+                QCOMPARE(tags.value(QStringLiteral("type")).toString(), QStringLiteral("other"));
             QByteArray all = request.everything();
             all.replace("gitbolt@0.1.0", "");   // the release names the app, not a person
             for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com",
@@ -1642,6 +1681,101 @@ private slots:
         QCOMPARE(provider.calls, 0);
     }
 
+    // An exception that escaped background work (AsyncRunner): its type
+    // from a fixed list, never its text; once per type per session.
+    void backgroundExceptionShape() {
+        Provider provider;
+        auto service = makeService(testConfig(*stub_, dir_->path()), provider);
+        service->start();
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("out_of_range"));
+        service->recordError(ErrorKind::BackgroundException, QStringLiteral("non_std"));
+        QTRY_COMPARE(stub_->requests().size(), 2);
+        QTest::qWait(300);
+        QCOMPARE(stub_->requests().size(), 2);
+
+        const QJsonObject event = stub_->requests().first().json();
+        QCOMPARE(event.value(QStringLiteral("level")).toString(), QStringLiteral("error"));
+        QCOMPARE(event.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: out_of_range"));
+        QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
+                 (QJsonObject{{QStringLiteral("kind"), QStringLiteral("background_exception")},
+                              {QStringLiteral("type"), QStringLiteral("out_of_range")}}));
+        QCOMPARE(event.value(QStringLiteral("fingerprint")).toArray(),
+                 (QJsonArray{QStringLiteral("background_exception"),
+                             QStringLiteral("out_of_range")}));
+        QCOMPARE(stub_->requests().at(1).json().value(QStringLiteral("message")).toString(),
+                 QStringLiteral("background_exception: non_std"));
+        QCOMPARE(provider.calls, 0);
+
+        // Every token AsyncRunner can report is sendable as it is.
+        for (const QString& kind : gitbolt::util::workerExceptionKinds())
+            QCOMPARE(errorDetail(ErrorKind::BackgroundException, kind), kind);
+        QCOMPARE(errorDetail(ErrorKind::BackgroundException, QStringLiteral("MyError")),
+                 QStringLiteral("other"));
+    }
+
+    // One line per request for the local log: sent, dropped, not sent
+    // (retried at the next tick) and offline, with the event's fixed
+    // name; and the switch turned off and events kept at quit. Never a
+    // payload, an install or device ID, or a URL.
+    void sendOutcomesAreLogged() {
+        g_telemetryLines.clear();
+        g_handlerBefore = qInstallMessageHandler(captureTelemetryLines);
+        const auto restore = qScopeGuard([] { qInstallMessageHandler(g_handlerBefore); });
+
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.flushIntervalMs = 300;
+        int answered = 0;
+        stub_->respond = [&answered](const StubRequest&) {
+            const int status[] = {200, 400, 503};
+            return StubResponse{answered < 3 ? status[answered++] : 202, {}};
+        };
+        auto service = makeService(config, provider);
+        service->recordRepoOpened(1, 1, 1);
+        service->recordError(ErrorKind::OperationFailed, QStringLiteral("fetch"));
+        service->recordLaunch();
+        service->start();
+        QTRY_COMPARE(service->queuedCount(), 0);
+        service->persistPending();   // nothing kept: no line
+        service.reset();
+
+        // Nothing listens: offline. Kept at quit, then turned off.
+        Config offline = config;
+        offline.transferTimeoutMs = 10000;   // Windows takes ~2 s to refuse
+        const int port = closedPort();
+        offline.trackUrl.setPort(port);
+        offline.storeUrl.setPort(port);
+        service = makeService(offline, provider);
+        service->recordRepoOpened(2, 2, 1);
+        service->start();
+        QTRY_VERIFY2_WITH_TIMEOUT(g_telemetryLines.contains(
+                                      QStringLiteral("Telemetry: offline; 1 events wait")),
+                                  qPrintable(g_telemetryLines.join(QLatin1Char('\n'))), 15000);
+        service->persistPending();
+        service.reset();
+        service = makeService(offline, provider);
+        service->setUserEnabled(false);
+        service.reset();
+
+        g_telemetryLines.removeDuplicates();
+        QCOMPARE(g_telemetryLines,
+                 (QStringList{QStringLiteral("Telemetry: repo_opened sent (HTTP 200)"),
+                              QStringLiteral("Telemetry: operation_failed dropped (HTTP 400)"),
+                              QStringLiteral("Telemetry: app_launched not sent (HTTP 503); "
+                                             "retrying at the next tick"),
+                              QStringLiteral("Telemetry: app_launched sent (HTTP 202)"),
+                              QStringLiteral("Telemetry: offline; 1 events wait"),
+                              QStringLiteral("Telemetry: 1 events kept for the next start"),
+                              QStringLiteral("Telemetry: turned off; the queue was deleted")}));
+        for (const QString& line : std::as_const(g_telemetryLines)) {
+            for (const QString& secret : {kInstallId, deviceIdFor(kInstallId), QStringLiteral("{"),
+                                          QStringLiteral("http"), QStringLiteral("127.0.0.1")})
+                QVERIFY2(!line.contains(secret), qPrintable(line));
+        }
+    }
+
     void crashReportIsQueuedAndSent() {
         Provider provider;
         auto service = makeService(testConfig(*stub_, dir_->path()), provider);
@@ -1703,6 +1837,118 @@ private slots:
         // The records behind it go in the same cycle.
         QTRY_COMPARE(stub_->requests().size(), 4);
         QTRY_COMPARE(service->queuedCount(), 0);
+    }
+
+    // ---- update outcomes --------------------------------------------------
+
+    // update_result has exactly its fixed fields; a failed (or
+    // unfinished) attempt is an update_failed error too, tagged with the
+    // stage and code only, once per session for each.
+    void updateResultEventShape() {
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.maxPerFlush = 20;
+        auto service = makeService(config, provider);
+        service->start();
+        service->recordUpdateResult({QStringLiteral("failed"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("deb"), QStringLiteral("install"), QStringLiteral("apt_failed")});
+        QTRY_COMPARE(stub_->requests().size(), 2);
+
+        const StubRequest& track = stub_->requests().at(0);
+        QCOMPARE(track.path, QByteArray("/track"));
+        const QJsonObject payload = track.json().value(QStringLiteral("payload")).toObject();
+        QCOMPARE(payload.value(QStringLiteral("name")).toString(), QStringLiteral("update_result"));
+        const QJsonObject props = properties(track);
+        QCOMPARE(keySet(props),
+                 (QSet<QString>{QStringLiteral("app_version"), QStringLiteral("__deviceId"),
+                                QStringLiteral("__os"), QStringLiteral("__osVersion"),
+                                QStringLiteral("__device"), QStringLiteral("status"),
+                                QStringLiteral("from_version"), QStringLiteral("to_version"),
+                                QStringLiteral("package"), QStringLiteral("stage"),
+                                QStringLiteral("reason")}));
+        QCOMPARE(props.value(QStringLiteral("status")).toString(), QStringLiteral("failed"));
+        QCOMPARE(props.value(QStringLiteral("from_version")).toString(), QStringLiteral("0.1.0"));
+        QCOMPARE(props.value(QStringLiteral("to_version")).toString(), QStringLiteral("0.1.1"));
+        QCOMPARE(props.value(QStringLiteral("package")).toString(), QStringLiteral("deb"));
+        QCOMPARE(props.value(QStringLiteral("stage")).toString(), QStringLiteral("install"));
+        QCOMPARE(props.value(QStringLiteral("reason")).toString(), QStringLiteral("apt_failed"));
+
+        const StubRequest& store = stub_->requests().at(1);
+        QCOMPARE(store.path, QByteArray("/api/42/store/"));
+        const QJsonObject event = store.json();
+        QCOMPARE(event.value(QStringLiteral("message")).toString(),
+                 QStringLiteral("update_failed: install/apt_failed"));
+        QCOMPARE(event.value(QStringLiteral("fingerprint")).toArray(),
+                 (QJsonArray{QStringLiteral("update_failed"), QStringLiteral("install/apt_failed")}));
+        QCOMPARE(event.value(QStringLiteral("tags")).toObject(),
+                 (QJsonObject{{QStringLiteral("kind"), QStringLiteral("update_failed")},
+                              {QStringLiteral("stage"), QStringLiteral("install")},
+                              {QStringLiteral("code"), QStringLiteral("apt_failed")}}));
+        QVERIFY(!store.body.contains(kInstallId.toLatin1()));
+        QVERIFY(!store.body.contains(deviceIdFor(kInstallId).toLatin1()));
+
+        // The other outcomes are usage statistics only; no_result is an
+        // error too; the same failure again only an update_result.
+        for (const char* status : {"ok", "declined", "incompatible", "gave_up"})
+            service->recordUpdateResult({QString::fromLatin1(status), QStringLiteral("0.1.0"),
+                                         QStringLiteral("0.1.1"), QStringLiteral("dmg"), QStringLiteral("install"),
+                                         QStringLiteral("none")});
+        service->recordUpdateResult({QStringLiteral("no_result"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("nsis"), QStringLiteral("install"), QStringLiteral("no_result")});
+        service->recordUpdateResult({QStringLiteral("failed"), QStringLiteral("0.1.0"), QStringLiteral("0.1.1"),
+                                     QStringLiteral("deb"), QStringLiteral("install"), QStringLiteral("apt_failed")});
+        // An update check's failure, as MainWindow reports it.
+        service->recordError(ErrorKind::UpdateFailed, QStringLiteral("check/rate_limited"));
+        QTRY_COMPARE(service->queuedCount(), 0);
+        QTRY_COMPARE(stub_->requests().size(), 2 + 6 + 2);
+        QStringList errors;
+        for (const StubRequest& request : stub_->requests()) {
+            if (request.path == QByteArray("/api/42/store/"))
+                errors << request.json().value(QStringLiteral("fingerprint")).toArray().at(1).toString();
+        }
+        QCOMPARE(errors, (QStringList{QStringLiteral("install/apt_failed"), QStringLiteral("install/no_result"),
+                                      QStringLiteral("check/rate_limited")}));
+    }
+
+    // Whatever reaches recordUpdateResult or an update_failed error, only
+    // the fixed vocabularies leave.
+    void unsafeUpdateInputsNeverLeave_data() { unsafeInputsNeverLeave_data(); }
+    void unsafeUpdateInputsNeverLeave() {
+        QFETCH(QString, input);
+        Provider provider;
+        Config config = testConfig(*stub_, dir_->path());
+        config.maxPerFlush = 20;
+        auto service = makeService(config, provider);
+        service->start();
+        service->recordUpdateResult({input, input, input, input, input, input});
+        service->recordUpdateResult({QStringLiteral("failed"), input, input, input, input, input});
+        service->recordError(ErrorKind::UpdateFailed, input);
+        service->recordError(ErrorKind::UpdateFailed, QStringLiteral("check/") + input);
+        service->recordError(ErrorKind::UpdateFailed, input + QStringLiteral("/http_error"));
+        QTRY_COMPARE(service->queuedCount(), 0);
+        QVERIFY(stub_->requests().size() >= 3);
+        for (const StubRequest& request : stub_->requests()) {
+            if (request.path == QByteArray("/track")) {
+                const QJsonObject props = properties(request);
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("failed")})
+                            .contains(props.value(QStringLiteral("status")).toString()));
+                QCOMPARE(props.value(QStringLiteral("from_version")).toString(), QStringLiteral("unknown"));
+                QCOMPARE(props.value(QStringLiteral("to_version")).toString(), QStringLiteral("unknown"));
+                for (const char* key : {"package", "stage", "reason"})
+                    QCOMPARE(props.value(QLatin1String(key)).toString(), QStringLiteral("other"));
+            } else {
+                const QJsonObject tags = request.json().value(QStringLiteral("tags")).toObject();
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("check")})
+                            .contains(tags.value(QStringLiteral("stage")).toString()));
+                QVERIFY((QStringList{QStringLiteral("other"), QStringLiteral("http_error")})
+                            .contains(tags.value(QStringLiteral("code")).toString()));
+            }
+            QByteArray all = request.everything();
+            all.replace("gitbolt@0.1.0", "");
+            all.replace("openpanel-client-secret", "");   // a header's name
+            for (const char* sentinel : {"alice", "secret", "/Users", "/home", "@", "example.com", "feature/"})
+                QVERIFY2(!all.contains(sentinel), sentinel);
+        }
     }
 
     // ---- inert and off sessions ----------------------------------------

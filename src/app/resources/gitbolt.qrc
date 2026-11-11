@@ -53,6 +53,7 @@
         <file alias="tag_create.svg">../../../resources/icons/menu/tag_create.svg</file>
         <file alias="tag_delete.svg">../../../resources/icons/menu/tag_delete.svg</file>
         <file alias="cherry_pick.svg">../../../resources/icons/menu/cherry_pick.svg</file>
+        <file alias="revert.svg">../../../resources/icons/menu/revert.svg</file>
         <file alias="archive.svg">../../../resources/icons/menu/archive.svg</file>
         <file alias="checkout.svg">../../../resources/icons/menu/checkout.svg</file>
         <file alias="bisect.svg">../../../resources/icons/menu/bisect.svg</file>

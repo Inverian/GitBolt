@@ -35,11 +35,11 @@ switch.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 
-from e2elib import App, Failure, OpenGate, git, make_repo, run
+from e2elib import (WINDOWS, App, Failure, OpenGate, git, make_repo, run,
+                    sh_quote, write_script)
 
 
 def commit(work: str, name: str, content: str, msg: str) -> None:
@@ -120,12 +120,10 @@ def test(binary: str, scratch: str, apps: list) -> None:
     hold = os.path.join(scratch, "hold")
     hooks = os.path.join(scratch, "hooks")
     os.makedirs(hooks)
-    hook = os.path.join(hooks, "post-commit")
-    with open(hook, "w") as fh:
-        fh.write("#!/bin/sh\nn=0\n"
-                 f"while [ -f {shlex.quote(hold)} ] && [ $n -lt 600 ]; do\n"
+    write_script(os.path.join(hooks, "post-commit"),
+                 "#!/bin/sh\nn=0\n"
+                 f"while [ -f {sh_quote(hold)} ] && [ $n -lt 600 ]; do\n"
                  "    sleep 0.1; n=$((n + 1))\ndone\n")
-    os.chmod(hook, 0o755)
     git("config", "core.hooksPath", hooks, cwd=work)
 
     # feature: f1, main merged in, f2. slow: one commit. stack: three,
@@ -224,8 +222,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
     app.wait_until(lambda s: buttons(app).get("Continue") is False,
                    "Continue running")
 
-    # The other repository's open is held until the step is over.
-    gate = OpenGate(other, scratch)
+    # The other repository's open is held until the step is over
+    # (Windows has no FIFO to hold it with: it opens at once there).
+    if WINDOWS:
+        print("3) skipped on Windows: the step ending while the other "
+              "repository's open is still held")
+    gate = None if WINDOWS else OpenGate(other, scratch)
     second = app.launch_second(other)
     if second.returncode != 0:
         raise Failure(f"hand-off of the other repository failed: "
@@ -240,6 +242,9 @@ def test(binary: str, scratch: str, apps: list) -> None:
             return f"the first repository's step reported: {note!r}"
         return ""
 
+    if not gate:
+        app.wait_until(lambda s: s.get("repoPath", "").rstrip("/").endswith("other"),
+                       "the other repository open while the step runs")
     os.remove(hold)
     deadline = time.monotonic() + 30
     while git("diff", "--name-only", "--diff-filter=U", cwd=work) != "a.txt":
@@ -248,13 +253,13 @@ def test(binary: str, scratch: str, apps: list) -> None:
                           "on its conflict")
         time.sleep(0.2)
     time.sleep(2)       # the step's outcome, had it been sent, is in
-    if not any(t.startswith("Opening") for t in app.state()["windows"]):
-        raise Failure(f"the other repository's open wasn't held: {app.state()['windows']}")
-    problem = step_reported_here()
-    if problem:
-        raise Failure(f"while the other repository was opening, {problem}")
-
-    gate.release()
+    if gate:
+        if not any(t.startswith("Opening") for t in app.state()["windows"]):
+            raise Failure(f"the other repository's open wasn't held: {app.state()['windows']}")
+        problem = step_reported_here()
+        if problem:
+            raise Failure(f"while the other repository was opening, {problem}")
+        gate.release()
     app.wait_until(lambda s: s.get("repoPath", "").rstrip("/").endswith("other")
                    and s.get("repoState") == "merge",
                    "the other repository open")

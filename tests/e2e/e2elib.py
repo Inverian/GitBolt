@@ -5,30 +5,39 @@ Each test launches the real app binary with the test bridge enabled
 through `dump-state` — never by scraping widgets. Isolation, so a
 test run can coexist with a real GitBolt session and with other tests:
 
-- GITBOLT_TEST_BRIDGE: unique socket name per App instance.
+- GITBOLT_TEST_BRIDGE: unique socket name per App instance (on
+  Windows the named pipe \\\\.\\pipe\\<name>).
 - GITBOLT_INSTANCE_NAME: unique namespace for the single-instance
   lock + forwarding socket, so a test launch can never forward its
   repo into a session the user has open.
-- TMPDIR + XDG_RUNTIME_DIR: a private runtime dir per App. Everything
-  the app creates at runtime lands in it — the instance lock and
-  socket (QDir::tempPath() on macOS, $XDG_RUNTIME_DIR on Linux), the
-  bridge socket, the log — and kill() removes it, so even a SIGKILLed
-  app leaves nothing behind.
+- TMPDIR + XDG_RUNTIME_DIR (+ TMP and TEMP on Windows): a private
+  runtime dir per App. Everything the app creates at runtime lands in
+  it — the instance lock and socket (QDir::tempPath() on macOS and
+  Windows, $XDG_RUNTIME_DIR on Linux), the bridge socket, the update
+  folder, the log — and kill() removes it, so even a SIGKILLed app
+  leaves nothing behind.
 - XDG_CONFIG_HOME: a private dir unless the test passes config_home,
   so GitBolt.ini reads/writes never touch the user's real settings —
-  one per App even where Apps share a runtime dir (see App).
+  one per App even where Apps share a runtime dir (see App). On
+  Windows main() honours it for instance-named sessions.
 - HOME: a private dir too, the same way. ~/.gitbolt (the crash log,
   which a crashing test would otherwise truncate and the user's next
   launch would report as theirs), ~/.gitconfig (read by the app's git
   and libgit2, written by Settings' Git Config page) and
   QDir::homePath() all hang off it. The harness's own git() keeps the
   test's HOME: make_repo sets the identity the app's commits need.
+  On Windows HOME moves git's config only: QDir::homePath() is the
+  profile folder whatever HOME says, so the tests that need ~/.gitbolt
+  or $HOME moved skip there.
+- XDG_STATE_HOME: a private dir, for the app's log on Linux (macOS
+  keeps it under HOME, Windows in the real %LOCALAPPDATA%): an
+  exported one would reach the developer's.
 - QT_QPA_PLATFORM=offscreen: no focus stealing, same behavior on
   headless CI. An exported QT_QPA_PLATFORM wins for the apps a test
   drives, so a developer can watch them; never for a second launch,
-  which may end in a modal nobody would dismiss. (QLocalServer named
-  sockets are unix-domain sockets, which is why these tests are gated
-  off on Windows.)
+  which may end in a modal nobody would dismiss.
+- QT_FORCE_STDERR_LOGGING=1 on Windows: GitBolt is a GUI-subsystem app,
+  whose messages would otherwise go to OutputDebugString, not the log.
 - GITBOLT_TELEMETRY=0: usage statistics off, on top of
   the app's own rule that a bridge or instance-named session never
   sends (src/telemetry/TelemetryGate.h; test_telemetry_inert checks
@@ -40,9 +49,11 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -50,12 +61,129 @@ import threading
 import time
 import uuid
 
+WINDOWS = os.name == "nt"
+
+# A hook's own pid, as sh writes it: MSYS sh's $$ is no Windows pid.
+SH_PID = "$(cat /proc/$$/winpid)" if WINDOWS else "$$"
+
+
+def scratch_root() -> str | None:
+    """Where make_runtime_dir() and run() make their dirs: the default,
+    but on Windows its long form (the runner's %TEMP% is 8.3, Qt reports
+    long paths, and a '~' must never reach sh)."""
+    return os.path.realpath(tempfile.gettempdir()) if WINDOWS else None
+
 
 def make_runtime_dir() -> str:
     """A private (0700) dir to serve as an app's TMPDIR and
     XDG_RUNTIME_DIR. Short prefix: the unix sockets inside it must fit
     sun_path (104 bytes on macOS)."""
-    return tempfile.mkdtemp(prefix="gb-")
+    return tempfile.mkdtemp(prefix="gb-", dir=scratch_root())
+
+
+def remove_tree(path: str) -> None:
+    """shutil.rmtree, errors ignored. git's object files are read-only,
+    which Windows won't delete: those are made writable first."""
+    def writable_again(func, failed: str, _info) -> None:
+        try:
+            os.chmod(failed, stat.S_IWRITE)
+            func(failed)
+        except OSError:
+            pass
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_again)
+    else:
+        shutil.rmtree(path, onerror=writable_again)
+
+
+def pid_alive(pid: int) -> bool:
+    """Whether process `pid` still runs. Never os.kill(pid, 0) on
+    Windows: signal 0 is CTRL_C_EVENT there."""
+    if WINDOWS:
+        import _winapi
+        try:
+            handle = _winapi.OpenProcess(_winapi.SYNCHRONIZE, False, pid)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        try:
+            return _winapi.WaitForSingleObject(handle, 0) == _winapi.WAIT_TIMEOUT
+        finally:
+            _winapi.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def kill_pid(pid: int) -> None:
+    """SIGKILL, or TerminateProcess on Windows; a process already gone
+    is fine."""
+    try:
+        os.kill(pid, signal.SIGTERM if WINDOWS else signal.SIGKILL)
+    except OSError:
+        pass
+
+
+def _nt_process(pid: int, call: str) -> None:
+    """ntdll's NtSuspendProcess or NtResumeProcess on `pid`."""
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    nt_call = getattr(ctypes.WinDLL("ntdll"), call)
+    nt_call.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(0x0800, False, pid)   # PROCESS_SUSPEND_RESUME
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        status = nt_call(handle)
+        if status:
+            raise OSError(f"{call}({pid}): NTSTATUS {status & 0xFFFFFFFF:#x}")
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def suspend(pid: int) -> None:
+    """Stop every thread of `pid` (SIGSTOP), as a busy GUI thread would
+    be: alive, but answering nothing."""
+    if WINDOWS:
+        _nt_process(pid, "NtSuspendProcess")
+    else:
+        os.kill(pid, signal.SIGSTOP)
+
+
+def resume(pid: int) -> None:
+    """Undo suspend() (SIGCONT)."""
+    if WINDOWS:
+        _nt_process(pid, "NtResumeProcess")
+    else:
+        os.kill(pid, signal.SIGCONT)
+
+
+def write_script(path: str, text: str) -> None:
+    """An executable sh script (a hook, a stub) with \\n line ends: Git
+    for Windows runs hooks through its sh, which CRLF breaks."""
+    with open(path, "w", newline="\n") as fh:
+        fh.write(text)
+    os.chmod(path, 0o755)
+
+
+def sh_quote(path: str) -> str:
+    """`path` quoted for sh. Forward slashes on Windows, which MSYS sh
+    takes in a C:/... path as it does on the command line."""
+    return shlex.quote(path.replace("\\", "/") if WINDOWS else path)
+
+
+def bridge_text(text: str) -> str:
+    """`text` for the bridge's `type`, which decodes \\n, \\t and \\\\: a
+    Windows path's backslashes go doubled."""
+    return text.replace("\\", "\\\\")
 
 
 def app_env(runtime_dir: str, instance_name: str,
@@ -74,8 +202,13 @@ def app_env(runtime_dir: str, instance_name: str,
                               or os.path.join(runtime_dir, "config"))
     env["HOME"] = home or os.path.join(runtime_dir, "home")
     os.makedirs(env["HOME"], exist_ok=True)
+    env["XDG_STATE_HOME"] = os.path.join(runtime_dir, "state")
     env.setdefault("QT_QPA_PLATFORM", "offscreen")
     env["GITBOLT_TELEMETRY"] = "0"
+    if WINDOWS:
+        # QDir::tempPath() reads TMP, then TEMP.
+        env["TMP"] = env["TEMP"] = runtime_dir
+        env["QT_FORCE_STDERR_LOGGING"] = "1"
     return env
 
 
@@ -129,10 +262,15 @@ class SilentServer:
         conn, _ = self.sock.accept()
         self.conn = conn
         self.connected.set()
-        with conn:
-            while conn.recv(4096):      # git's request, never answered
-                pass
-        self.closed.set()
+        # A git killed on Windows resets the connection, not closes it.
+        try:
+            with conn:
+                while conn.recv(4096):      # git's request, never answered
+                    pass
+        except OSError:
+            pass
+        finally:
+            self.closed.set()
 
     def hang_up(self) -> None:
         """Drop the connection unanswered: git's fetch then fails."""
@@ -153,6 +291,8 @@ class OpenGate:
     """
 
     def __init__(self, repo: str, scratch: str) -> None:
+        if WINDOWS:
+            raise Failure("OpenGate needs a FIFO, which Windows has not")
         self.fifo = os.path.join(scratch, f"gate-{uuid.uuid4().hex[:8]}.fifo")
         os.mkfifo(self.fifo)
         git("config", "include.path", self.fifo, cwd=repo)
@@ -202,8 +342,14 @@ class AuthServer:
         """The askpass processes asking for a user name for this server:
         git passes its question as the argument, and it names the server
         ("Username for 'http://127.0.0.1:<port>': ")."""
-        out = subprocess.run(["ps", "-A", "-o", "pid=,args="],
-                             capture_output=True, text=True).stdout
+        if WINDOWS:
+            listing = ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                       "Get-CimInstance Win32_Process | ForEach-Object "
+                       "{ '{0} {1}' -f $_.ProcessId, $_.CommandLine }"]
+        else:
+            listing = ["ps", "-A", "-o", "pid=,args="]
+        out = subprocess.run(listing, capture_output=True, text=True,
+                             errors="replace").stdout
         question = f"Username for '{self.origin}'"
         return [line.strip() for line in out.splitlines()
                 if question in line]
@@ -215,9 +361,72 @@ class AuthServer:
         self.httpd.server_close()
         for line in self.askpass_children():
             try:
-                os.kill(int(line.split()[0]), signal.SIGKILL)
-            except (OSError, ValueError):
+                kill_pid(int(line.split()[0]))
+            except ValueError:
                 pass
+
+
+def _pipe_exchange(name: str, payload: bytes, replies: int,
+                   timeout: float) -> bytes:
+    """App._exchange over the Windows named pipe `name`, overlapped so
+    that the write has a deadline too: Qt's pipes have no buffer, so a
+    write waits until the app's event loop takes the connection."""
+    import _winapi
+    deadline = time.monotonic() + timeout
+
+    def ms_left() -> int:
+        left = int((deadline - time.monotonic()) * 1000)
+        if left <= 0:
+            raise TimeoutError(f"the bridge {name} didn't answer within {timeout} s")
+        return left
+
+    while True:
+        try:
+            handle = _winapi.CreateFile(
+                name, _winapi.GENERIC_READ | _winapi.GENERIC_WRITE, 0,
+                _winapi.NULL, _winapi.OPEN_EXISTING,
+                _winapi.FILE_FLAG_OVERLAPPED, _winapi.NULL)
+            break
+        except OSError as error:    # no pipe yet: FileNotFoundError
+            if error.winerror != _winapi.ERROR_PIPE_BUSY:
+                raise
+        try:
+            _winapi.WaitNamedPipe(name, ms_left())
+        except OSError as error:
+            if error.winerror != _winapi.ERROR_SEM_TIMEOUT:
+                raise
+
+    def finish(ov, err: int) -> None:
+        if err == _winapi.ERROR_IO_PENDING:
+            try:
+                waited = _winapi.WaitForSingleObject(ov.event, ms_left())
+            except TimeoutError:
+                waited = _winapi.WAIT_TIMEOUT
+            if waited != _winapi.WAIT_OBJECT_0:
+                ov.cancel()
+                try:
+                    ov.GetOverlappedResult(True)
+                except OSError:
+                    pass
+                raise TimeoutError(f"the bridge {name} didn't answer within {timeout} s")
+        ov.GetOverlappedResult(True)
+
+    buf = b""
+    try:
+        finish(*_winapi.WriteFile(handle, payload, overlapped=True))
+        while buf.count(b"\n") < replies:
+            try:
+                ov, err = _winapi.ReadFile(handle, 65536, overlapped=True)
+                finish(ov, err)
+            except BrokenPipeError:     # the bridge hung up
+                break
+            chunk = ov.getbuffer()
+            if not chunk:
+                break
+            buf += chunk
+    finally:
+        _winapi.CloseHandle(handle)
+    return buf
 
 
 class App:
@@ -314,18 +523,27 @@ class App:
 
     # ---- bridge protocol -------------------------------------------------
 
-    def cmd(self, line: str, timeout: float = 10.0) -> dict:
+    def _exchange(self, payload: bytes, replies: int, timeout: float) -> bytes:
+        """Send `payload` to the bridge, and read until `replies` lines
+        are in or it hangs up. A timeout raises TimeoutError, an OSError."""
+        if WINDOWS:
+            return _pipe_exchange("\\\\.\\pipe\\" + self.bridge_name, payload,
+                                  replies, timeout)
         path = os.path.join(self.runtime_dir, self.bridge_name)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(timeout)
             sock.connect(path)
-            sock.sendall(line.encode() + b"\n")
+            sock.sendall(payload)
             buf = b""
-            while not buf.endswith(b"\n"):
+            while buf.count(b"\n") < replies:
                 chunk = sock.recv(65536)
                 if not chunk:
                     break
                 buf += chunk
+        return buf
+
+    def cmd(self, line: str, timeout: float = 10.0) -> dict:
+        buf = self._exchange(line.encode() + b"\n", 1, timeout)
         return json.loads(buf.decode())
 
     def wait_bridge(self, timeout: float = 20.0) -> None:
@@ -421,17 +639,8 @@ class App:
         so the actions they trigger are queued back to back: all of
         them run before anything the first one sets off on a worker
         (that worker's finished signal, say) can get in between."""
-        path = os.path.join(self.runtime_dir, self.bridge_name)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(timeout)
-            sock.connect(path)
-            sock.sendall("".join(line + "\n" for line in lines).encode())
-            buf = b""
-            while buf.count(b"\n") < len(lines):
-                chunk = sock.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
+        buf = self._exchange("".join(line + "\n" for line in lines).encode(),
+                             len(lines), timeout)
         replies = [json.loads(r) for r in buf.decode().splitlines()]
         if len(replies) != len(lines):
             raise Failure(f"{lines} -> {len(replies)} replies: {replies}")
@@ -467,14 +676,18 @@ class App:
         if not self._log.closed:
             self._log.close()
         if self._owns_runtime_dir:
-            shutil.rmtree(self.runtime_dir, ignore_errors=True)
+            remove_tree(self.runtime_dir)
 
-    def tail(self, lines: int = 15) -> str:
+    def log_text(self) -> str:
+        """Everything the app printed so far (its stdout and stderr)."""
         if not self._log.closed:
             self._log.flush()
+        with open(self.log_path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+
+    def tail(self, lines: int = 15) -> str:
         try:
-            with open(self.log_path) as fh:
-                return "\n" + "".join(fh.readlines()[-lines:])
+            return "\n" + "".join(self.log_text().splitlines(True)[-lines:])
         except OSError:
             return "(no log)"
 
@@ -554,7 +767,7 @@ def run(test_fn) -> None:
     if not os.access(binary, os.X_OK):
         print(f"FAIL: not executable: {binary}")
         sys.exit(1)
-    scratch = tempfile.mkdtemp(prefix="gb-e2e-")
+    scratch = tempfile.mkdtemp(prefix="gb-e2e-", dir=scratch_root())
     apps: list[App] = []
     passed = False
     try:
@@ -569,7 +782,7 @@ def run(test_fn) -> None:
                 print(f"--- {app.label} log:{app.tail()}")
         for app in apps:
             app.kill()
-        shutil.rmtree(scratch, ignore_errors=True)
+        remove_tree(scratch)
     if passed:
         print("PASS")
     sys.exit(0 if passed else 1)

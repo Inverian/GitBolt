@@ -16,24 +16,15 @@ exists, so the step runs for as long as the test likes.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import SH_PID, App, Failure, git, make_repo, pid_alive, run, sh_quote
 
 
 def buttons(app: App) -> dict[str, bool]:
     """Visible buttons: text -> enabled."""
     return {b["text"]: b["enabled"] for b in app.cmd("list-widgets")["buttons"]}
-
-
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
 
 
 def test(binary: str, scratch: str, apps: list) -> None:
@@ -47,8 +38,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
     # which waits while `hold` exists (a minute at most).
     hold = os.path.join(scratch, "hold")
     pid_file = os.path.join(scratch, "exec.pid")
-    waiter = (f"echo $$ > {shlex.quote(pid_file)}; n=0; "
-              f"while [ -f {shlex.quote(hold)} ] && [ $n -lt 600 ]; do "
+    waiter = (f"echo {SH_PID} > {sh_quote(pid_file)}; n=0; "
+              f"while [ -f {sh_quote(hold)} ] && [ $n -lt 600 ]; do "
               "sleep 0.1; n=$((n + 1)); done")
     if subprocess.run(["git", "rebase", "--exec", "false", "--exec", waiter,
                        "HEAD~1"], cwd=work, capture_output=True).returncode == 0:
@@ -71,7 +62,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
         time.sleep(0.1)
     with open(pid_file) as fh:
         pid = int(fh.read().strip() or 0)
-    if pid <= 0 or not alive(pid):
+    if pid <= 0 or not pid_alive(pid):
         raise Failure("the exec that waits isn't running")
 
     start = time.monotonic()
@@ -85,7 +76,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
                       "a rebase step")
     print(f"quit took {time.monotonic() - start:.1f} s")
     deadline = time.monotonic() + 3
-    while alive(pid):
+    while pid_alive(pid):
         if time.monotonic() > deadline:
             raise Failure("the rebase's exec ran on after GitBolt quit")
         time.sleep(0.1)

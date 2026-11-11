@@ -109,8 +109,12 @@ if(NOT WIN32)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestFlattenLibraryLinks.cmake)
 endif()
 
-# util/ tests — AsyncRunner's threading guarantees (no repository needed)
+# util/ tests — AsyncRunner's threading guarantees (no repository needed),
+# and a worker's exception reaching the sink (util/WorkerExceptions.h)
 gitbolt_add_test(test_async_runner util/TestAsyncRunner.cpp)
+# The log file (util/LogFile.h): rotation, lines intact across threads,
+# the message handler that forwards, a rename another process blocks.
+gitbolt_add_test(test_log_file util/TestLogFile.cpp)
 # The login shell's PATH for git's children (util/LoginPath.h): a
 # Dock-launched GitBolt had launchd's, and a hook that needs node failed.
 gitbolt_add_test(test_login_path util/TestLoginPath.cpp)
@@ -135,14 +139,20 @@ gitbolt_add_test(test_telemetry telemetry/TestTelemetry.cpp)
 target_sources(test_telemetry PRIVATE telemetry/HttpStub.h telemetry/CrashHeader.h)
 target_link_libraries(test_telemetry PRIVATE gitbolt_telemetry Qt6::Network)
 # Crash reports: fixtures for every refusal, the renderHeader round
-# trip, and (POSIX) death tests that parse the crash.log a real
-# handler wrote. Their helper is built as "gitbolt", in a directory of
-# its own, so the parser counts its frames as the app's.
+# trip, and death tests that parse the crash.log a real handler wrote.
+# Their helper is built as "gitbolt", in a directory of its own, so the
+# parser counts its frames as the app's. MSVC: linked with /DEBUG, so
+# the test and the helper have the PDB id the Build ID line reads, and
+# dbghelp to check it independently.
 gitbolt_add_test(test_crash_log_parser telemetry/TestCrashLogParser.cpp)
 target_sources(test_crash_log_parser PRIVATE telemetry/CrashHeader.h)
 target_link_libraries(test_crash_log_parser PRIVATE gitbolt_telemetry)
 target_compile_definitions(test_crash_log_parser PRIVATE
     GITBOLT_CRASH_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/crash")
+if(MSVC)
+    target_link_options(test_crash_log_parser PRIVATE /DEBUG)
+    target_link_libraries(test_crash_log_parser PRIVATE dbghelp)
+endif()
 
 # update/ — the installer side of in-app updates. What kind of install
 # the running copy is and whether the updater may replace it, from
@@ -152,8 +162,8 @@ target_sources(test_update_package PRIVATE update/FakeApps.h)
 target_link_libraries(test_update_package PRIVATE gitbolt_update)
 # The helpers that finish an update once GitBolt has quit, run for real
 # on scratch folders with HOME a scratch folder too: macOS's (on macOS)
-# and the AppImage's under /bin/sh and dash, the deb's with a stand-in
-# pkexec; Windows' two PowerShell parts as text (quoting, /D= last, the
+# and the deb's (with a stand-in pkexec) under /bin/sh and dash; Windows'
+# two PowerShell parts as text (quoting, /D= last, the
 # -EncodedCommand round trip and ShellExecuteExW's parameters, the
 # administrator part that waits for the install folder to be free and
 # writes the result last, the helper that waits for it and starts GitBolt
@@ -164,27 +174,39 @@ target_link_libraries(test_update_package PRIVATE gitbolt_update)
 gitbolt_add_test(test_update_helpers update/TestInstallHelpers.cpp)
 target_sources(test_update_helpers PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_helpers PRIVATE gitbolt_update)
+# What the real installer must carry (GitBoltMinimumWindows).
+target_compile_definitions(test_update_helpers PRIVATE
+    GITBOLT_WINDOWS_MINIMUM="${GITBOLT_WINDOWS_MINIMUM}")
 # Installer::prepare for each package, and whole updates through a real
-# detached helper: an AppImage on any Unix; on macOS real disk images,
-# made here with hdiutil from fake ad-hoc-signed bundles, including a
-# wrong bundle id, a wrong version and a broken seal. About a minute on
-# macOS (each hdiutil create takes seconds), hence the longer TIMEOUT.
+# detached helper: a deb (stand-in pkexec and apt-get) on any Unix; on
+# macOS real disk images, made here with hdiutil from fake ad-hoc-signed
+# bundles, including a wrong bundle id, a wrong version and a broken
+# seal. About a minute on macOS (each hdiutil create takes seconds),
+# hence the longer TIMEOUT. On Windows the test exe carries a
+# GitBoltMinimumWindows above any Windows, as an installer for a newer
+# one would.
 gitbolt_add_test(test_update_installer update/TestInstaller.cpp)
 target_sources(test_update_installer PRIVATE update/FakeApps.h TestProcessHelper.h)
 target_link_libraries(test_update_installer PRIVATE gitbolt_update)
-set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
-if(NOT WIN32)
-    add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
-    # dladdr, as for gitbolt_util: in libdl before glibc 2.34
-    target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
-    set_target_properties(gitbolt_crash_helper PROPERTIES
-        OUTPUT_NAME gitbolt
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
-    gitbolt_set_warnings(gitbolt_crash_helper)
-    add_dependencies(test_crash_log_parser gitbolt_crash_helper)
-    target_compile_definitions(test_crash_log_parser PRIVATE
-        GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
+if(WIN32)
+    target_sources(test_update_installer PRIVATE update/NeedsNewerWindows.rc)
 endif()
+set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
+add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
+# dladdr, as for gitbolt_util: in libdl before glibc 2.34 (empty on Windows)
+target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
+set_target_properties(gitbolt_crash_helper PROPERTIES
+    OUTPUT_NAME gitbolt
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/crash-helper")
+# /INCREMENTAL:NO: in a Debug build a function's address would be its
+# incremental-link thunk, not the code the crash frames point into.
+if(MSVC)
+    target_link_options(gitbolt_crash_helper PRIVATE /DEBUG /INCREMENTAL:NO)
+endif()
+gitbolt_set_warnings(gitbolt_crash_helper)
+add_dependencies(test_crash_log_parser gitbolt_crash_helper)
+target_compile_definitions(test_crash_log_parser PRIVATE
+    GITBOLT_CRASH_HELPER="$<TARGET_FILE:gitbolt_crash_helper>")
 
 # update/ — the in-app updater's rules, no network: Version, the feed's
 # and the downloads' URL allowlists, the daily schedule, the
@@ -299,6 +321,11 @@ set_property(TEST test_update_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATF
 gitbolt_add_test(test_commit_dialog dialogs/TestCommitDialog.cpp)
 target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs)
 set_property(TEST test_commit_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Commands › Cherry pick and Revert commit's dialog: each mode's texts,
+# OK only with a preview, a merge's parent chooser for a revert. Off screen.
+gitbolt_add_test(test_cherry_pick_dialog dialogs/TestCherryPickDialog.cpp)
+target_link_libraries(test_cherry_pick_dialog PRIVATE gitbolt_dialogs)
+set_property(TEST test_cherry_pick_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # Help › About's minimum size versus its wrapped text, on a short
 # off-screen screen (fixtures/short-screen.json). The config file is
@@ -315,9 +342,12 @@ set_property(TEST test_about_dialog APPEND PROPERTY ENVIRONMENT
     "QT_QPA_PLATFORM=offscreen:configfile=short-screen.json")
 
 # ui/ — the Settings switch reaching usage statistics through a real
-# MainWindow's own SettingsService, against the loopback HttpStub.
+# MainWindow's own SettingsService, against the loopback HttpStub; and
+# in-app updates' outcomes, dialog buttons and (macOS) application menu
+# reaching the same service, with a loopback feed (update/HttpServer.h);
+# right-click menus' entries, in a repository opened in the window.
 gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
-target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h)
+target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h update/HttpServer.h ui/AppMenuWatcher.h)
 target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)
 set_property(TEST test_telemetry_switch APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # In-app updates' gate (ui/UpdateSetup.h) as a table: a test session
@@ -329,11 +359,14 @@ target_link_libraries(test_update_setup PRIVATE gitbolt_ui)
 # the loopback stub (update/HttpServer.h): the dialog for a manual check,
 # the notice bar for the daily one, Skip and dismiss, the schedule, and
 # installs stopped (Cancel, closing, a bad or abandoned download) with
-# nothing left behind; Help › Check for Updates through a real
-# MainWindow. Off screen; on macOS a disk image hdiutil refuses, and
-# one made here (update/FakeApps.h) for a newer macOS, take a moment.
+# nothing left behind, each attempt's outcome and the pending-install
+# marker for usage statistics; Help › Check for Updates through a real
+# MainWindow. A deb with stand-in apt-get and pkexec on Unix. Off screen;
+# on macOS a disk image hdiutil refuses, and one made here
+# (update/FakeApps.h) for a newer macOS, take a moment.
 gitbolt_add_test(test_update_controller ui/TestUpdateController.cpp)
-target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h)
+target_sources(test_update_controller PRIVATE update/HttpServer.h update/FakeApps.h TestProcessHelper.h
+    ui/AppMenuWatcher.h)
 target_link_libraries(test_update_controller PRIVATE gitbolt_ui gitbolt_update Qt6::Network)
 set_property(TEST test_update_controller APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # File > Recent Repositories following the recent list, and the
@@ -413,9 +446,10 @@ target_compile_definitions(test_changelog PRIVATE
     GITBOLT_VERSION="${PROJECT_VERSION}"
     GITBOLT_CHANGELOG_PATH="${PROJECT_SOURCE_DIR}/CHANGELOG.md")
 # The single-instance guard: lock, hand-off and listener, on every
-# platform. The e2e tests that launch the app twice are Unix-only, and
-# only this reaches Windows' named pipes. InstanceHelper is either end
-# of a hand-off in a process of its own, with no window or settings.
+# platform. The e2e tests launch the app twice everywhere too; this
+# drives busy owners and hang-ups deterministically. InstanceHelper is
+# either end of a hand-off in a process of its own, with no window or
+# settings.
 gitbolt_add_test(test_single_instance app/TestSingleInstance.cpp)
 target_link_libraries(test_single_instance PRIVATE gitbolt_instance)
 add_executable(gitbolt_instance_helper app/InstanceHelper.cpp)
@@ -472,6 +506,16 @@ if(NOT WIN32 AND Python3_FOUND)
     add_test(NAME ci_pins
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/ci/test_ci_pins.py ${PROJECT_SOURCE_DIR})
+endif()
+
+# tools/symbolize.py: reports and GlitchTip events parsed, build IDs read
+# from synthetic Mach-O, ELF and PE headers, and a round trip through
+# the crash helper's real crash.log (skipped where no symbolizer is).
+if(NOT WIN32 AND Python3_FOUND)
+    add_test(NAME symbolize_tool
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_symbolize.py ${PROJECT_SOURCE_DIR}
+                $<TARGET_FILE:gitbolt_crash_helper>)
 endif()
 
 # e2e/ tests — the real app binary driven through the test bridge.

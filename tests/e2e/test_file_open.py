@@ -19,7 +19,8 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from e2elib import App, Failure, git, make_repo, on_screen, run  # noqa: E402
+from e2elib import (WINDOWS, App, Failure, git, make_repo, on_screen,  # noqa: E402
+                    run)
 
 OPEN_FAILED = "dlg.openFailed"
 
@@ -90,17 +91,24 @@ def test(binary: str, scratch: str, apps: list) -> None:
 
     # 3) $HOME as a dotfiles repository: not the repository of a folder
     #    below it, but itself when asked for.
-    home = app.env["HOME"]
-    git("init", "-q", "-b", "main", cwd=home)
-    below = os.path.join(home, "projects", "plain")
-    os.makedirs(below)
-    app.ok(f"file-open {below}")
-    refused(app, below, repo_b, "a folder below a repository at $HOME")
-    app.ok(f"file-open {home}/")
-    state = app.wait_until(lambda s: same_dir(s.get("repoPath", ""), home),
-                           "$HOME itself")
-    if not any(t.startswith(os.path.basename(home)) for t in state["windows"]):
-        raise Failure(f"$HOME open, but the title isn't its: {state['windows']}")
+    if WINDOWS:
+        print("3) skipped on Windows: the ceiling is QDir::homePath(), the "
+              "real profile folder whatever HOME says")
+        # Something else open, so that 4) is a switch there too.
+        app.ok(f"file-open {repo_d}")
+        opened(app, repo_d, "repo-d in place of $HOME")
+    else:
+        home = app.env["HOME"]
+        git("init", "-q", "-b", "main", cwd=home)
+        below = os.path.join(home, "projects", "plain")
+        os.makedirs(below)
+        app.ok(f"file-open {below}")
+        refused(app, below, repo_b, "a folder below a repository at $HOME")
+        app.ok(f"file-open {home}/")
+        state = app.wait_until(lambda s: same_dir(s.get("repoPath", ""), home),
+                               "$HOME itself")
+        if not any(t.startswith(os.path.basename(home)) for t in state["windows"]):
+            raise Failure(f"$HOME open, but the title isn't its: {state['windows']}")
 
     # 4) A file: the repository it is in.
     app.ok(f"file-open {os.path.join(repo_b, 'a.txt')}")

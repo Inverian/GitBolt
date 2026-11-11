@@ -19,11 +19,11 @@ conflicts it never had.
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import (SH_PID, App, Failure, git, make_repo, pid_alive, run,
+                    sh_quote, write_script)
 
 
 def commit(work: str, name: str, msg: str) -> None:
@@ -68,14 +68,6 @@ def hook_pid(pid_file: str, timeout: float = 20) -> int:
     raise Failure("the merge's post-merge hook never ran")
 
 
-def alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
 def test(binary: str, scratch: str, apps: list) -> None:
     work = make_repo(os.path.join(scratch, "work"))
     # A post-merge hook that notes its pid and waits while `hold`
@@ -85,14 +77,12 @@ def test(binary: str, scratch: str, apps: list) -> None:
     pid_file = os.path.join(scratch, "hook.pid")
     hooks = os.path.join(scratch, "hooks")
     os.makedirs(hooks)
-    hook = os.path.join(hooks, "post-merge")
-    with open(hook, "w") as fh:
-        fh.write("#!/bin/sh\n"
-                 f"echo $$ > {shlex.quote(pid_file)}\n"
+    write_script(os.path.join(hooks, "post-merge"),
+                 "#!/bin/sh\n"
+                 f"echo {SH_PID} > {sh_quote(pid_file)}\n"
                  "n=0\n"
-                 f"while [ -f {shlex.quote(hold)} ] && [ $n -lt 600 ]; do\n"
+                 f"while [ -f {sh_quote(hold)} ] && [ $n -lt 600 ]; do\n"
                  "    sleep 0.1; n=$((n + 1))\ndone\n")
-    os.chmod(hook, 0o755)
     git("config", "core.hooksPath", hooks, cwd=work)
     git("checkout", "-q", "-b", "topic", cwd=work)
     commit(work, "t.txt", "topic")
@@ -152,7 +142,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
         raise Failure(f"GitBolt exited with {rc} after quitting during "
                       "a merge")
     deadline = time.monotonic() + 3
-    while alive(pid):
+    while pid_alive(pid):
         if time.monotonic() > deadline:
             raise Failure("the merge's hook ran on after GitBolt quit")
         time.sleep(0.1)

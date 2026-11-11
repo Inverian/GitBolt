@@ -1,8 +1,126 @@
 # Changelog
 
 All notable changes to GitBolt are documented here. The format loosely
-follows [Keep a Changelog](https://keepachangelog.com); versions follow
-semver once 1.0 lands.
+follows [Keep a Changelog](https://keepachangelog.com). From 1.0.0 on,
+versions follow [Semantic Versioning](https://semver.org): a 1.0.x
+release only fixes bugs, and a 1.x.0 release can also add features or
+need a newer version of macOS, Windows or Ubuntu.
+
+## [Unreleased]
+
+### Added
+
+- **Revert a commit**: Commands › Revert commit... (after Cherry
+  pick...), or Revert This Commit... on a commit's right-click menu in
+  the history. GitBolt stages the changes that undo the commit, with
+  git's message, and doesn't commit them: the bar that says a revert is
+  in progress has Commit…, which finishes it with that message, and
+  Abort, which goes back. A conflict offers the conflict resolver. For
+  a merge commit the dialog asks which parent to revert against (the
+  first by default), as `git revert -m` does.
+- **The history has a right-click menu**: Revert This Commit... and
+  Cherry-Pick This Commit... open those dialogs for the commit you
+  clicked. Commands › Cherry pick... and Revert commit... now start
+  with the commit selected in the history.
+- **A log file**, kept on your computer and never sent: a line each
+  time GitBolt starts, then the warnings and other messages it prints
+  while it runs, which can help with a bug report. It is
+  `~/Library/Logs/GitBolt/GitBolt.log` on macOS,
+  `%LOCALAPPDATA%\GitBolt\logs\GitBolt.log` on Windows and
+  `~/.local/state/GitBolt/GitBolt.log` on Linux, at most three files of
+  about 1 MB each. It can contain file and folder paths; PRIVACY.md
+  says more.
+- **Symbol files**: each release also has a
+  `GitBolt-<version>-<platform>-symbols.zip` for each platform, which
+  the maintainers use to read crash reports. You don't need them to
+  install or run GitBolt. Crash reports now name the build that
+  crashed, so each is read with the right file.
+- Development: the end-to-end tests run on Windows too, reaching the
+  test bridge over a named pipe; docs/AGENT_TESTING.md lists what skips
+  there. CI's manual runs take an `os` input (one build leg) and a
+  `tests` input (a ctest -R regex), and on every platform CI has the
+  latest published release update itself to the build through its own
+  Install and Restart.
+- Development: `tools/symbolize.py` reads a crash report, or a
+  GlitchTip event, with a release's symbol files. The CMake option
+  `GITBOLT_RELEASE_SYMBOLS` (CI sets it) adds line tables to Release
+  builds, and the `gitbolt_symbols` target zips them. The environment
+  variable `GITBOLT_MACOS_SIGN_IDENTITY` (a keychain identity's SHA-1)
+  signs a macOS bundle with that identity when `cpack` or
+  `cmake --install` runs; without it the bundle is signed ad hoc.
+
+### Changed
+
+- **Supported platforms**: Windows 11, macOS 13 (Ventura) or later on
+  Apple Silicon, and Ubuntu 24.04 or later. GitBolt still installs and
+  updates on Windows 10 (version 1809 or later), but Windows 10 isn't
+  supported.
+- **First launch**: the Windows installer isn't signed yet, and the Mac
+  app isn't notarized by Apple, so the first time you open a download,
+  your system asks you to confirm it. On macOS: System Settings ›
+  Privacy & Security › Open Anyway. On Windows: More info › Run anyway
+  in SmartScreen's message. While Windows 11's Smart App Control is on,
+  it blocks GitBolt, and it can't make an exception for one app. The
+  README's Download section has the steps, and how to update and
+  uninstall GitBolt.
+- **macOS: GitBolt is signed with its own certificate**, GitBolt Code
+  Signing, instead of ad hoc. When GitBolt updates, macOS now keeps the
+  access to folders such as Documents that you gave it. The update from
+  0.9.12 to this version may ask for that access once more. The app
+  still isn't notarized by Apple, so a download's first launch still
+  needs Open Anyway.
+- **In-app updates check the system first**, before GitBolt quits.
+  Windows: a release that needs a newer Windows than this PC has isn't
+  installed, and the update window says so. Ubuntu: GitBolt asks apt
+  whether it can install the new .deb, and shows apt's reason when it
+  can't (after `sudo apt update`, Try Again asks again).
+- **Usage statistics** also count right-click menu commands, each by
+  its fixed internal name (never the text it shows, which can be a
+  branch name), the buttons of the update window and of the bar that
+  says an update is out, and on macOS the GitBolt menu's About GitBolt
+  and Check for Updates…. They also say how each in-app update ended.
+  A failed update or update check, and an unexpected error in
+  background work, are reported as errors, with fixed codes and the
+  error's type only; an update check that fails because you are
+  offline is never reported. PRIVACY.md lists what each carries.
+- macOS: a second GitBolt started for a folder (by Finder, say, or with
+  `open -n`) waits for macOS to hand the folder over, at most 3 s,
+  before passing it on to the GitBolt that is open.
+
+### Removed
+
+- **The AppImage.** GitBolt for Linux is the .deb, for Ubuntu 24.04 or
+  later. To switch, download `gitbolt_1.0.0_amd64.deb` and run
+  `sudo apt install ./gitbolt_1.0.0_amd64.deb` in its folder, then
+  delete the AppImage. Your settings carry over: both keep them in
+  `~/.config/GitBolt`. The AppImage keeps working, but gets no more
+  updates: its update window says this release has no installer for
+  it, and offers the release page. On a distribution the .deb doesn't
+  install on, such as Fedora, build GitBolt from source
+  (docs/BUILDING.md); such builds don't update themselves.
+
+### Fixed
+
+- **Cherry-picking a merge commit** always failed ("mainline branch is
+  not specified"). The dialog now asks which parent to pick against,
+  the first by default, as `git cherry-pick -m` does.
+- **A cherry-pick right after a commit** made in a terminal, or with
+  GitBolt's Commit dialog, could fail with "1 uncommitted change would
+  be overwritten by merge".
+- **The cherry-pick dialog** opened while a merge, cherry-pick, revert
+  or rebase was in progress, and refused only once it was filled in;
+  now a message says why at once. It also picks the commit its preview
+  shows, even if a branch typed in moved meanwhile.
+- **macOS: switching repositories** could freeze the window for a
+  second or more now and then.
+- **Windows: crashes in background work** weren't saved or reported,
+  nor were invalid parameters passed to the C runtime. Now they are,
+  like a crash on the main thread, without an error dialog from
+  Windows. A crash report is also saved when the Windows user folder's
+  name has non-Latin letters.
+- **Ubuntu: Nautilus's Open in GitBolt** needs python3-nautilus, which
+  the .deb now recommends, so apt installs it. Restart Nautilus
+  (`nautilus -q`) after the first install.
 
 ## [0.9.12] — 2026-11-09
 

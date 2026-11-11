@@ -24,10 +24,9 @@
 from __future__ import annotations
 
 import os
-import shlex
 import time
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import App, Failure, git, make_repo, run, sh_quote, write_script
 
 
 def commit(work: str, name: str, msg: str) -> None:
@@ -80,13 +79,12 @@ def busy_gate(binary: str, scratch: str, apps: list) -> None:
     started = os.path.join(scratch, "merge-hook-started")
     hooks = os.path.join(scratch, "gate-hooks")
     os.makedirs(hooks)
-    with open(os.path.join(hooks, "post-merge"), "w") as fh:
-        fh.write("#!/bin/sh\n"
-                 f"touch {shlex.quote(started)}\n"
+    write_script(os.path.join(hooks, "post-merge"),
+                 "#!/bin/sh\n"
+                 f"touch {sh_quote(started)}\n"
                  "n=0\n"
-                 f"while [ -f {shlex.quote(hold)} ] && [ $n -lt 600 ]; do\n"
+                 f"while [ -f {sh_quote(hold)} ] && [ $n -lt 600 ]; do\n"
                  "    sleep 0.1; n=$((n + 1))\ndone\n")
-    os.chmod(os.path.join(hooks, "post-merge"), 0o755)
     git("config", "core.hooksPath", hooks, cwd=work)
     git("checkout", "-q", "-b", "topic", cwd=work)
     commit(work, "t.txt", "topic")
@@ -144,12 +142,10 @@ def outcome_after_reopen(binary: str, scratch: str, apps: list) -> None:
     hooks = os.path.join(scratch, "reopen-hooks")
     os.makedirs(hooks)
     started = os.path.join(scratch, "pre-merge-started")
-    hook = os.path.join(hooks, "pre-merge-commit")
-    with open(hook, "w") as fh:
-        fh.write("#!/bin/sh\n"
-                 f"touch {shlex.quote(started)}\n"
+    write_script(os.path.join(hooks, "pre-merge-commit"),
+                 "#!/bin/sh\n"
+                 f"touch {sh_quote(started)}\n"
                  "sleep 3\necho 'hook says no' >&2\nexit 1\n")
-    os.chmod(hook, 0o755)
     git("config", "core.hooksPath", hooks, cwd=work)
     git("checkout", "-q", "-b", "topic", cwd=work)
     commit(work, "t.txt", "topic")

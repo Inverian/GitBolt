@@ -1,8 +1,11 @@
 #include "app/OpenRequests.h"
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QFileOpenEvent>
+#include <QTimer>
 #include <QUrl>
 
 #include <utility>
@@ -50,6 +53,42 @@ void OpenRequests::submit(const QString& path)
 QString OpenRequests::takePending()
 {
     return std::exchange(pending_, QString());
+}
+
+std::optional<QString> OpenRequests::waitForLaunchFolder(const std::function<bool()>& launched, int capMs)
+{
+    // A real exec, not one processEvents(): on macOS that runs AppKit's
+    // own [NSApp run] launch, whose folder event can come after the
+    // first turn of the loop but always before didFinishLaunching.
+    const auto done = [this, &launched] { return !pending_.isEmpty() || launched(); };
+    bool timedOut = false;
+    if (!done()) {
+        QEventLoop loop;
+        QElapsedTimer clock;
+        clock.start();
+        QTimer poll;
+        poll.setInterval(10);
+        // Ends with 1: a 0 is QCoreApplication::exit(0), a quit from macOS
+        // the next exec() would forget (kept if it came in the same pass).
+        QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+            if (!loop.isRunning())
+                return;
+            if (done()) {
+                loop.exit(1);
+            } else if (clock.elapsed() >= capMs) {
+                timedOut = true;
+                loop.exit(1);
+            }
+        });
+        poll.start();
+        if (loop.exec() != 1)
+            return std::nullopt;
+    }
+    // A folder event posted just as the launch finished.
+    QCoreApplication::processEvents();
+    if (timedOut)
+        qWarning("macOS had not finished launching GitBolt after %d ms", capMs);
+    return takePending();
 }
 
 void OpenRequests::setLaunchPath(const QString& path)

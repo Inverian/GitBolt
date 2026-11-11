@@ -22,9 +22,8 @@ it was still open. Now:
 from __future__ import annotations
 
 import os
-import shlex
 
-from e2elib import App, Failure, git, make_repo, run
+from e2elib import App, Failure, git, make_repo, run, sh_quote
 
 
 def commit(work: str, name: str, content: str, msg: str) -> None:
@@ -76,7 +75,7 @@ def test(binary: str, scratch: str, apps: list) -> None:
     os.environ.pop("GIT_EDITOR", None)
     work = make_repo(os.path.join(scratch, "work"))
     marker = os.path.join(scratch, "editor-ran")
-    git("config", "core.editor", f"touch {shlex.quote(marker)}; false",
+    git("config", "core.editor", f"touch {sh_quote(marker)}; false",
         cwd=work)
 
     git("checkout", "-q", "-b", "feature", cwd=work)

@@ -44,6 +44,12 @@ struct CrashEvent {
     QString osVersion;       ///< empty when the report's didn't pass the check
     QString arch;
     QString qtVersion;       ///< the runtime version
+    /// "Build ID:", lower-case hex (16-64 digits); empty when absent
+    /// (0.9.x reports) or malformed. Names the binary the offsets are in.
+    QString buildId;
+    /// Windows "Exception:", e.g. "0xc0000005"; empty when absent or
+    /// not exactly "0x" and 8 lower-case hex digits.
+    QString exceptionCode;
     QList<CrashFrame> frames;   ///< oldest first, handler frames dropped, at most 64
     /// "crash", the signal, then "gitbolt@<release>:" and 16 hex
     /// digits of a hash over the first three GitBolt frames' offsets,
@@ -54,7 +60,12 @@ struct CrashEvent {
 };
 
 /// Reads a report written by util::CrashHandler (format and frame
-/// lines in CrashHandler.h).
+/// lines in CrashHandler.h). A Windows report with "Stack: exception"
+/// starts at the crash point and keeps every frame, except an uncaught
+/// C++ exception's leading raise frames (ntdll, KERNELBASE, the CRT);
+/// other reports, 0.9.x's Windows ones included, drop the handler's
+/// frames by the older rules. Lines after the frames ("--- Modules
+/// ---") are never read.
 class CrashLogParser {
 public:
     /// nullopt unless the header says "Format: 2", "Build: official",

@@ -148,15 +148,14 @@ QString AboutDialog::thirdPartyNoticesPath(const QString& appDir)
     const QString macos = QStringLiteral("../Resources/THIRD-PARTY-NOTICES.txt");  // GitBolt.app/Contents/MacOS
     const QString windows = QStringLiteral("../THIRD-PARTY-NOTICES.txt");          // <install>\bin
     const QString deb = QStringLiteral("../../share/doc/gitbolt/copyright");       // /usr/lib/gitbolt
-    const QString appImage = QStringLiteral("../share/doc/gitbolt/copyright");     // usr/bin
     // Every package's place, on every platform: they are GitBolt's own,
     // and so one machine's test tries them all. This platform's first.
 #if defined(Q_OS_MACOS)
-    const QStringList places = {macos, windows, deb, appImage};
+    const QStringList places = {macos, windows, deb};
 #elif defined(Q_OS_WIN)
-    const QStringList places = {windows, macos, deb, appImage};
+    const QStringList places = {windows, macos, deb};
 #else
-    const QStringList places = {deb, appImage, macos, windows};
+    const QStringList places = {deb, macos, windows};
 #endif
     const QDir dir(appDir);
     for (const QString& place : places) {

@@ -272,22 +272,22 @@ void ReflogDialog::onTableContextMenu(const QPoint& pos)
     menu.addAction(tr("Checkout %1 (detached HEAD)").arg(shortSha),
                    this, [this, sha]() {
         emit checkoutRequested(sha);
-    });
+    })->setObjectName(QStringLiteral("reflog.checkout"));
     menu.addSeparator();
     auto* resetMenu = menu.addMenu(
         tr("Reset current branch to %1").arg(shortSha));
     resetMenu->addAction(tr("Soft — keep index and working tree"),
                          this, [this, sha]() {
         emit resetRequested(sha, QStringLiteral("soft"));
-    });
+    })->setObjectName(QStringLiteral("reflog.reset-soft"));
     resetMenu->addAction(tr("Mixed — keep working tree"),
                          this, [this, sha]() {
         emit resetRequested(sha, QStringLiteral("mixed"));
-    });
+    })->setObjectName(QStringLiteral("reflog.reset-mixed"));
     resetMenu->addAction(tr("Hard — discard all local changes"),
                          this, [this, sha]() {
         emit resetRequested(sha, QStringLiteral("hard"));
-    });
+    })->setObjectName(QStringLiteral("reflog.reset-hard"));
 
     menu.exec(table_->viewport()->mapToGlobal(pos));
 }

@@ -103,8 +103,8 @@ function(gitbolt_add_bundled_libgit2)
     # No network operation goes through libgit2 (see the top), so no SSH
     # transport. HTTPS stays where it's the OS's own TLS stack, which
     # costs no dependency to build or ship. Elsewhere (Linux) it would be
-    # OpenSSL: a library linked for nothing, and one more the AppImage
-    # bundles. Without it SHA-256 uses libgit2's builtin implementation.
+    # OpenSSL: a library linked for nothing. Without it SHA-256 uses
+    # libgit2's builtin implementation.
     set(USE_SSH OFF)
     if(APPLE)
         set(USE_HTTPS SecureTransport)

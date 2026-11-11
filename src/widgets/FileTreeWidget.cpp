@@ -581,26 +581,29 @@ void FileTreeWidget::onContextMenu(const QPoint& pos)
     QMenu menu(this);
     menu.addAction(tr("Copy Path"), this, [path]() {
         QApplication::clipboard()->setText(path);
-    });
+    })->setObjectName(QStringLiteral("file-tree.copy-path"));
     menu.addAction(tr("Copy Name"), this, [path]() {
         const auto last = path.lastIndexOf(QLatin1Char('/'));
         QApplication::clipboard()->setText(
             (last >= 0) ? path.mid(last + 1) : path);
-    });
+    })->setObjectName(QStringLiteral("file-tree.copy-name"));
     menu.addSeparator();
 
     if (!isDir) {
         QAction* histAction = menu.addAction(tr("Show History…"));
+        histAction->setObjectName(QStringLiteral("file-tree.show-history"));
         connect(histAction, &QAction::triggered, this, [this, path]() {
             emit showHistoryRequested(path);
         });
 
         QAction* blameAction = menu.addAction(tr("Blame"));
+        blameAction->setObjectName(QStringLiteral("file-tree.blame"));
         connect(blameAction, &QAction::triggered, this, [this, path]() {
             emit blameRequested(path);
         });
 
         QAction* openAction = menu.addAction(tr("Open Externally"));
+        openAction->setObjectName(QStringLiteral("file-tree.open-externally"));
         connect(openAction, &QAction::triggered, this, [this, path]() {
             emit openExternallyRequested(path);
         });
@@ -613,11 +616,11 @@ void FileTreeWidget::onContextMenu(const QPoint& pos)
         menu.addAction(tr("Expand All"), this, [this, dir]() {
             if (dir.isValid())
                 treeView_->expandRecursively(dir);
-        });
+        })->setObjectName(QStringLiteral("file-tree.expand-all"));
         menu.addAction(tr("Collapse All"), this, [this, dir]() {
             if (dir.isValid())
                 treeView_->collapse(dir);
-        });
+        })->setObjectName(QStringLiteral("file-tree.collapse-all"));
     }
 
     menu.exec(treeView_->viewport()->mapToGlobal(pos));

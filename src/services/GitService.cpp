@@ -1535,7 +1535,7 @@ void GitService::runSequenceStep(bool skip) {
 // One commit: this took a list, but libgit2's pick only stages, so the
 // second one met the first one's uncommitted changes, failed, and took
 // the first pick's CHERRY_PICK_HEAD and MERGE_MSG down with it.
-void GitService::cherryPick(const git::ObjectId& commit) {
+void GitService::cherryPick(const git::ObjectId& commit, unsigned mainline) {
     if (!repo_) return;
     if (refusedWhileAStepRuns(QStringLiteral("cherryPick"))) return;
     // Pin the repository like every other async op does: the
@@ -1545,7 +1545,7 @@ void GitService::cherryPick(const git::ObjectId& commit) {
     // that is no longer the open one. (This used to capture the raw
     // pointer with no re-check — a use-after-free.)
     std::shared_ptr<git::Repository> r = repo_;
-    runner_.run([this, r, commit]() {
+    runner_.run([this, r, commit, mainline]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_)
             return;  // superseded: repo closed or swapped mid-flight
@@ -1555,7 +1555,7 @@ void GitService::cherryPick(const git::ObjectId& commit) {
         // the pick stopped on, and these would be the merge's, or the
         // earlier pick's.
         const bool refused = r->state() != git::RepoState::None;
-        auto result = r->cherryPick(commit);
+        auto result = r->cherryPick(commit, mainline);
         QString error;
         bool conflicts = false;
         bool alreadyApplied = false;
@@ -1598,6 +1598,59 @@ void GitService::cherryPick(const git::ObjectId& commit) {
                 emit cherryPickComplete(true, tr("Cherry-pick completed successfully."));
                 refreshStatus();
                 refreshLog();
+            });
+        }, Qt::QueuedConnection);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Revert
+// ---------------------------------------------------------------------------
+
+// As cherryPick(): pinned repository, outcome through reportTo, and a
+// refusal (another operation in progress) as an operationFailed alone.
+void GitService::revertCommit(const git::ObjectId& commit, unsigned mainline) {
+    if (!repo_) return;
+    if (refusedWhileAStepRuns(QStringLiteral("revert"))) return;
+    std::shared_ptr<git::Repository> r = repo_;
+    runner_.run([this, r, commit, mainline]() {
+        std::lock_guard<std::mutex> lock(repoMutex_);
+        if (r != repo_)
+            return;  // superseded: repo closed or swapped mid-flight
+        const bool refused = r->state() != git::RepoState::None;
+        auto result = r->revert(commit, mainline);
+        QString error;
+        bool conflicts = false;
+        bool nothing = false;
+        if (!result) {
+            error = QString::fromStdString(result.error().message());
+        } else {
+            conflicts = result->hasConflicts;
+            nothing = result->nothingToRevert;
+        }
+        QMetaObject::invokeMethod(this, [this, key = rebaseStepKey(*r), refused, error,
+                                         conflicts, nothing, commit]() {
+            reportTo(key, [this, refused, error, conflicts, nothing, commit] {
+                const QString shortId = QString::fromStdString(commit.toShortHex());
+                if (!error.isEmpty()) {
+                    emit operationFailed(QStringLiteral("revert"), error);
+                    if (!refused)
+                        emit revertComplete(false, error);
+                    return;
+                }
+                if (conflicts)
+                    emit revertComplete(
+                        false, tr("Revert produced conflicts for commit %1").arg(shortId));
+                else if (nothing)
+                    emit revertComplete(
+                        true, tr("Commit %1's changes aren't on this branch: nothing to revert.")
+                                  .arg(shortId));
+                else
+                    emit revertComplete(
+                        true, tr("Revert of %1 staged. Commit to finish it.").arg(shortId));
+                refreshStatus();
+                if (!conflicts && !nothing)
+                    refreshLog();
             });
         }, Qt::QueuedConnection);
     });

@@ -23,11 +23,11 @@
 from __future__ import annotations
 
 import os
-import shlex
 import subprocess
 import time
 
-from e2elib import App, Failure, git, make_repo, on_screen, run
+from e2elib import (WINDOWS, App, Failure, git, make_repo, on_screen, run,
+                    sh_quote, write_script)
 
 
 def boxes(app: App) -> list:
@@ -120,7 +120,7 @@ def stash_during_local_op(binary: str, scratch: str, apps: list) -> None:
     hold = os.path.join(scratch, "hold-smudge")
     # Checking big.dat out waits while `hold` is there.
     git("config", "filter.slow.smudge",
-        f"while [ -f {shlex.quote(hold)} ]; do sleep 0.1; done; cat", cwd=work)
+        f"while [ -f {sh_quote(hold)} ]; do sleep 0.1; done; cat", cwd=work)
     git("config", "filter.slow.clean", "cat", cwd=work)
     with open(os.path.join(work, ".gitattributes"), "w") as fh:
         fh.write("big.dat filter=slow\n")
@@ -179,18 +179,18 @@ def stash_during_local_op(binary: str, scratch: str, apps: list) -> None:
 def deinit_during_local_op(binary: str, scratch: str, apps: list) -> None:
     sub = make_repo(os.path.join(scratch, "libsub-src"))
     work = make_repo(os.path.join(scratch, "subs"))
-    git("-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "libsub",
-        cwd=work)
+    # Forward slashes on Windows: submodule URLs are URLs, not paths.
+    git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        sub.replace("\\", "/") if WINDOWS else sub, "libsub", cwd=work)
     git("commit", "-qm", "add libsub", cwd=work)
     hold = os.path.join(scratch, "hold-merge")
     started = os.path.join(scratch, "merge-started")
     hooks = os.path.join(scratch, "subs-hooks")
     os.makedirs(hooks)
-    with open(os.path.join(hooks, "post-merge"), "w") as fh:
-        fh.write("#!/bin/sh\n"
-                 f"touch {shlex.quote(started)}\n"
-                 f"while [ -f {shlex.quote(hold)} ]; do sleep 0.1; done\n")
-    os.chmod(os.path.join(hooks, "post-merge"), 0o755)
+    write_script(os.path.join(hooks, "post-merge"),
+                 "#!/bin/sh\n"
+                 f"touch {sh_quote(started)}\n"
+                 f"while [ -f {sh_quote(hold)} ]; do sleep 0.1; done\n")
     git("config", "core.hooksPath", hooks, cwd=work)
     git("checkout", "-q", "-b", "topic", cwd=work)
     with open(os.path.join(work, "t.txt"), "w") as fh:

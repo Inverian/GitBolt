@@ -5,6 +5,7 @@
 
 #include <servers/bootstrap.h>
 
+#include <memory>
 #include <utility>
 
 namespace gitbolt::app::macos {
@@ -135,6 +136,24 @@ void activateApp()
         [NSApp activate];
     else
         [NSApp activateIgnoringOtherApps:YES];
+}
+
+std::function<bool()> launchFinishedProbe()
+{
+    if (!onCocoa())
+        return [] { return true; };
+    auto finished = std::make_shared<bool>(false);
+    // Posted once: the observer goes as it fires (nil breaks ARC's cycle).
+    __block id observer = [NSNotificationCenter.defaultCenter
+        addObserverForName:NSApplicationDidFinishLaunchingNotification
+                    object:NSApp
+                     queue:nil
+                usingBlock:^(NSNotification*) {
+                    *finished = true;
+                    [NSNotificationCenter.defaultCenter removeObserver:observer];
+                    observer = nil;
+                }];
+    return [finished] { return *finished; };
 }
 
 bool sendToServicesProvider(const QStringList& folders, QString& error)
