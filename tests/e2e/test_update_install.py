@@ -111,9 +111,11 @@ def sha256(path: str) -> str:
 
 
 def deb_member_sha256(deb: str, member: str) -> str:
-    """SHA-256 of one file of a .deb's data, streamed from dpkg-deb."""
+    """SHA-256 of one file of a .deb's data, streamed from dpkg-deb, read
+    to its end (dpkg-deb complains of a pipe closed early)."""
     proc = subprocess.Popen(["dpkg-deb", "--fsys-tarfile", deb], stdout=subprocess.PIPE)
-    try:
+    found = None
+    with proc.stdout:
         with tarfile.open(fileobj=proc.stdout, mode="r|") as tar:
             for info in tar:
                 if info.name == member:
@@ -121,11 +123,12 @@ def deb_member_sha256(deb: str, member: str) -> str:
                     with tar.extractfile(info) as fh:
                         for block in iter(lambda: fh.read(1 << 20), b""):
                             digest.update(block)
-                    return digest.hexdigest()
-    finally:
-        proc.stdout.close()
-        proc.wait()
-    raise Failure(f"{deb} has no {member}")
+                    found = digest.hexdigest()
+        while proc.stdout.read(1 << 20):    # the archive's padding
+            pass
+    if proc.wait() != 0 or found is None:
+        raise Failure(f"no {member} in {deb} (dpkg-deb exit {proc.returncode})")
+    return found
 
 
 class Offer:
