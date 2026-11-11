@@ -33,7 +33,7 @@ The events are:
 | `app_launched` | Each time GitBolt starts | CPU architecture (for example "arm64"), Qt version, and the language of your system (for example "en", without the region) |
 | `command_used` | Every 10 minutes, and when GitBolt quits | The internal name of a menu, toolbar or right-click menu command you used, or of a button in the update window or in the bar that says an update is out (for example `act.commit`, `file.recent`, `log.revert-commit` or `updateDialog.install`), and how many times you used it. On macOS this includes About GitBolt and Check for Updates… in the GitBolt menu. A right-click entry is sent by its fixed internal name, never by the text it shows, which can include a branch name or a commit's short hash. Standard text-editing entries (Copy, Paste, Select All) are not counted. |
 | `repo_opened` | Each time a repository finishes opening | How many milliseconds it took to open and to show the first page of history, and a rough size of that page: "0", "1-99", "100-255" or "256+" commits |
-| `update_result` | Once each time you choose **Install and Restart**: when the update ends, or the next time GitBolt starts if it ended while GitBolt was closed | How the update ended ("ok", "failed", "declined", "incompatible", "gave_up" or "no_result"), the version it updated from and to (versions only, or "unknown"), the kind of installer ("dmg", "nsis" or "deb"), the step it ended at ("download", "prepare", "launch", "quit" or "install"), and a fixed code for why, such as "none", "checksum_mismatch" or "installer_exit" |
+| `update_result` | Once for each install attempt (**Install and Restart**, or **Try Again**) that isn't cancelled: when it ends, or the next time GitBolt starts if it ended while GitBolt was closed. An install you cancel, or stop by closing the update window, sends nothing | How the update ended ("ok", "failed", "declined", "incompatible", "gave_up" or "no_result"), the version it updated from and to (versions only, or "unknown"), the kind of installer ("dmg", "nsis" or "deb"), the step it ended at ("download", "prepare", "launch", "quit" or "install"), and a fixed code for why, such as "none", "checksum_mismatch" or "installer_exit" |
 
 ### Error reports
 
@@ -46,16 +46,17 @@ error, GitBolt sends the kind of error only:
 - for a failed commit, nothing more;
 - for a repository that would not open, the error code, such as
   "not_found" or "locked";
-- for an in-app update that failed or never finished, the step it
-  stopped at and the same fixed code as in `update_result`, such as
-  "download" and "checksum_mismatch";
+- for an in-app update that failed, or that never said how it ended,
+  the step it stopped at and the same fixed code as in `update_result`,
+  such as "download" and "checksum_mismatch";
 - for an update check that GitHub answered with an error, a rate limit
   or something that isn't a release, the step "check" and a code:
   "http_error", "rate_limited" or "bad_response". A check that fails
   in any other way, while you are offline for example, is never sent;
-- for an unexpected error in background work, the type of the C++
-  exception only, such as "out_of_range" or "bad_alloc" ("other" for
-  anything else). Its message stays in the [log file](#log-file).
+- for an unexpected error in background work, only the standard C++
+  exception type it is, such as "out_of_range" or "bad_alloc"
+  ("std_exception" for any other standard exception, "non_std" for
+  anything else thrown). Its message stays in the [log file](#log-file).
 
 Each error report also carries the GitBolt version, the time, the
 operating system and its version, the CPU architecture, the Qt version
@@ -75,16 +76,17 @@ summary contains:
 - the GitBolt version that crashed, when it crashed, and a random
   report ID;
 - the build ID of the GitBolt that crashed: the same in every copy of
-  that release, it tells the maintainers which of the release's symbol
-  files reads the call stack;
+  that release for your system, it tells the maintainers which of the
+  release's symbol files reads the call stack;
 - the kind of crash (for example "SIGSEGV"), and on Windows the
   Windows exception code (for example "0xc0000005");
 - the operating system and its version, the CPU architecture and the
   Qt version;
 - the call stack, reduced to file names and positions within those
   files: GitBolt's own, with no function names, and those of the
-  libraries below, with their function names (on Windows, positions
-  only: no function names for any library):
+  libraries below, with their function names (on Windows, for a crash
+  in GitBolt 1.0.0 or later, positions only: no function names for any
+  library):
   - Qt, and the Qt plugins that draw GitBolt's windows;
   - libgit2;
   - on macOS: the system's C and C++ libraries (`libsystem_*`,
@@ -98,10 +100,10 @@ summary contains:
   Any other library shows as `<other>`, with no name, position or
   function, so the summary does not reveal what else is installed.
 
-The full crash report, which on Windows also lists the libraries
-loaded in GitBolt, never leaves your computer. Crash and error reports
-do not carry your install ID or device ID, so they are not linked to
-you or to your usage statistics.
+The full crash report, which on Windows also lists the libraries its
+call stack ran through, never leaves your computer. Crash and error
+reports do not carry your install ID or device ID, so they are not
+linked to you or to your usage statistics.
 
 Every request also says which version of GitBolt sent it, on which
 operating system and, on Windows and Linux, for which CPU architecture,
@@ -274,17 +276,21 @@ Either of these stops the automatic checks:
 
 Every GitBolt build keeps a log on your computer, which is never sent
 and which GitBolt doesn't read back: a line each time it starts (its
-version, the operating system, the CPU architecture and the Qt
-version), then the warnings and messages it prints, such as git's
-error when an operation fails. Those can contain repository paths,
-branch names and git's error text, so look through the log before you
-share it. It also says whether each usage statistics request got
-through, by the event's name only, never what it carried.
+version, the operating system, the CPU architecture, the Qt version
+and its process ID), then the warnings and messages GitBolt and Qt
+print, such as how an update check or install went, and the message of
+an unexpected error in background work. Those can contain file and
+folder paths, with your user name in them, and error text from git or
+your system, so look through the log before you share it. It also says
+whether each request with usage statistics, an error report or a crash
+summary got through, with the event's name and the server's answer
+only, never what it carried.
 
 - macOS: `~/Library/Logs/GitBolt/GitBolt.log`
 - Windows: `%LOCALAPPDATA%\GitBolt\logs\GitBolt.log`
 - Linux: `~/.local/state/GitBolt/GitBolt.log`, or
   `$XDG_STATE_HOME/GitBolt/GitBolt.log` when `XDG_STATE_HOME` is set
+  to an absolute path
 
 When the log reaches about 1 MB, it moves to `GitBolt.1.log` and a new
 one starts. GitBolt keeps at most three files, `GitBolt.log`,

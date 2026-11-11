@@ -62,10 +62,11 @@ Installers for every release are on the
 | Ubuntu | `gitbolt_<version>_amd64.deb` | Ubuntu 24.04 or later, x86-64 |
 
 These are the platforms GitBolt supports. GitBolt also installs and
-updates on Windows 10 (version 1809 or later), and the .deb installs on
-Debian 13 and on distributions based on Ubuntu 24.04 or Debian 13, such
-as Linux Mint 22, but they aren't supported. There is no AppImage any
-more: see [Install](#install) to switch to the .deb.
+updates on Windows 10 (version 1809 or later), but Windows 10 isn't
+supported. The .deb also installs on Debian 13 and on distributions
+based on Ubuntu 24.04 or Debian 13, such as Linux Mint 22, but they
+aren't supported either. There is no AppImage any more: see
+[Install](#install) to switch to the .deb.
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`,
 and has a `-symbols.zip` for each platform: debug symbols the
@@ -83,10 +84,11 @@ has known security flaws.
 - **macOS**: open the .dmg and drag GitBolt to Applications, then open
   it from there. A GitBolt that runs from the disk image can't update
   itself.
-- **Windows**: run the installer. It asks for administrator permission,
-  installs GitBolt (by default in Program Files), and adds it to the
-  Start menu, and **Open in GitBolt** to Explorer's right-click menu on
-  folders.
+- **Windows**: run the installer (see [First launch](#first-launch) for
+  the prompts). It asks for administrator permission, installs GitBolt
+  (by default in Program Files), and adds it to the Start menu, and
+  **Open in GitBolt** to Explorer's right-click menu on folders (on
+  Windows 11, under **Show more options**).
 - **Ubuntu**: in the folder you downloaded it to, run
   `sudo apt install ./gitbolt_<version>_amd64.deb` (the `./` matters).
   apt also installs python3-nautilus, for **Open in GitBolt** in
@@ -95,12 +97,15 @@ has known security flaws.
 **From the AppImage** (GitBolt 0.9.x): install the .deb as above, then
 delete the AppImage. Your settings carry over: both keep them in
 `~/.config/GitBolt`. The AppImage keeps working, but gets no more
-updates.
+updates. On a distribution the .deb doesn't install on, such as Fedora,
+build GitBolt from source ([Linux notes](docs/BUILDING.md#linux-notes));
+such builds don't update themselves.
 
 ### First launch
 
-GitBolt's installers aren't signed by Apple or Microsoft yet, so the
-first time you open GitBolt, your system asks you to confirm it.
+The Windows installer isn't signed yet, and the Mac app isn't notarized
+by Apple, so the first time you open a download (the Windows installer,
+or GitBolt on a Mac), your system asks you to confirm it.
 
 - **macOS**: the app is signed with GitBolt's own certificate, which
   macOS doesn't know, and isn't notarized by Apple. When you first open
@@ -118,8 +123,9 @@ first time you open GitBolt, your system asks you to confirm it.
   publisher is unknown: click **Yes**. While **Smart App Control** is on
   (Windows 11), it blocks GitBolt, and it can't make an exception for
   one app. Until GitBolt's installers are signed, GitBolt runs only
-  with Smart App Control off (**Windows Security › App & browser
-  control › Smart App Control settings**).
+  while Smart App Control is off or still in evaluation mode
+  (**Windows Security › App & browser control › Smart App Control
+  settings**).
 - **Ubuntu**: nothing more to do.
 
 ### Updating
@@ -153,11 +159,13 @@ sends.
 
 This doesn't touch your repositories. It leaves GitBolt's settings,
 crash report, log and update downloads behind; to remove them too,
-delete these folders:
+delete these:
 
 - **macOS**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
-  report), `~/Library/Logs/GitBolt` (log) and
-  `~/Library/Caches/GitBolt` (update downloads).
+  report), `~/Library/Logs/GitBolt` (log), `~/Library/Caches/GitBolt`
+  (update downloads), and the file
+  `~/Library/Preferences/com.gitbolt.app.plist` (macOS's own record of
+  GitBolt's file dialogs).
 - **Windows**: `%APPDATA%\GitBolt` (settings), `%USERPROFILE%\.gitbolt`
   (crash report) and `%LOCALAPPDATA%\GitBolt` (log and update
   downloads).
@@ -175,9 +183,14 @@ delete these folders:
 - File-level staging with per-file and stage-all/unstage-all flows
 - Interactive rebase with drag-and-drop reordering and
   continue / skip / abort controls for conflicted rebases
-- Cherry-pick a commit, with a preview of its details; a
-  `git cherry-pick` of several commits started in a terminal can be
-  continued, skipped or aborted from the operation bar
+- Revert a commit (Commands › Revert commit..., or right-click it in
+  the history): the changes that undo it are staged with git's message
+  for you to commit, and for a merge commit you pick the parent to
+  revert against
+- Cherry-pick a commit, from Commands or the history's right-click
+  menu, with a preview of its details; a `git cherry-pick` of several
+  commits started in a terminal can be continued, skipped or aborted
+  from the operation bar
 - Stash save/apply/pop/drop with diff preview
 - Branch management (create, delete, rename, checkout, merge,
   push, set-upstream — from the sidebar context menu or Commands)
@@ -223,12 +236,13 @@ delete these folders:
 - File-status legend tooltip in the Commit dialog headers (hover the
   ⓘ icon to see what M / A / D / R / U / ? mean)
 - Built-in background tools:
-  - Periodic fetch with new-commit notifications
+  - Periodic background fetch (Plugins › Periodic background fetch),
+    at an interval you choose
   - Repository statistics summary
 
 ### Platform Integration
 - macOS Finder "Open in GitBolt" on a folder's right-click menu (in its Services submenu when there are several), a macOS service that comes with GitBolt.app and works once GitBolt has been opened once. If it doesn't show, turn it on in System Settings › Keyboard › Keyboard Shortcuts… › Services › Files and Folders. Folders dropped on GitBolt's Dock icon, and `open -a GitBolt <folder>`, open too
-- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
+- Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds (on Windows 11, under Show more options)
 - Linux Nautilus extension and `.desktop` file
 - A folder inside a repository opens that repository; a folder in none says so
 - Cross-platform installers (DMG, NSIS, DEB)
@@ -237,7 +251,7 @@ delete these folders:
 
 ## Architecture
 
-GitBolt uses a **12-module architecture** following Qt convention with strict single-responsibility:
+GitBolt uses a **13-module architecture** following Qt convention with strict single-responsibility:
 
 ```
 src/
@@ -246,6 +260,7 @@ src/
 ├── watcher/    File system monitoring
 ├── util/       Threading, caching, performance, crash handling
 ├── telemetry/  Usage statistics and crash reports (see PRIVACY.md)
+├── update/     In-app updates (official builds only)
 ├── models/     Qt data models (QAbstractItemModel subclasses)
 ├── services/   Business logic orchestration (GitService, RepoManager)
 ├── editor/     Custom renderers (revision graph delegate, syntax highlighter)
@@ -268,6 +283,7 @@ flowchart TD
     models["<b>models/</b><br/>Qt data models"]
     git["<b>git/</b><br/>libgit2 + CLI fallback"]
     telemetry["<b>telemetry/</b><br/>usage statistics"]
+    update["<b>update/</b><br/>in-app updates"]
 
     subgraph foundation["Foundation · no internal dependencies"]
         direction LR
@@ -284,6 +300,7 @@ flowchart TD
     models --> git --> util
     dialogs --> conf
     ui --> telemetry --> util
+    dialogs --> update --> util
 
     classDef entry fill:#fde68a,stroke:#b45309,color:#1f2937
     classDef presentation fill:#ddd6fe,stroke:#6d28d9,color:#1f2937
@@ -292,7 +309,7 @@ flowchart TD
     classDef base fill:#e5e7eb,stroke:#4b5563,color:#1f2937
     class app entry
     class ui,dialogs,widgets,editor presentation
-    class services,telemetry logic
+    class services,telemetry,update logic
     class models,git core
     class util,conf,watcher base
     style foundation fill:none,stroke:#9ca3af,stroke-dasharray:4 4

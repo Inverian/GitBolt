@@ -288,7 +288,7 @@ If you see "Could NOT find Qt6" or other errors, see [Common issues](#common-iss
 cmake --build build --parallel
 ```
 
-This compiles all 12 modules of GitBolt. On a modern laptop the first build takes **2–5 minutes**. Subsequent incremental builds are typically under 30 seconds.
+This compiles all 13 modules of GitBolt. On a modern laptop the first build takes **2–5 minutes**. Subsequent incremental builds are typically under 30 seconds.
 
 Use `--parallel <N>` to control the number of jobs (defaults to all cores).
 
@@ -369,12 +369,15 @@ a system libgit2. To run one directly with verbose output:
 The end-to-end tests (`ctest --test-dir build -L e2e`) drive the built
 app through the [test bridge](AGENT_TESTING.md) on macOS, Linux and
 Windows. They need Python 3 and git on `PATH`; on Windows that is Git
-for Windows, whose `sh` runs the tests' hooks and filters. Where your
-shell exports an editor (`GIT_EDITOR`), run them with
-`env -u GIT_EDITOR`. Each one gets 240 seconds on Windows, 120
-elsewhere. A test that can't run on a platform exits 77, which ctest
-counts as skipped; [AGENT_TESTING.md](AGENT_TESTING.md#end-to-end-tests-on-windows)
-lists what skips on Windows.
+for Windows, whose `sh` runs the tests' hooks and filters, and Qt's
+`bin` folder (for example `C:\Qt\6.11.3\msvc2022_64\bin`), whose DLLs
+the build's GitBolt.exe loads. Where your shell exports an editor
+(`GIT_EDITOR`), run them with `env -u GIT_EDITOR`. Each one gets 240
+seconds on Windows and 120 elsewhere (the update test, 420). A test
+that can't run here (on this platform, or without the packages and
+variables CI gives it) exits 77, which ctest counts as skipped;
+[AGENT_TESTING.md](AGENT_TESTING.md#end-to-end-tests-on-windows) lists
+what skips on Windows.
 
 ---
 
@@ -390,6 +393,8 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | `GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2` | `OFF` | With `GITBOLT_BUNDLED_LIBGIT2=OFF`, accept a system libgit2 older than [the floor](#a-system-libgit2), for a distribution that backported its fixes |
 | `GITBOLT_RELEASE_SYMBOLS` | `OFF` | Give Release builds line tables at the same optimisation (`-g1`; on MSVC `/Z7`, and `/DEBUG:FULL /OPT:REF /OPT:ICF` for GitBolt.exe), for the symbol files each release publishes. The `gitbolt_symbols` target then writes `build/GitBolt-<version>-<system>-<cpu>-symbols.zip` (a dSYM, the .exe and its .pdb, or `gitbolt.debug`), which [`tools/symbolize.py`](../tools/README.md#symbolizepy) reads crash reports with. CI sets it on every build |
 | `GITBOLT_REQUIRE_ENGLISH_PLURALS` | `OFF` | Fail the configure when the [English plural forms](#english-plural-forms) can't be built (no Qt LinguistTools, or Qt before 6.7). CI sets it |
+| `GITBOLT_STRICT_NOTICES` | `OFF` | Fail the configure when a licence text the packages need is missing from `resources/licenses` (see [`update-qt-notices.py`](../tools/README.md#update-qt-noticespy)). CI sets it |
+| `GITBOLT_UPDATES` | `OFF` | Official builds only: check GitHub for new releases and offer to install them; without it, **Help › Check for updates** is greyed out. Its default comes from the environment variable of the same name; CI turns it on for upstream `main` |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
 | `GITBOLT_TELEMETRY_HOST` | empty | Usage statistics ingest origin, `https://<host>`; empty compiles telemetry out (see below) |
@@ -597,7 +602,7 @@ By default `cmake --build` uses all CPU cores. If your system is becoming unresp
 cmake --build build --parallel 4
 ```
 
-The largest module to compile is `git/` (42 files). If incremental builds are still slow, double-check that you're using **Ninja** (`-G Ninja` at configure time) instead of the default Make generator.
+The largest module to compile is `git/`. If incremental builds are still slow, double-check that you're using **Ninja** (`-G Ninja` at configure time) instead of the default Make generator.
 
 ### "App is damaged and can't be opened" on macOS
 

@@ -3,7 +3,8 @@
 All notable changes to GitBolt are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com). From 1.0.0 on,
 versions follow [Semantic Versioning](https://semver.org): a 1.0.x
-release only fixes bugs, and a 1.x.0 release can also add features.
+release only fixes bugs, and a 1.x.0 release can also add features or
+need a newer version of macOS, Windows or Ubuntu.
 
 ## [Unreleased]
 
@@ -21,13 +22,14 @@ release only fixes bugs, and a 1.x.0 release can also add features.
   Cherry-Pick This Commit... open those dialogs for the commit you
   clicked. Commands › Cherry pick... and Revert commit... now start
   with the commit selected in the history.
-- **A log file**, kept on your computer and never sent: the warnings
-  and errors GitBolt reports while it runs, which can help with a bug
-  report. It is `~/Library/Logs/GitBolt/GitBolt.log` on macOS,
+- **A log file**, kept on your computer and never sent: a line each
+  time GitBolt starts, then the warnings and other messages it prints
+  while it runs, which can help with a bug report. It is
+  `~/Library/Logs/GitBolt/GitBolt.log` on macOS,
   `%LOCALAPPDATA%\GitBolt\logs\GitBolt.log` on Windows and
   `~/.local/state/GitBolt/GitBolt.log` on Linux, at most three files of
-  about 1 MB each. It can contain repository paths and branch names;
-  PRIVACY.md says more.
+  about 1 MB each. It can contain file and folder paths; PRIVACY.md
+  says more.
 - **Symbol files**: each release also has a
   `GitBolt-<version>-<platform>-symbols.zip` for each platform, which
   the maintainers use to read crash reports. You don't need them to
@@ -42,9 +44,10 @@ release only fixes bugs, and a 1.x.0 release can also add features.
 - Development: `tools/symbolize.py` reads a crash report, or a
   GlitchTip event, with a release's symbol files. The CMake option
   `GITBOLT_RELEASE_SYMBOLS` (CI sets it) adds line tables to Release
-  builds, and the `gitbolt_symbols` target zips them.
-  `GITBOLT_MACOS_SIGN_IDENTITY` signs a macOS bundle with a keychain
-  identity when `cpack` or `cmake --install` runs.
+  builds, and the `gitbolt_symbols` target zips them. The environment
+  variable `GITBOLT_MACOS_SIGN_IDENTITY` (a keychain identity's SHA-1)
+  signs a macOS bundle with that identity when `cpack` or
+  `cmake --install` runs; without it the bundle is signed ad hoc.
 
 ### Changed
 
@@ -52,12 +55,12 @@ release only fixes bugs, and a 1.x.0 release can also add features.
   Apple Silicon, and Ubuntu 24.04 or later. GitBolt still installs and
   updates on Windows 10 (version 1809 or later), but Windows 10 isn't
   supported.
-- **First launch**: GitBolt's installers aren't signed by Apple or
-  Microsoft yet, so the first time you open a download, your system
-  asks you to confirm it. On macOS: System Settings › Privacy &
-  Security › Open Anyway. On Windows: More info › Run anyway in
-  SmartScreen's message. While Windows 11's Smart App Control is on, it
-  blocks GitBolt, and it can't make an exception for one app. The
+- **First launch**: the Windows installer isn't signed yet, and the Mac
+  app isn't notarized by Apple, so the first time you open a download,
+  your system asks you to confirm it. On macOS: System Settings ›
+  Privacy & Security › Open Anyway. On Windows: More info › Run anyway
+  in SmartScreen's message. While Windows 11's Smart App Control is on,
+  it blocks GitBolt, and it can't make an exception for one app. The
   README's Download section has the steps, and how to update and
   uninstall GitBolt.
 - **macOS: GitBolt is signed with its own certificate**, GitBolt Code
@@ -92,23 +95,24 @@ release only fixes bugs, and a 1.x.0 release can also add features.
   delete the AppImage. Your settings carry over: both keep them in
   `~/.config/GitBolt`. The AppImage keeps working, but gets no more
   updates: its update window says this release has no installer for
-  it, and offers the release page.
+  it, and offers the release page. On a distribution the .deb doesn't
+  install on, such as Fedora, build GitBolt from source
+  (docs/BUILDING.md); such builds don't update themselves.
 
 ### Fixed
 
 - **Cherry-picking a merge commit** always failed ("mainline branch is
   not specified"). The dialog now asks which parent to pick against,
   the first by default, as `git cherry-pick -m` does.
-- **A cherry-pick right after a commit made outside libgit2** (in a
-  terminal, or with GitBolt's Commit dialog) could fail with "1
-  uncommitted change would be overwritten by merge".
+- **A cherry-pick right after a commit** made in a terminal, or with
+  GitBolt's Commit dialog, could fail with "1 uncommitted change would
+  be overwritten by merge".
 - **The cherry-pick dialog** opened while a merge, cherry-pick, revert
   or rebase was in progress, and refused only once it was filled in;
   now a message says why at once. It also picks the commit its preview
   shows, even if a branch typed in moved meanwhile.
 - **macOS: switching repositories** could freeze the window for a
-  second or more now and then. GitBolt now asks macOS to watch a
-  repository's files in one call instead of about eight.
+  second or more now and then.
 - **Windows: crashes in background work** weren't saved or reported,
   nor were invalid parameters passed to the C runtime. Now they are,
   like a crash on the main thread, without an error dialog from

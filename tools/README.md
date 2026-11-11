@@ -188,7 +188,7 @@ The other texts in `resources/licenses/` are fetched by hand at a pinned version
 
 ## `symbolize.py`
 
-Reads the GitBolt frames of a crash report with the symbol files of the release that crashed. A report's call stack has GitBolt's frames as positions only (see [PRIVACY.md](../PRIVACY.md#crash-reports)); this turns them into functions, files and lines. Each release publishes `GitBolt-<version>-<platform>-symbols.zip` beside its installers: the macOS dSYM, the Windows `GitBolt.exe` with its `GitBolt.pdb`, or Linux's `gitbolt.debug`. Reports carry a `Build ID:` line (the crash summary's `build_id` tag), which must match the symbol files.
+Reads the GitBolt frames of a crash report with the symbol files of the release that crashed. A crash summary's call stack has GitBolt's frames as positions only (see [PRIVACY.md](../PRIVACY.md#crash-reports)), and a `crash.log` names few of them, if any; this turns them into functions, files and lines. From 1.0.0 on, each release publishes `GitBolt-<version>-<platform>-symbols.zip` beside its installers: the macOS dSYM, the Windows `GitBolt.exe` with its `GitBolt.pdb`, or Linux's `gitbolt.debug`. Reports carry a `Build ID:` line (the crash summary's `build_id` tag), which must match the symbol files.
 
 ### Usage
 
@@ -200,7 +200,7 @@ python3 tools/symbolize.py --id build/src/app/GitBolt.app/Contents/MacOS/GitBolt
 python3 tools/symbolize.py --check SYMBOLS SHIPPED      # CI: the symbol files belong to the shipped binary
 ```
 
-The report is a `crash.log` (as the Crash Detected box or an issue shows it) or a GlitchTip event's JSON, as sent or from GlitchTip's API. The symbols are the release's zip, a folder of its files, a `.dSYM` or a binary. A build ID that doesn't match exits 1; `--force` symbolizes anyway. A report without a build ID (0.9.x) gets a warning, and the tool trusts its version, OS and architecture. `--tool auto|llvm-symbolizer|atos|addr2line` picks the lookup tool; `auto` takes llvm-symbolizer when it finds one, else atos for macOS and addr2line for Linux.
+The report is a `crash.log` (as the Crash Detected box or an issue shows it) or a GlitchTip event's JSON, as sent or from GlitchTip's API. The symbols are the release's zip, a folder of its files, a `.dSYM` or a binary. A build ID that doesn't match exits 1; `--force` symbolizes anyway. A report without a build ID (0.9.x, whose releases have no symbol files) gets a warning if you pass it symbols anyway, and the tool trusts its version, OS and architecture. `--tool auto|llvm-symbolizer|atos|addr2line` picks the lookup tool; `auto` takes llvm-symbolizer when it finds one, else atos for macOS and addr2line for Linux.
 
 Only GitBolt's own frames are looked up. Qt's and the system's frames keep what the report says: a function name at most on macOS and Linux, a position only on Windows. Reading a Qt frame needs Qt's own debug info for the Qt version the release was built with (Qt's installer offers it as debug information files), which GitBolt's symbol files don't include; a system frame needs the system's symbols.
 

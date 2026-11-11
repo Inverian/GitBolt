@@ -161,15 +161,18 @@ session, point the updater at a loopback stub
 A `test-feed` session downloads into a folder of its own in its
 `TMPDIR`, `gitbolt-updates-XXXXXX` (0700, never the shared
 `gitbolt-updates`), which `dump-state`'s `updateDir` names: the
-download, the staging, `install-helper.sh`, `install.log`, the
-helper's `install-result` (one line, `<status> <version> <reason>`)
-and the `pending-install` marker the launch leaves (one line,
+download, the staging, `install-helper.sh` (macOS and Linux; Windows'
+helper is a PowerShell command line), `install.log`, the helper's
+`install-result` (one line, `<status> <version> <reason>`) and the
+`pending-install` marker the launch leaves (one line,
 `<from> <to> <unix seconds>`) go there. The app hands it on in
 `GITBOLT_TEST_UPDATE_DIR`, so the copy the install helper relaunches
-uses the same folder (and reads `install-result` and
-`pending-install` from it once, at startup, and deletes them); a
-folder handed on that isn't a private one of this user's in `TMPDIR`
-is ignored and a new one made. Each attempt's outcome is one log line,
+uses the same folder (it reads `install-result` from it once, at
+startup, and deletes it, and `pending-install` with it; a marker with
+no result yet stays for about 40 minutes, then counts as
+`no_result`); a folder handed on that isn't a private one of this
+user's in `TMPDIR` is ignored and a new one made. Each attempt's
+outcome is one log line,
 `Update: <status> (<stage>, <reason>), <from> to <to>, <package>`,
 for example `Update: ok (install, none), 0.1.0 to 1.0.0, dmg`.
 
@@ -220,7 +223,8 @@ user's session keeps macOS's crash reporting.
 
 A test session also writes its log to `GitBolt-test.log`, never
 `GitBolt.log`, in the log folder (`~/Library/Logs/GitBolt`,
-`%LOCALAPPDATA%\GitBolt\logs`, `$XDG_STATE_HOME/GitBolt`). The e2e
+`%LOCALAPPDATA%\GitBolt\logs`, `$XDG_STATE_HOME/GitBolt` or else
+`~/.local/state/GitBolt`). The e2e
 harness gives each app an `XDG_STATE_HOME` of its own; on macOS the
 folder follows the test's `HOME`, and on Windows it is the real
 profile's.
@@ -295,7 +299,8 @@ Restart, against the loopback feed. Its inputs:
   installed system-wide (`<dir>\bin\GitBolt.exe`, `/usr/bin/gitbolt`).
   The test changes the system, so it is for throwaway runners only.
 - `GITBOLT_E2E_UPDATE_APP`: the installer the feed offers, named as its
-  release asset; `GITBOLT_E2E_INSTALL_APP` by default.
+  release asset; on macOS `GITBOLT_E2E_INSTALL_APP` by default, on
+  Windows and Linux required.
 - `GITBOLT_E2E_PUBLISHED_VERSION`: set when the installed copy is that
   published release.
 
@@ -303,8 +308,9 @@ Without them it skips. The old copy always runs as 0.1.0
 (`GITBOLT_TEST_APP_VERSION`); on Linux CI also relabels the installed
 package's dpkg version to 0.1.0, so apt sees an upgrade even when the
 versions are equal. Afterwards the test checks that the new copy is the
-offer's version and binary, that `pending-install` and `install-result`
-are gone, and that the log says
+offer's version and binary (on Windows, CI's NSIS step checks that),
+that `pending-install` and `install-result` are gone, and that the log
+says
 `Update: ok (install, none), <from> to <version>, dmg|deb|nsis`, where
 `<from>` is 0.1.0, or `unknown` after a release up to 0.9.12, which
 writes no `pending-install` marker. In CI, pkexec is the real one,
@@ -333,7 +339,8 @@ build reads after the update:
   widget names they use;
 - `dump-state`'s keys `updates`, `updateDialog`, `updateDialogText`,
   `updateDir`, `pid`, `appPath` and `statusMessage`;
-- the `install-result` line.
+- the `install-result` and `pending-install` lines, and `install.log`
+  beside them.
 
 Compiling the bridge or the test feed out of release builds, say,
 would break the next release's CI.
