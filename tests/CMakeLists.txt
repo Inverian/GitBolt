@@ -344,7 +344,8 @@ set_property(TEST test_about_dialog APPEND PROPERTY ENVIRONMENT
 # ui/ — the Settings switch reaching usage statistics through a real
 # MainWindow's own SettingsService, against the loopback HttpStub; and
 # in-app updates' outcomes, dialog buttons and (macOS) application menu
-# reaching the same service, with a loopback feed (update/HttpServer.h).
+# reaching the same service, with a loopback feed (update/HttpServer.h);
+# right-click menus' entries, in a repository opened in the window.
 gitbolt_add_test(test_telemetry_switch ui/TestTelemetrySwitch.cpp)
 target_sources(test_telemetry_switch PRIVATE telemetry/HttpStub.h update/HttpServer.h ui/AppMenuWatcher.h)
 target_link_libraries(test_telemetry_switch PRIVATE gitbolt_ui gitbolt_telemetry Qt6::Network)

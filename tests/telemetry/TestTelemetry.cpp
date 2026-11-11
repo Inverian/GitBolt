@@ -433,6 +433,7 @@ private slots:
         QTest::addColumn<QString>("expected");   // empty: rejected
         QTest::newRow("explicit") << "act.commit" << "act.commit";
         QTest::newRow("menu path") << "commands.resolve-conflicts" << "commands.resolve-conflicts";
+        QTest::newRow("right-click entry") << "file-tree.open-externally" << "file-tree.open-externally";
         QTest::newRow("recent entry") << "file.recent.3" << "file.recent";
         QTest::newRow("64 chars") << QString(64, u'a') << QString(64, u'a');
         QTest::newRow("65 chars") << QString(65, u'a') << QString();

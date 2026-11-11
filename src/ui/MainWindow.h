@@ -104,6 +104,9 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* e) override;
+    /// Right-click menus' entries, counted as each menu opens (set up by
+    /// instrumentActionsForTelemetry).
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void openRepository();
@@ -294,8 +297,12 @@ private:
     /// slug, which can hold paths and branch names. Each action once
     /// (the menu and the toolbar share QActions), the macOS application
     /// menu's too; Recent Repositories entries, whose texts are paths,
-    /// all count as "file.recent".
+    /// all count as "file.recent". Right-click menus too, in any of the
+    /// window's views and dialogs: see eventFilter().
     void instrumentActionsForTelemetry();
+    /// Counts `action`'s triggers by objectName, once however many
+    /// menus and toolbars it is in.
+    void countTriggers(QAction* action);
     void createStatusBar();
     void setupConnections();
     void updateRecentMenu();

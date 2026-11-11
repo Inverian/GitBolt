@@ -248,15 +248,15 @@ void SubmoduleWidget::onContextMenu(const QPoint& pos) {
 
     menu.addAction(tr("Init"), this, [this, name]() {
         emit initRequested(name);
-    });
+    })->setObjectName(QStringLiteral("submodules.init"));
 
     menu.addAction(tr("Update"), this, [this, name]() {
         emit updateRequested(name);
-    });
+    })->setObjectName(QStringLiteral("submodules.update"));
 
     menu.addAction(tr("Deinit"), this, [this, name]() {
         emit deinitRequested(name);
-    });
+    })->setObjectName(QStringLiteral("submodules.deinit"));
 
     menu.addSeparator();
 
@@ -264,14 +264,14 @@ void SubmoduleWidget::onContextMenu(const QPoint& pos) {
     // it shows, as Recent does.
     menu.addAction(tr("Open in GitBolt"), this, [this, path]() {
         emit openRequested(path);
-    });
+    })->setObjectName(QStringLiteral("submodules.open-in-gitbolt"));
     menu.addAction(tr("Open in File Explorer"), this, [this, path]() {
         emit revealRequested(path);
-    });
+    })->setObjectName(QStringLiteral("submodules.open-in-file-explorer"));
 
     menu.addAction(tr("Copy URL"), this, [url]() {
         QApplication::clipboard()->setText(url);
-    });
+    })->setObjectName(QStringLiteral("submodules.copy-url"));
 
     menu.exec(table_->viewport()->mapToGlobal(pos));
 }
