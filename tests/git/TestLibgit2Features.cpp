@@ -48,7 +48,7 @@ private slots:
                  QStringLiteral(GITBOLT_BUNDLED_LIBGIT2_VERSION));
         // cmake/Libgit2.cmake: no SSH, HTTPS on the OS's TLS stack, and
         // none where that would be OpenSSL (Linux): the DEB would then
-        // depend on it and the AppImage bundle it.
+        // depend on it.
         QVERIFY((git_libgit2_features() & GIT_FEATURE_SSH) == 0);
 #if defined(Q_OS_MACOS)
         QCOMPARE(backend(GIT_FEATURE_HTTPS), "securetransport");

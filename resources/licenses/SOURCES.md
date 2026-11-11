@@ -26,10 +26,9 @@ them the same way, and update this file.
 Byte for byte, each file here is the fetched file.
 
 - `LICENSE` and `LGPL-3.0.txt`: compared with gnu.org's texts as fetched.
-- `LGPL-2.1.txt`: this is gnu.org's current text. libgit2's `COPYING` and
-  libfuse's `LGPL2.txt` hold older copies of LGPL 2.1. Those differ only in
-  the FSF's postal address and the example name in the appendix, so
-  `appimage-runtime-20251108.txt` carries libfuse's own copy.
+- `LGPL-2.1.txt`: this is gnu.org's current text. libgit2's `COPYING`
+  holds an older copy of LGPL 2.1, which differs only in the FSF's postal
+  address and the example name in the appendix.
 - `Apache-2.0.txt`: google/material-design-icons' `LICENSE` (see
   `material-symbols.txt`) is the same text, without the last newline.
 - `ICU-73.2.txt`: this licence covers the ICU4C libraries (libicuuc,
@@ -132,73 +131,6 @@ So the `fill` attribute is GitBolt's only change.
   fonts.gstatic.com. Twelve differ from the repository only in their path
   data. For `insights.svg`, the repository still holds the older drawing,
   which has a 24-unit canvas and no `viewBox`.
-
-### `appimage-runtime-20251108.txt`
-
-The notices for the AppImage runtime CI pins: type2-runtime release
-`20251108`, `runtime-x86_64`.
-- Download URL:
-  https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
-- SHA-256 `2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d`,
-  which matches both CI's pin and the release's asset digest.
-
-The file has two parts:
-- a header GitBolt wrote, naming each component, its version, licence and
-  source;
-- the licence texts verbatim, each under a heading GitBolt wrote.
-
-| Text | Upstream | SHA-256 |
-|---|---|---|
-| type2-runtime `LICENSE` | https://raw.githubusercontent.com/AppImage/type2-runtime/dd6cebedcbddde9c82f89b011e8e1d40b6e43868/LICENSE | `aa154fc9070614bbe7921f89db11efd1dba7a1f3a41685958110e2230f9c0ca1` |
-| type2-runtime `src/runtime/runtime.c`, lines 1-33 | same commit, `src/runtime/runtime.c` | `581c98a4bf7ac6289338da36122ccb91a46941c1148760eb22e3002c085180b7` |
-| musl `COPYRIGHT` | https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT?h=v1.2.5 | `f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af` |
-| libfuse `LICENSE` | https://raw.githubusercontent.com/libfuse/libfuse/fuse-3.15.0/LICENSE | `b8832d9caaa075bbbd2aef24efa09f8b7ab66a832812d88c602da0c7b4397fad` |
-| libfuse `LGPL2.txt` | https://raw.githubusercontent.com/libfuse/libfuse/fuse-3.15.0/LGPL2.txt | `dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551` |
-| squashfuse `LICENSE` | https://raw.githubusercontent.com/vasi/squashfuse/0.5.2/LICENSE | `9e909cc8a8ba27b1a649c964cf9eda37de911f3138c2b64e6d2f01703904ac13` |
-| zstd `LICENSE` | https://raw.githubusercontent.com/facebook/zstd/v1.5.6/LICENSE | `7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8` |
-| zlib `LICENSE` | https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE | `845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243` |
-| mimalloc `LICENSE` | https://raw.githubusercontent.com/microsoft/mimalloc/v2.1.7/LICENSE | `19c99805e7a44a34b297a75d1edea9985e300066dfc024d5c99d4236d4573b5d` |
-| libfuse patch (named, not copied) | https://raw.githubusercontent.com/AppImage/type2-runtime/dd6cebedcbddde9c82f89b011e8e1d40b6e43868/patches/libfuse/mount.c.diff | `1c7fd9e26717545a476b226b083a9f9d05676c180edbd71a04bbd8a73599dc44` |
-
-Three texts were also checked against the source archives the builds use:
-- musl's `COPYRIGHT` is identical in `musl-1.2.5.tar.gz`
-  (`a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4`).
-- libfuse's `LGPL2.txt` and `LICENSE` are identical in `fuse-3.15.0.tar.xz`
-  (`70589cfd5e1cff7ccd6ac91c86c01be340b227285c5e200baa284e401eea2ca0`, the hash
-  type2-runtime's script checks).
-- squashfuse's `LICENSE` is identical in `0.5.2.tar.gz`
-  (`db0238c5981dabbd80ee09ae15387f390091668ca060a7bc38047912491443d3`).
-
-libfuse's `LGPL2.txt` is not byte-identical to `LGPL-2.1.txt` (see above), so
-it is copied rather than referred to.
-
-**How each version was confirmed.** The runtime binary was inspected with
-`strings` only. Its release's debug file, `runtime-x86_64.debug`
-(SHA-256 `1f3c4a8439e344d74b61bfd0610b89e8499453791bbc3c5b4ae38c181fe54942`),
-was inspected the same way.
-
-| Component | Version | Evidence |
-|---|---|---|
-| type2-runtime | dd6cebe | The binary contains `https://github.com/AppImage/type2-runtime/commit/dd6cebe`. Tag `20251108` is commit `dd6cebedcbddde9c82f89b011e8e1d40b6e43868`. |
-| squashfuse | 0.5.2 | The binary contains `squashfuse 0.5.2`. `scripts/common/install-dependencies.sh` fetches 0.5.2. |
-| libfuse | 3.15.0, patched | The binary contains `3.15.0` beside `FUSE library version: %s`. The debug file's build directory is `fuse-3.15.0`. The patch's `FUSERMOUNT_PROG` lookup is present. |
-| zstd | 1.5.6 | The binary contains `1.5.6` ahead of zstd's error strings. |
-| zlib | 1.3.1 | The binary contains ` inflate 1.3.1 Copyright 1995-2024 Mark Adler `. |
-| musl | 1.2.5 | The debug file's path is `/home/buildozer/aports/main/musl/src/musl-1.2.5`. |
-| mimalloc | 2.1.7 | See below. |
-
-The commit's `Dockerfile` (`alpine:3.21`) installs zstd, zlib, musl and
-mimalloc as Alpine packages.
-
-**mimalloc.** The runtime's `Makefile` links `-lmimalloc`, from Alpine's
-`mimalloc-dev`. In Alpine 3.21 that name is provided only by
-`mimalloc2-dev 2.1.7-r0`, built 2024-07-23, which is still the branch's
-current build. The binary agrees:
-- it has mimalloc's `retry_on_oom` option, which first appears in v2.1.7;
-- it lacks the `visit_abandoned` and `guarded_*` options that v2.1.8 adds.
-
-The release's build log (Actions run 20037536435) has expired, so it could
-not be read.
 
 ### `windows-runtime.txt`
 

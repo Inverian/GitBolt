@@ -1,8 +1,7 @@
 # ============================================================================
 # The licence texts every package ships (cmake/Packaging.cmake, the app's
-# bundle in src/app/CMakeLists.txt, the AppImage step in CI): GitBolt's own
-# GPL-3.0 (LICENSE), and THIRD-PARTY-NOTICES.txt for the software of others
-# a package holds:
+# bundle in src/app/CMakeLists.txt): GitBolt's own GPL-3.0 (LICENSE), and
+# THIRD-PARTY-NOTICES.txt for the software of others a package holds:
 #   - Qt, under the LGPL-3.0, and the code of others in Qt's libraries
 #     (resources/licenses/qt-<Qt version>-third-party.txt, written by
 #     tools/update-qt-notices.py);
@@ -15,9 +14,7 @@
 #   - on Windows, Microsoft's C++ runtime and NSIS (the installer, and the
 #     Uninstall.exe it leaves).
 # On Linux all of it goes in one file, share/doc/gitbolt/copyright, as Debian
-# has it; the AppImage step in CI adds the Ubuntu libraries and the AppImage
-# runtime it bundles. resources/licenses/SOURCES.md says where each text
-# comes from.
+# has it. resources/licenses/SOURCES.md says where each text comes from.
 #
 # A text that should be there and isn't is a warning, so a build against
 # another Qt (Homebrew's, a distribution's) still configures; with
@@ -135,9 +132,9 @@ else()
 endif()
 
 # --- ICU (Linux) --------------------------------------------------------
-# Deployed from Qt's own lib folder (src/app/CMakeLists.txt, linuxdeploy)
-# when the Qt there has it, as aqt's Qt does; a distribution's Qt uses the
-# system's ICU, which no package here carries.
+# Deployed from Qt's own lib folder (src/app/CMakeLists.txt) when the Qt
+# there has it, as aqt's Qt does; a distribution's Qt uses the system's
+# ICU, which no package here carries.
 if(UNIX AND NOT APPLE)
     get_target_property(_gitbolt_qtcore Qt6::Core LOCATION)
     get_filename_component(_gitbolt_qtlib "${_gitbolt_qtcore}" DIRECTORY)
