@@ -8,7 +8,7 @@
   <a href="https://github.com/Inverian/GitBolt/actions/workflows/ci.yml"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/Inverian/GitBolt/ci.yml?branch=main&label=build&logo=githubactions&logoColor=white"></a>
   <a href="https://github.com/Inverian/GitBolt/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/Inverian/GitBolt?include_prereleases&sort=semver&label=release&color=ffb020"></a>
   <a href="LICENSE"><img alt="License: GPL-3.0" src="https://img.shields.io/github/license/Inverian/GitBolt?color=blue"></a>
-  <a href="#download"><img alt="Platforms: macOS, Linux, Windows" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-6b7280"></a>
+  <a href="#download"><img alt="Platforms: macOS, Windows 11, Ubuntu" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%2011%20%7C%20Ubuntu-6b7280"></a>
   <a href="https://www.gitbolt.com"><img alt="Website: gitbolt.com" src="https://img.shields.io/badge/website-gitbolt.com-ffb020?labelColor=0b0d10"></a>
   <br>
   <a href="https://www.qt.io"><img alt="Qt 6" src="https://img.shields.io/badge/Qt-6-41CD52?logo=qt&logoColor=white"></a>
@@ -55,19 +55,115 @@ Most desktop Git GUIs today are either Electron-based (dragging a full JavaScrip
 Installers for every release are on the
 [Releases page](https://github.com/Inverian/GitBolt/releases), newest first.
 
-| Platform | Download | Notes |
+| Platform | Download | Requirements |
 |---|---|---|
 | macOS | `GitBolt-<version>-Darwin-arm64.dmg` | Apple Silicon, macOS 13 (Ventura) or later |
-| Windows | `GitBolt-<version>-Windows-AMD64.exe` | 64-bit installer |
-| Linux | `GitBolt-<version>-x86_64.AppImage` | x86-64, on distributions with GCC 13's C++ runtime or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later); make it executable and run it |
-| Ubuntu / Debian | `gitbolt_<version>_amd64.deb` | x86-64; Ubuntu 24.04 or later, Debian 13 and distributions based on them, such as Linux Mint 22 |
+| Windows | `GitBolt-<version>-Windows-AMD64.exe` | Windows 11, 64-bit (x64) |
+| Ubuntu | `gitbolt_<version>_amd64.deb` | Ubuntu 24.04 or later, x86-64 |
 
-Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`.
+These are the platforms GitBolt supports. GitBolt also installs and
+updates on Windows 10 (version 1809 or later), and the .deb installs on
+Debian 13 and on distributions based on Ubuntu 24.04 or Debian 13, such
+as Linux Mint 22, but they aren't supported. There is no AppImage any
+more: see [Install](#install) to switch to the .deb.
+
+Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`,
+and has a `-symbols.zip` for each platform: debug symbols the
+maintainers use to read crash reports. You don't need them to install
+or run GitBolt (the `GitBolt.exe` in the Windows one is not an
+installer).
 
 GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
 or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
 runs the git your login shell finds first, and says so when that git
 has known security flaws.
+
+### Install
+
+- **macOS**: open the .dmg and drag GitBolt to Applications, then open
+  it from there. A GitBolt that runs from the disk image can't update
+  itself.
+- **Windows**: run the installer. It asks for administrator permission,
+  installs GitBolt (by default in Program Files), and adds it to the
+  Start menu, and **Open in GitBolt** to Explorer's right-click menu on
+  folders.
+- **Ubuntu**: in the folder you downloaded it to, run
+  `sudo apt install ./gitbolt_<version>_amd64.deb` (the `./` matters).
+  apt also installs python3-nautilus, for **Open in GitBolt** in
+  Nautilus: restart Nautilus once (`nautilus -q`) to see it.
+
+**From the AppImage** (GitBolt 0.9.x): install the .deb as above, then
+delete the AppImage. Your settings carry over: both keep them in
+`~/.config/GitBolt`. The AppImage keeps working, but gets no more
+updates.
+
+### First launch
+
+GitBolt's installers aren't signed by Apple or Microsoft yet, so the
+first time you open GitBolt, your system asks you to confirm it.
+
+- **macOS**: the app is signed with GitBolt's own certificate, which
+  macOS doesn't know, and isn't notarized by Apple. When you first open
+  it, macOS says it can't verify GitBolt and doesn't open it. Close
+  that message, open **System Settings › Privacy & Security**, scroll
+  down to **Security**, and click **Open Anyway** next to the message
+  about GitBolt. The button shows for about an hour after you tried to
+  open GitBolt. Confirm with **Open Anyway** and your login password.
+  When you open a repository in Documents, Desktop or Downloads, macOS
+  asks whether GitBolt may access that folder. After the update from
+  0.9.12 to 1.0.0 it may ask once more; from 1.0.0 on, updates keep
+  that access.
+- **Windows**: if SmartScreen says "Windows protected your PC", click
+  **More info**, then **Run anyway**. The administrator prompt says the
+  publisher is unknown: click **Yes**. While **Smart App Control** is on
+  (Windows 11), it blocks GitBolt, and it can't make an exception for
+  one app. Until GitBolt's installers are signed, GitBolt runs only
+  with Smart App Control off (**Windows Security › App & browser
+  control › Smart App Control settings**).
+- **Ubuntu**: nothing more to do.
+
+### Updating
+
+GitBolt checks for a new release once a day, and a bar says when one
+is out. **Help › Check for updates** (on macOS also **GitBolt › Check
+for Updates…**) checks at once. The update window shows what's new;
+**Install and Restart** downloads the new version, checks it against
+the release's checksums, installs it and starts GitBolt again.
+
+- **macOS** replaces GitBolt.app where it is, so it can't update a
+  GitBolt that runs from the disk image, or from a folder you can't
+  change.
+- **Windows** asks for administrator permission. The prompt names
+  Windows PowerShell, which runs the installer.
+- **Ubuntu** first asks apt whether the new .deb can be installed, then
+  asks for your password. Without pkexec, GitBolt shows the `apt`
+  command to run instead.
+
+To stop the daily check, clear **Check for updates automatically** in
+**Tools › Settings › Updates**. Builds from source don't update
+themselves. [PRIVACY.md](PRIVACY.md#update-checks) says what a check
+sends.
+
+### Uninstalling
+
+- **macOS**: quit GitBolt and move it from Applications to the Trash.
+- **Windows**: in **Settings › Apps › Installed apps**, click **⋯** next
+  to GitBolt, then **Uninstall**.
+- **Ubuntu**: `sudo apt remove gitbolt`.
+
+This doesn't touch your repositories. It leaves GitBolt's settings,
+crash report, log and update downloads behind; to remove them too,
+delete these folders:
+
+- **macOS**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
+  report), `~/Library/Logs/GitBolt` (log) and
+  `~/Library/Caches/GitBolt` (update downloads).
+- **Windows**: `%APPDATA%\GitBolt` (settings), `%USERPROFILE%\.gitbolt`
+  (crash report) and `%LOCALAPPDATA%\GitBolt` (log and update
+  downloads).
+- **Ubuntu**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
+  report), `~/.local/state/GitBolt` (log) and `~/.cache/GitBolt`
+  (update downloads).
 
 ---
 
@@ -109,8 +205,8 @@ has known security flaws.
   worker threads (no UI freeze even on huge working trees)
 - Built-in terminal (Console tab, Tools → Git bash) opened in the
   repository: your login shell under a PTY on macOS and Linux, cmd.exe
-  under ConPTY on Windows (10 1809 or later). Plain text for now, no
-  colors or full-screen programs
+  under ConPTY on Windows. Plain text for now, no colors or full-screen
+  programs
 - Light, Dark, and System theme modes
 - Customizable code font and tab size
 - Configurable keyboard shortcuts
@@ -135,7 +231,7 @@ has known security flaws.
 - Windows Explorer "Open in GitBolt" context menu, on folders and folder backgrounds
 - Linux Nautilus extension and `.desktop` file
 - A folder inside a repository opens that repository; a folder in none says so
-- Cross-platform installers (DMG, NSIS, DEB, AppImage)
+- Cross-platform installers (DMG, NSIS, DEB)
 
 ---
 

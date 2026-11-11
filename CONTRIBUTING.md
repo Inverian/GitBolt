@@ -29,8 +29,7 @@ There are many ways to contribute to GitBolt:
 - **Improve documentation** — Fix typos, clarify confusing sections, add examples
 - **Write code** — Fix bugs or implement new features
 - **Review pull requests** — Help us review and test contributions from others
-- **Test pre-releases** — Try beta builds and report issues
-- **Create plugins** — Extend GitBolt's functionality via the plugin system
+- **Test new versions** — Try the latest release, or an installer CI built from `main` (the Actions tab, signed in to GitHub), and report issues
 - **Translate** — Help localize GitBolt into your language (when translation infrastructure is in place)
 
 ---
@@ -55,6 +54,7 @@ When reporting a bug, include:
 - **Expected behavior** vs **actual behavior**
 - **Screenshots or screen recordings** if relevant
 - **Stack trace or crash log** from `~/.gitbolt/crash.log` if the app crashed
+- **The log file**, or the part of it around the problem: `~/Library/Logs/GitBolt/GitBolt.log` (macOS), `%LOCALAPPDATA%\GitBolt\logs\GitBolt.log` (Windows) or `~/.local/state/GitBolt/GitBolt.log` (Linux). It can contain repository paths and branch names, so look through it first
 - **Repository details** that may be relevant (size, structure, special configurations)
 
 ---
@@ -206,9 +206,13 @@ feature:
 
 - **Every `QAction` must be addressable.** Call `setObjectName()` on
   any new menu / toolbar / context-menu action, using the dotted
-  `area.action` convention (`"commands.resolveConflicts"`,
-  `"worktree.lockUnlock"`). Explicit names are required because they
-  stay stable when the display text changes. `MainWindow` runs an
+  `area.action` convention, lower case with hyphens
+  (`"commands.resolve-conflicts"`, `"log.revert-commit"`). Explicit
+  names are required because they stay stable when the display text
+  changes. The dotted name is also what usage statistics count: a
+  right-click menu entry without one is never counted, and one with
+  one is counted by that name ([PRIVACY.md](PRIVACY.md)), so never put
+  a branch name, path or other user text in it. `MainWindow` runs an
   `assignActionObjectNames()` safety net that auto-derives a name from
   the menu path for anything left unnamed — **treat that as a backstop,
   not a substitute**; a derived name breaks the moment someone reworks

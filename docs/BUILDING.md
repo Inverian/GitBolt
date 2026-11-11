@@ -4,7 +4,7 @@ This guide walks you through setting up a development environment and building G
 
 The Mac and Windows instructions are intentionally kept as parallel as possible. The same dependencies are installed in the same order, just through each platform's preferred package manager.
 
-> If you only want to **use** GitBolt and not develop it, download a pre-built installer from the [Releases page](https://github.com/Inverian/GitBolt/releases) instead.
+> If you only want to **use** GitBolt and not develop it, download a pre-built installer from the [Releases page](https://github.com/Inverian/GitBolt/releases) instead. The README's [Download](../README.md#download) section says which platforms the installers support: Windows 11, macOS 13 or later on Apple Silicon, and Ubuntu 24.04 or later.
 
 ---
 
@@ -148,7 +148,7 @@ You're now ready to [build](#building).
 
 ## Windows — Step by step
 
-These instructions are tested on **Windows 10 21H2** and **Windows 11**.
+These instructions are for **Windows 11**, the Windows version GitBolt supports.
 
 ### 1. Install Visual Studio 2022
 
@@ -366,6 +366,16 @@ a system libgit2. To run one directly with verbose output:
 ./build/tests/test_git_service
 ```
 
+The end-to-end tests (`ctest --test-dir build -L e2e`) drive the built
+app through the [test bridge](AGENT_TESTING.md) on macOS, Linux and
+Windows. They need Python 3 and git on `PATH`; on Windows that is Git
+for Windows, whose `sh` runs the tests' hooks and filters. Where your
+shell exports an editor (`GIT_EDITOR`), run them with
+`env -u GIT_EDITOR`. Each one gets 240 seconds on Windows, 120
+elsewhere. A test that can't run on a platform exits 77, which ctest
+counts as skipped; [AGENT_TESTING.md](AGENT_TESTING.md#end-to-end-tests-on-windows)
+lists what skips on Windows.
+
 ---
 
 ## Build options
@@ -378,6 +388,7 @@ These CMake options can be passed at configure time with `-D<NAME>=<VALUE>`:
 | `GITBOLT_SANITIZERS` | `OFF` | Instrument everything with AddressSanitizer + UndefinedBehaviorSanitizer |
 | `GITBOLT_BUNDLED_LIBGIT2` | `ON` | Build the pinned libgit2, with GitBolt's patches, from source and link it statically (see [Bundled libgit2](#bundled-libgit2)). `OFF` uses [a system libgit2](#a-system-libgit2) |
 | `GITBOLT_ALLOW_OLD_SYSTEM_LIBGIT2` | `OFF` | With `GITBOLT_BUNDLED_LIBGIT2=OFF`, accept a system libgit2 older than [the floor](#a-system-libgit2), for a distribution that backported its fixes |
+| `GITBOLT_RELEASE_SYMBOLS` | `OFF` | Give Release builds line tables at the same optimisation (`-g1`; on MSVC `/Z7`, and `/DEBUG:FULL /OPT:REF /OPT:ICF` for GitBolt.exe), for the symbol files each release publishes. The `gitbolt_symbols` target then writes `build/GitBolt-<version>-<system>-<cpu>-symbols.zip` (a dSYM, the .exe and its .pdb, or `gitbolt.debug`), which [`tools/symbolize.py`](../tools/README.md#symbolizepy) reads crash reports with. CI sets it on every build |
 | `GITBOLT_REQUIRE_ENGLISH_PLURALS` | `OFF` | Fail the configure when the [English plural forms](#english-plural-forms) can't be built (no Qt LinguistTools, or Qt before 6.7). CI sets it |
 | `CMAKE_BUILD_TYPE` | `Debug` | `Debug`, `Release`, `RelWithDebInfo`, or `MinSizeRel` (defaults to Debug when unset) |
 | `CMAKE_OSX_DEPLOYMENT_TARGET` | `13.0` | macOS only: the oldest macOS the build targets, also written to Info.plist as `LSMinimumSystemVersion`. Set it on the first configure of a build directory |
@@ -446,8 +457,7 @@ pinned in [`cmake/Libgit2.cmake`](../cmake/Libgit2.cmake) (1.9.7, checked
 against its SHA-256) at configure time, patches it, builds it as part of
 the project and links it statically into GitBolt, so there is no libgit2
 library to install or ship. CI and every installer use it, so the DEB
-depends on no distribution's libgit2 package and the AppImage carries
-no libgit2 library.
+depends on no distribution's libgit2 package.
 
 - GitBolt uses libgit2 only for local repository access. Clone, fetch,
   pull and push run the `git` CLI, so git's own SSH and credential
@@ -597,7 +607,7 @@ This appears when running a development build that hasn't been code-signed. To a
 xattr -cr build/src/app/GitBolt.app
 ```
 
-For production releases, the binary is code-signed by the GitBolt project.
+GitBolt's macOS releases are signed with GitBolt's own certificate, not with an Apple Developer ID, and aren't notarized, so a downloaded release still needs **Open Anyway** the first time (see the README's [First launch](../README.md#first-launch)). The Windows installers aren't signed. To sign a macOS build of your own with an identity in your keychain, set the environment variable `GITBOLT_MACOS_SIGN_IDENTITY` to the identity's SHA-1 (40 hex digits) when you run `cpack -G DragNDrop` or `cmake --install`; without it the bundle is signed ad hoc.
 
 ---
 

@@ -80,6 +80,7 @@ gives them all.
 | refresh.svg | `refresh` | `#1f77d4` |
 | remote.svg | `cloud` (or `cloud_queue`, `cloudy`, `cloudy_filled`) | `#1f77d4` |
 | reset.svg | `restart_alt` | `#e67e22` |
+| revert.svg | `undo` | `#8e44ad` |
 | schedule.svg | `schedule` | `#666a73` |
 | settings.svg | `settings` | `#666a73` |
 | sparse.svg | `layers` | `#666a73` |

@@ -104,6 +104,18 @@ tools/bridge.py screenshot /tmp/state.png     # in-process grab(), no overlay is
 tools/bridge.py quit                  # MainWindow::close() — clean exit for relaunch tests
 ```
 
+On Windows the bridge listens on the named pipe
+`\\.\pipe\<name>`, where `<name>` is `GITBOLT_TEST_BRIDGE`'s value
+(`gitbolt-test-bridge` for `1`), not on a socket in `$TMPDIR`.
+`tools/bridge.py` speaks Unix sockets only; the e2e harness
+(`tests/e2e/e2elib.py`) has the Windows client.
+
+The history table is `log.view`, so `select-row log.view N` selects a
+commit. The Cherry-Pick and Revert dialogs' fields are
+`cherryPick.commit` and `revert.commit`, the merge parent's combo
+`cherryPick.parent` and `revert.parent`, and the revert's note
+`revert.note` (`tests/e2e/test_revert_commit.py`).
+
 `dump-state` also reports `headOid`, `theme`, `logRows`,
 `statusMessage` and `opIndicator` (the toolbar's inline op label:
 "Merging topic…", "✓ Fetch complete.", "✗ fetch failed: …") so a
@@ -149,12 +161,17 @@ session, point the updater at a loopback stub
 A `test-feed` session downloads into a folder of its own in its
 `TMPDIR`, `gitbolt-updates-XXXXXX` (0700, never the shared
 `gitbolt-updates`), which `dump-state`'s `updateDir` names: the
-download, the staging, `install-helper.sh`, `install.log` and the
-helper's `install-result` go there. The app hands it on in
+download, the staging, `install-helper.sh`, `install.log`, the
+helper's `install-result` (one line, `<status> <version> <reason>`)
+and the `pending-install` marker the launch leaves (one line,
+`<from> <to> <unix seconds>`) go there. The app hands it on in
 `GITBOLT_TEST_UPDATE_DIR`, so the copy the install helper relaunches
-uses the same folder (and reads `install-result` from it once, at
-startup); a folder handed on that isn't a private one of this user's
-in `TMPDIR` is ignored and a new one made.
+uses the same folder (and reads `install-result` and
+`pending-install` from it once, at startup, and deletes them); a
+folder handed on that isn't a private one of this user's in `TMPDIR`
+is ignored and a new one made. Each attempt's outcome is one log line,
+`Update: <status> (<stage>, <reason>), <from> to <to>, <package>`,
+for example `Update: ok (install, none), 0.1.0 to 1.0.0, dmg`.
 
 The rest of `dump-state`'s update keys: `updateTimerActive` (the daily
 check is scheduled: never in a test session), `updateDialog` (while
@@ -201,6 +218,13 @@ processes it starts (git, hooks, ssh, the terminal's shell) don't
 inherit that port: one that crashes is reported by macOS as usual. A
 user's session keeps macOS's crash reporting.
 
+A test session also writes its log to `GitBolt-test.log`, never
+`GitBolt.log`, in the log folder (`~/Library/Logs/GitBolt`,
+`%LOCALAPPDATA%\GitBolt\logs`, `$XDG_STATE_HOME/GitBolt`). The e2e
+harness gives each app an `XDG_STATE_HOME` of its own; on macOS the
+folder follows the test's `HOME`, and on Windows it is the real
+profile's.
+
 Addressing:
 - **Actions** by `objectName` (every action has one — see below), by
   menu-path slug (`commands/merge-branches`), or trailing suffix
@@ -229,6 +253,97 @@ cached libgit2 index (CLI-side merges were invisible — fixed with
 (fixed with the prefix fallback). Worktree lock/remove — which no
 synthetic input could ever reach because they need a selected table
 row — were verified end to end via `select-row`.
+
+## End-to-end tests on Windows
+
+The e2e tests (`ctest --test-dir build -L e2e`) run on Windows too.
+There the harness also gives each app `TMP` and `TEMP` of its own
+(`QDir::tempPath()`, where the instance lock and the update folder
+go) and sets `QT_FORCE_STDERR_LOGGING=1`, because GitBolt is
+a GUI-subsystem app whose messages would otherwise go to
+`OutputDebugString`. An instance-named session with `XDG_CONFIG_HOME`
+set keeps `GitBolt.ini` (and the usage statistics queue beside it) in
+`%XDG_CONFIG_HOME%\GitBolt`, not in `%APPDATA%\GitBolt`. `HOME` moves
+only git's and libgit2's config: `QDir::homePath()` (`~/.gitbolt`,
+`crash-test.log`) and the log folder are the real profile's.
+
+What skips on Windows, with the reason printed:
+
+- Whole tests (exit 77): `test_git_notice` (the login shell's git),
+  `test_home_isolated` (`QDir::homePath()` ignores `HOME`) and
+  `test_crash_box_handoff` (it would read and delete the real
+  `~/.gitbolt/crash.log`).
+- Parts of tests ("skipped on Windows: ..."): `test_commit_hooks`' login
+  shell `PATH` case and FIFO-held reopen, `test_file_open` part 3 (the
+  `$HOME` ceiling), `test_instance_lock`'s live owner without its
+  socket, the held-open checks of `test_rebase_progress` section 3,
+  and `test_remote_op_leave_repo` section 7 (the FIFO gate).
+- Not registered: `test_instance_busy_owner` and
+  `test_launchservices_open` (macOS only; the first one's 64 KB
+  argument is also over Windows' 32,767-character command line), and
+  `test_update_install`, which CI runs directly in the NSIS smoke step.
+
+## The update tests in CI
+
+`tests/e2e/test_update_install.py` updates a real package in place,
+through the bridge: Help › Check for updates, then Install and
+Restart, against the loopback feed. Its inputs:
+
+- `GITBOLT_E2E_INSTALL_APP` (macOS): a DMG, whose GitBolt.app the test
+  copies into a scratch Applications folder.
+- `GITBOLT_E2E_INSTALLED_APP` (Windows, Linux): a GitBolt that CI
+  installed system-wide (`<dir>\bin\GitBolt.exe`, `/usr/bin/gitbolt`).
+  The test changes the system, so it is for throwaway runners only.
+- `GITBOLT_E2E_UPDATE_APP`: the installer the feed offers, named as its
+  release asset; `GITBOLT_E2E_INSTALL_APP` by default.
+- `GITBOLT_E2E_PUBLISHED_VERSION`: set when the installed copy is that
+  published release.
+
+Without them it skips. The old copy always runs as 0.1.0
+(`GITBOLT_TEST_APP_VERSION`); on Linux CI also relabels the installed
+package's dpkg version to 0.1.0, so apt sees an upgrade even when the
+versions are equal. Afterwards the test checks that the new copy is the
+offer's version and binary, that `pending-install` and `install-result`
+are gone, and that the log says
+`Update: ok (install, none), <from> to <version>, dmg|deb|nsis`, where
+`<from>` is 0.1.0, or `unknown` after a release up to 0.9.12, which
+writes no `pending-install` marker. In CI, pkexec is the real one,
+allowed by a polkit rule for the runner's user.
+
+Each platform runs two in-app updates on push and dispatch runs: the
+build updating itself (the DMG and the .deb; Windows in NSIS smoke
+parts 5 and 6), and the latest published release, fetched with
+`gh release download --repo Inverian/GitBolt`, updating to the build
+through its own Install and Restart (the DMG and the .deb, and NSIS
+part 7). A release with no asset for the platform skips only the
+published case, with a warning.
+
+**This makes a contract one release back.** Each release's CI drives
+the published release before it. So these must keep working in
+release builds, and a change to one must still work with the
+published release's copy of it, which the tests drive and the new
+build reads after the update:
+
+- the test bridge and the loopback test feed, and the variables
+  `GITBOLT_TEST_BRIDGE`, `GITBOLT_INSTANCE_NAME`,
+  `GITBOLT_TEST_UPDATE_FEED`, `GITBOLT_TEST_APP_VERSION` and
+  `GITBOLT_TEST_UPDATE_DIR`;
+- the bridge commands `trigger help.check-for-updates`,
+  `click updateDialog.install`, `dump-state` and `quit`, and the
+  widget names they use;
+- `dump-state`'s keys `updates`, `updateDialog`, `updateDialogText`,
+  `updateDir`, `pid`, `appPath` and `statusMessage`;
+- the `install-result` line.
+
+Compiling the bridge or the test feed out of release builds, say,
+would break the next release's CI.
+
+CI's manual runs take two inputs: `os` (`all`, `macos-latest`,
+`ubuntu-24.04` or `windows-latest`) and `tests` (a ctest `-R` regex;
+one that matches nothing fails). For example:
+`gh workflow run ci.yml --ref <branch> -f os=windows-latest -f tests='^e2e_'`.
+The installers of a filtered run come from a binary that ran only
+those tests; a manual run never releases.
 
 ## Every action is named
 
