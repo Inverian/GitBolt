@@ -2355,6 +2355,9 @@ private slots:
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
         gitbolt::git::GitProcess git(repo.path().toStdString());
+        // Git for Windows' autocrlf would check out "side\r\n", which
+        // libgit2 (no system config here) sees as a change when racy.
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
         QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
         repo.writeFile("side.txt", "side\n");
         QVERIFY(succeeded(git.run({"add", "side.txt"})));
@@ -2660,6 +2663,7 @@ private slots:
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
         gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
         QVERIFY(succeeded(git.run({"branch", "target"})));
         QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
         repo.writeFile("side.txt", "side\n");
@@ -2698,6 +2702,7 @@ private slots:
         gitbolt::test::TestRepo repo;
         QVERIFY(repo.writeAndCommit("a.txt", "a\n", "base").ok());
         gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "core.autocrlf", "false"})));
         QVERIFY(succeeded(git.run({"checkout", "-q", "-b", "side"})));
         repo.writeFile("b.txt", "b\n");
         QVERIFY(succeeded(git.run({"add", "b.txt"})));
