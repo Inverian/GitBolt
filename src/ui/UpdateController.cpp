@@ -590,10 +590,8 @@ void UpdateController::onPrepared()
     // the instance lock goes with this process, so the new copy can't
     // be folded into this one (SingleInstance.h). A false says why
     // through failed() (failInstall) or declined() (onDeclined) already.
-    // Windows' UAC prompt comes up now, over the window the user is in:
-    // the dialog, or one opened over it during the download (Settings,
-    // say). Owned by a window a modal one disables, the prompt was only a
-    // flashing taskbar button, and waited there.
+    // UAC's prompt is owned by the window in front: a modal over the
+    // dialog, else the dialog (a disabled owner may leave it on the taskbar).
     const qint64 pid = hooks_.pid ? hooks_.pid() : QCoreApplication::applicationPid();
     declined_ = false;
     installStage_ = "launch";
@@ -605,7 +603,7 @@ void UpdateController::onPrepared()
         dialog_->showPreparing(tr("Windows is asking for permission. If no prompt comes up, click the flashing "
                                   "shield button on the taskbar."));
 #endif
-    const bool started = launchHook_ ? launchHook_(*installer_, pid)
+    const bool started = launchHook_ ? launchHook_(*installer_, pid, owner)
                                      : installer_->launchHelper(pid, owner ? quintptr(owner->winId()) : 0);
     if (!started)
         return;

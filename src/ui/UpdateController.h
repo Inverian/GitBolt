@@ -132,11 +132,10 @@ public:
 
     void setRestartHooks(RestartHooks hooks);
     /// Starts the helper for `pid` in installer.launchHelper's place
-    /// (null, the default: that, with the dialog's window for Windows'
-    /// UAC prompt). Tests stand in for that prompt with it: they emit
-    /// the Installer's declined() or failed() and return false, as a No
-    /// does.
-    using LaunchHook = std::function<bool(update::Installer& installer, qint64 pid)>;
+    /// (null, the default: that, with `owner`'s window for Windows' UAC
+    /// prompt). Tests stand in for that prompt with it: they emit the
+    /// Installer's declined() or failed() and return false, as a No does.
+    using LaunchHook = std::function<bool(update::Installer& installer, qint64 pid, QWidget* owner)>;
     void setLaunchHook(LaunchHook hook);
 
     /// Once the window is up: says how the last install went (the

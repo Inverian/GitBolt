@@ -47,12 +47,15 @@ namespace {
 // every git: by its full path, without git's repository variables (an
 // exported GIT_CONFIG makes git refuse), and in the home folder so no
 // repository's config comes in. Its output, trimmed; empty when it failed.
-QString globalGitConfig(const QStringList& args, const char* scope = "--global")
+// `exitCode`: git's (1: the key isn't set), -1 if it didn't run.
+QString globalGitConfig(const QStringList& args, const char* scope = "--global", int* exitCode = nullptr)
 {
     std::vector<std::string> argv{"config", scope};
     for (const QString& arg : args)
         argv.push_back(arg.toStdString());
     const auto result = git::GitProcess(QDir::homePath().toStdString()).run(argv, 3000);
+    if (exitCode)
+        *exitCode = result.ok() ? result->exitCode : -1;
     if (!result.ok() || !result->success())
         return {};
     return QString::fromStdString(result->stdoutData).trimmed();
@@ -1338,10 +1341,11 @@ void SettingsDialog::loadGitConfig()
         }
         id.name  = globalGitConfig({QStringLiteral("user.name")});
         id.email = globalGitConfig({QStringLiteral("user.email")});
-        id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")});
-        // Else the system's, which git uses then: Git for Windows sets
-        // its helper (manager) there.
-        if (id.credentialHelper.isEmpty()) {
+        int global = 0;
+        id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")}, "--global", &global);
+        // None set globally: the system's, which Git for Windows sets
+        // (manager). A global empty value turns that off, so none then.
+        if (global == 1) {
             const QString system = globalGitConfig({QStringLiteral("credential.helper")}, "--system");
             if (!system.isEmpty())
                 id.credentialHelper = tr("%1 (system)").arg(system);

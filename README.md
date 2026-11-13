@@ -79,8 +79,8 @@ installer).
 GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
 or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
 runs the first git on your PATH (on macOS and Linux, the PATH your
-login shell sets up), so restart GitBolt after you install git. It
-says so when that git has known security flaws.
+login shell sets up), so restart GitBolt after you install git.
+GitBolt warns you when that git has known security flaws.
 
 ### Install
 
@@ -132,8 +132,9 @@ or GitBolt on a Mac), your system asks you to confirm it.
 - **Ubuntu**: nothing more to do.
 
 Before your first commit, enter your name and email in **Tools ›
-Settings › Git Config**, unless git already has them. GitBolt saves
-them as git's `user.name` and `user.email`, which every commit records.
+Settings › Git Config** (on macOS **GitBolt › Settings › Git
+Config**), unless git already has them. GitBolt saves them as git's
+`user.name` and `user.email`, which every commit records.
 
 ### Updating
 
@@ -150,8 +151,9 @@ the release's checksums, installs it and starts GitBolt again.
   Windows PowerShell (verified publisher: Microsoft Windows), which
   runs GitBolt's installer; **Show more details** shows its long
   encoded command. If no prompt comes up, click the flashing shield
-  button on the taskbar. A prompt left unanswered for about 2 minutes
-  is cancelled, and nothing is installed (**Try Again** asks again).
+  button on the taskbar. A prompt that comes up and is left unanswered
+  for about 2 minutes is cancelled, and nothing is installed (**Try
+  Again** asks again).
   After **Yes**, GitBolt closes while the installer runs, usually for a
   few seconds, and starts again by itself: don't start it in the
   meantime. Its status bar then says which version GitBolt was updated
@@ -191,8 +193,8 @@ delete these:
   report), `~/.local/state/GitBolt` (log) and `~/.cache/GitBolt`
   (update downloads).
 
-The name and email you set in **Tools › Settings › Git Config** are
-git's own settings, usually in `~/.gitconfig` (on Windows
+The name and email you set in GitBolt's Git Config settings are git's
+own settings, usually in `~/.gitconfig` (on Windows
 `%USERPROFILE%\.gitconfig`), and stay.
 
 ---

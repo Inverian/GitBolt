@@ -61,6 +61,14 @@ bool missingIdentity(const QString& gitMessage)
 {
     return gitMessage.contains(QLatin1String("git config --global user.email"));
 }
+
+// The note a commit refused for a missing name and email leaves.
+QString missingIdentityNote()
+{
+    return CommitDialog::tr("Commit failed: git doesn't know your name and email yet. Set them in %1, then commit "
+                            "again.")
+        .arg(identitySettings());
+}
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -396,6 +404,15 @@ void CommitDialog::setupUi()
 
 void CommitDialog::wireConnections()
 {
+    // Settings' Apply writes git's name and email, then emits one
+    // settingsChanged: the footer follows while this dialog is open
+    // (showEvent reads it again otherwise).
+    if (settings_)
+        connect(settings_, &conf::SettingsService::settingsChanged, this, [this] {
+            if (isVisible())
+                readCommitterFromConfig();
+        });
+
     // ---- View interactions -----------------------------------------------
     connect(unstagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &CommitDialog::onUnstagedSelectionChanged);
@@ -681,6 +698,9 @@ void CommitDialog::readCommitterFromConfig()
         committerLabel_->setText(tr("Committer: %1 <%2>")
             .arg(QString::fromStdString(*name),
                  QString::fromStdString(*email)));
+        // Set meanwhile: the note asking for them goes.
+        if (errorLabel_->text() == missingIdentityNote())
+            errorLabel_->hide();
     } else if (name) {
         committerLabel_->setText(tr("Committer: %1")
             .arg(QString::fromStdString(*name)));
@@ -1006,11 +1026,7 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
             emit pushAfterCommitRequested();
     } else {
         pushAfterCommit_ = false;
-        errorLabel_->setText(missingIdentity(message)
-                                 ? tr("Commit failed: git doesn't know your name and email yet. Set them in "
-                                      "%1, then commit again.")
-                                       .arg(identitySettings())
-                                 : tr("Commit failed: %1").arg(message));
+        errorLabel_->setText(missingIdentity(message) ? missingIdentityNote() : tr("Commit failed: %1").arg(message));
         errorLabel_->show();
     }
 }

@@ -16,7 +16,7 @@
 //     and says why, and opening it never creates an install ID;
 //   - Copy puts the install ID on the clipboard;
 //   - the Git Config page's Credential Helper is the global one, else
-//     the system's, marked so.
+//     the system's, marked so; none when a global empty value resets it.
 //
 // Settings live in a folder of the test's own (QSettings::setPath),
 // and Apply's git config writes go to a temporary global config: never
@@ -322,7 +322,19 @@ private slots:
             QVERIFY(helper);
             QTRY_COMPARE_WITH_TIMEOUT(helper->text(), QStringLiteral("manager-test (system)"), 10000);
         }
-        // The global one is what git uses, when there is one.
+        // A global empty value resets git's list: no helper runs, the
+        // system's neither.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[credential]\n\thelper =\n");
+        global.close();
+        {
+            SettingsDialog dialog(&settings, nullptr);
+            auto* helper = child<QLineEdit>(dialog, "settings.git-credential-helper");
+            QVERIFY(helper);
+            QTRY_VERIFY_WITH_TIMEOUT(helper->isEnabled(), 10000);
+            QCOMPARE(helper->text(), QString());
+        }
+        // A global one is shown (git runs the system's first, then it).
         QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
         global.write("[credential]\n\thelper = store\n");
         global.close();

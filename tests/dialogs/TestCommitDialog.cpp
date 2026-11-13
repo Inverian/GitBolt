@@ -16,7 +16,7 @@
 //     dialog stays open with its message;
 //   - with no user.name or user.email, the footer and a refused commit
 //     say where GitBolt sets them, and the note is gone when the dialog
-//     opens again;
+//     opens again, or once Settings sets them while it stays open;
 //   - a new repository's title names its branch, before the first commit;
 //   - status that can't be read (a tree nested too deep for libgit2)
 //     says so, and why, until it reads again, the lists empty;
@@ -45,12 +45,14 @@
 #include <QTest>
 
 #include "../TestRepoHelper.h"
+#include "conf/SettingsService.h"
 #include "dialogs/CommitDialog.h"
 #include "widgets/DiffViewerWidget.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 #include "util/MessageText.h"
 
+using gitbolt::conf::SettingsService;
 using gitbolt::dialogs::CommitDialog;
 using gitbolt::services::GitService;
 
@@ -539,7 +541,8 @@ private slots:
 
         GitService svc;
         QVERIFY(svc.openRepository(repo.path()));
-        CommitDialog dialog(&svc, nullptr);
+        SettingsService settings;
+        CommitDialog dialog(&svc, &settings);
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         auto* message = child<QPlainTextEdit>(dialog, "commit.message");
@@ -559,14 +562,28 @@ private slots:
         QVERIFY2(error->text().endsWith(QStringLiteral("Settings › Git Config, then commit again.")),
                  qPrintable(error->text()));
 
+        // Opened again, the note is stale: gone, though the footer still asks.
         dialog.close();
-        QVERIFY(succeeded(git.run({"config", "user.name", "Test User"})));
-        QVERIFY(succeeded(git.run({"config", "user.email", "test@gitbolt.local"})));
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         QVERIFY(!error->isVisible());
-        QCOMPARE(committer->text(), QStringLiteral("Committer: Test User <test@gitbolt.local>"));
+        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
         QCOMPARE(message->toPlainText(), QStringLiteral("first"));
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
+
+        // Set while the dialog stays open, then Settings' Apply emits
+        // settingsChanged (a setter stands in): the footer follows, the
+        // note goes, and the commit goes in.
+        QVERIFY(succeeded(git.run({"config", "user.name", "Test User"})));
+        QVERIFY(succeeded(git.run({"config", "user.email", "test@gitbolt.local"})));
+        settings.setDefaultRemote(QStringLiteral("origin"));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Test User <test@gitbolt.local>"));
+        QVERIFY(!error->isVisible());
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog.isVisible(), 15000);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%an <%ae> %s"})),
+                 QStringLiteral("Test User <test@gitbolt.local> first"));
     }
 
     // A new repository (`git init -b main`) has no commit yet, so HEAD

@@ -42,6 +42,8 @@
 //     GitBolt runs (the launch hook stands in for the prompt): GitBolt
 //     doesn't quit, the dialog says how to install it by hand, and
 //     after a No, Try Again asks again for the same checked download;
+//     the prompt's owner is a modal opened over the dialog meanwhile,
+//     else the dialog;
 //   - every attempt's outcome, for usage statistics (updateResult): at
 //     start() from install-result and the pending-install marker the
 //     launch leaves (a marker alone, past its patience, is no_result),
@@ -68,6 +70,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
+#include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -690,7 +693,7 @@ private slots:
                           true));
         Harness h(testSetup(server, cache_->path(), deb()));
         int launches = 0;
-        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64, QWidget*) {
             ++launches;
             return false;
         });
@@ -864,7 +867,7 @@ private slots:
         QList<qint64> launched;
         QString downloaded;
         h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
-        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64 pid) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64 pid, QWidget*) {
             launched << pid;
             downloaded = QDir(h.controller->setup().config.downloadDir)
                              .filePath(QStringLiteral("0.1.1/GitBolt-0.1.1-Windows-AMD64.exe"));
@@ -927,6 +930,38 @@ private slots:
             QCOMPARE(server.hits(exePath), 2);
         }
         QTest::qWait(400);
+        QCOMPARE(quits, 0);
+    }
+
+    // UAC's prompt is owned by the window in front: a modal opened over
+    // the dialog during the download (Settings, say), else the dialog.
+    void thePromptIsOwnedByTheWindowInFront() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        int quits = 0;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
+        QList<QPointer<QWidget>> owners;
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget* owner) {
+            owners << owner;
+            emit installer.declined(QStringLiteral("Install it yourself."));
+            return false;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QDialog over(h.dialog());
+        over.open();   // while the download runs
+        QTRY_COMPARE(owners.size(), 1);
+        QCOMPARE(owners.first().data(), static_cast<QWidget*>(&over));
+        QCOMPARE(h.dialog()->state(), State::Declined);
+        // Closed, Try Again's prompt is the dialog's.
+        over.close();
+        h.button("updateDialog.retry")->click();
+        QCOMPARE(owners.size(), 2);
+        QCOMPARE(owners.last().data(), static_cast<QWidget*>(h.dialog()));
         QCOMPARE(quits, 0);
     }
 
@@ -1499,7 +1534,7 @@ private slots:
             Harness h(setup);
             int quits = 0;
             h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
-            h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64) { return true; });
+            h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64, QWidget*) { return true; });
             h.controller->checkNow();
             QTRY_COMPARE(h.dialog()->state(), State::Available);
             const qint64 before = QDateTime::currentSecsSinceEpoch();
@@ -1561,7 +1596,7 @@ private slots:
                                        .filePath(QLatin1String(UpdateController::kInstallMarkerFile));
         int quits = 0;
         h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300, 1000});
-        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget*) {
             if (how == QLatin1String("declined")) {
                 emit installer.declined(QStringLiteral("Install it yourself."));
                 return false;
