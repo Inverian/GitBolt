@@ -1,4 +1,5 @@
 #include "conf/SettingsService.h"
+#include "conf/WindowPlacement.h"
 
 #include <QCoreApplication>
 #include <QDialog>
@@ -750,6 +751,9 @@ void SettingsService::applyConfiguredSize(QDialog* dlg, const char* key)
     }
     if (!sized)
         dlg->resize(readDefaultSize(s));
+    // The default (1000 x 800) or a saved size can be larger than a small
+    // screen, and QDialog only moves a dialog onto the screen, never shrinks it.
+    fitOnScreenWhenShown(dlg);
 
     // Save geometry on close. We use QDialog::finished because it
     // fires whether the dialog was closed via accept(), reject(),

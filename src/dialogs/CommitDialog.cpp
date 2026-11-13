@@ -2,6 +2,7 @@
 
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "conf/WindowPlacement.h"
 #include "git/Config.h"
 #include "git/Diff.h"
 #include "git/PatchBuilder.h"
@@ -1105,6 +1106,8 @@ void CommitDialog::showEvent(QShowEvent* e)
         if (!rightSplit.isEmpty()) rightSplitter_->restoreState(rightSplit);
 
         validateGeometryOnScreen();
+        // Its default or saved size, no larger than a small screen.
+        conf::fitOnScreen(this);
         restored_ = true;
     }
 

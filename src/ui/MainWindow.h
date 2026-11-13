@@ -105,7 +105,7 @@ public:
 protected:
     void closeEvent(QCloseEvent* e) override;
     /// The first show puts the window fully on its screen
-    /// (widgets::fitOnScreen).
+    /// (conf::fitOnScreen).
     void showEvent(QShowEvent* e) override;
     /// Right-click menus' entries, counted as each menu opens (set up by
     /// instrumentActionsForTelemetry).

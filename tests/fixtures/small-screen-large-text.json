@@ -1,0 +1,14 @@
+{
+    "screens": [
+        {
+            "name": "Small, large text",
+            "x": 0,
+            "y": 0,
+            "width": 819,
+            "height": 566,
+            "logicalDpi": 144,
+            "logicalBaseDpi": 144,
+            "dpr": 1
+        }
+    ]
+}

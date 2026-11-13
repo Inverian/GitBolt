@@ -8,12 +8,17 @@
 // the startup size (1024x700 at least) nor a saved geometry was fitted
 // to the screen: the third card ran off its right edge.
 //
+// test_small_screen_large_text runs dashboardIsWhole again with fonts at
+// 144 dpi, unscaled (fixtures/small-screen-large-text.json), where the
+// Contribute row is the page's widest.
+//
 
 #include <QAction>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
+#include <QLayout>
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
@@ -21,14 +26,21 @@
 #include <QSettings>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QToolButton>
+#include <QTreeWidget>
+
+#include <memory>
 
 #include "../TestRepoHelper.h"
 #include "conf/SettingsService.h"
+#include "conf/WindowPlacement.h"
+#include "dialogs/CloneDialog.h"
+#include "dialogs/CommitDialog.h"
 #include "dialogs/SettingsDialog.h"
 #include "services/GitService.h"
 #include "ui/DashboardView.h"
 #include "ui/MainWindow.h"
-#include "widgets/WindowPlacement.h"
+#include "widgets/BoltLogoWidget.h"
 
 using gitbolt::conf::SettingsService;
 using gitbolt::ui::DashboardView;
@@ -105,7 +117,35 @@ private slots:
         QFETCH(QRect, frame);
         QFETCH(QRect, available);
         QFETCH(QRect, fitted);
-        QCOMPARE(gitbolt::widgets::fitWindowFrame(frame, available), fitted);
+        QCOMPARE(gitbolt::conf::fitWindowFrame(frame, available), fitted);
+    }
+
+    // A window still to be placed by the system: one that fits is left to
+    // it (macOS centres it; fitting it there put it in the screen's top
+    // left corner, its frame's position being (0,0) until then), one too
+    // large is fitted and centred. A placed one moves just far enough.
+    void fitOnScreen() {
+        QWidget fits;
+        fits.resize(600, 400);
+        gitbolt::conf::fitOnScreen(&fits);
+        QVERIFY(!fits.testAttribute(Qt::WA_Moved));
+        QCOMPARE(fits.size(), QSize(600, 400));
+
+        QWidget tooLarge;
+        tooLarge.resize(1400, 500);
+        gitbolt::conf::fitOnScreen(&tooLarge);
+        QCOMPARE(tooLarge.geometry(), QRect(0, 33, 819, 500));
+
+        QWidget placed;
+        placed.setGeometry(500, 300, 600, 400);
+        gitbolt::conf::fitOnScreen(&placed);
+        QCOMPARE(placed.geometry(), QRect(219, 166, 600, 400));
+
+        QWidget maximized;
+        maximized.setGeometry(500, 300, 600, 400);
+        maximized.setWindowState(Qt::WindowMaximized);
+        gitbolt::conf::fitOnScreen(&maximized);
+        QCOMPARE(maximized.geometry(), QRect(500, 300, 600, 400));
     }
 
     // Each card whole, inside what the dashboard shows, beside the
@@ -137,6 +177,91 @@ private slots:
                 QVERIFY(card->height() >= 220);
             }
         }
+    }
+
+    // At every width, each card whole on the page (it scrolls sideways
+    // below its least width), its labels whole, the cards' icons, titles
+    // and descriptions in line across the row although titles wrap at
+    // some widths, and the corner bolt clear of the Contribute row's
+    // links (with large text the row is the page's widest).
+    void dashboardIsWhole_data() {
+        QTest::addColumn<int>("width");
+        for (int width : {640, 700, 730, 760, 800, 900, 1000, 1400})
+            QTest::newRow(qPrintable(QString::number(width))) << width;
+    }
+
+    void dashboardIsWhole() {
+        QFETCH(int, width);
+        SettingsService settings;
+        DashboardView view(&settings);
+        view.resize(width, 600);
+        view.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&view));
+        QTRY_COMPARE(view.width(), width);
+        auto* page = view.findChild<QWidget*>(QStringLiteral("dashboard.page"));
+        QVERIFY(page);
+        QVERIFY(cardsShown(&view, page));
+        QVERIFY(cardsLineUp(&view));
+
+        const auto* bolt = page->findChild<gitbolt::widgets::BoltLogoWidget*>();
+        QVERIFY(bolt && bolt->isVisible());
+        QVERIFY2(page->rect().contains(bolt->geometry()), qPrintable(str(bolt->geometry())));
+        for (const QAbstractButton* button :
+             page->findChildren<QAbstractButton*>(Qt::FindDirectChildrenOnly)) {
+            if (!button->isVisible())
+                continue;
+            QVERIFY2(page->rect().contains(button->geometry()),
+                     qPrintable(button->text() + QLatin1Char(' ') + str(button->geometry())));
+            QVERIFY2(!bolt->geometry().intersects(button->geometry()),
+                     qPrintable(QStringLiteral("the bolt %1 is over \"%2\" %3")
+                                    .arg(str(bolt->geometry()), button->text(),
+                                         str(button->geometry()))));
+        }
+    }
+
+    // With recent repositories, a laptop's window (1280 x 720) shows the
+    // whole welcome screen: the recent list gives up height, as it did
+    // before the page scrolled, rather than the page scrolling the
+    // Contribute row out of sight. Only shorter than the page's least
+    // height does it scroll.
+    void recentListShrinksBeforeThePageScrolls() {
+        gitbolt::test::TestRepo outer;
+        {
+            SettingsService settings;
+            for (int i = 1; i <= 6; ++i) {
+                const QString path = outer.path() + QStringLiteral("/project-%1").arg(i);
+                QVERIFY(QDir().mkpath(path));
+                QVERIFY(gitbolt::git::Repository::init(path.toStdString()).ok());
+                settings.addRecentRepository(path);
+            }
+        }
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.resize(1280, 720);
+        QTRY_COMPARE(window.size(), QSize(1280, 720));
+        auto* view = window.findChild<DashboardView*>();
+        auto* scroll = view->findChild<QScrollArea*>();
+        auto* recent = view->findChild<QTreeWidget*>();
+        QVERIFY(scroll && recent);
+        QTRY_COMPARE(recent->topLevelItemCount(), 6);
+        QTRY_VERIFY(recent->isVisible());
+        QTest::qWait(50);  // the layout requests the resize posted
+        QVERIFY2(!scroll->verticalScrollBar()->isVisible(),
+                 qPrintable(QStringLiteral("the page scrolls: %1 high in %2")
+                                .arg(scroll->widget()->height())
+                                .arg(scroll->viewport()->height())));
+        QVERIFY2(recent->height() < recent->sizeHint().height(),
+                 qPrintable(QString::number(recent->height())));
+        const QRect shown = rectIn(scroll->viewport(), view);
+        for (const QToolButton* link : scroll->widget()->findChildren<QToolButton*>()) {
+            QVERIFY2(shown.contains(rectIn(link, view)),
+                     qPrintable(link->text() + QLatin1Char(' ') + str(rectIn(link, view))));
+        }
+
+        window.resize(1280, 560);
+        QTRY_COMPARE(window.height(), 560);
+        QTRY_VERIFY(scroll->verticalScrollBar()->isVisible());
     }
 
     // The dashboard asks the window for no more room than a scroll area
@@ -201,6 +326,55 @@ private slots:
         }
     }
 
+    // The dialogs a first launch reaches (Clone, on the welcome screen;
+    // Settings; Commit, once a repository is open) open inside the screen:
+    // their default size (1000 x 800), or a saved one larger than the
+    // screen, is fitted as they show. QDialog only moves a dialog.
+    void dialogsFitTheScreen_data() {
+        QTest::addColumn<QString>("dialog");
+        QTest::addColumn<bool>("saved");
+        QTest::newRow("clone") << QStringLiteral("clone") << false;
+        QTest::newRow("clone, saved larger") << QStringLiteral("clone") << true;
+        QTest::newRow("settings") << QStringLiteral("settings") << false;
+        QTest::newRow("commit") << QStringLiteral("commit") << false;
+    }
+
+    void dialogsFitTheScreen() {
+        QFETCH(QString, dialog);
+        QFETCH(bool, saved);
+        SettingsService settings;
+        if (saved) {
+            QWidget before;
+            before.setGeometry(100, 80, 1400, 1000);
+            QSettings(settings.fileName(), QSettings::IniFormat)
+                .setValue(QStringLiteral("layout/dialog/%1/geom").arg(dialog), before.saveGeometry());
+        }
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        gitbolt::test::TestRepo repo;
+        gitbolt::services::GitService svc;
+        std::unique_ptr<QDialog> dlg;
+        if (dialog == QLatin1String("clone")) {
+            dlg = std::make_unique<gitbolt::dialogs::CloneDialog>(&window);
+        } else if (dialog == QLatin1String("settings")) {
+            dlg = std::make_unique<gitbolt::dialogs::SettingsDialog>(&settings, nullptr, &window);
+        } else {
+            QVERIFY(svc.openRepository(repo.path()));
+            dlg = std::make_unique<gitbolt::dialogs::CommitDialog>(&svc, &settings, &window);
+        }
+        dlg->show();
+        QVERIFY(QTest::qWaitForWindowExposed(dlg.get()));
+        const QRect avail = window.screen()->availableGeometry();
+        QVERIFY2(avail.contains(dlg->frameGeometry()),
+                 qPrintable(QStringLiteral("frame %1 (least %2x%3) on %4")
+                                .arg(str(dlg->frameGeometry()))
+                                .arg(dlg->minimumSizeHint().width())
+                                .arg(dlg->minimumSizeHint().height())
+                                .arg(str(avail))));
+    }
+
     // With a repository open the window still fits: the repository view,
     // the toolbar's branch and filter boxes and the status bar's path (a
     // long one, wider than the screen) ask for less than the screen, so
@@ -251,7 +425,34 @@ private slots:
     }
 
 private:
-    // The cards whole inside `shown`, apart, and their labels whole.
+    // The cards equally tall, and each one's labels (icon, title,
+    // description) where the first card's are.
+    static bool cardsLineUp(const QWidget* view) {
+        QList<QRect> first;
+        int height = -1;
+        for (const char* name : kCards) {
+            const auto* card = view->findChild<QPushButton*>(QString::fromLatin1(name));
+            QList<QRect> labels;
+            for (const QLabel* label : card->findChildren<QLabel*>())
+                labels << QRect(0, label->y(), 1, label->height());
+            if (height < 0) {
+                height = card->height();
+                first = labels;
+            } else if (card->height() != height || labels != first) {
+                qWarning("%s, %d tall, is out of line with the first card, %d tall", name,
+                         card->height(), height);
+                for (qsizetype i = 0; i < labels.size() && i < first.size(); ++i)
+                    qWarning("  label %lld at y %d, %d tall; first card's at y %d, %d tall",
+                             static_cast<long long>(i), labels[i].y(), labels[i].height(),
+                             first[i].y(), first[i].height());
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The cards whole inside `shown`, apart, and their labels whole, as
+    // they'd be at a card's least width too (the row may squeeze it there).
     static bool cardsShown(const QWidget* view, const QWidget* shown) {
         const QRect area = rectIn(shown, view);
         QList<QRect> placed;
@@ -283,6 +484,13 @@ private:
                     qWarning("%s's \"%s\" is cut: %s, needs %dx%d", name,
                              qPrintable(label->text()), qPrintable(str(rectIn(label, card))),
                              label->minimumSizeHint().width(), needs);
+                    return false;
+                }
+                const int margins = card->width() - label->width();
+                if (label->minimumSizeHint().width() + margins > card->minimumSizeHint().width()) {
+                    qWarning("%s's least width, %d, cuts \"%s\": it needs %d", name,
+                             card->minimumSizeHint().width(), qPrintable(label->text()),
+                             label->minimumSizeHint().width() + margins);
                     return false;
                 }
             }

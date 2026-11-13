@@ -383,9 +383,10 @@ gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # A small screen (fixtures/small-screen.json: Windows at 1024x768 and
-# 125%): the window opens whole on it, with a repository too, and the
-# welcome screen's cards fit a window 800 px wide. The config file is
-# named relative to the working directory, as for test_about_dialog.
+# 125%): the window and its dialogs open whole on it, with a repository
+# too, and the welcome screen's cards fit a window 800 px wide. The
+# config file is named relative to the working directory, as for
+# test_about_dialog.
 gitbolt_add_test(test_small_screen ui/TestSmallScreen.cpp)
 target_sources(test_small_screen PRIVATE ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
 target_link_libraries(test_small_screen PRIVATE gitbolt_ui)
@@ -393,6 +394,14 @@ set_tests_properties(test_small_screen PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fixtures)
 set_property(TEST test_small_screen APPEND PROPERTY ENVIRONMENT
     "QT_QPA_PLATFORM=offscreen:configfile=small-screen.json")
+# The welcome screen again with fonts at 144 dpi, unscaled (X11's
+# Xft.dpi: 144, say): the Contribute row is then the page's widest.
+add_test(NAME test_small_screen_large_text
+    COMMAND test_small_screen ${GITBOLT_QTEST_ARGV} dashboardIsWhole)
+set_tests_properties(test_small_screen_large_text PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fixtures
+    ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000;GITBOLT_TELEMETRY=0;QT_QPA_PLATFORM=offscreen:configfile=small-screen-large-text.json"
+    TIMEOUT 180)
 # Repository > Edit .gitignore, .gitattributes and .mailmap: a symbolic
 # link there (one a repository committed) is neither read nor written
 # through. Off screen; it answers the editor and the message boxes.

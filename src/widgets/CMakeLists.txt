@@ -25,7 +25,6 @@ set(SOURCES
     SubmoduleWidget.cpp
     TerminalWidget.cpp
     UpdateNoticeBar.cpp
-    WindowPlacement.cpp
     WorktreeWidget.cpp
     BlameWidget.h
     BoltLogoWidget.h
@@ -50,7 +49,6 @@ set(SOURCES
     SubmoduleWidget.h
     TerminalWidget.h
     UpdateNoticeBar.h
-    WindowPlacement.h
     WorktreeWidget.h
 )
 add_library(gitbolt_widgets STATIC ${SOURCES})

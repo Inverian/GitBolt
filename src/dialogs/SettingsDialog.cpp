@@ -5,9 +5,9 @@
 #include <QtConcurrent>
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "conf/WindowPlacement.h"
 #include "git/GitProcess.h"
 #include "git/GitVersion.h"
-#include "widgets/WindowPlacement.h"
 
 #include <QAction>
 #include <QApplication>
@@ -63,6 +63,15 @@ QString globalGitConfig(const QStringList& args)
 // from SettingsService::defaultDialogSize() — this is just the
 // nav-tree column width inside the dialog.
 constexpr int kNavWidth = 220;
+
+// 320 px at its size hint, the width its form row keeps (a 320 px
+// minimum used to set it); down to 200 px, so the dialog fits a small
+// screen (1024 x 768 at 125 %).
+class PaneSlider : public QSlider {
+public:
+    using QSlider::QSlider;
+    QSize sizeHint() const override { return QSlider::sizeHint().expandedTo(QSize(320, 0)); }
+};
 
 // What usage statistics collect, where they go, and how to have them
 // deleted (the Usage Statistics page links here; so does About).
@@ -480,14 +489,14 @@ QWidget* SettingsDialog::createUiDesignPage()
 
     // --- Bottom inspector pane percent --------------------------
     auto* row = new QHBoxLayout;
-    bottomPaneSlider_ = new QSlider(Qt::Horizontal, layoutGroup);
+    bottomPaneSlider_ = new PaneSlider(Qt::Horizontal, layoutGroup);
     bottomPaneSlider_->setRange(10, 90);
     bottomPaneSlider_->setTickInterval(10);
     bottomPaneSlider_->setTickPosition(QSlider::TicksBelow);
-    // 320–480 px keeps the slider usable (enough drag distance for
-    // ~5%-per-pixel resolution at the 80-step range) without
-    // letting it stretch the full width of a 1500-px dialog.
-    bottomPaneSlider_->setMinimumWidth(320);
+    // 200–480 px keeps the slider usable (enough drag distance for
+    // the 80-step range) without letting it stretch the full width of
+    // a 1500-px dialog; PaneSlider keeps it at 320 where there's room.
+    bottomPaneSlider_->setMinimumWidth(200);
     bottomPaneSlider_->setMaximumWidth(480);
 
     bottomPaneSpin_ = new QSpinBox(layoutGroup);
@@ -1411,7 +1420,7 @@ void SettingsDialog::apply()
                             startupHeightSpin_->value());
                 // A size above the screen's (the spin boxes start at
                 // 1024 x 700) mustn't push the window past its edge.
-                widgets::fitOnScreen(top);
+                conf::fitOnScreen(top);
             }
         }
     }

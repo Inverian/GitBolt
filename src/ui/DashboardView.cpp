@@ -51,12 +51,48 @@ public:
     using QPushButton::QPushButton;
 
     QSize sizeHint() const override { return sizeAt(kCardWidth); }
-    QSize minimumSizeHint() const override { return sizeAt(kCardMinWidth); }
+    // No narrower than its longest word needs, in a large font.
+    QSize minimumSizeHint() const override
+    {
+        return sizeAt(qMax(kCardMinWidth, layout() ? layout()->totalMinimumSize().width() : 0));
+    }
 
 private:
     QSize sizeAt(int width) const
     {
         return {width, qMax(minimumHeight(), layout() ? layout()->totalHeightForWidth(width) : 0)};
+    }
+};
+
+// A card's title or description, as tall at a width as the tallest of
+// its row (the cards' labels of its name): the blocks the cards centre
+// are then equal, so their icons and text line up although one card's
+// title wraps in a narrow window and the others' don't.
+class RowLabel : public QLabel {
+public:
+    using QLabel::QLabel;
+
+    int heightForWidth(int width) const override
+    {
+        int tallest = QLabel::heightForWidth(width);
+        if (const QWidget* page = parentWidget() ? parentWidget()->parentWidget() : nullptr) {
+            for (const QLabel* label : page->findChildren<QLabel*>(objectName()))
+                tallest = qMax(tallest, label->QLabel::heightForWidth(width));
+        }
+        return tallest;
+    }
+};
+
+// Its height for a width is its least, not its preferred: a resizable
+// QScrollArea makes its widget at least that tall, which held the recent
+// list at its preferred height and scrolled the page in a laptop window.
+class DashboardPage : public QWidget {
+public:
+    using QWidget::QWidget;
+
+    int heightForWidth(int width) const override
+    {
+        return layout() ? layout()->totalMinimumHeightForWidth(width) : QWidget::heightForWidth(width);
     }
 };
 
@@ -98,7 +134,7 @@ void DashboardView::setupUi()
     // tabbing to one scrolls it into view (QScrollArea::focusNextPrevChild).
     scrollArea_->setFocusPolicy(Qt::NoFocus);
     outer->addWidget(scrollArea_);
-    page_ = new QWidget(scrollArea_);
+    page_ = new DashboardPage(scrollArea_);
     page_->setObjectName(QStringLiteral("dashboard.page"));
     page_->installEventFilter(this);
 
@@ -285,15 +321,18 @@ void DashboardView::setupUi()
                  QStringLiteral("https://github.com/Inverian/GitBolt/issues")));
     contributeRow->addStretch();
 
-    root->addLayout(contributeRow);
-
     // The decorative bolt logo lives OUTSIDE the layout — parented
     // directly to the page so placeCornerBolt() can pin it to the
     // bottom-right corner with equal margins. Putting it inside the
     // Contribute row forced it to vertical-center with the text,
     // which made it hover mid-row rather than sit in the corner.
+    // The row keeps room for it, so a narrow page's links don't run
+    // under it.
     cornerBolt_ = new widgets::BoltLogoWidget(page_);
     cornerBolt_->raise();
+    contributeRow->addSpacing(cornerBolt_->width() + contributeRow->spacing());
+
+    root->addLayout(contributeRow);
     // After the layout, or the page isn't shown (QScrollArea::setWidget).
     scrollArea_->setWidget(page_);
 
@@ -419,17 +458,20 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
         "QLabel { font-size: 44pt; background: transparent; border: none; }"));
 
     // Wrapped, as the description is: a narrow card's title takes two
-    // lines (and a taller card) rather than losing its ends.
-    auto* titleLabel = new QLabel(title, btn);
-    titleLabel->setAlignment(Qt::AlignCenter);
+    // lines (and a taller card) rather than losing its ends. Both from
+    // the top of the height RowLabel gives the row's labels.
+    auto* titleLabel = new RowLabel(title, btn);
+    titleLabel->setObjectName(QStringLiteral("dashboard.cardTitle"));
+    titleLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     titleLabel->setWordWrap(true);
     titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     titleLabel->setStyleSheet(QStringLiteral(
         "QLabel { font-size: 18pt; font-weight: bold;"
         "         background: transparent; border: none; }"));
 
-    auto* descLabel = new QLabel(description, btn);
-    descLabel->setAlignment(Qt::AlignCenter);
+    auto* descLabel = new RowLabel(description, btn);
+    descLabel->setObjectName(QStringLiteral("dashboard.cardDescription"));
+    descLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     descLabel->setWordWrap(true);
     descLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     cardDescriptions_.append(descLabel);

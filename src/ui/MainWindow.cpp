@@ -36,6 +36,7 @@
 #include "services/GitService.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "conf/WindowPlacement.h"
 #include "telemetry/EventSchema.h"
 #include "telemetry/TelemetryService.h"
 #include "util/DesktopOpen.h"
@@ -49,7 +50,6 @@
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
-#include "widgets/WindowPlacement.h"
 #include "widgets/WorktreeWidget.h"
 #include "models/CommitLogModel.h"
 
@@ -354,7 +354,7 @@ void MainWindow::showEvent(QShowEvent* e)
     QMainWindow::showEvent(e);
     if (!fittedOnScreen_ && !e->spontaneous()) {
         fittedOnScreen_ = true;
-        widgets::fitOnScreen(this);
+        conf::fitOnScreen(this);
     }
 }
 
@@ -3764,6 +3764,7 @@ void MainWindow::buildToolsMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Git Bash"));
             dlg->resize(900, 500);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* term = new widgets::TerminalWidget(dlg);
@@ -3821,6 +3822,7 @@ void MainWindow::buildToolsMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Git Command Log"));
             dlg->resize(900, 420);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* console = new widgets::ConsoleOutputWidget(dlg);
@@ -3928,6 +3930,7 @@ void MainWindow::buildHelpMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Changelog"));
             dlg->resize(720, 560);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* browser = new QTextBrowser(dlg);
