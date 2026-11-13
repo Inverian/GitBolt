@@ -4,7 +4,6 @@
 #include "services/RecentRepoProbe.h"
 #include "util/MessageText.h"
 #include "util/ToolTip.h"
-#include "widgets/BoltLogoWidget.h"
 
 #include <QApplication>
 #include <QDateTime>
@@ -154,7 +153,6 @@ void DashboardView::setupUi()
     outer->addWidget(scrollArea_);
     page_ = new DashboardPage(scrollArea_);
     page_->setObjectName(QStringLiteral("dashboard.page"));
-    page_->installEventFilter(this);
 
     auto* root = new QVBoxLayout(page_);
     root->setContentsMargins(40, 30, 40, 30);
@@ -259,20 +257,15 @@ void DashboardView::setupUi()
     // ---- Contribute section ------------------------------------------
     //
     // A single compact row: the "Contribute:" label sits inline
-    // with the quick links (Develop / Donate / Issues), and the
-    // animated bolt logo anchors the far right. Everything on one
-    // line keeps the footer tight — the previous two-row layout
+    // with the quick links (Develop / Donate / Issues). Everything on
+    // one line keeps the footer tight — the previous two-row layout
     // (header above, links below) left a lot of vertical air for a
     // section that's really just three links.
     //
     // Translate is intentionally omitted — no localization workflow
     // is set up yet, so a link would lead nowhere useful.
     //
-    // 28 px spacer gives the Recent Repositories table enough
-    // breathing room below its bottom border so it doesn't butt
-    // right up against the Contribute row or the corner bolt. 8 px
-    // felt too tight once the bolt was placed absolutely in the
-    // corner — the table's bottom edge sat almost on top of it.
+    // 28 px between the Recent Repositories table and the Contribute row.
     root->addSpacing(28);
 
     auto* contributeRow = new QHBoxLayout;
@@ -338,17 +331,6 @@ void DashboardView::setupUi()
                  tr("Issues"),
                  QStringLiteral("https://github.com/Inverian/GitBolt/issues")));
     contributeRow->addStretch();
-
-    // The decorative bolt logo lives OUTSIDE the layout — parented
-    // directly to the page so placeCornerBolt() can pin it to the
-    // bottom-right corner with equal margins. Putting it inside the
-    // Contribute row forced it to vertical-center with the text,
-    // which made it hover mid-row rather than sit in the corner.
-    // The row keeps room for it, so a narrow page's links don't run
-    // under it.
-    cornerBolt_ = new widgets::BoltLogoWidget(page_);
-    cornerBolt_->raise();
-    contributeRow->addSpacing(cornerBolt_->width() + contributeRow->spacing());
 
     root->addLayout(contributeRow);
     // After the layout, or the page isn't shown (QScrollArea::setWidget).
@@ -765,33 +747,8 @@ void DashboardView::updateRecentColumnWidths()
     recentList_->setColumnWidth(6, qMax(50, total - assigned));
 }
 
-void DashboardView::placeCornerBolt()
-{
-    // Pin the floating bolt so its right edge aligns with the
-    // right edge of the Recent Repositories table above. The root
-    // layout uses 40 px left/right content margins (see setupUi),
-    // so setting the bolt's right margin to the same 40 px lines
-    // the bolt up with the table's right border exactly.
-    //
-    // The bottom margin is smaller (12 px) on purpose — the user
-    // wants the bolt to sit low in the corner rather than align
-    // with the layout's 30 px bottom margin. Splitting the two
-    // sides like this gives: bolt's right edge aligned with the
-    // table, bolt's bottom edge tucked close to the dashboard's
-    // bottom border.
-    if (cornerBolt_) {
-        constexpr int kRightMargin  = 40;
-        constexpr int kBottomMargin = 12;
-        const int x = page_->width()  - cornerBolt_->width()  - kRightMargin;
-        const int y = page_->height() - cornerBolt_->height() - kBottomMargin;
-        cornerBolt_->move(x, y);
-    }
-}
-
 bool DashboardView::eventFilter(QObject* watched, QEvent* event)
 {
-    if (watched == page_ && event->type() == QEvent::Resize)
-        placeCornerBolt();
     if (watched == recentList_ && event->type() == QEvent::Resize) {
         // Defer to the next tick so the tree's internal layout (header,
         // viewport, scrollbars) has fully settled. Running synchronously

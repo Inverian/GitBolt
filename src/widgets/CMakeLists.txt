@@ -4,7 +4,6 @@
 # Add new files HERE.
 set(SOURCES
     BlameWidget.cpp
-    BoltLogoWidget.cpp
     BranchTreeWidget.cpp
     CommitFilterProxy.cpp
     CommitMessageEdit.cpp
@@ -27,7 +26,6 @@ set(SOURCES
     UpdateNoticeBar.cpp
     WorktreeWidget.cpp
     BlameWidget.h
-    BoltLogoWidget.h
     BranchTreeWidget.h
     CommitFilterProxy.h
     CommitMessageEdit.h

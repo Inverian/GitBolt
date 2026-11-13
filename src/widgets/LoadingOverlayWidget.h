@@ -16,8 +16,8 @@ namespace gitbolt::widgets {
 /// half-loaded view underneath isn't clickable while loading.
 ///
 /// The animation timer only runs while the overlay is visible
-/// (started in showEvent, stopped in hideEvent — same pattern as
-/// BoltLogoWidget), so a hidden overlay costs nothing.
+/// (started in showEvent, stopped in hideEvent), so a hidden overlay
+/// costs nothing.
 class LoadingOverlayWidget : public QWidget {
     Q_OBJECT
 
