@@ -63,21 +63,24 @@ Installers for every release are on the
 
 These are the platforms GitBolt supports. GitBolt also installs and
 updates on Windows 10 (version 1809 or later), but Windows 10 isn't
-supported. The .deb also installs on Debian 13 and on distributions
-based on Ubuntu 24.04 or Debian 13, such as Linux Mint 22, but they
-aren't supported either. There is no AppImage any more: see
-[Install](#install) to switch to the .deb.
+supported. On a Windows PC with an Arm processor, GitBolt runs under
+Windows' x64 emulation; that works, but isn't supported. The .deb also
+installs on Debian 13 and on distributions based on Ubuntu 24.04 or
+Debian 13, such as Linux Mint 22, but they aren't supported either.
+From 1.0.0 on there is no AppImage: see [Install](#install) to switch
+to the .deb.
 
 Each release also lists the files' SHA-256 checksums in `SHA256SUMS.txt`,
-and has a `-symbols.zip` for each platform: debug symbols the
-maintainers use to read crash reports. You don't need them to install
-or run GitBolt (the `GitBolt.exe` in the Windows one is not an
+and from 1.0.0 on has a `-symbols.zip` for each platform: debug symbols
+the maintainers use to read crash reports. You don't need them to
+install or run GitBolt (the `GitBolt.exe` in the Windows one is not an
 installer).
 
 GitBolt runs your git for clones, fetches, pushes and commits: git 2.25
 or later ([git-scm.com/downloads](https://git-scm.com/downloads)). It
-runs the git your login shell finds first, and says so when that git
-has known security flaws.
+runs the first git on your PATH (on macOS and Linux, the PATH your
+login shell sets up), so restart GitBolt after you install git.
+GitBolt warns you when that git has known security flaws.
 
 ### Install
 
@@ -121,12 +124,17 @@ or GitBolt on a Mac), your system asks you to confirm it.
 - **Windows**: if SmartScreen says "Windows protected your PC", click
   **More info**, then **Run anyway**. The administrator prompt says the
   publisher is unknown: click **Yes**. While **Smart App Control** is on
-  (Windows 11), it blocks GitBolt, and it can't make an exception for
-  one app. Until GitBolt's installers are signed, GitBolt runs only
-  while Smart App Control is off or still in evaluation mode
-  (**Windows Security › App & browser control › Smart App Control
-  settings**).
+  (Windows 11), it may block GitBolt's installer or GitBolt, and it
+  can't make an exception for one app. If it does, then until GitBolt's
+  installers are signed, GitBolt runs only while Smart App Control is
+  off or still in evaluation mode (**Windows Security › App & browser
+  control › Smart App Control settings**).
 - **Ubuntu**: nothing more to do.
+
+Before your first commit, enter your name and email in **Tools ›
+Settings › Git Config** (on macOS **GitBolt › Settings › Git
+Config**), unless git already has them. GitBolt saves them as git's
+`user.name` and `user.email`, which every commit records.
 
 ### Updating
 
@@ -140,7 +148,16 @@ the release's checksums, installs it and starts GitBolt again.
   GitBolt that runs from the disk image, or from a folder you can't
   change.
 - **Windows** asks for administrator permission. The prompt names
-  Windows PowerShell, which runs the installer.
+  Windows PowerShell (verified publisher: Microsoft Windows), which
+  runs GitBolt's installer; **Show more details** shows its long
+  encoded command. If no prompt comes up, click the flashing shield
+  button on the taskbar. A prompt that comes up and is left unanswered
+  for about 2 minutes is cancelled, and nothing is installed (**Try
+  Again** asks again).
+  After **Yes**, GitBolt closes while the installer runs, usually for a
+  few seconds, and starts again by itself: don't start it in the
+  meantime. Its status bar then says which version GitBolt was updated
+  to.
 - **Ubuntu** first asks apt whether the new .deb can be installed, then
   asks for your password. Without pkexec, GitBolt shows the `apt`
   command to run instead.
@@ -153,8 +170,11 @@ sends.
 ### Uninstalling
 
 - **macOS**: quit GitBolt and move it from Applications to the Trash.
-- **Windows**: in **Settings › Apps › Installed apps**, click **⋯** next
-  to GitBolt, then **Uninstall**.
+- **Windows**: quit GitBolt. Then in **Settings › Apps › Installed
+  apps**, click **⋯** next to GitBolt, then **Uninstall**, and
+  **Uninstall** again. Windows asks for administrator permission (the
+  publisher is unknown): click **Yes**, then **Uninstall** and **Close**
+  in GitBolt's uninstaller.
 - **Ubuntu**: `sudo apt remove gitbolt`.
 
 This doesn't touch your repositories. It leaves GitBolt's settings,
@@ -172,6 +192,10 @@ delete these:
 - **Ubuntu**: `~/.config/GitBolt` (settings), `~/.gitbolt` (crash
   report), `~/.local/state/GitBolt` (log) and `~/.cache/GitBolt`
   (update downloads).
+
+The name and email you set in GitBolt's Git Config settings are git's
+own settings, usually in `~/.gitconfig` (on Windows
+`%USERPROFILE%\.gitconfig`), and stay.
 
 ---
 

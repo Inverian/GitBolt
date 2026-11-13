@@ -824,11 +824,10 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     in.newVersion = version_.toString();
     in.resultFile = resultPath();
     const WindowsLaunch launch = launchWindowsUpdate(in, window, QProcessEnvironment::systemEnvironment());
-    // Where Windows won't elevate (a standard user under "deny elevation
-    // requests"), only an administrator can install it.
-    const QString byHand = tr("To install it yourself, download %1 from the release page and run it as an "
-                              "administrator.")
-                               .arg(assetNameFor(package_.kind, version_));
+    // The installer asks for permission itself. Where Windows won't
+    // elevate (a standard user under "deny elevation requests"), only an
+    // administrator can install it.
+    const QString asset = assetNameFor(package_.kind, version_);
     switch (launch.outcome) {
     case WindowsLaunch::Outcome::Started:
         if (!launch.error.isEmpty())
@@ -836,7 +835,9 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         break;
     case WindowsLaunch::Outcome::Declined:
         failure_ = Failure::PermissionDeclined;
-        emit declined(byHand);
+        emit declined(tr("To install it yourself, download %1 from the release page and open it; Windows asks "
+                         "for administrator permission.")
+                          .arg(asset));
         return false;
     case WindowsLaunch::Outcome::Failed: {
         // The system's own sentence ("Access is denied."), in its language.
@@ -845,7 +846,10 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
             why += u'.';
         return failWith(Failure::ElevationFailed,
                         tr("Windows couldn't start GitBolt's installer as an administrator: %1").arg(why)
-                            + QLatin1Char(' ') + byHand);
+                            + QLatin1Char(' ')
+                            + tr("To install it, an administrator can download %1 from the release page and "
+                                 "run it.")
+                                  .arg(asset));
     }
     }
 #else

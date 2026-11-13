@@ -450,8 +450,12 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("} else {"),
         QStringLiteral("    $reason = 'the installer exited with code ' + $code"),
         QStringLiteral("}"),
-        QStringLiteral("if ($status -eq 'failed') {"),
+        // Nothing was installed only if the installer never ran; else, as
+        // UpdateController says, GitBolt may be incomplete.
+        QStringLiteral("if ($code -eq %1 -or $code -eq %2) {").arg(kWindowsExitInUse).arg(kWindowsExitNoInstaller),
         QStringLiteral("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)"),
+        QStringLiteral("} elseif ($status -eq 'failed') {"),
+        QStringLiteral("    Write-Log ('GitBolt may be incomplete (code ' + $code + '): ' + $reason)"),
         QStringLiteral("}"),
         // Flush before the result: once it exists, the helper starts GitBolt.
         QStringLiteral("Write-Log ''"),

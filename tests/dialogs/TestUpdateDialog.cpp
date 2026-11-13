@@ -182,13 +182,15 @@ private slots:
         dialog.showAvailable(release(), v(0, 1, 0), {}, PackageKind::WindowsInstall);
         dialog.showPreparing(QStringLiteral("Checking the download…"));
         const QString byHand = QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
-                                              "the release page and run it as an administrator.");
+                                              "the release page and open it; Windows asks for administrator permission.");
         dialog.showDeclined(byHand);
         QCOMPARE(dialog.state(), State::Declined);
         QCOMPARE(dialog.property("updateState").toString(), QStringLiteral("declined"));
         QCOMPARE(headline(dialog), QStringLiteral("GitBolt 0.1.1 wasn't installed"));
         QCOMPARE(child<QLabel>(dialog, "updateDialog.message")->text(),
-                 QStringLiteral("Windows didn't give permission, so nothing was installed.\n\n") + byHand);
+                 QStringLiteral("Windows didn't give permission (the prompt was declined, or not answered in time), "
+                                "so nothing was installed.\n\n")
+                     + byHand);
         QCOMPARE(shownButtons(dialog),
                  (QStringList{QStringLiteral("updateDialog.close"), QStringLiteral("updateDialog.openReleasePage"),
                               QStringLiteral("updateDialog.retry")}));

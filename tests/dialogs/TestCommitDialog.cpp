@@ -14,6 +14,10 @@
 //     of a line of megabytes is filled in cut, with a note;
 //   - a commit that a hook turns down shows what the hook said, and the
 //     dialog stays open with its message;
+//   - with no user.name or user.email, the footer and a refused commit
+//     say where GitBolt sets them, and the note is gone when the dialog
+//     opens again, or once Settings sets them while it stays open;
+//   - a new repository's title names its branch, before the first commit;
 //   - status that can't be read (a tree nested too deep for libgit2)
 //     says so, and why, until it reads again, the lists empty;
 //   - while the commit runs, nothing stages, unstages or commits, the
@@ -41,12 +45,14 @@
 #include <QTest>
 
 #include "../TestRepoHelper.h"
+#include "conf/SettingsService.h"
 #include "dialogs/CommitDialog.h"
 #include "widgets/DiffViewerWidget.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
 #include "util/MessageText.h"
 
+using gitbolt::conf::SettingsService;
 using gitbolt::dialogs::CommitDialog;
 using gitbolt::services::GitService;
 
@@ -507,6 +513,103 @@ private slots:
         QVERIFY(commit->isEnabled());
         QCOMPARE(message->toPlainText(), QStringLiteral("refused"));
         QCOMPARE(output(git.run({"rev-parse", "HEAD"})), head);
+    }
+
+    // No identity (Git for Windows on its defaults): git refused the
+    // commit with its advice to run `git config --global`, and opened
+    // again with the identity set, the dialog still showed it.
+    void aMissingIdentitySaysWhereToSetIt() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.name"})));
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.email"})));
+        // Else git may make one up from the computer's name.
+        QVERIFY(succeeded(git.run({"config", "user.useConfigOnly", "true"})));
+        QList<QPair<QByteArray, QByteArray>> saved;
+        for (const char* name : {"EMAIL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
+                                 "GIT_COMMITTER_EMAIL"}) {
+            if (qEnvironmentVariableIsSet(name))
+                saved.append({name, qgetenv(name)});
+            qunsetenv(name);
+        }
+        const auto restore = qScopeGuard([saved] {
+            for (const auto& [name, value] : saved)
+                qputenv(name.constData(), value);
+        });
+        repo.writeFile(QStringLiteral("a.txt"), "a\n");
+        QVERIFY(repo.stageFile(QStringLiteral("a.txt")).ok());
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        SettingsService settings;
+        CommitDialog dialog(&svc, &settings);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* message = child<QPlainTextEdit>(dialog, "commit.message");
+        auto* commit = child<QPushButton>(dialog, "commit.commitBtn");
+        auto* error = child<QLabel>(dialog, "commit.error");
+        auto* committer = child<QLabel>(dialog, "commit.committer");
+        QVERIFY(message && commit && error && committer);
+        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
+        QVERIFY2(committer->text().contains(QStringLiteral("Settings › Git Config")), qPrintable(committer->text()));
+        message->setPlainText(QStringLiteral("first"));
+        commit->click();
+
+        QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
+        QVERIFY2(error->text().startsWith(QStringLiteral("Commit failed: git doesn't know your name and email "
+                                                         "yet. Set them in ")),
+                 qPrintable(error->text()));
+        QVERIFY2(error->text().endsWith(QStringLiteral("Settings › Git Config, then commit again.")),
+                 qPrintable(error->text()));
+        // The status bar says the same (MainWindow shows failureText).
+        QCOMPARE(CommitDialog::failureText(QStringLiteral("Run\n  git config --global user.email ...")),
+                 error->text());
+
+        // Opened again, the note is stale: gone, though the footer still asks.
+        dialog.close();
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QVERIFY(!error->isVisible());
+        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
+        QCOMPARE(message->toPlainText(), QStringLiteral("first"));
+        // libgit2 still reads a ~/.gitconfig deleted while GitBolt runs
+        // (a stale footer stands in): git's refusal is what counts.
+        committer->setText(QStringLiteral("Committer: Gone <gone@example.invalid>"));
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
+        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
+
+        // Set while the dialog stays open, then Settings' Apply emits
+        // settingsChanged (a setter stands in): the footer follows, the
+        // note goes, and the commit goes in.
+        QVERIFY(succeeded(git.run({"config", "user.name", "Test User"})));
+        QVERIFY(succeeded(git.run({"config", "user.email", "test@gitbolt.local"})));
+        settings.setDefaultRemote(QStringLiteral("origin"));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Test User <test@gitbolt.local>"));
+        QVERIFY(!error->isVisible());
+        commit->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!dialog.isVisible(), 15000);
+        QCOMPARE(output(git.run({"log", "-1", "--format=%an <%ae> %s"})),
+                 QStringLiteral("Test User <test@gitbolt.local> first"));
+    }
+
+    // A new repository (`git init -b main`) has no commit yet, so HEAD
+    // names a branch that doesn't exist: the title said "(no branch)".
+    void aNewRepositoryNamesItsBranch() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"symbolic-ref", "HEAD", "refs/heads/trunk"})));
+
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        CommitDialog dialog(&svc, nullptr);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        QCOMPARE(dialog.windowTitle(),
+                 QStringLiteral("%1 - Commit to trunk (first commit)").arg(QDir(repo.path()).dirName()));
+        auto* branch = child<QLabel>(dialog, "commit.branch");
+        QVERIFY(branch);
+        QCOMPARE(branch->text(), QStringLiteral("trunk (first commit)"));
     }
 
     // Status that can't be read (HEAD's tree nested deeper than the

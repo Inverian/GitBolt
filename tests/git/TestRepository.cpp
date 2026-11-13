@@ -810,6 +810,8 @@ private slots:
 
         if (expectedBranch.isEmpty()) {
             QVERIFY(repo.repo().isHeadDetached());
+            // No branch: libgit2's shorthand "HEAD" isn't one.
+            QVERIFY(!repo.repo().headBranchName().ok());
         } else {
             QVERIFY(!repo.repo().isHeadDetached());
             auto branch = repo.repo().headBranchName();

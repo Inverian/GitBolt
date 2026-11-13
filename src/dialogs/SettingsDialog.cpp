@@ -5,6 +5,7 @@
 #include <QtConcurrent>
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "conf/WindowPlacement.h"
 #include "git/GitProcess.h"
 #include "git/GitVersion.h"
 
@@ -42,16 +43,19 @@ namespace gitbolt::dialogs {
 
 namespace {
 
-// `git config --global <args>` as GitProcess runs every git: by its full
-// path, without git's repository variables (an exported GIT_CONFIG makes
-// git refuse), and in the home folder so no repository's config comes in.
-// Its output, trimmed; empty when it failed.
-QString globalGitConfig(const QStringList& args)
+// `git config --global <args>` (or another `scope`) as GitProcess runs
+// every git: by its full path, without git's repository variables (an
+// exported GIT_CONFIG makes git refuse), and in the home folder so no
+// repository's config comes in. Its output, trimmed; empty when it failed.
+// `exitCode`: git's (1: the key isn't set), -1 if it didn't run.
+QString globalGitConfig(const QStringList& args, const char* scope = "--global", int* exitCode = nullptr)
 {
-    std::vector<std::string> argv{"config", "--global"};
+    std::vector<std::string> argv{"config", scope};
     for (const QString& arg : args)
         argv.push_back(arg.toStdString());
     const auto result = git::GitProcess(QDir::homePath().toStdString()).run(argv, 3000);
+    if (exitCode)
+        *exitCode = result.ok() ? result->exitCode : -1;
     if (!result.ok() || !result->success())
         return {};
     return QString::fromStdString(result->stdoutData).trimmed();
@@ -62,6 +66,15 @@ QString globalGitConfig(const QStringList& args)
 // from SettingsService::defaultDialogSize() — this is just the
 // nav-tree column width inside the dialog.
 constexpr int kNavWidth = 220;
+
+// 320 px at its size hint, the width its form row keeps (a 320 px
+// minimum used to set it); down to 200 px, so the dialog fits a small
+// screen (1024 x 768 at 125 %).
+class PaneSlider : public QSlider {
+public:
+    using QSlider::QSlider;
+    QSize sizeHint() const override { return QSlider::sizeHint().expandedTo(QSize(320, 0)); }
+};
 
 // What usage statistics collect, where they go, and how to have them
 // deleted (the Usage Statistics page links here; so does About).
@@ -479,14 +492,14 @@ QWidget* SettingsDialog::createUiDesignPage()
 
     // --- Bottom inspector pane percent --------------------------
     auto* row = new QHBoxLayout;
-    bottomPaneSlider_ = new QSlider(Qt::Horizontal, layoutGroup);
+    bottomPaneSlider_ = new PaneSlider(Qt::Horizontal, layoutGroup);
     bottomPaneSlider_->setRange(10, 90);
     bottomPaneSlider_->setTickInterval(10);
     bottomPaneSlider_->setTickPosition(QSlider::TicksBelow);
-    // 320–480 px keeps the slider usable (enough drag distance for
-    // ~5%-per-pixel resolution at the 80-step range) without
-    // letting it stretch the full width of a 1500-px dialog.
-    bottomPaneSlider_->setMinimumWidth(320);
+    // 200–480 px keeps the slider usable (enough drag distance for
+    // the 80-step range) without letting it stretch the full width of
+    // a 1500-px dialog; PaneSlider keeps it at 320 where there's room.
+    bottomPaneSlider_->setMinimumWidth(200);
     bottomPaneSlider_->setMaximumWidth(480);
 
     bottomPaneSpin_ = new QSpinBox(layoutGroup);
@@ -782,6 +795,7 @@ QWidget* SettingsDialog::createGitConfigPage()
     auto* credForm = new QFormLayout(credGroup);
     credForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     credentialHelperEdit_ = new QLineEdit(credGroup);
+    credentialHelperEdit_->setObjectName(QStringLiteral("settings.git-credential-helper"));
     credentialHelperEdit_->setReadOnly(true);
     credentialHelperEdit_->setPlaceholderText(tr("(not configured)"));
     sizeEdit(credentialHelperEdit_);
@@ -1327,7 +1341,15 @@ void SettingsDialog::loadGitConfig()
         }
         id.name  = globalGitConfig({QStringLiteral("user.name")});
         id.email = globalGitConfig({QStringLiteral("user.email")});
-        id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")});
+        int global = 0;
+        id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")}, "--global", &global);
+        // None set globally: the system's, which Git for Windows sets
+        // (manager). A global empty value turns that off, so none then.
+        if (global == 1) {
+            const QString system = globalGitConfig({QStringLiteral("credential.helper")}, "--system");
+            if (!system.isEmpty())
+                id.credentialHelper = tr("%1 (system)").arg(system);
+        }
         return id;
     }));
 }
@@ -1405,9 +1427,13 @@ void SettingsDialog::apply()
         // constructed standalone).
         if (QWidget* p = parentWidget()) {
             QWidget* top = p->window();
-            if (top)
+            if (top) {
                 top->resize(startupWidthSpin_->value(),
                             startupHeightSpin_->value());
+                // A size above the screen's (the spin boxes start at
+                // 1024 x 700) mustn't push the window past its edge.
+                conf::fitOnScreen(top);
+            }
         }
     }
 

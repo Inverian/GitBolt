@@ -123,6 +123,7 @@
 #include "dialogs/ReflogDialog.h"
 #include "dialogs/TagDialog.h"
 #include "git/Rebase.h"
+#include "models/BranchModel.h"
 #include "services/GitService.h"
 #include "ui/MainWindow.h"
 #include "ui/RepositoryView.h"
@@ -385,6 +386,76 @@ private slots:
                                   "[protocol \"file\"]\n\tallow = always\n"));
         qputenv("GIT_CONFIG_GLOBAL", QFile::encodeName(global));
         qputenv("GIT_CONFIG_NOSYSTEM", "1");
+    }
+
+    // The status bar and the branch combo, from a new repository's first
+    // commit to a HEAD detached outside GitBolt. They said "HEAD
+    // (detached)" before it, stayed empty after it until Refresh, and
+    // a detached HEAD read "Branch: HEAD" with the first branch current.
+    void theStatusBarFollowsHead() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"symbolic-ref", "HEAD", "refs/heads/trunk"})));
+        repo.writeFile(QStringLiteral("a.txt"), "a\n");
+        QVERIFY(succeeded(git.run({"add", "a.txt"})));
+
+        MainWindow window;
+        auto* svc = openIn(window, repo.path());
+        QVERIFY(svc);
+        auto* label = window.findChild<QLabel*>(QStringLiteral("status.branch"));
+        auto* combo = window.findChild<QComboBox*>(QStringLiteral("toolbar.branchCombo"));
+        QVERIFY(label && combo);
+        QTRY_COMPARE(label->text(), QStringLiteral("Branch: trunk (no commits yet)"));
+        QCOMPARE(combo->count(), 0);
+
+        QSignalSpy done(svc, &GitService::commitComplete);
+        svc->commitChanges(QStringLiteral("first"));
+        QTRY_COMPARE_WITH_TIMEOUT(done.count(), 1, 15000);
+        QVERIFY2(done.first().at(0).toBool(), qPrintable(done.first().at(1).toString()));
+        QTRY_COMPARE_WITH_TIMEOUT(combo->currentText(), QStringLiteral("trunk"), 10000);
+        QTRY_COMPARE(label->text(), QStringLiteral("Branch: trunk"));
+
+        // Outside GitBolt: the watcher sees HEAD change.
+        QVERIFY(succeeded(git.run({"branch", "other"})));
+        QVERIFY(succeeded(git.run({"checkout", "-q", "--detach"})));
+        QTRY_COMPARE_WITH_TIMEOUT(label->text(), QStringLiteral("HEAD (detached)"), 15000);
+        QTRY_COMPARE(combo->count(), 2);
+        QCOMPARE(combo->currentIndex(), -1);
+
+        // A commit on the detached HEAD rewrites .git/HEAD, but HEAD
+        // still names no branch: the sidebar isn't reloaded (collapsed).
+        auto* branches = window.findChild<gitbolt::models::BranchModel*>();
+        auto* log = window.findChild<QTableView*>(QStringLiteral("log.view"));
+        QVERIFY(branches && log);
+        QSignalSpy resets(branches, &QAbstractItemModel::modelReset);
+        const int rows = log->model()->rowCount();
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "detached"})));
+        QTRY_COMPARE_WITH_TIMEOUT(log->model()->rowCount(), rows + 1, 15000);
+        QTest::qWait(1000);
+        QCOMPARE(resets.count(), 0);
+
+        QVERIFY(succeeded(git.run({"checkout", "-q", "other"})));
+        QTRY_COMPARE_WITH_TIMEOUT(label->text(), QStringLiteral("Branch: other"), 15000);
+        QCOMPARE(combo->currentText(), QStringLiteral("other"));
+    }
+
+    // A first commit made outside GitBolt (a terminal, the Console, git
+    // am) leaves .git/HEAD as it was: the branch appears all the same.
+    void aFirstCommitOutsideShowsTheBranch() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"symbolic-ref", "HEAD", "refs/heads/trunk"})));
+
+        MainWindow window;
+        QVERIFY(openIn(window, repo.path()));
+        auto* label = window.findChild<QLabel*>(QStringLiteral("status.branch"));
+        auto* combo = window.findChild<QComboBox*>(QStringLiteral("toolbar.branchCombo"));
+        QVERIFY(label && combo);
+        QTRY_COMPARE(label->text(), QStringLiteral("Branch: trunk (no commits yet)"));
+
+        QVERIFY(succeeded(git.run({"commit", "-q", "--allow-empty", "-m", "first"})));
+        QTRY_COMPARE_WITH_TIMEOUT(combo->currentText(), QStringLiteral("trunk"), 15000);
+        QCOMPARE(label->text(), QStringLiteral("Branch: trunk"));
     }
 
     // git commit runs its pre-commit hook, then writes HEAD through the

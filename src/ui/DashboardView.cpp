@@ -23,6 +23,7 @@
 #include <QMimeData>
 #include <QPointer>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QTimer>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -31,6 +32,89 @@
 #include <QtConcurrent/QtConcurrentRun>
 
 namespace gitbolt::ui {
+
+namespace {
+
+// A card's size: today's at normal widths, down to kCardMinWidth in a
+// narrow window, where three cards and the page's margins still fit
+// 800 px with a scroll bar. Taller only when its wrapped text needs it.
+constexpr int kCardWidth = 290;
+constexpr int kCardMinWidth = 200;
+constexpr int kCardHeight = 220;
+
+// Sized by its labels: QPushButton's own hints count only its (empty)
+// text, so a row of them would squeeze a card narrower than its title.
+// Its height at a given width is its layout's (QWidgetItem asks the
+// layout, not the button), at least the minimum height it's given.
+class ActionCard : public QPushButton {
+public:
+    using QPushButton::QPushButton;
+
+    QSize sizeHint() const override { return sizeAt(kCardWidth); }
+    // No narrower than its longest word needs, in a large font.
+    QSize minimumSizeHint() const override
+    {
+        return sizeAt(qMax(kCardMinWidth, layout() ? layout()->totalMinimumSize().width() : 0));
+    }
+
+private:
+    QSize sizeAt(int width) const
+    {
+        return {width, qMax(minimumHeight(), layout() ? layout()->totalHeightForWidth(width) : 0)};
+    }
+};
+
+// A card's title or description, as tall at a width as the tallest of
+// its row (the cards' labels of its name): the blocks the cards centre
+// are then equal, so their icons and text line up although one card's
+// title wraps in a narrow window and the others' don't.
+class RowLabel : public QLabel {
+public:
+    using QLabel::QLabel;
+
+    int heightForWidth(int width) const override
+    {
+        int tallest = QLabel::heightForWidth(width);
+        if (const QWidget* page = parentWidget() ? parentWidget()->parentWidget() : nullptr) {
+            for (const QLabel* label : page->findChildren<QLabel*>(objectName()))
+                tallest = qMax(tallest, label->QLabel::heightForWidth(width));
+        }
+        return tallest;
+    }
+};
+
+// A card's icon, as tall as the tallest of its row, for the same reason:
+// on Linux and Windows the emoji come from fonts of different heights.
+class RowIcon : public QLabel {
+public:
+    using QLabel::QLabel;
+
+    QSize sizeHint() const override
+    {
+        QSize size = QLabel::sizeHint();
+        if (const QWidget* page = parentWidget() ? parentWidget()->parentWidget() : nullptr) {
+            for (const QLabel* label : page->findChildren<QLabel*>(objectName()))
+                size.setHeight(qMax(size.height(), label->QLabel::sizeHint().height()));
+        }
+        return size;
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+};
+
+// Its height for a width is its least, not its preferred: a resizable
+// QScrollArea makes its widget at least that tall, which held the recent
+// list at its preferred height and scrolled the page in a laptop window.
+class DashboardPage : public QWidget {
+public:
+    using QWidget::QWidget;
+
+    int heightForWidth(int width) const override
+    {
+        return layout() ? layout()->totalMinimumHeightForWidth(width) : QWidget::heightForWidth(width);
+    }
+};
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -56,7 +140,23 @@ DashboardView::DashboardView(conf::SettingsService* settings, QWidget* parent)
 
 void DashboardView::setupUi()
 {
-    auto* root = new QVBoxLayout(this);
+    // The page scrolls when the window is smaller than it, rather than
+    // holding the window's minimum size above a small screen's.
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    scrollArea_ = new QScrollArea(this);
+    scrollArea_->setObjectName(QStringLiteral("dashboard.scroll"));
+    scrollArea_->setFrameShape(QFrame::NoFrame);
+    scrollArea_->setWidgetResizable(true);
+    // No Tab stop of its own: the cards and the list keep theirs, and
+    // tabbing to one scrolls it into view (QScrollArea::focusNextPrevChild).
+    scrollArea_->setFocusPolicy(Qt::NoFocus);
+    outer->addWidget(scrollArea_);
+    page_ = new DashboardPage(scrollArea_);
+    page_->setObjectName(QStringLiteral("dashboard.page"));
+    page_->installEventFilter(this);
+
+    auto* root = new QVBoxLayout(page_);
     root->setContentsMargins(40, 30, 40, 30);
 
     // Title row
@@ -90,6 +190,10 @@ void DashboardView::setupUi()
     initBtn_ = createActionCard(tr("Create New Repository"),
                                 QString::fromUtf8("\xE2\x9C\xA8"),      // ✨
                                 tr("Create a new empty repository"));
+
+    openBtn_->setObjectName(QStringLiteral("dashboard.openCard"));
+    cloneBtn_->setObjectName(QStringLiteral("dashboard.cloneCard"));
+    initBtn_->setObjectName(QStringLiteral("dashboard.initCard"));
 
     cardsRow->addWidget(openBtn_);
     cardsRow->addWidget(cloneBtn_);
@@ -235,15 +339,20 @@ void DashboardView::setupUi()
                  QStringLiteral("https://github.com/Inverian/GitBolt/issues")));
     contributeRow->addStretch();
 
-    root->addLayout(contributeRow);
-
     // The decorative bolt logo lives OUTSIDE the layout — parented
-    // directly to `this` so resizeEvent can pin it to the bottom-
-    // right corner with equal margins. Putting it inside the
+    // directly to the page so placeCornerBolt() can pin it to the
+    // bottom-right corner with equal margins. Putting it inside the
     // Contribute row forced it to vertical-center with the text,
     // which made it hover mid-row rather than sit in the corner.
-    cornerBolt_ = new widgets::BoltLogoWidget(this);
+    // The row keeps room for it, so a narrow page's links don't run
+    // under it.
+    cornerBolt_ = new widgets::BoltLogoWidget(page_);
     cornerBolt_->raise();
+    contributeRow->addSpacing(cornerBolt_->width() + contributeRow->spacing());
+
+    root->addLayout(contributeRow);
+    // After the layout, or the page isn't shown (QScrollArea::setWidget).
+    scrollArea_->setWidget(page_);
 
     // Connections
     connect(openBtn_, &QPushButton::clicked, this, [this]() {
@@ -338,8 +447,9 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     // WA_TransparentForMouseEvents on every label ensures clicks and
     // hover events pass through to the button beneath, so the native
     // pressed / hover / focus states all still work.
-    auto* btn = new QPushButton(this);
-    btn->setFixedSize(290, 220);
+    auto* btn = new ActionCard(page_);
+    btn->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+    btn->setMinimumHeight(kCardHeight);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setStyleSheet(QStringLiteral(
         "QPushButton {"
@@ -357,7 +467,8 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     layout->setContentsMargins(16, 20, 16, 20);
     layout->setSpacing(6);
 
-    auto* iconLabel = new QLabel(iconText, btn);
+    auto* iconLabel = new RowIcon(iconText, btn);
+    iconLabel->setObjectName(QStringLiteral("dashboard.cardIcon"));
     iconLabel->setAlignment(Qt::AlignCenter);
     iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     // 44pt — dominates the card, "way larger" than the old 10pt the
@@ -365,23 +476,29 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     iconLabel->setStyleSheet(QStringLiteral(
         "QLabel { font-size: 44pt; background: transparent; border: none; }"));
 
-    auto* titleLabel = new QLabel(title, btn);
-    titleLabel->setAlignment(Qt::AlignCenter);
+    // Wrapped, as the description is: a narrow card's title takes two
+    // lines (and a taller card) rather than losing its ends. Both from
+    // the top of the height RowLabel gives the row's labels.
+    auto* titleLabel = new RowLabel(title, btn);
+    titleLabel->setObjectName(QStringLiteral("dashboard.cardTitle"));
+    titleLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    titleLabel->setWordWrap(true);
     titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     titleLabel->setStyleSheet(QStringLiteral(
         "QLabel { font-size: 18pt; font-weight: bold;"
         "         background: transparent; border: none; }"));
 
-    auto* descLabel = new QLabel(description, btn);
-    descLabel->setAlignment(Qt::AlignCenter);
+    auto* descLabel = new RowLabel(description, btn);
+    descLabel->setObjectName(QStringLiteral("dashboard.cardDescription"));
+    descLabel->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     descLabel->setWordWrap(true);
     descLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     cardDescriptions_.append(descLabel);
     applyCardColors();
 
     // Stretch on both ends so the icon/title/description block sits
-    // vertically centered within the fixed-height card, rather than
-    // being top-aligned with dead space below the description.
+    // vertically centered within the card, rather than being
+    // top-aligned with dead space below the description.
     layout->addStretch();
     layout->addWidget(iconLabel);
     layout->addWidget(titleLabel);
@@ -645,9 +762,8 @@ void DashboardView::updateRecentColumnWidths()
     recentList_->setColumnWidth(6, qMax(50, total - assigned));
 }
 
-void DashboardView::resizeEvent(QResizeEvent* event)
+void DashboardView::placeCornerBolt()
 {
-    QWidget::resizeEvent(event);
     // Pin the floating bolt so its right edge aligns with the
     // right edge of the Recent Repositories table above. The root
     // layout uses 40 px left/right content margins (see setupUi),
@@ -663,14 +779,16 @@ void DashboardView::resizeEvent(QResizeEvent* event)
     if (cornerBolt_) {
         constexpr int kRightMargin  = 40;
         constexpr int kBottomMargin = 12;
-        const int x = width()  - cornerBolt_->width()  - kRightMargin;
-        const int y = height() - cornerBolt_->height() - kBottomMargin;
+        const int x = page_->width()  - cornerBolt_->width()  - kRightMargin;
+        const int y = page_->height() - cornerBolt_->height() - kBottomMargin;
         cornerBolt_->move(x, y);
     }
 }
 
 bool DashboardView::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == page_ && event->type() == QEvent::Resize)
+        placeCornerBolt();
     if (watched == recentList_ && event->type() == QEvent::Resize) {
         // Defer to the next tick so the tree's internal layout (header,
         // viewport, scrollbars) has fully settled. Running synchronously

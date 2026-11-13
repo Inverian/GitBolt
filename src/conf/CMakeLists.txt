@@ -5,8 +5,10 @@
 set(SOURCES
     SettingsService.cpp
     ThemeService.cpp
+    WindowPlacement.cpp
     SettingsService.h
     ThemeService.h
+    WindowPlacement.h
 )
 add_library(gitbolt_conf STATIC ${SOURCES})
 

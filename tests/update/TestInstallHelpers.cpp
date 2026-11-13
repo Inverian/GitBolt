@@ -1286,7 +1286,16 @@ private slots:
             "} else {\n    $reason = 'the installer exited with code ' + $code\n}\n")));
         QVERIFY(elevated.contains(QLatin1String(
             "    Write-Log ('the installer exited with code 0, and GitBolt.exe is now version ' + $version)\n")));
-        QVERIFY(elevated.contains(QLatin1String("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)\n")));
+        // "nothing was installed" only where the installer never ran.
+        QVERIFY2(elevated.contains(QStringLiteral(
+                     "if ($code -eq %1 -or $code -eq %2) {\n"
+                     "    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)\n"
+                     "} elseif ($status -eq 'failed') {\n"
+                     "    Write-Log ('GitBolt may be incomplete (code ' + $code + '): ' + $reason)\n"
+                     "}\n")
+                                       .arg(kWindowsExitInUse)
+                                       .arg(kWindowsExitNoInstaller)),
+                 qPrintable(elevated));
         QCOMPARE(elevated.count(QLatin1String("Write-Result ")), 1);
         QVERIFY(elevated.endsWith(QLatin1String("\nWrite-Log ''\nWrite-Result $status $reason\nWrite-Log ''\nexit $code")));
 

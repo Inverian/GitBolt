@@ -36,6 +36,7 @@
 #include "services/GitService.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
+#include "conf/WindowPlacement.h"
 #include "telemetry/EventSchema.h"
 #include "telemetry/TelemetryService.h"
 #include "util/DesktopOpen.h"
@@ -83,6 +84,7 @@
 #include <QMessageBox>
 #include <QFile>
 #include <QProcess>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QTextBrowser>
 #include <QStatusBar>
@@ -138,6 +140,21 @@ static bool handleProcessResult(QWidget* parent,
 } // namespace
 
 namespace gitbolt::ui {
+
+namespace {
+// The status bar's HEAD: its branch, a new repository's branch before
+// its first commit, or detached.
+QString headLabel(const git::Repository& r)
+{
+    if (r.isHeadDetached())
+        return MainWindow::tr("HEAD (detached)");
+    if (auto branch = r.headBranchName(); branch && !branch->empty())
+        return MainWindow::tr("Branch: %1").arg(QString::fromStdString(*branch));
+    if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
+        return MainWindow::tr("Branch: %1 (no commits yet)").arg(QString::fromStdString(unborn));
+    return MainWindow::tr("No branch");
+}
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -342,6 +359,18 @@ void MainWindow::closeEvent(QCloseEvent* e)
 {
     persistLayout();
     QMainWindow::closeEvent(e);
+}
+
+// Before the system shows the window (QWidget sends ShowEvent first), so
+// it never appears past the screen's edge: neither resize() to the
+// startup size nor restoreGeometry() keeps it on a small screen.
+void MainWindow::showEvent(QShowEvent* e)
+{
+    QMainWindow::showEvent(e);
+    if (!fittedOnScreen_ && !e->spontaneous()) {
+        fittedOnScreen_ = true;
+        conf::fitOnScreen(this);
+    }
 }
 
 // Idempotent: safe to call from both closeEvent and aboutToQuit.
@@ -3750,6 +3779,7 @@ void MainWindow::buildToolsMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Git Bash"));
             dlg->resize(900, 500);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* term = new widgets::TerminalWidget(dlg);
@@ -3807,6 +3837,7 @@ void MainWindow::buildToolsMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Git Command Log"));
             dlg->resize(900, 420);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* console = new widgets::ConsoleOutputWidget(dlg);
@@ -3914,6 +3945,7 @@ void MainWindow::buildHelpMenu()
             dlg->setAttribute(Qt::WA_DeleteOnClose);
             dlg->setWindowTitle(tr("Changelog"));
             dlg->resize(720, 560);
+            conf::fitOnScreenWhenShown(dlg);  // no larger than a small screen
             auto* layout = new QVBoxLayout(dlg);
             layout->setContentsMargins(0, 0, 0, 0);
             auto* browser = new QTextBrowser(dlg);
@@ -4456,6 +4488,7 @@ void MainWindow::createToolBar()
 void MainWindow::createStatusBar()
 {
     branchLabel_ = new QLabel(this);
+    branchLabel_->setObjectName(QStringLiteral("status.branch"));
     repoPathLabel_ = new QLabel(this);
     // A branch's name and the repository's path are the repository's
     // to choose ("<b>main</b>" is a valid branch name): plain text,
@@ -5031,7 +5064,7 @@ void MainWindow::setupConnections()
                 if (success) {
                     statusBar()->showMessage(message, 3000);
                 } else {
-                    statusBar()->showMessage(tr("Commit failed: ") + message, 5000);
+                    statusBar()->showMessage(dialogs::CommitDialog::failureText(message), 5000);
                     // The kind only; the message never leaves.
                     if (telemetry_)
                         telemetry_->recordError(telemetry::ErrorKind::CommitFailed);
@@ -5493,16 +5526,8 @@ void MainWindow::onRepositoryOpened(const QString& path)
 
     repoPathLabel_->setText(path);
 
-    const QString headBranch = gitService_->withRepository(
-        [](git::Repository& r) -> QString {
-            auto branchResult = r.headBranchName();
-            return branchResult
-                ? QString::fromStdString(*branchResult)
-                : QString();
-        });
-    branchLabel_->setText(headBranch.isEmpty()
-        ? tr("HEAD (detached)")
-        : tr("Branch: %1").arg(headBranch));
+    branchLabel_->setText(gitService_->withRepository(
+        [](git::Repository& r) { return headLabel(r); }));
 
     // Refresh the remaining sidebar categories.
     gitService_->refreshStashes();
@@ -5584,25 +5609,13 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         setRepoActionsEnabled(true);
         setRepoOnlyMenusEnabled(true);  // re-arm for the still-open repo
 
-        struct HeadInfo {
-            bool open = false;
-            QString branch;
-        };
-        const HeadInfo info = gitService_->withRepository(
-            [](git::Repository& r) {
-                HeadInfo h;
-                h.open = true;
-                if (auto branchResult = r.headBranchName(); branchResult)
-                    h.branch = QString::fromStdString(*branchResult);
-                return h;
-            });
-        if (info.open) {
+        const QString head = gitService_->withRepository(
+            [](git::Repository& r) { return headLabel(r); });
+        if (!head.isEmpty()) {
             // What it said before the open: the repository's path as it
             // was opened (libgit2's work tree is empty for a bare one).
             repoPathLabel_->setText(pendingOpen_.pathLabelBefore);
-            branchLabel_->setText(info.branch.isEmpty()
-                ? tr("HEAD (detached)")
-                : tr("Branch: %1").arg(info.branch));
+            branchLabel_->setText(head);
         }
         gitService_->refreshStatus();
         gitService_->refreshLog();
@@ -5654,10 +5667,9 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
             if (b.isHead) currentBranch = name;
         }
         branchCombo_->setProperty("currentBranch", currentBranch);
-        if (!currentBranch.isEmpty()) {
-            const int idx = branchCombo_->findText(currentBranch);
-            if (idx >= 0) branchCombo_->setCurrentIndex(idx);
-        }
+        // Detached or unborn, no branch is current: shown blank, rather
+        // than whichever branch came first.
+        branchCombo_->setCurrentIndex(currentBranch.isEmpty() ? -1 : branchCombo_->findText(currentBranch));
     }
 
     // Forward branches to the repository view (which owns the
@@ -5666,15 +5678,10 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
         repoView_->setBranches(std::move(branches));
 
     // Also update the branch label in the status bar.
-    const QString headBranch = gitService_->withRepository(
-        [](git::Repository& r) -> QString {
-            auto branchResult = r.headBranchName();
-            return branchResult
-                ? QString::fromStdString(*branchResult)
-                : QString();
-        });
-    if (!headBranch.isEmpty())
-        branchLabel_->setText(tr("Branch: %1").arg(headBranch));
+    if (const QString head = gitService_->withRepository(
+            [](git::Repository& r) { return headLabel(r); });
+        !head.isEmpty())
+        branchLabel_->setText(head);
 }
 
 void MainWindow::showAbout()
@@ -5759,9 +5766,11 @@ void MainWindow::setUpdates(const UpdateSetup& setup)
     updateGate_ = setup.gate;
     if (!updates_ && setup.on()) {   // once only
         updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
-        // "GitBolt was updated to <v>.", at startup after an update.
+        // "GitBolt was updated to <v>.", at startup after an update. Until
+        // the next message: GitBolt starts again by itself, perhaps while
+        // the user looks elsewhere, and 10 s went unseen.
         connect(updates_, &UpdateController::statusMessage, this,
-                [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+                [this](const QString& text) { statusBar()->showMessage(text); });
         // Usage statistics (setTelemetry, which main() calls first):
         // outcomes, a check's failure code, the dialog's and bar's buttons.
         connect(updates_, &UpdateController::updateResult, this, [this](const telemetry::UpdateResult& result) {

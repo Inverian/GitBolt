@@ -97,7 +97,11 @@ public:
     bool isEmpty() const;
 
     Result<ObjectId> head() const;
+    /// The branch HEAD is on; fails when HEAD is detached or unborn.
     Result<std::string> headBranchName() const;
+    /// The branch an unborn HEAD names (`main` after `git init -b main`),
+    /// which headBranchName() can't resolve yet; empty otherwise.
+    std::string unbornBranchName() const;
     Result<CommitData> lookupCommit(const ObjectId& id) const;
 
     /// Resolve any revision spec — full sha, short sha, branch name,

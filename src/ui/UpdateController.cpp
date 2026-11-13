@@ -9,6 +9,7 @@
 #include "widgets/UpdateNoticeBar.h"
 
 #include <QAbstractButton>
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
@@ -316,6 +317,12 @@ void UpdateController::reportEarlierInstall()
     if (!(result->version > current))
         return;
     const update::Failure failure = update::installResultFailure(result->status, result->reason);
+    // Once the installer ran, some of its files may be in place: GitBolt
+    // was left half updated, not unchanged.
+    const bool maybeChanged = failure == update::Failure::InstallerExit || failure == update::Failure::WrongVersion
+                              || failure == update::Failure::ElevatedError
+                              || failure == update::Failure::ElevatedTimeout
+                              || failure == update::Failure::ElevatedNoResult;
     if (result->status == QLatin1String("gave-up"))
         reportResult("gave_up", "quit", failure, from, version);
     else
@@ -347,9 +354,17 @@ void UpdateController::reportEarlierInstall()
                      .arg(asset);
         break;
     case update::PackageKind::WindowsInstall:
-        byHand = tr("To install it yourself, download %1 from the release page and run it as an "
-                    "administrator.")
-                     .arg(asset);
+        // The installer asks for permission itself.
+        byHand = maybeChanged ? tr("To repair it, download %1 from the release page and open it; Windows asks "
+                                   "for administrator permission.")
+                                    .arg(asset)
+                              : tr("To install it yourself, download %1 from the release page and open it; "
+                                   "Windows asks for administrator permission.")
+                                    .arg(asset);
+        // The installer can't replace files another GitBolt has open.
+        if (failure == update::Failure::InUse)
+            byHand = tr("Close GitBolt wherever else it is open on this computer, in other users' sessions too, "
+                        "then click Try Again.");
         break;
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "
@@ -361,7 +376,9 @@ void UpdateController::reportEarlierInstall()
         break;
     }
 
-    QString message = why + QLatin1Char(' ') + tr("GitBolt wasn't changed.") + QStringLiteral("\n\n") + byHand;
+    QString message = why + QLatin1Char(' ')
+                      + (maybeChanged ? tr("GitBolt may be incomplete now.") : tr("GitBolt wasn't changed."))
+                      + QStringLiteral("\n\n") + byHand;
     const QString logPath = downloads.filePath(QLatin1String(kInstallLogFile));
     const QString log = logTail(logPath);
     if (QFileInfo::exists(logPath))
@@ -573,13 +590,21 @@ void UpdateController::onPrepared()
     // the instance lock goes with this process, so the new copy can't
     // be folded into this one (SingleInstance.h). A false says why
     // through failed() (failInstall) or declined() (onDeclined) already.
-    // Windows' UAC prompt comes up now, owned by the dialog, which is
-    // in front: the user just chose Install and Restart in it.
+    // UAC's prompt is owned by the window in front: a modal over the
+    // dialog, else the dialog (a disabled owner may leave it on the taskbar).
     const qint64 pid = hooks_.pid ? hooks_.pid() : QCoreApplication::applicationPid();
     declined_ = false;
     installStage_ = "launch";
-    const bool started = launchHook_ ? launchHook_(*installer_, pid)
-                                     : installer_->launchHelper(pid, dialog_ ? quintptr(dialog_->winId()) : 0);
+    QWidget* owner = dialog_.data();
+    if (QWidget* modal = QApplication::activeModalWidget(); modal && modal->isVisible())
+        owner = modal;
+#ifdef Q_OS_WIN
+    if (dialog_)
+        dialog_->showPreparing(tr("Windows is asking for permission. If no prompt comes up, click the flashing "
+                                  "shield button on the taskbar."));
+#endif
+    const bool started = launchHook_ ? launchHook_(*installer_, pid, owner)
+                                     : installer_->launchHelper(pid, owner ? quintptr(owner->winId()) : 0);
     if (!started)
         return;
     launched_ = true;

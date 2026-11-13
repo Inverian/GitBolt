@@ -42,6 +42,8 @@
 //     GitBolt runs (the launch hook stands in for the prompt): GitBolt
 //     doesn't quit, the dialog says how to install it by hand, and
 //     after a No, Try Again asks again for the same checked download;
+//     the prompt's owner is a modal opened over the dialog meanwhile,
+//     else the dialog;
 //   - every attempt's outcome, for usage statistics (updateResult): at
 //     start() from install-result and the pending-install marker the
 //     launch leaves (a marker alone, past its patience, is no_result),
@@ -68,6 +70,7 @@
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDesktopServices>
+#include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QJsonArray>
@@ -690,7 +693,7 @@ private slots:
                           true));
         Harness h(testSetup(server, cache_->path(), deb()));
         int launches = 0;
-        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64, QWidget*) {
             ++launches;
             return false;
         });
@@ -859,12 +862,12 @@ private slots:
                             {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
                              true, {}}));
         const QString byHand = QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
-                                              "the release page and run it as an administrator.");
+                                              "the release page and open it; Windows asks for administrator permission.");
         int quits = 0;
         QList<qint64> launched;
         QString downloaded;
         h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
-        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64 pid) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64 pid, QWidget*) {
             launched << pid;
             downloaded = QDir(h.controller->setup().config.downloadDir)
                              .filePath(QStringLiteral("0.1.1/GitBolt-0.1.1-Windows-AMD64.exe"));
@@ -900,7 +903,8 @@ private slots:
             QCOMPARE(h.dialog()->state(), State::Declined);
             QCOMPARE(h.dialog()->property("updateState").toString(), QStringLiteral("declined"));
             QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.1 wasn't installed"));
-            QVERIFY2(shown.contains(QStringLiteral("Windows didn't give permission, so nothing was installed.")),
+            QVERIFY2(shown.contains(QStringLiteral("Windows didn't give permission (the prompt was declined, or not answered in "
+                                                     "time), so nothing was installed.")),
                      qPrintable(shown));
             // Still checked and ready: Try Again asks Windows again,
             // with no second download.
@@ -926,6 +930,38 @@ private slots:
             QCOMPARE(server.hits(exePath), 2);
         }
         QTest::qWait(400);
+        QCOMPARE(quits, 0);
+    }
+
+    // UAC's prompt is owned by the window in front: a modal opened over
+    // the dialog during the download (Settings, say), else the dialog.
+    void thePromptIsOwnedByTheWindowInFront() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        int quits = 0;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
+        QList<QPointer<QWidget>> owners;
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget* owner) {
+            owners << owner;
+            emit installer.declined(QStringLiteral("Install it yourself."));
+            return false;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QDialog over(h.dialog());
+        over.open();   // while the download runs
+        QTRY_COMPARE(owners.size(), 1);
+        QCOMPARE(owners.first().data(), static_cast<QWidget*>(&over));
+        QCOMPARE(h.dialog()->state(), State::Declined);
+        // Closed, Try Again's prompt is the dialog's.
+        over.close();
+        h.button("updateDialog.retry")->click();
+        QCOMPARE(owners.size(), 2);
+        QCOMPARE(owners.last().data(), static_cast<QWidget*>(h.dialog()));
         QCOMPARE(quits, 0);
     }
 
@@ -1213,25 +1249,42 @@ private slots:
         QTest::addColumn<int>("kind");
         QTest::addColumn<QStringList>("says");
         QTest::addColumn<QString>("offerSays");
+        QTest::addColumn<bool>("unchanged");   // else "may be incomplete"
 
+        // After the installer ran: some of its files may be in place.
         QTest::newRow("Windows: the installer failed")
             << QByteArray("failed 0.1.1 the installer exited with code 2\n") << int(PackageKind::WindowsInstall)
             << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: the installer "
-                                          "exited with code 2."),
-                           QStringLiteral("download GitBolt-0.1.1-Windows-AMD64.exe from the release page and run "
-                                          "it as an administrator.")}
-            << "Windows will ask for permission for Windows PowerShell to install it.";
+                                          "exited with code 2. GitBolt may be incomplete now.\n"),
+                           QStringLiteral("To repair it, download GitBolt-0.1.1-Windows-AMD64.exe from the release "
+                                          "page and open it; Windows asks for administrator permission.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << false;
+        QTest::newRow("Windows: wrong version")
+            << QByteArray("failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("GitBolt may be incomplete now.\n"), QStringLiteral("To repair it")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << false;
+        // The installer never ran: a copy open elsewhere kept its files.
+        QTest::newRow("Windows: in use")
+            << QByteArray("failed 0.1.1 another GitBolt kept running from the install folder\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("GitBolt wasn't changed.\n\nClose GitBolt wherever else it is open on "
+                                          "this computer, in other users' sessions too, then click Try Again.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
             << QByteArray("\xEF\xBB\xBF" "declined 0.1.1 the request for permission was cancelled\r\n")
             << int(PackageKind::WindowsInstall)
             << QStringList{QStringLiteral("needs an administrator's permission, and it wasn't given: the request "
-                                          "for permission was cancelled.")}
-            << "Windows will ask for permission for Windows PowerShell to install it.";
+                                          "for permission was cancelled."),
+                           QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
+                                          "the release page and open it; Windows asks for administrator "
+                                          "permission.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         QTest::newRow("deb: polkit dismissed") << QByteArray("declined 0.1.1\n") << int(PackageKind::Deb)
                                                << QStringList{QStringLiteral("and it wasn't given."),
                                                               QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-                                               << "You'll be asked for an administrator's password.";
+                                               << "You'll be asked for an administrator's password." << true;
         QTest::newRow("deb: pkexec couldn't authenticate")
             << QByteArray("failed 0.1.1 pkexec couldn't authenticate (no polkit authentication agent is running, or "
                           "polkit isn't set up to allow it)\n")
@@ -1240,27 +1293,28 @@ private slots:
                                           "authenticate (no polkit authentication agent is running, or polkit isn't "
                                           "set up to allow it). GitBolt wasn't changed.\n"),
                            QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-            << "You'll be asked for an administrator's password.";
+            << "You'll be asked for an administrator's password." << true;
         QTest::newRow("macOS: rolled back")
             << QByteArray("failed 0.1.1 couldn't move the new copy into place; the old one was put back.\n")
             << int(PackageKind::MacBundle)
             << QStringList{QStringLiteral("the old one was put back."),
                            QStringLiteral("download GitBolt-0.1.1-Darwin-arm64.dmg from the release page, open it, "
                                           "and drag GitBolt into your Applications folder.")}
-            << "restarts GitBolt with it.";
+            << "restarts GitBolt with it." << true;
         // What the helpers write: the reason, in seconds, isn't repeated.
         QTest::newRow("deb: gave up")
             << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::Deb)
             << QStringList{QStringLiteral("\nGitBolt 0.1.1 wasn't installed: GitBolt didn't quit within 10 minutes "
                                           "of Install and Restart. GitBolt wasn't changed.\n"),
                            QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-            << "You'll be asked for an administrator's password.";
+            << "You'll be asked for an administrator's password." << true;
     }
     void anEarlierFailureIsShown() {
         QFETCH(QByteArray, result);
         QFETCH(int, kind);
         QFETCH(QStringList, says);
         QFETCH(QString, offerSays);
+        QFETCH(bool, unchanged);
         HttpServer server;
         serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
         UrlCatcher catcher;
@@ -1283,7 +1337,8 @@ private slots:
         const QString shown = h.dialog()->shownText();
         for (const QString& line : says)
             QVERIFY2(shown.contains(line), qPrintable(shown));
-        QVERIFY2(shown.contains(QStringLiteral("GitBolt wasn't changed.")), qPrintable(shown));
+        QCOMPARE(shown.contains(QStringLiteral("GitBolt wasn't changed.")), unchanged);
+        QCOMPARE(shown.contains(QStringLiteral("GitBolt may be incomplete now.")), !unchanged);
         QVERIFY2(shown.contains(QDir::toNativeSeparators(downloads.filePath(QStringLiteral("install.log")))),
                  qPrintable(shown));
         // The log's last ten lines, as written.
@@ -1479,7 +1534,7 @@ private slots:
             Harness h(setup);
             int quits = 0;
             h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
-            h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64) { return true; });
+            h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64, QWidget*) { return true; });
             h.controller->checkNow();
             QTRY_COMPARE(h.dialog()->state(), State::Available);
             const qint64 before = QDateTime::currentSecsSinceEpoch();
@@ -1541,7 +1596,7 @@ private slots:
                                        .filePath(QLatin1String(UpdateController::kInstallMarkerFile));
         int quits = 0;
         h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300, 1000});
-        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64) {
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget*) {
             if (how == QLatin1String("declined")) {
                 emit installer.declined(QStringLiteral("Install it yourself."));
                 return false;

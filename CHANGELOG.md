@@ -60,7 +60,7 @@ need a newer version of macOS, Windows or Ubuntu.
   your system asks you to confirm it. On macOS: System Settings ›
   Privacy & Security › Open Anyway. On Windows: More info › Run anyway
   in SmartScreen's message. While Windows 11's Smart App Control is on,
-  it blocks GitBolt, and it can't make an exception for one app. The
+  it may block GitBolt, and it can't make an exception for one app. The
   README's Download section has the steps, and how to update and
   uninstall GitBolt.
 - **macOS: GitBolt is signed with its own certificate**, GitBolt Code
@@ -121,6 +121,46 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Ubuntu: Nautilus's Open in GitBolt** needs python3-nautilus, which
   the .deb now recommends, so apt installs it. Restart Nautilus
   (`nautilus -q`) after the first install.
+- **Small screens**: on a screen such as 1024×768, the window and its
+  dialogs open fully on screen, and the welcome screen's cards no
+  longer get cut off: they narrow to fit, and the welcome screen
+  scrolls when the window is smaller than it.
+- **Restore previous window size on launch** turned off now opens
+  GitBolt at the default size set in Settings; it used to bring back
+  the last session's size anyway.
+- **Windows: uninstalling while GitBolt ran** left GitBolt.exe and its
+  libraries in Program Files, though the uninstaller said it had
+  finished. It now asks you to quit GitBolt first, and no longer leaves
+  an empty GitBolt key in the registry.
+- **Windows: Explorer's Open in GitBolt** now quotes GitBolt's path in
+  the registry, so a program at `C:\Program.exe` can't run in its
+  place.
+- **Committing without a name and email** for git failed with git's
+  advice to run `git config`. The Commit dialog and the status bar now
+  say to set them in Tools › Settings › Git Config (GitBolt › Settings
+  on macOS), and the dialog's footer says so before you commit. Opened again, the dialog no longer
+  shows the last commit's error.
+- **The Commit dialog in a new repository** said "(no branch)" until
+  the first commit; it names the branch now.
+- **The status bar in a new repository** said "HEAD (detached)", and
+  after the first commit the toolbar's branch list and the sidebar
+  stayed empty until Refresh. It now says "Branch: main (no commits
+  yet)", and the branch appears with the first commit, made in GitBolt
+  or not. The welcome screen's Recent Repositories names that branch
+  too. A detached HEAD said "Branch: HEAD", with another branch
+  picked in the toolbar; it now says "HEAD (detached)". A checkout made
+  outside GitBolt shows without Refresh.
+- **Tools › Settings › Git Config** showed no Credential Helper when
+  git's is set in its system settings, as Git for Windows does; it now
+  shows that one, marked "(system)".
+- **In-app updates.** On Windows, Windows' permission prompt came up
+  only as a flashing button on the taskbar while another GitBolt
+  dialog, such as Settings, was open over the update window; it now
+  comes up as usual. Should it still show only on the taskbar, the
+  update window says to click that button. An update there that failed after the installer ran said GitBolt
+  wasn't changed; it now says GitBolt may be incomplete, and how to
+  repair it. On every system, "GitBolt was updated to …" stays in the
+  status bar until the next message, instead of 10 seconds.
 
 ## [0.9.12] — 2026-11-09
 
