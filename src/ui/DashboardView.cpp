@@ -83,6 +83,24 @@ public:
     }
 };
 
+// A card's icon, as tall as the tallest of its row, for the same reason:
+// on Linux and Windows the emoji come from fonts of different heights.
+class RowIcon : public QLabel {
+public:
+    using QLabel::QLabel;
+
+    QSize sizeHint() const override
+    {
+        QSize size = QLabel::sizeHint();
+        if (const QWidget* page = parentWidget() ? parentWidget()->parentWidget() : nullptr) {
+            for (const QLabel* label : page->findChildren<QLabel*>(objectName()))
+                size.setHeight(qMax(size.height(), label->QLabel::sizeHint().height()));
+        }
+        return size;
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+};
+
 // Its height for a width is its least, not its preferred: a resizable
 // QScrollArea makes its widget at least that tall, which held the recent
 // list at its preferred height and scrolled the page in a laptop window.
@@ -449,7 +467,8 @@ QPushButton* DashboardView::createActionCard(const QString& title, const QString
     layout->setContentsMargins(16, 20, 16, 20);
     layout->setSpacing(6);
 
-    auto* iconLabel = new QLabel(iconText, btn);
+    auto* iconLabel = new RowIcon(iconText, btn);
+    iconLabel->setObjectName(QStringLiteral("dashboard.cardIcon"));
     iconLabel->setAlignment(Qt::AlignCenter);
     iconLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     // 44pt — dominates the card, "way larger" than the old 10pt the
