@@ -12,11 +12,17 @@
 // 144 dpi, unscaled (fixtures/small-screen-large-text.json), where the
 // Contribute row is the page's widest.
 //
+// On Windows the offscreen platform finds fonts only through
+// QT_QPA_FONTDIR (tests/CMakeLists.txt points it at Windows' own).
+//
 
 #include <QAction>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFontDatabase>
+#include <QFontInfo>
+#include <QFontMetrics>
 #include <QLabel>
 #include <QLayout>
 #include <QPushButton>
@@ -24,6 +30,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolButton>
@@ -79,6 +86,13 @@ private slots:
         const QScreen* screen = QGuiApplication::primaryScreen();
         QVERIFY(screen);
         QCOMPARE(screen->availableGeometry(), QRect(0, 0, 819, 566));
+        // Real fonts too: without any, each glyph is a box as wide as the
+        // font is tall, and every width here is wrong.
+        const QFont font = QApplication::font();
+        qInfo("Font: %s, %d px; \"Clone a Repository\" is %d px wide",
+              qPrintable(QFontInfo(font).family()), QFontInfo(font).pixelSize(),
+              QFontMetrics(font).horizontalAdvance(QStringLiteral("Clone a Repository")));
+        QVERIFY2(!QFontDatabase::families().isEmpty(), "no fonts: on Windows, see QT_QPA_FONTDIR");
     }
 
     // Every test starts from an empty GitBolt.ini.
@@ -381,10 +395,16 @@ private slots:
     // the window isn't pushed past its edge.
     void repositoryWindowFits() {
         // In TestRepo's folder, which keeps libgit2 off the user's config.
+        // Capitals make the path wide while it stays well under Windows'
+        // MAX_PATH (260), which libgit2 can't init a repository past.
         gitbolt::test::TestRepo outer;
-        const QString path = outer.path() + QStringLiteral("/a-folder-name-that-goes-on").repeated(5);
+        const QString folder = QStringLiteral("A-WIDE-FOLDER-NAME-IN-CAPITALS");
+        const QString path = outer.path() + QStringLiteral("/%1/%1/%1").arg(folder);
+        QVERIFY2(path.size() < 200, qPrintable(path));
         QVERIFY(QDir().mkpath(path));
-        QVERIFY(gitbolt::git::Repository::init(path.toStdString()).ok());
+        const auto inited = gitbolt::git::Repository::init(path.toStdString());
+        const QString why = inited.ok() ? QString() : QString::fromStdString(inited.error().message());
+        QVERIFY2(inited.ok(), qPrintable(why));
         MainWindow window;
         window.show();
         QVERIFY(QTest::qWaitForWindowExposed(&window));
@@ -397,6 +417,15 @@ private slots:
         QTRY_VERIFY(!window.findChild<DashboardView*>()->isVisible());
 
         const QRect avail = window.screen()->availableGeometry();
+        const QLabel* pathLabel = nullptr;
+        for (const QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
+            if (label->text().contains(folder))
+                pathLabel = label;
+        }
+        QVERIFY(pathLabel);
+        const int pathWidth = pathLabel->fontMetrics().horizontalAdvance(pathLabel->text());
+        QVERIFY2(pathWidth > avail.width(),
+                 qPrintable(QStringLiteral("the path is only %1 px wide").arg(pathWidth)));
         const QSize least = window.minimumSizeHint().expandedTo(window.minimumSize());
         QVERIFY2(least.width() <= avail.width() && least.height() <= avail.height(),
                  qPrintable(QStringLiteral("%1x%2").arg(least.width()).arg(least.height())));

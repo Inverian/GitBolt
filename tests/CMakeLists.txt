@@ -402,6 +402,18 @@ set_tests_properties(test_small_screen_large_text PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/fixtures
     ENVIRONMENT "QT_FORCE_STDERR_LOGGING=1;QTEST_FUNCTION_TIMEOUT=60000;GITBOLT_TELEMETRY=0;QT_QPA_PLATFORM=offscreen:configfile=small-screen-large-text.json"
     TIMEOUT 180)
+# Windows' fonts for both: there the offscreen platform loads fonts only
+# from QT_QPA_FONTDIR (default <Qt>/lib/fonts, which Qt doesn't ship), and
+# without any every glyph is a box as wide as the font is tall.
+if(WIN32)
+    set(_windir "$ENV{WINDIR}")
+    if(NOT _windir)
+        set(_windir "C:/Windows")
+    endif()
+    file(TO_CMAKE_PATH "${_windir}/Fonts" _windows_fonts)
+    set_property(TEST test_small_screen test_small_screen_large_text APPEND PROPERTY
+        ENVIRONMENT "QT_QPA_FONTDIR=${_windows_fonts}")
+endif()
 # Repository > Edit .gitignore, .gitattributes and .mailmap: a symbolic
 # link there (one a repository committed) is neither read nor written
 # through. Off screen; it answers the editor and the message boxes.
