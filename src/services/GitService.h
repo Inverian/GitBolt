@@ -231,6 +231,10 @@ public:
     static constexpr int kLogPageSize = 256;
     void refreshLog(int offset = 0, int count = kLogPageSize);
     void refreshBranches();
+    /// Only when what HEAD names changed since the last list (a checkout,
+    /// a detach, a first commit outside GitBolt): a reload collapses the
+    /// sidebar's tree, so not on every ref change.
+    void refreshBranchesIfHeadMoved();
 
     /// Async per-line blame for a repo-relative path. Result lands
     /// via blameReady; failures via operationFailed("blame", …).
@@ -632,6 +636,10 @@ private:
     /// requested it.
     void startWatchEnumeration(const QString& path, quint64 gen);
 
+    /// refreshBranches' worker; with `onlyIfHeadMoved`, skipped while
+    /// HEAD names what it did at the last list.
+    void listBranches(bool onlyIfHeadMoved);
+
     /// refreshLog's worker. `openGeneration`, when not 0, marks the
     /// first page of that open, which then also emits
     /// initialLogLoaded.
@@ -729,6 +737,10 @@ private:
     // refresh result is delivered meanwhile (deliverFor), and outcomes
     // wait in waitingReports_ (reportTo).
     bool openPending_ = false;
+    // What HEAD named at the last branch list, and in which repository
+    // (repoMutex_).
+    std::string headSeen_;
+    std::weak_ptr<git::Repository> headSeenIn_;
     // reportTo's reports waiting for the open on its way, by the key of
     // the repository each is for (service thread only).
     std::vector<std::pair<std::string, std::function<void()>>> waitingReports_;

@@ -402,6 +402,9 @@ Result<ObjectId> Repository::head() const {
 }
 
 Result<std::string> Repository::headBranchName() const {
+    // Detached, HEAD names no branch; libgit2's shorthand for it is "HEAD".
+    if (isHeadDetached())
+        return GitError(GitErrorCode::NotFound, "HEAD is detached");
     git_reference* ref = nullptr;
     int err = git_repository_head(&ref, repo_);
     if (err < 0) return GitError::fromLibgit2(err);

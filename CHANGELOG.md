@@ -142,14 +142,21 @@ need a newer version of macOS, Windows or Ubuntu.
   shows the last commit's error.
 - **The Commit dialog in a new repository** said "(no branch)" until
   the first commit; it names the branch now.
+- **The status bar in a new repository** said "HEAD (detached)", and
+  after the first commit the toolbar's branch list and the sidebar
+  stayed empty until Refresh. It now says "Branch: main (no commits
+  yet)", and the branch appears with the first commit, made in GitBolt
+  or not. A detached HEAD said "Branch: HEAD", with another branch
+  picked in the toolbar; it now says "HEAD (detached)". A checkout made
+  outside GitBolt shows without Refresh.
 - **Tools › Settings › Git Config** showed no Credential Helper when
   git's is set in its system settings, as Git for Windows does; it now
   shows that one, marked "(system)".
-- **In-app updates.** On Windows, Windows' permission prompt can come
-  up only as a flashing button on the taskbar, as it did while another
-  GitBolt dialog, such as Settings, was open over the update window;
-  the update window now says to click that button if no prompt comes
-  up. An update there that failed after the installer ran said GitBolt
+- **In-app updates.** On Windows, Windows' permission prompt came up
+  only as a flashing button on the taskbar while another GitBolt
+  dialog, such as Settings, was open over the update window; it now
+  comes up as usual. Should it still show only on the taskbar, the
+  update window says to click that button. An update there that failed after the installer ran said GitBolt
   wasn't changed; it now says GitBolt may be incomplete, and how to
   repair it. On every system, "GitBolt was updated to …" stays in the
   status bar until the next message, instead of 10 seconds.

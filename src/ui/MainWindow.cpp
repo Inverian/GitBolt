@@ -141,6 +141,21 @@ static bool handleProcessResult(QWidget* parent,
 
 namespace gitbolt::ui {
 
+namespace {
+// The status bar's HEAD: its branch, a new repository's branch before
+// its first commit, or detached.
+QString headLabel(const git::Repository& r)
+{
+    if (r.isHeadDetached())
+        return MainWindow::tr("HEAD (detached)");
+    if (auto branch = r.headBranchName(); branch && !branch->empty())
+        return MainWindow::tr("Branch: %1").arg(QString::fromStdString(*branch));
+    if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
+        return MainWindow::tr("Branch: %1 (no commits yet)").arg(QString::fromStdString(unborn));
+    return MainWindow::tr("No branch");
+}
+} // namespace
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
@@ -4473,6 +4488,7 @@ void MainWindow::createToolBar()
 void MainWindow::createStatusBar()
 {
     branchLabel_ = new QLabel(this);
+    branchLabel_->setObjectName(QStringLiteral("status.branch"));
     repoPathLabel_ = new QLabel(this);
     // A branch's name and the repository's path are the repository's
     // to choose ("<b>main</b>" is a valid branch name): plain text,
@@ -5510,16 +5526,8 @@ void MainWindow::onRepositoryOpened(const QString& path)
 
     repoPathLabel_->setText(path);
 
-    const QString headBranch = gitService_->withRepository(
-        [](git::Repository& r) -> QString {
-            auto branchResult = r.headBranchName();
-            return branchResult
-                ? QString::fromStdString(*branchResult)
-                : QString();
-        });
-    branchLabel_->setText(headBranch.isEmpty()
-        ? tr("HEAD (detached)")
-        : tr("Branch: %1").arg(headBranch));
+    branchLabel_->setText(gitService_->withRepository(
+        [](git::Repository& r) { return headLabel(r); }));
 
     // Refresh the remaining sidebar categories.
     gitService_->refreshStashes();
@@ -5601,25 +5609,13 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         setRepoActionsEnabled(true);
         setRepoOnlyMenusEnabled(true);  // re-arm for the still-open repo
 
-        struct HeadInfo {
-            bool open = false;
-            QString branch;
-        };
-        const HeadInfo info = gitService_->withRepository(
-            [](git::Repository& r) {
-                HeadInfo h;
-                h.open = true;
-                if (auto branchResult = r.headBranchName(); branchResult)
-                    h.branch = QString::fromStdString(*branchResult);
-                return h;
-            });
-        if (info.open) {
+        const QString head = gitService_->withRepository(
+            [](git::Repository& r) { return headLabel(r); });
+        if (!head.isEmpty()) {
             // What it said before the open: the repository's path as it
             // was opened (libgit2's work tree is empty for a bare one).
             repoPathLabel_->setText(pendingOpen_.pathLabelBefore);
-            branchLabel_->setText(info.branch.isEmpty()
-                ? tr("HEAD (detached)")
-                : tr("Branch: %1").arg(info.branch));
+            branchLabel_->setText(head);
         }
         gitService_->refreshStatus();
         gitService_->refreshLog();
@@ -5671,10 +5667,9 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
             if (b.isHead) currentBranch = name;
         }
         branchCombo_->setProperty("currentBranch", currentBranch);
-        if (!currentBranch.isEmpty()) {
-            const int idx = branchCombo_->findText(currentBranch);
-            if (idx >= 0) branchCombo_->setCurrentIndex(idx);
-        }
+        // Detached or unborn, no branch is current: shown blank, rather
+        // than whichever branch came first.
+        branchCombo_->setCurrentIndex(currentBranch.isEmpty() ? -1 : branchCombo_->findText(currentBranch));
     }
 
     // Forward branches to the repository view (which owns the
@@ -5683,15 +5678,10 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
         repoView_->setBranches(std::move(branches));
 
     // Also update the branch label in the status bar.
-    const QString headBranch = gitService_->withRepository(
-        [](git::Repository& r) -> QString {
-            auto branchResult = r.headBranchName();
-            return branchResult
-                ? QString::fromStdString(*branchResult)
-                : QString();
-        });
-    if (!headBranch.isEmpty())
-        branchLabel_->setText(tr("Branch: %1").arg(headBranch));
+    if (const QString head = gitService_->withRepository(
+            [](git::Repository& r) { return headLabel(r); });
+        !head.isEmpty())
+        branchLabel_->setText(head);
 }
 
 void MainWindow::showAbout()

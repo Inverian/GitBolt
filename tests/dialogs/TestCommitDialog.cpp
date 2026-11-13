@@ -569,8 +569,12 @@ private slots:
         QVERIFY(!error->isVisible());
         QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
         QCOMPARE(message->toPlainText(), QStringLiteral("first"));
+        // libgit2 still reads a ~/.gitconfig deleted while GitBolt runs
+        // (a stale footer stands in): git's refusal is what counts.
+        committer->setText(QStringLiteral("Committer: Gone <gone@example.invalid>"));
         commit->click();
         QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
+        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
 
         // Set while the dialog stays open, then Settings' Apply emits
         // settingsChanged (a setter stands in): the footer follows, the

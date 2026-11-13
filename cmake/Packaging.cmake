@@ -121,7 +121,7 @@ elseif(WIN32)
         FileOpen $0 '$INSTDIR\\\\bin\\\\GitBolt.exe' a
         IfErrors 0 gitbolt_closed
         MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION 'GitBolt is running. Quit GitBolt, then click Retry.' IDRETRY gitbolt_check_running
-        Abort
+        Abort 'GitBolt was running, so nothing was removed.'
       gitbolt_closed:
         FileClose $0
       gitbolt_not_running:

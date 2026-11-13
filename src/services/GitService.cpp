@@ -44,6 +44,7 @@ GitService::GitService(QObject* parent)
     readPool_.setMaxThreadCount(1);
     connect(&watcher_, &watcher::FileWatcher::repositoryChanged, this, [this]() {
         refreshStatus();
+        refreshBranchesIfHeadMoved();
         emit repositoryChanged();
     });
 }
@@ -459,13 +460,34 @@ void GitService::setSelectedBranches(const QStringList& branchNames) {
         refreshLog();
 }
 
-void GitService::refreshBranches() {
-    if (deferToOwnerThread([this] { refreshBranches(); })) return;
+namespace {
+// What HEAD names: a branch, one without commits yet, or none.
+std::string headTarget(const git::Repository& r) {
+    if (r.isHeadDetached())
+        return "detached";
+    if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
+        return "unborn:" + unborn;
+    auto branch = r.headBranchName();
+    return branch ? *branch : std::string();
+}
+} // namespace
+
+void GitService::refreshBranches() { listBranches(false); }
+
+void GitService::refreshBranchesIfHeadMoved() { listBranches(true); }
+
+void GitService::listBranches(bool onlyIfHeadMoved) {
+    if (deferToOwnerThread([this, onlyIfHeadMoved] { listBranches(onlyIfHeadMoved); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
-    runner_.run([this, r]() {
+    runner_.run([this, r, onlyIfHeadMoved]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
+        std::string target = headTarget(*r);
+        if (onlyIfHeadMoved && headSeenIn_.lock() == r && target == headSeen_)
+            return;
+        headSeen_ = std::move(target);
+        headSeenIn_ = r;
         auto result = r->allBranches();
         if (result)
             deliverFor(r, [this, branches = std::move(*result)]() mutable {
@@ -823,10 +845,12 @@ void GitService::commitChanges(const QString& message, bool amend) {
         const auto stillOpen = [&] { return repo_ && rebaseStepKey(*repo_) == gitDir; };
         QString refusal;
         std::optional<git::ObjectId> autostash;
+        bool firstCommit = false;
         {
             std::lock_guard<std::mutex> lock(repoMutex_);
             if (!stillOpen())
                 return;
+            firstCommit = r->isHeadUnborn();
             if (amend)
                 refusal = QString::fromStdString(r->amendProblem());
             if (auto stash = r->resolveRef("MERGE_AUTOSTASH"))
@@ -842,8 +866,8 @@ void GitService::commitChanges(const QString& message, bool amend) {
         // swap arrived after it. Held while an open is pending, a Commit
         // & Push of this repository, opened again meanwhile, still
         // pushes: its Push is back by the time the outcome is in.
-        const auto report = [this, gitDir](bool ok, QString text, bool autostashKept) {
-            postReport(gitDir, [this, ok, text, autostashKept] {
+        const auto report = [this, gitDir, firstCommit](bool ok, QString text, bool autostashKept) {
+            postReport(gitDir, [this, ok, text, autostashKept, firstCommit] {
                 emit commitComplete(ok, text);
                 if (!ok)
                     return;
@@ -858,6 +882,9 @@ void GitService::commitChanges(const QString& message, bool amend) {
                 }
                 refreshStatus();
                 refreshLog();
+                // A repository's first commit creates its branch.
+                if (firstCommit)
+                    refreshBranches();
             });
         };
         if (!refusal.isEmpty()) {

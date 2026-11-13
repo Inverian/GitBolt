@@ -1026,8 +1026,13 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
             emit pushAfterCommitRequested();
     } else {
         pushAfterCommit_ = false;
-        errorLabel_->setText(missingIdentity(message) ? missingIdentityNote() : tr("Commit failed: %1").arg(message));
+        const bool noIdentity = missingIdentity(message);
+        errorLabel_->setText(noIdentity ? missingIdentityNote() : tr("Commit failed: %1").arg(message));
         errorLabel_->show();
+        // git knows best: libgit2 still reads a ~/.gitconfig deleted
+        // while GitBolt ran, and the footer said who would commit.
+        if (noIdentity)
+            committerLabel_->setText(tr("Committer: not set (%1)").arg(identitySettings()));
     }
 }
 
