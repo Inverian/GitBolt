@@ -60,7 +60,7 @@ need a newer version of macOS, Windows or Ubuntu.
   your system asks you to confirm it. On macOS: System Settings ›
   Privacy & Security › Open Anyway. On Windows: More info › Run anyway
   in SmartScreen's message. While Windows 11's Smart App Control is on,
-  it blocks GitBolt, and it can't make an exception for one app. The
+  it may block GitBolt, and it can't make an exception for one app. The
   README's Download section has the steps, and how to update and
   uninstall GitBolt.
 - **macOS: GitBolt is signed with its own certificate**, GitBolt Code
