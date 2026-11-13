@@ -859,7 +859,7 @@ private slots:
                             {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
                              true, {}}));
         const QString byHand = QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
-                                              "the release page and run it as an administrator.");
+                                              "the release page and open it; Windows asks for administrator permission.");
         int quits = 0;
         QList<qint64> launched;
         QString downloaded;
@@ -900,7 +900,8 @@ private slots:
             QCOMPARE(h.dialog()->state(), State::Declined);
             QCOMPARE(h.dialog()->property("updateState").toString(), QStringLiteral("declined"));
             QCOMPARE(headline(h.dialog()), QStringLiteral("GitBolt 0.1.1 wasn't installed"));
-            QVERIFY2(shown.contains(QStringLiteral("Windows didn't give permission, so nothing was installed.")),
+            QVERIFY2(shown.contains(QStringLiteral("Windows didn't give permission (the prompt was declined, or not answered in "
+                                                     "time), so nothing was installed.")),
                      qPrintable(shown));
             // Still checked and ready: Try Again asks Windows again,
             // with no second download.
@@ -1213,25 +1214,42 @@ private slots:
         QTest::addColumn<int>("kind");
         QTest::addColumn<QStringList>("says");
         QTest::addColumn<QString>("offerSays");
+        QTest::addColumn<bool>("unchanged");   // else "may be incomplete"
 
+        // After the installer ran: some of its files may be in place.
         QTest::newRow("Windows: the installer failed")
             << QByteArray("failed 0.1.1 the installer exited with code 2\n") << int(PackageKind::WindowsInstall)
             << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: the installer "
-                                          "exited with code 2."),
-                           QStringLiteral("download GitBolt-0.1.1-Windows-AMD64.exe from the release page and run "
-                                          "it as an administrator.")}
-            << "Windows will ask for permission for Windows PowerShell to install it.";
+                                          "exited with code 2. GitBolt may be incomplete now.\n"),
+                           QStringLiteral("To repair it, download GitBolt-0.1.1-Windows-AMD64.exe from the release "
+                                          "page and open it; Windows asks for administrator permission.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << false;
+        QTest::newRow("Windows: wrong version")
+            << QByteArray("failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("GitBolt may be incomplete now.\n"), QStringLiteral("To repair it")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << false;
+        // The installer never ran: a copy open elsewhere kept its files.
+        QTest::newRow("Windows: in use")
+            << QByteArray("failed 0.1.1 another GitBolt kept running from the install folder\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("GitBolt wasn't changed.\n\nClose GitBolt wherever else it is open on "
+                                          "this computer, in other users' sessions too, then click Try Again.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
             << QByteArray("\xEF\xBB\xBF" "declined 0.1.1 the request for permission was cancelled\r\n")
             << int(PackageKind::WindowsInstall)
             << QStringList{QStringLiteral("needs an administrator's permission, and it wasn't given: the request "
-                                          "for permission was cancelled.")}
-            << "Windows will ask for permission for Windows PowerShell to install it.";
+                                          "for permission was cancelled."),
+                           QStringLiteral("To install it yourself, download GitBolt-0.1.1-Windows-AMD64.exe from "
+                                          "the release page and open it; Windows asks for administrator "
+                                          "permission.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         QTest::newRow("deb: polkit dismissed") << QByteArray("declined 0.1.1\n") << int(PackageKind::Deb)
                                                << QStringList{QStringLiteral("and it wasn't given."),
                                                               QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-                                               << "You'll be asked for an administrator's password.";
+                                               << "You'll be asked for an administrator's password." << true;
         QTest::newRow("deb: pkexec couldn't authenticate")
             << QByteArray("failed 0.1.1 pkexec couldn't authenticate (no polkit authentication agent is running, or "
                           "polkit isn't set up to allow it)\n")
@@ -1240,27 +1258,28 @@ private slots:
                                           "authenticate (no polkit authentication agent is running, or polkit isn't "
                                           "set up to allow it). GitBolt wasn't changed.\n"),
                            QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-            << "You'll be asked for an administrator's password.";
+            << "You'll be asked for an administrator's password." << true;
         QTest::newRow("macOS: rolled back")
             << QByteArray("failed 0.1.1 couldn't move the new copy into place; the old one was put back.\n")
             << int(PackageKind::MacBundle)
             << QStringList{QStringLiteral("the old one was put back."),
                            QStringLiteral("download GitBolt-0.1.1-Darwin-arm64.dmg from the release page, open it, "
                                           "and drag GitBolt into your Applications folder.")}
-            << "restarts GitBolt with it.";
+            << "restarts GitBolt with it." << true;
         // What the helpers write: the reason, in seconds, isn't repeated.
         QTest::newRow("deb: gave up")
             << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::Deb)
             << QStringList{QStringLiteral("\nGitBolt 0.1.1 wasn't installed: GitBolt didn't quit within 10 minutes "
                                           "of Install and Restart. GitBolt wasn't changed.\n"),
                            QStringLiteral("sudo apt install ./gitbolt_0.1.1_amd64.deb")}
-            << "You'll be asked for an administrator's password.";
+            << "You'll be asked for an administrator's password." << true;
     }
     void anEarlierFailureIsShown() {
         QFETCH(QByteArray, result);
         QFETCH(int, kind);
         QFETCH(QStringList, says);
         QFETCH(QString, offerSays);
+        QFETCH(bool, unchanged);
         HttpServer server;
         serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
         UrlCatcher catcher;
@@ -1283,7 +1302,8 @@ private slots:
         const QString shown = h.dialog()->shownText();
         for (const QString& line : says)
             QVERIFY2(shown.contains(line), qPrintable(shown));
-        QVERIFY2(shown.contains(QStringLiteral("GitBolt wasn't changed.")), qPrintable(shown));
+        QCOMPARE(shown.contains(QStringLiteral("GitBolt wasn't changed.")), unchanged);
+        QCOMPARE(shown.contains(QStringLiteral("GitBolt may be incomplete now.")), !unchanged);
         QVERIFY2(shown.contains(QDir::toNativeSeparators(downloads.filePath(QStringLiteral("install.log")))),
                  qPrintable(shown));
         // The log's last ten lines, as written.

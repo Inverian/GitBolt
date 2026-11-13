@@ -409,7 +409,8 @@ void UpdateDialog::showDeclined(const QString& howToInstall)
 {
     showsLog_ = false;
     headline_->setText(tr("GitBolt %1 wasn't installed").arg(version_));
-    QString text = tr("Windows didn't give permission, so nothing was installed.");
+    QString text = tr("Windows didn't give permission (the prompt was declined, or not answered in time), so "
+                      "nothing was installed.");
     if (!howToInstall.isEmpty())
         text += QStringLiteral("\n\n") + howToInstall;
     message_->setText(text);

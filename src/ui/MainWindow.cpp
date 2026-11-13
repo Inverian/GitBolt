@@ -5776,9 +5776,11 @@ void MainWindow::setUpdates(const UpdateSetup& setup)
     updateGate_ = setup.gate;
     if (!updates_ && setup.on()) {   // once only
         updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
-        // "GitBolt was updated to <v>.", at startup after an update.
+        // "GitBolt was updated to <v>.", at startup after an update. Until
+        // the next message: GitBolt starts again by itself, perhaps while
+        // the user looks elsewhere, and 10 s went unseen.
         connect(updates_, &UpdateController::statusMessage, this,
-                [this](const QString& text) { statusBar()->showMessage(text, 10000); });
+                [this](const QString& text) { statusBar()->showMessage(text); });
         // Usage statistics (setTelemetry, which main() calls first):
         // outcomes, a check's failure code, the dialog's and bar's buttons.
         connect(updates_, &UpdateController::updateResult, this, [this](const telemetry::UpdateResult& result) {
