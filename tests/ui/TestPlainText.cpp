@@ -419,7 +419,7 @@ private slots:
         for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
             if (label->text().startsWith(QStringLiteral("Branch: ")))
                 branchLabel = label;
-            else if (label->text().contains(kBoldName))
+            else if (label->text().contains(QDir::toNativeSeparators(kBoldName)))
                 pathLabel = label;
         }
         QVERIFY(branchLabel && pathLabel);

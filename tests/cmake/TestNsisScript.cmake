@@ -3,6 +3,9 @@
 # can't answer, files in use not skipped), and that this CMake's
 # NSIS.template.in still has the hooks it relies on.
 
+# Policies as the project's (CMP0053: @VAR@ in quoted arguments stays text).
+cmake_minimum_required(VERSION 3.21)
+
 set(PROJECT_VERSION 0.1.0)
 set(GITBOLT_WINDOWS_MINIMUM 10.0.19045)
 set(CPACK_NSIS_DISPLAY_NAME GitBolt)  # as cmake/Packaging.cmake sets it
