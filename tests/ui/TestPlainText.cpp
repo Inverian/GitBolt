@@ -419,7 +419,7 @@ private slots:
         for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
             if (label->text().startsWith(QStringLiteral("Branch: ")))
                 branchLabel = label;
-            else if (label->text().contains(kBoldName))
+            else if (label->text().contains(QDir::toNativeSeparators(kBoldName)))
                 pathLabel = label;
         }
         QVERIFY(branchLabel && pathLabel);
@@ -547,7 +547,8 @@ private slots:
         QVERIFY(status->isVisible());
         QCOMPARE(status->textFormat(), Qt::PlainText);
         QCOMPARE(shownText(status),
-                 QStringLiteral("Destination already exists and is not empty: %1").arg(target));
+                 QStringLiteral("Destination already exists and is not empty: %1")
+                     .arg(QDir::toNativeSeparators(target)));
     }
 
     // A commit's failure is shown in git's words, a hook's output among
@@ -656,7 +657,8 @@ private slots:
         wt.branch = kBold.toStdString();
         worktrees.setWorktrees({wt});
         QCOMPARE(shownToolTip(worktrees.index(0, 0).data(Qt::ToolTipRole).toString()),
-                 QStringLiteral("%1\nPath: /tmp/%2\nBranch: %1\nUnlocked").arg(kBold, kLink));
+                 QStringLiteral("%1\nPath: %2\nBranch: %1\nUnlocked")
+                     .arg(kBold, QDir::toNativeSeparators(QStringLiteral("/tmp/") + kLink)));
 
         gitbolt::widgets::RebaseListModel rebase;
         gitbolt::git::RebaseOperation op;

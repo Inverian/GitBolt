@@ -133,7 +133,8 @@ or GitBolt on a Mac), your system asks you to confirm it.
 
 Before your first commit, enter your name and email in **Tools ›
 Settings › Git Config** (on macOS **GitBolt › Settings › Git
-Config**), unless git already has them. GitBolt saves them as git's
+Config**), unless git already has them; the Commit dialog's **Set
+name and email…** opens that page. GitBolt saves them as git's
 `user.name` and `user.email`, which every commit records.
 
 ### Updating
@@ -142,7 +143,9 @@ GitBolt checks for a new release once a day, and a bar says when one
 is out. **Help › Check for updates** (on macOS also **GitBolt › Check
 for Updates…**) checks at once. The update window shows what's new;
 **Install and Restart** downloads the new version, checks it against
-the release's checksums, installs it and starts GitBolt again.
+the release's checksums, installs it and starts GitBolt again with the
+repository you had open. A bar at the top then says which version
+GitBolt was updated to; **What's New** opens the release page.
 
 - **macOS** replaces GitBolt.app where it is, so it can't update a
   GitBolt that runs from the disk image, or from a folder you can't
@@ -155,9 +158,10 @@ the release's checksums, installs it and starts GitBolt again.
   for about 2 minutes is cancelled, and nothing is installed (**Try
   Again** asks again).
   After **Yes**, GitBolt closes while the installer runs, usually for a
-  few seconds, and starts again by itself: don't start it in the
-  meantime. Its status bar then says which version GitBolt was updated
-  to.
+  few seconds, and starts again by itself. If you start it in the
+  meantime, it says the update is still going in and closes again. If
+  GitBolt is also open in another window, or in another user's
+  session, **Install and Restart** first asks you to close it.
 - **Ubuntu** first asks apt whether the new .deb can be installed, then
   asks for your password. Without pkexec, GitBolt shows the `apt`
   command to run instead.

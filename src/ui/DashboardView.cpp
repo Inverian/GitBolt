@@ -537,15 +537,16 @@ static QString formatRelativeTime(const QDateTime& when)
 // strategies each have a short implementation that would otherwise
 // visually clutter the loop body.
 static QString applyShortening(
-    const QString& path,
+    const QString& absolutePath,
     gitbolt::conf::SettingsService::RecentShortening strategy)
 {
     using RS = gitbolt::conf::SettingsService::RecentShortening;
+    // Native separators, as the system shows paths (QFileInfo gives '/'
+    // on Windows too); the split below relies on them.
+    const QString path = QDir::toNativeSeparators(absolutePath);
     if (strategy == RS::None)
         return path;
 
-    // Normalize to native separators; the split below relies on
-    // QDir::separator() to pick the right delimiter per platform.
     const QChar sep = QDir::separator();
     const QStringList parts = path.split(sep, Qt::SkipEmptyParts);
     if (parts.size() < 4)
@@ -555,7 +556,7 @@ static QString applyShortening(
         // Just the deepest directory name, prefixed by an ellipsis
         // so the user can see it's been truncated. Keeps the UI
         // scannable when the screen is narrow.
-        return QStringLiteral("…%1%2").arg(sep).arg(parts.last());
+        return QStringLiteral("…") + sep + parts.last();
     }
 
     // RS::MiddleEllipsis: keep the first 1-2 and last 1-2 segments,
@@ -568,10 +569,12 @@ static QString applyShortening(
     out << QStringLiteral("…");
     out << parts.mid(parts.size() - keepBack);
     QString joined = out.join(sep);
-    // Preserve a leading separator on POSIX absolute paths
-    // (split+join would otherwise drop it).
-    if (path.startsWith(sep) && !joined.startsWith(sep))
-        joined.prepend(sep);
+    // The leading separators split+join drops: a POSIX path's '/', a
+    // Windows share's two.
+    qsizetype lead = 0;
+    while (lead < path.size() && path.at(lead) == sep)
+        ++lead;
+    joined.prepend(QString(lead, sep));
     return joined;
 }
 
@@ -625,7 +628,7 @@ void DashboardView::refreshRecentList()
         // retrieve it regardless of which column the user clicked in.
         item->setData(0, Qt::UserRole, path);
         // A path's folder names can be anything, markup included.
-        const QString tip = util::plainToolTip(path);
+        const QString tip = util::plainToolTip(QDir::toNativeSeparators(path));
         for (int c = 0; c < recentList_->columnCount(); ++c)
             item->setToolTip(c, tip);
 

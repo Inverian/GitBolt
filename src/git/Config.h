@@ -29,6 +29,14 @@ public:
 
     Result<void> remove(const std::string& key, ConfigLevel level = ConfigLevel::Local);
 
+    /// user.name and user.email as git's config files say now: read
+    /// through a config loaded anew, as the repository's own (loaded
+    /// once) keeps a file's values after it is deleted.
+    struct Identity {
+        std::optional<std::string> name;
+        std::optional<std::string> email;
+    };
+    Identity identity() const;
     std::optional<std::string> userName() const;
     std::optional<std::string> userEmail() const;
 

@@ -17,6 +17,11 @@
 //   - with no user.name or user.email, the footer and a refused commit
 //     say where GitBolt sets them, and the note is gone when the dialog
 //     opens again, or once Settings sets them while it stays open;
+//   - the footer reads them anew each time the dialog shows, so it
+//     follows ~/.gitconfig deleted, created again and edited while
+//     GitBolt runs; while either is missing it offers Set name and
+//     email…, which opens Settings at Git Config, and reads them again
+//     once Settings closes;
 //   - a new repository's title names its branch, before the first commit;
 //   - status that can't be read (a tree nested too deep for libgit2)
 //     says so, and why, until it reads again, the lists empty;
@@ -30,6 +35,7 @@
 //
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QFile>
@@ -41,12 +47,16 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QSignalSpy>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 #include "../TestRepoHelper.h"
 #include "conf/SettingsService.h"
 #include "dialogs/CommitDialog.h"
+#include "dialogs/SettingsDialog.h"
+#include "ui/MainWindow.h"
 #include "widgets/DiffViewerWidget.h"
 #include "git/GitProcess.h"
 #include "services/GitService.h"
@@ -72,6 +82,35 @@ template <typename T>
 T* child(const QWidget& parent, const char* name) {
     return parent.findChild<T*>(QString::fromLatin1(name));
 }
+
+// libgit2's global config, ~/.gitconfig for the footer, in a folder of
+// the test's own while this lives.
+class GlobalConfig {
+public:
+    GlobalConfig() {
+        git_buf saved = GIT_BUF_INIT;
+        git_libgit2_opts(GIT_OPT_GET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, &saved);
+        saved_ = QByteArray(saved.ptr ? saved.ptr : "", static_cast<int>(saved.size));
+        git_buf_dispose(&saved);
+        git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, QFile::encodeName(home_.path()).constData());
+    }
+    ~GlobalConfig() { git_libgit2_opts(GIT_OPT_SET_SEARCH_PATH, GIT_CONFIG_LEVEL_GLOBAL, saved_.constData()); }
+    QString path() const { return home_.filePath(QStringLiteral(".gitconfig")); }
+    // user.name and user.email, each left out when null.
+    bool write(const char* name, const char* email) const {
+        QByteArray text("[user]\n");
+        if (name)
+            text += QByteArray("\tname = ") + name + '\n';
+        if (email)
+            text += QByteArray("\temail = ") + email + '\n';
+        QFile file(path());
+        return file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(text) == text.size();
+    }
+
+private:
+    QTemporaryDir home_;
+    QByteArray saved_;
+};
 
 } // namespace
 
@@ -550,8 +589,10 @@ private slots:
         auto* error = child<QLabel>(dialog, "commit.error");
         auto* committer = child<QLabel>(dialog, "commit.committer");
         QVERIFY(message && commit && error && committer);
-        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
-        QVERIFY2(committer->text().contains(QStringLiteral("Settings › Git Config")), qPrintable(committer->text()));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: not set"));
+        // The link next to it opens Settings › Git Config.
+        auto* setIdentity = child<QPushButton>(dialog, "commit.setIdentity");
+        QVERIFY(setIdentity && setIdentity->isVisible());
         message->setPlainText(QStringLiteral("first"));
         commit->click();
 
@@ -570,14 +611,14 @@ private slots:
         dialog.show();
         QVERIFY(QTest::qWaitForWindowExposed(&dialog));
         QVERIFY(!error->isVisible());
-        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: not set"));
         QCOMPARE(message->toPlainText(), QStringLiteral("first"));
         // libgit2 still reads a ~/.gitconfig deleted while GitBolt runs
         // (a stale footer stands in): git's refusal is what counts.
         committer->setText(QStringLiteral("Committer: Gone <gone@example.invalid>"));
         commit->click();
         QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
-        QVERIFY2(committer->text().startsWith(QStringLiteral("Committer: not set (")), qPrintable(committer->text()));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: not set"));
 
         // Set while the dialog stays open, then Settings' Apply emits
         // settingsChanged (a setter stands in): the footer follows, the
@@ -591,6 +632,130 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!dialog.isVisible(), 15000);
         QCOMPARE(output(git.run({"log", "-1", "--format=%an <%ae> %s"})),
                  QStringLiteral("Test User <test@gitbolt.local> first"));
+    }
+
+    // ~/.gitconfig deleted while GitBolt ran: libgit2's cached config
+    // kept its values, and the footer showed them until a restart.
+    void theFooterFollowsTheGlobalConfig() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.name"})));
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.email"})));
+        GlobalConfig global;
+        QVERIFY(global.write("Ada One", "ada@example.invalid"));
+
+        // Opened now, so the repository's own config reads that file.
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        SettingsService settings;
+        CommitDialog dialog(&svc, &settings);
+        auto* committer = child<QLabel>(dialog, "commit.committer");
+        auto* link = child<QPushButton>(dialog, "commit.setIdentity");
+        QVERIFY(committer && link);
+        const auto reopen = [&] {
+            dialog.close();
+            dialog.show();
+            return QTest::qWaitForWindowExposed(&dialog);
+        };
+        QVERIFY(reopen());
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Ada One <ada@example.invalid>"));
+        QVERIFY(link->isHidden());
+
+        QVERIFY(QFile::remove(global.path()));
+        QVERIFY(reopen());
+        QCOMPARE(committer->text(), QStringLiteral("Committer: not set"));
+        QVERIFY(link->isVisible());
+
+        QVERIFY(global.write("Bea Two", "bea@example.invalid"));
+        QVERIFY(reopen());
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Bea Two <bea@example.invalid>"));
+        QVERIFY(link->isHidden());
+
+        // Edited, the same size, while the dialog is open: Settings'
+        // Apply (a setter stands in) reads it again.
+        QVERIFY(global.write("Cal Six", "cal@example.invalid"));
+        settings.setDefaultRemote(QStringLiteral("origin"));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Cal Six <cal@example.invalid>"));
+    }
+
+    // Set name and email… shows while either is missing; MainWindow
+    // opens Settings for it (a stand-in here), and once that returns the
+    // footer says what was set.
+    void setNameAndEmailReadsThemAgain() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.name"})));
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.email"})));
+        GlobalConfig global;
+        QVERIFY(global.write("Ada One", nullptr));
+        GitService svc;
+        QVERIFY(svc.openRepository(repo.path()));
+        SettingsService settings;
+        CommitDialog dialog(&svc, &settings);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        auto* committer = child<QLabel>(dialog, "commit.committer");
+        auto* link = child<QPushButton>(dialog, "commit.setIdentity");
+        QVERIFY(committer && link);
+        // A name alone: git still refuses, so the link shows.
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Ada One"));
+        QVERIFY(link->isVisible());
+        QCOMPARE(link->text(), QStringLiteral("Set name and email…"));
+
+        int asked = 0;
+        connect(&dialog, &CommitDialog::identitySettingsRequested, this, [&] {
+            ++asked;
+            QVERIFY(global.write("Ada One", "ada@example.invalid"));
+        });
+        link->click();
+        QCOMPARE(asked, 1);
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Ada One <ada@example.invalid>"));
+        QVERIFY(link->isHidden());
+    }
+
+    // The window's side: the link opens Tools › Settings at Git Config.
+    void setNameAndEmailOpensGitConfig() {
+        gitbolt::test::TestRepo repo;
+        gitbolt::git::GitProcess git(repo.path().toStdString());
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.name"})));
+        QVERIFY(succeeded(git.run({"config", "--unset", "user.email"})));
+        GlobalConfig global;
+        QVERIFY(global.write(nullptr, nullptr));
+
+        gitbolt::ui::MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto* svc = window.findChild<GitService*>();
+        QVERIFY(svc);
+        auto* commit = window.findChild<QAction*>(QStringLiteral("act.commit"));
+        QVERIFY(commit);
+        window.openRepositoryAtPath(repo.path());
+        QTRY_VERIFY_WITH_TIMEOUT(svc->isOpen() && commit->isEnabled(), 15000);
+        commit->trigger();
+        auto* dialog = window.findChild<CommitDialog*>();
+        QVERIFY(dialog);
+        QVERIFY(QTest::qWaitForWindowExposed(dialog));
+        auto* committer = child<QLabel>(*dialog, "commit.committer");
+        auto* link = child<QPushButton>(*dialog, "commit.setIdentity");
+        QVERIFY(committer && link);
+        QTRY_VERIFY(link->isVisible());
+
+        QString page;
+        QTimer::singleShot(0, this, [&] {
+            auto* settings = window.findChild<gitbolt::dialogs::SettingsDialog*>();
+            if (!settings)
+                return;
+            if (auto* pages = settings->findChild<QStackedWidget*>())
+                page = pages->currentWidget()->objectName();
+            // As if set there and saved.
+            global.write("Ada One", "ada@example.invalid");
+            settings->reject();
+        });
+        link->click();
+        QCOMPARE(page, QLatin1String(gitbolt::dialogs::SettingsDialog::kGitConfigPage));
+        QCOMPARE(committer->text(), QStringLiteral("Committer: Ada One <ada@example.invalid>"));
+        QVERIFY(link->isHidden());
+        dialog->close();
     }
 
     // A new repository (`git init -b main`) has no commit yet, so HEAD

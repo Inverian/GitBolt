@@ -20,7 +20,6 @@ LoadingOverlayWidget::LoadingOverlayWidget(QWidget* parent)
     : QWidget(parent)
 {
     Q_ASSERT(parent);
-    hide();
 
     timer_ = new QTimer(this);
     timer_->setInterval(kTickMs);
@@ -28,6 +27,8 @@ LoadingOverlayWidget::LoadingOverlayWidget(QWidget* parent)
         angle_ = (angle_ + kDegPerTick) % 360;
         update();
     });
+    // After the timer: under a hidden parent, hide() sends a hide event.
+    hide();
 
     // Track the parent's size so the veil always covers it edge to
     // edge, including splitter drags and window resizes while the

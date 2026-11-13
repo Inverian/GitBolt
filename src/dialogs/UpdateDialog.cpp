@@ -13,6 +13,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScreen>
 #include <QShortcut>
 #include <QVBoxLayout>
 
@@ -90,7 +91,6 @@ UpdateDialog::UpdateDialog(QWidget* parent)
     root->setSpacing(14);
 
     auto* top = new QHBoxLayout;
-    top_ = top;
     top->setSpacing(16);
     icon_ = new QLabel(this);
     icon_->setObjectName(QStringLiteral("updateDialog.icon"));
@@ -108,7 +108,6 @@ UpdateDialog::UpdateDialog(QWidget* parent)
     top->addWidget(icon_, 0, Qt::AlignTop);
 
     auto* column = new QVBoxLayout;
-    column_ = column;
     column->setSpacing(8);
     headline_ = plainLabel(this, "updateDialog.headline");
     QFont headlineFont = headline_->font();
@@ -215,6 +214,9 @@ void UpdateDialog::enterState(State state)
     const bool withRelease = state == State::Available || state == State::NotInstallable
                              || state == State::Downloading || state == State::Preparing
                              || (state == State::Failed && showsLog_);
+    // Showing a widget activates the layout at once, which grows the dialog
+    // to a minimum that leaves out the wrapped text: fit() sizes it instead.
+    layout()->setEnabled(false);
     notesLabel_->setVisible(withRelease);
     notes_->setVisible(withRelease);
     reason_->setVisible(state == State::NotInstallable);
@@ -231,9 +233,11 @@ void UpdateDialog::enterState(State state)
     close_->setVisible(state == State::Checking || state == State::UpToDate || state == State::Failed
                        || state == State::QuitNeeded || state == State::Declined);
     cancel_->setVisible(state == State::Downloading || state == State::Preparing);
+    cancel_->setEnabled(true);   // showAskingPermission greys it out
     retry_->setVisible(state == State::Failed || state == State::Declined);
     install_->setVisible(state == State::Available);
     quit_->setVisible(state == State::QuitNeeded);
+    layout()->setEnabled(true);
 
     // Enter does the state's main action.
     QPushButton* primary = close_;
@@ -257,18 +261,34 @@ void UpdateDialog::enterState(State state)
     // The notes take most of the room. A state without them fits what it
     // says, as does one that just gained them; one that keeps them keeps
     // the size the user gave it.
-    if (!withRelease || notesBefore != withRelease || !isVisible()) {
-        // Hiding a widget invalidates only the dialog's own layout; the
-        // nested ones would size it with what they hid.
-        column_->invalidate();
-        top_->invalidate();
-        adjustSize();
-        // adjustSize takes the height for the width of the wrapped
-        // labels' own hint, narrower than the dialog's minimum: a long
-        // message would leave a gap under it at the width it gets.
-        if (!withRelease && layout()->hasHeightForWidth())
-            resize(width(), std::max(minimumSizeHint().height(), layout()->totalHeightForWidth(width())));
+    fit(!withRelease || notesBefore != withRelease || !isVisible());
+}
+
+void UpdateDialog::fit(bool snug)
+{
+    // The nested layouts too: showing or hiding a widget invalidates only the dialog's own.
+    for (QLayout* nested : findChildren<QLayout*>())
+        nested->invalidate();
+    QLayout* root = layout();
+    QSize size = snug ? root->totalSizeHint() : this->size();
+    size.setWidth(std::clamp(size.width(), minimumWidth(), maximumWidth()));
+    // As adjustSize, but for the width it gets; two thirds of the screen at most (the notes scroll).
+    if (snug && root->hasHeightForWidth()) {
+        size.setHeight(root->totalHeightForWidth(size.width()));
+        if (const QScreen* screen = this->screen())
+            size.setHeight(std::min(size.height(), screen->availableGeometry().height() * 2 / 3));
     }
+    // Never below what the layout needs at that width: Windows enlarges it
+    // itself (QLayout::closestAcceptableSize), logs "Unable to set geometry"
+    // and may move the top edge. A smaller minimum is set first, so that
+    // setting it never resizes the dialog on its own.
+    size = size.expandedTo(root->totalMinimumSize());
+    if (root->hasHeightForWidth())
+        size.setHeight(std::max(size.height(), root->totalMinimumHeightForWidth(size.width())));
+    if (size.height() < height())
+        root->activate();
+    resize(size);   // keeps the top edge
+    root->activate();
 }
 
 void UpdateDialog::setProgressText(const QString& text)
@@ -346,6 +366,16 @@ void UpdateDialog::showPreparing(const QString& status)
     setProgressText(status);
     if (state_ != State::Preparing)
         enterState(State::Preparing);
+    cancel_->setEnabled(true);
+}
+
+void UpdateDialog::showAskingPermission()
+{
+    showPreparing(tr("Waiting for Windows' permission prompt…"));
+    message_->setText(tr("Windows is asking for permission. If no prompt comes up, click the flashing shield "
+                         "button on the taskbar."));
+    cancel_->setEnabled(false);
+    fit(!isVisible());   // the longer message may need another line
 }
 
 void UpdateDialog::showCheckFailed(const QString& message)

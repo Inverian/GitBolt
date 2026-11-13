@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QDir>
 #include <QFont>
 #include <QHeaderView>
 #include <QTableView>
@@ -45,7 +46,7 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::DisplayRole) {
         switch (index.column()) {
         case ColName:   return QString::fromStdString(wt.name);
-        case ColPath:   return QString::fromStdString(wt.path);
+        case ColPath:   return QDir::toNativeSeparators(QString::fromStdString(wt.path));
         case ColBranch: return QString::fromStdString(wt.branch);
         case ColLocked: return wt.isLocked ? tr("Locked") : tr("Unlocked");
         default:        return {};
@@ -58,7 +59,7 @@ QVariant WorktreeTableModel::data(const QModelIndex& index, int role) const {
         // stays.
         return util::plainToolTip(QStringLiteral("%1\nPath: %2\nBranch: %3\n%4")
                                       .arg(QString::fromStdString(wt.name),
-                                           QString::fromStdString(wt.path),
+                                           QDir::toNativeSeparators(QString::fromStdString(wt.path)),
                                            QString::fromStdString(wt.branch),
                                            wt.isLocked ? tr("Locked") : tr("Unlocked")));
     }
@@ -251,7 +252,7 @@ void WorktreeWidget::onContextMenu(const QPoint& pos) {
     menu.addSeparator();
 
     menu.addAction(tr("Copy Path"), this, [path]() {
-        QApplication::clipboard()->setText(path);
+        QApplication::clipboard()->setText(QDir::toNativeSeparators(path));
     })->setObjectName(QStringLiteral("worktree-list.copy-path"));
 
     menu.exec(table_->viewport()->mapToGlobal(pos));

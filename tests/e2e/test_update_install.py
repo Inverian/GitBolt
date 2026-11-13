@@ -38,9 +38,9 @@ Skipped (exit 77) without them.
    cache, and the relaunched copy goes on using that folder
    (GITBOLT_TEST_UPDATE_DIR, inherited through the helper). There it
    reads the helper's install-result and the launch's pending-install
-   marker, both gone afterwards, says "GitBolt was updated to <v>.",
-   and logs the outcome: from 0.1.0, or from unknown after a release
-   up to 0.9.12, which writes no marker.
+   marker, both gone afterwards, says "GitBolt was updated to <v>." in
+   its notice bar, and logs the outcome: from 0.1.0, or from unknown
+   after a release up to 0.9.12, which writes no marker.
 5. macOS and Linux: the new binary's --version is the offer's.
 
 The packaged app has no offscreen platform plugin, so it runs on the
@@ -383,16 +383,16 @@ def test(_binary: str, scratch: str, apps: list) -> None:
             raise Failure(f"the relaunched copy downloads into {new_state.get('updateDir')!r}, "
                           f"not {update_dir!r}: it can't read the helper's install-result")
         # The helper's install-result, read at start: the new copy says
-        # the update went through (the status bar; dump-state's
-        # statusMessage), and the result is gone, said once.
+        # the update went through (the notice bar, dump-state's
+        # updateNotice), and the result is gone, said once.
         want = f"GitBolt was updated to {offer.version}."
         deadline = time.monotonic() + 15
-        said = new_state.get("statusMessage")
+        said = new_state.get("updateNotice")
         while said != want and time.monotonic() < deadline:
             time.sleep(0.3)
-            said = app.cmd("dump-state", timeout=5).get("statusMessage")
+            said = app.cmd("dump-state", timeout=5).get("updateNotice")
         if said != want:
-            raise Failure(f"the relaunched copy's status bar says {said!r}, not {want!r}")
+            raise Failure(f"the relaunched copy's notice bar says {said!r}, not {want!r}")
         for name in ("install-result", "pending-install"):
             if os.path.exists(os.path.join(update_dir, name)):
                 raise Failure(f"{name} is still there after the relaunched copy read it")

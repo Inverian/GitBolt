@@ -5,6 +5,7 @@
 #include <QDialog>
 #include <QString>
 #include <QStringList>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -83,6 +84,11 @@ signals:
     /// MainWindow says so on its status bar.
     void repositoryChangedUnderQuestion(const QString& notDone);
 
+    /// The footer's "Set name and email…", shown while git's user.name
+    /// or user.email is missing: MainWindow opens Settings at Git
+    /// Config. The footer reads them again once this returns.
+    void identitySettingsRequested();
+
 protected:
     void showEvent(QShowEvent* e) override;
     void closeEvent(QCloseEvent* e) override;
@@ -111,6 +117,9 @@ private:
     void clearDiff();
     void updateStatusBar();
     void readCommitterFromConfig();
+    /// The footer's committer; "not set" with Set name and email… when
+    /// either is missing.
+    void showCommitter(const std::optional<std::string>& name, const std::optional<std::string>& email);
     /// Amend is off, with the reason as its tooltip, while the
     /// repository has a merge, cherry-pick or revert to commit.
     void updateAmend();
@@ -182,6 +191,7 @@ private:
 
     // Footer status strip
     QLabel*                     committerLabel_   = nullptr;
+    QPushButton*                setIdentityBtn_   = nullptr;
     QLabel*                     branchStatusLabel_= nullptr;
     QLabel*                     stagedCountLabel_ = nullptr;
 

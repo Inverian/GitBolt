@@ -509,10 +509,12 @@ private slots:
                               QStringLiteral("-o"), QStringLiteral("DPkg::Lock::Timeout=60"), deb}));
         QVERIFY(readFile(launcher()).contains(QLatin1String("'0.1.1'")));
         // Started by a detached helper in a session (so a process
-        // group) of its own, with the instance name passed on.
+        // group) of its own, with the instance name passed on, and
+        // marked as the helper's.
         const QString started = readFile(marker());
         const QRegularExpressionMatch m =
-            QRegularExpression(QStringLiteral("^0\\.1\\.1 pid=(\\d+) pgid=(\\d+) instance=(\\S+)\\n$")).match(started);
+            QRegularExpression(QStringLiteral("^0\\.1\\.1 pid=(\\d+) pgid=(\\d+) instance=(\\S+) relaunch=1\\n$"))
+                .match(started);
         QVERIFY2(m.hasMatch(), qPrintable(started));
         QVERIFY(m.captured(2).toLongLong() != qint64(::getpgrp()));
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
@@ -811,7 +813,7 @@ private slots:
                      .entryList(QDir::AllEntries | QDir::Hidden | QDir::NoDotAndDotDot),
                  QStringList{QStringLiteral("GitBolt.app")});
         const QRegularExpressionMatch m =
-            QRegularExpression(QStringLiteral("^0\\.1\\.1 pid=(\\d+) pgid=(\\d+) instance=(\\S+)\\n$"))
+            QRegularExpression(QStringLiteral("^0\\.1\\.1 pid=(\\d+) pgid=(\\d+) instance=(\\S+) relaunch=1\\n$"))
                 .match(readFile(marker()));
         QVERIFY2(m.hasMatch(), qPrintable(readFile(marker())));
         QVERIFY(m.captured(2).toLongLong() != qint64(::getpgrp()));

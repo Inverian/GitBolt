@@ -98,6 +98,13 @@ bool sameWindowsPath(const QString& a, const QString& b) {
     return !ra.isEmpty() && ra.compare(QFileInfo(cb).canonicalFilePath(), Qt::CaseInsensitive) == 0;
 }
 
+// The folder a registered UninstallString is in, comparable: compared as
+// a folder, which is there even when the uninstaller isn't.
+QString uninstallerFolder(const QString& registered) {
+    const QString path = windowsComparable(registered);
+    return path.left(qMax<qsizetype>(0, path.lastIndexOf(u'/')));
+}
+
 } // namespace
 
 PackageInfo detectPackage(const PackageProbe& probe) {
@@ -108,20 +115,28 @@ PackageInfo detectPackage(const PackageProbe& probe) {
             return macBundle(probe, bundle);
 
         const QFileInfo bin(appDir);
-        if (bin.fileName().compare(QLatin1String("bin"), Qt::CaseInsensitive) == 0
-            && QFileInfo(bin.path() + QStringLiteral("/Uninstall.exe")).isFile()) {
-            // The installer's .onInit runs the registered uninstaller
-            // (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL), whichever
-            // folder it is in: from a copy of the install folder, an
-            // update would remove the real install and move it here.
-            // With nothing registered there is nothing to uninstall.
-            PackageInfo info{PackageKind::WindowsInstall, bin.path(), true, {}};
-            const QString own = bin.path() + QStringLiteral("/Uninstall.exe");
+        // Registered here, but Uninstall.exe gone: still the install (the
+        // next update puts it back), else this copy could never update.
+        const auto registeredHere = [&] {
             for (const QString& registered : probe.registeredUninstallers) {
-                if (windowsComparable(registered).isEmpty() || sameWindowsPath(registered, own))
+                if (windowsComparable(registered).endsWith(QLatin1String("/Uninstall.exe"), Qt::CaseInsensitive)
+                    && sameWindowsPath(uninstallerFolder(registered), bin.path()))
+                    return true;
+            }
+            return false;
+        };
+        if (bin.fileName().compare(QLatin1String("bin"), Qt::CaseInsensitive) == 0
+            && (QFileInfo(bin.path() + QStringLiteral("/Uninstall.exe")).isFile() || registeredHere())) {
+            // The installer runs the registered uninstaller first
+            // (cmake/NsisScript.cmake), whichever folder it is in: from
+            // a copy of the install folder, an update would remove the
+            // real install and move it here. With nothing registered
+            // there is nothing to uninstall.
+            PackageInfo info{PackageKind::WindowsInstall, bin.path(), true, {}};
+            for (const QString& registered : probe.registeredUninstallers) {
+                const QString folder = uninstallerFolder(registered);
+                if (windowsComparable(registered).isEmpty() || sameWindowsPath(folder, bin.path()))
                     continue;
-                QString folder = windowsComparable(registered);
-                folder = folder.left(qMax<qsizetype>(0, folder.lastIndexOf(u'/')));
                 info.canInstall = false;
                 info.whyNot = QObject::tr("This copy of GitBolt isn't the installed one, which is in %1, so it "
                                           "can't update itself: the installer would update that one instead. "

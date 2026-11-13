@@ -21,9 +21,15 @@ no release package, so it can't install it (update/Package.h: Unknown).
    helper relaunches one) goes on using it, and reads the helper's
    install-result there once: a failure opens the dialog on why, with
    install.log's path, and Try Again checks again; ok says "GitBolt was
-   updated to <v>." in the status bar. Either way the file is gone
+   updated to <v>." in the notice bar. Either way the file is gone
    afterwards, and so is the pending-install marker the old copy left
    (old or young), and the log says how the attempt ended.
+5. While an update goes in (the marker names a helper that still runs,
+   and there is no result yet), a copy started says so and exits; the
+   helper's own (GITBOLT_UPDATE_RELAUNCH=1) starts, and so does any once
+   the helper is gone.
+6. A launch handed over to a running copy: an install result that came
+   meanwhile is said then, in the notice bar.
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from __future__ import annotations
 import configparser
 import os
 import stat
+import subprocess
 import sys
 import time
 
@@ -153,8 +160,8 @@ def test(binary: str, scratch: str, apps: list) -> None:
         with open(marker, "w") as fh:
             fh.write(f"0.1.0 0.1.1 {int(time.time())}\n")
         relaunched = relaunch(binary, app, stub, update_dir, apps, "updated")
-        relaunched.wait_until(lambda s: s.get("statusMessage") == "GitBolt was updated to 0.1.1.",
-                              "the status bar's word on the update")
+        relaunched.wait_until(lambda s: s.get("updateNotice") == "GitBolt was updated to 0.1.1.",
+                              "the notice bar's word on the update")
         state = relaunched.state()
         if "updateDialog" in state:
             raise Failure(f"an update that went in opened the dialog: {state['updateDialog']}")
@@ -164,6 +171,53 @@ def test(binary: str, scratch: str, apps: list) -> None:
         rc = relaunched.quit()
         if rc != 0:
             raise Failure(f"quit rc={rc}{relaunched.tail()}")
+
+        # 5. An update going in: its helper (a stand-in) started before
+        #    the marker, which names it, and no result yet.
+        helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        try:
+            with open(marker, "w") as fh:
+                fh.write(f"0.1.0 0.1.1 {int(time.time())} {helper.pid}\n")
+            refused = App(binary, runtime_dir=app.runtime_dir, label="started during the update",
+                          extra_env={"GITBOLT_TEST_UPDATE_FEED": stub.feed_url,
+                                     "GITBOLT_TEST_APP_VERSION": "0.1.0",
+                                     "GITBOLT_TEST_UPDATE_DIR": update_dir})
+            apps.append(refused)
+            try:
+                rc = refused.proc.wait(30)
+            except subprocess.TimeoutExpired:
+                raise Failure("a copy started during the update didn't exit") from None
+            told = "GitBolt is being updated and starts again by itself in a moment."
+            if rc != 1 or told not in refused.log_text():
+                raise Failure(f"a copy started during the update exited {rc}:{refused.tail()}")
+            if not os.path.exists(marker):
+                raise Failure("the copy turned away removed the marker")
+            # The helper's own copy starts.
+            started = relaunch(binary, app, stub, update_dir, apps, "the helper's",
+                               {"GITBOLT_UPDATE_RELAUNCH": "1"})
+            rc = started.quit()
+            if rc != 0:
+                raise Failure(f"quit rc={rc}{started.tail()}")
+        finally:
+            helper.kill()
+            helper.wait()
+        # The helper gone (killed, or the machine restarted): any copy starts.
+        after = relaunch(binary, app, stub, update_dir, apps, "after the helper")
+
+        # 6. A launch handed over to it, with a result that came meanwhile.
+        with open(result, "w") as fh:
+            fh.write("ok 0.1.1\n")
+        second = after.launch_second()
+        if second.returncode != 0:
+            raise Failure(f"the second launch exited {second.returncode}: {second.stderr!r}")
+        after.wait_until(lambda s: s.get("updateNotice")
+                         == "GitBolt 0.1.1 was installed. Quit GitBolt and open it again to use it.",
+                         "the handed-over launch's word on the update")
+        if os.path.exists(result):
+            raise Failure("install-result is still there after the running copy read it")
+        rc = after.quit()
+        if rc != 0:
+            raise Failure(f"quit rc={rc}{after.tail()}")
     finally:
         stub.close()
 
@@ -195,13 +249,14 @@ def check_private_dir(path: str, runtime_dir: str) -> None:
 
 
 def relaunch(binary: str, old: App, stub: UpdateFeed, update_dir: str, apps: list,
-             label: str) -> App:
+             label: str, more_env: dict | None = None) -> App:
     """A copy started as the install helper starts one: the old session's
     TMPDIR and environment, GITBOLT_TEST_UPDATE_DIR included."""
     app = App(binary, runtime_dir=old.runtime_dir, label=label,
               extra_env={"GITBOLT_TEST_UPDATE_FEED": stub.feed_url,
                          "GITBOLT_TEST_APP_VERSION": "0.1.0",
-                         "GITBOLT_TEST_UPDATE_DIR": update_dir})
+                         "GITBOLT_TEST_UPDATE_DIR": update_dir,
+                         **(more_env or {})})
     apps.append(app)
     app.wait_bridge()
     state = app.state()

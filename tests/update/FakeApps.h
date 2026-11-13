@@ -43,16 +43,19 @@ inline QString readFile(const QString& path) {
 }
 
 /// A GitBolt that only says it ran: one line per start, appended to
-/// $GITBOLT_TEST_MARKER, "<label> pid=<pid> pgid=<group> instance=<name>".
+/// $GITBOLT_TEST_MARKER, "<label> pid=<pid> pgid=<group> instance=<name>
+/// relaunch=<GITBOLT_UPDATE_RELAUNCH>", and its arguments, "[<arg>]" a
+/// line, in $GITBOLT_TEST_MARKER.args.
 /// When $GITBOLT_TEST_RESULT names a file, it also copies that file, as
 /// it is when this copy starts, to $GITBOLT_TEST_MARKER.result: what the
 /// relaunched GitBolt would read (the helpers' install result).
 inline QByteArray fakeAppScript(const QString& label) {
     return QByteArrayLiteral("#!/bin/sh\n"
-                             "printf '%s pid=%s pgid=%s instance=%s\\n' '")
+                             "printf '%s pid=%s pgid=%s instance=%s relaunch=%s\\n' '")
            + label.toUtf8()
            + QByteArrayLiteral("' \"$$\" \"$(ps -o pgid= -p $$ | tr -d ' ')\" \"${GITBOLT_INSTANCE_NAME:-}\" "
-                               ">>\"$GITBOLT_TEST_MARKER\"\n"
+                               "\"${GITBOLT_UPDATE_RELAUNCH:-}\" >>\"$GITBOLT_TEST_MARKER\"\n"
+                               "for arg in \"$@\"; do printf '[%s]\\n' \"$arg\"; done >\"$GITBOLT_TEST_MARKER.args\"\n"
                                "if [ -n \"${GITBOLT_TEST_RESULT:-}\" ]; then\n"
                                "    cat \"$GITBOLT_TEST_RESULT\" >\"$GITBOLT_TEST_MARKER.result\" 2>/dev/null\n"
                                "fi\n");

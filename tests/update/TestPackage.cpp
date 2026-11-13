@@ -8,10 +8,11 @@
 //     without (a build tree's); refused in App Translocation's
 //     read-only copy, or where the bundle or its folder can't be
 //     written (on a disk image too: TestInstaller mounts one);
-//   - a Windows install: bin\ beside the NSIS uninstaller; not refused
-//     for a folder the user can't write (the installer asks for
-//     elevation), only when the registry's uninstaller (either view)
-//     is another folder's: a copy of the install;
+//   - a Windows install: bin\ beside the NSIS uninstaller, or where the
+//     registry names it after it was lost; not refused for a folder the
+//     user can't write (the installer asks for elevation), only when the
+//     registry's uninstaller (either view) is another folder's: a copy
+//     of the install;
 //   - a .deb: /usr/lib/gitbolt that dpkg lists; refused without pkexec,
 //     and the refusal gives the command;
 //   - anything else (a build tree, a cmake --install prefix, an
@@ -212,6 +213,53 @@ private slots:
         info = detectPackage(p);
         QVERIFY(!info.canInstall);
         QVERIFY2(info.whyNot.contains(QLatin1String("C:\\Program Files\\GitBolt")), qPrintable(info.whyNot));
+    }
+
+    // Uninstall.exe lost (seen once in a Windows VM's self-updates): still
+    // the install while the registry names it here, so the next update
+    // can put it back. Not when it names nothing here, or another file.
+    void findsAWindowsInstallThatLostItsUninstaller() {
+        QDir().mkpath(path(QStringLiteral("lost/GitBolt/bin")));
+        PackageProbe p = probe(QStringLiteral("lost/GitBolt/bin"));
+        QCOMPARE(kindName(detectPackage(p).kind), kindName(PackageKind::Unknown));
+
+        const QString own = path(QStringLiteral("lost/GitBolt/Uninstall.exe"));
+        QString backslashed = own;
+        backslashed.replace(u'/', u'\\');
+        for (const QStringList& registered :
+             {QStringList{u'"' + backslashed + u'"'}, QStringList{backslashed.toUpper()},
+              QStringList{own, u'"' + backslashed + u'"'}}) {
+            p.registeredUninstallers = registered;
+            const PackageInfo info = detectPackage(p);
+            QCOMPARE(kindName(info.kind), kindName(PackageKind::WindowsInstall));
+            QCOMPARE(info.target, path(QStringLiteral("lost/GitBolt")));
+            QVERIFY2(info.canInstall, qPrintable(registered.join(u',') + QStringLiteral(": ") + info.whyNot));
+        }
+
+        for (const QString& elsewhere :
+             {QStringLiteral("\"C:\\Program Files\\GitBolt\\Uninstall.exe\""),
+              path(QStringLiteral("lost/GitBolt/bin/Uninstall.exe")), path(QStringLiteral("lost/GitBolt/Other.exe")),
+              path(QStringLiteral("lost/Uninstall.exe"))}) {
+            p.registeredUninstallers = {elsewhere};
+            QVERIFY2(detectPackage(p).kind == PackageKind::Unknown, qPrintable(elsewhere));
+        }
+
+        // Named here and, in the other view, elsewhere: as for a copy.
+        p.registeredUninstallers = {own, QStringLiteral("\"C:\\Program Files\\GitBolt\\Uninstall.exe\"")};
+        PackageInfo info = detectPackage(p);
+        QCOMPARE(kindName(info.kind), kindName(PackageKind::WindowsInstall));
+        QVERIFY(!info.canInstall);
+        QVERIFY2(info.whyNot.contains(QLatin1String("C:\\Program Files\\GitBolt")), qPrintable(info.whyNot));
+
+#if !defined(Q_OS_WIN)
+        // Compared as folders, which are there: by where they lead (as an
+        // 8.3 name or a junction would), with no uninstaller to compare.
+        QVERIFY(QFile::link(path(QStringLiteral("lost/GitBolt")), path(QStringLiteral("lost/Alias"))));
+        p.registeredUninstallers = {path(QStringLiteral("lost/Alias/Uninstall.exe"))};
+        info = detectPackage(p);
+        QCOMPARE(kindName(info.kind), kindName(PackageKind::WindowsInstall));
+        QVERIFY2(info.canInstall, qPrintable(info.whyNot));
+#endif
     }
 
     void aWindowsBuildTreeIsUnknown() {

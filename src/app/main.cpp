@@ -3,6 +3,7 @@
 #include "TelemetryEndpoints.h"
 #include "TestBridge.h"
 #include "ui/MainWindow.h"
+#include "ui/UpdateController.h"
 #include "ui/UpdateSetup.h"
 #include "conf/SettingsService.h"
 #include "conf/ThemeService.h"
@@ -12,6 +13,7 @@
 #include "telemetry/TelemetryConfig.h"
 #include "telemetry/TelemetryGate.h"
 #include "telemetry/TelemetryService.h"
+#include "update/InstallHelpers.h"
 #include "update/Package.h"
 #include "update/UpdateConfig.h"
 #include "util/CrashHandler.h"
@@ -47,6 +49,7 @@
 #include <QInputDialog>
 #include <QMessageBox>
 #include <QLockFile>
+#include <QProcess>
 #include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QSettings>
@@ -55,6 +58,7 @@
 #include <QSysInfo>
 #include <QTextStream>
 #include <QThreadPool>
+#include <QTimer>
 #include <QUrl>
 
 #include <git2.h>
@@ -207,6 +211,48 @@ void reportUnresponsiveInstance()
         gitbolt::widgets::PlainMessageBox::warning(nullptr, QStringLiteral("GitBolt"), text);
 }
 
+// Started while an update goes in (UpdateController::updateInstalling):
+// a note for a terminal and, where someone can see it, a box. This
+// process mustn't stay on Windows, whose installer replaces its files
+// (the box is Windows PowerShell's), nor on macOS, where LaunchServices
+// would bring it forward in place of the new copy (the swap takes a
+// second). On Linux the box is its own, until the update is over.
+void sayUpdateRunning(const QString& downloadDir)
+{
+    const QString text = QObject::tr("GitBolt is being updated and starts again by itself in a moment.");
+    qWarning("%s", qPrintable(text));
+    if (gitbolt::util::isHeadlessPlatform(QGuiApplication::platformName()))
+        return;
+#if defined(Q_OS_MACOS)
+    Q_UNUSED(downloadDir)
+#elif defined(Q_OS_WIN)
+    Q_UNUSED(downloadDir)
+    QString root = qEnvironmentVariable("SystemRoot");
+    if (root.isEmpty())
+        root = QStringLiteral("C:\\Windows");
+    QProcess notice;
+    notice.setProgram(root + QStringLiteral("\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"));
+    notice.setArguments(gitbolt::update::powerShellArguments(gitbolt::update::windowsNoticeScript(text, 20)));
+    // No console at all, as for the update's helper.
+    notice.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments* args) {
+        args->flags &= ~static_cast<unsigned long>(CREATE_NEW_CONSOLE | DETACHED_PROCESS);
+        args->flags |= CREATE_NO_WINDOW;
+    });
+    if (!notice.startDetached())
+        qWarning("Couldn't show that: %s", qPrintable(notice.errorString()));
+#else
+    QMessageBox box(QMessageBox::Information, QStringLiteral("GitBolt"), text, QMessageBox::Ok);
+    box.setObjectName(QStringLiteral("app.updateRunning"));
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, &box, [&box, &downloadDir] {
+        if (!gitbolt::ui::UpdateController::updateInstalling(downloadDir))
+            box.done(QMessageBox::Ok);
+    });
+    poll.start(500);
+    box.exec();
+#endif
+}
+
 namespace endpoints = gitbolt::app::telemetry_endpoints;
 
 // The GitBolt maintainers' usage statistics endpoint, which CI compiles
@@ -268,6 +314,10 @@ int main(int argc, char* argv[]) {
     // (GitProcess, the terminals and GitK leave them out as well.)
     for (const auto& name : gitbolt::git::GitProcess::repositoryEnvVars())
         qunsetenv(name.c_str());
+    // The GitBolt an update's helper starts: never turned away below as
+    // started during that update. Gone at once, so nothing inherits it.
+    const bool startedByUpdate = qEnvironmentVariable(gitbolt::update::kRelaunchEnv) == QLatin1String("1");
+    qunsetenv(gitbolt::update::kRelaunchEnv);
 
     // Install crash handler before anything else. Its report header
     // says whether a later launch may upload the report: official
@@ -472,6 +522,42 @@ int main(int argc, char* argv[]) {
     gitbolt::util::installMessageLog(&appLog);
     const auto messageLogGone = qScopeGuard([] { gitbolt::util::uninstallMessageLog(); });
 
+    // In-app updates (ui/UpdateSetup.h): only an official build
+    // (GITBOLT_UPDATES_ENABLED, this target's alone) asks GitHub, never a
+    // test session; nothing goes out until the window is up.
+    gitbolt::ui::UpdateSetupInputs updateInputs;
+#ifdef GITBOLT_UPDATES_ENABLED
+    updateInputs.officialFeed = QUrl(QString::fromLatin1(gitbolt::update::kOfficialFeed));
+#endif
+    updateInputs.testSession = testSessionKind;
+    updateInputs.env = QProcessEnvironment::systemEnvironment();
+    updateInputs.appVersion = app.applicationVersion();
+    updateInputs.cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    updateInputs.tempDir = QDir::tempPath();
+    gitbolt::ui::UpdateSetup updateSetup = gitbolt::ui::setUpUpdates(updateInputs);
+    if (!updateSetup.problem.isEmpty())
+        qWarning("In-app updates: %s", qPrintable(updateSetup.problem));
+    // A test feed's downloads folder is this session's own (setUpUpdates):
+    // handed on to the install helper and the copy it relaunches, which
+    // reads the helper's install-result there.
+    if (updateSetup.gate == gitbolt::ui::UpdateGate::TestFeed)
+        qputenv(gitbolt::ui::kTestUpdateDirEnv, QFile::encodeName(updateSetup.config.downloadDir));
+    // How this copy was installed decides what Install and Restart
+    // downloads, and whether it can (update/Package.h).
+    if (updateSetup.on())
+        updateSetup.package = gitbolt::update::detectPackage(gitbolt::update::currentProbe());
+    // An update going in now: this launch would hold files the installer
+    // has to replace (Windows' skips them, leaving a mix of versions). It
+    // says so and exits, unlocked first so the helper's GitBolt needn't
+    // wait; the helper starts GitBolt once the update is done. Checked only
+    // now that this launch is the one that runs: a hand-over is harmless.
+    if (updateSetup.on() && !startedByUpdate
+        && gitbolt::ui::UpdateController::updateInstalling(updateSetup.config.downloadDir)) {
+        instanceLock.unlock();
+        sayUpdateRunning(updateSetup.config.downloadDir);
+        return 1;
+    }
+
 #ifdef Q_OS_MACOS
     // Finder's "Open in GitBolt", only now that this is the GitBolt
     // that opens things: macOS gives the service to the first process
@@ -617,35 +703,6 @@ int main(int argc, char* argv[]) {
             telemetryService && telemetryService->queueCrashReport(crashReport);
     }
 
-    // In-app updates (src/update, ui/UpdateSetup.h). One gate, evaluated
-    // once, here: only an official build (GITBOLT_UPDATES_ENABLED, this
-    // target's alone, so no library or test binary names the feed) asks
-    // GitHub, and never in a test session, which may point the updater
-    // at a loopback stub instead (GITBOLT_TEST_UPDATE_FEED). Nothing
-    // touches the network until the window is up (startUpdates below)
-    // and the first check is due.
-    gitbolt::ui::UpdateSetupInputs updateInputs;
-#ifdef GITBOLT_UPDATES_ENABLED
-    updateInputs.officialFeed = QUrl(QString::fromLatin1(gitbolt::update::kOfficialFeed));
-#endif
-    updateInputs.testSession = testSessionKind;
-    updateInputs.env = QProcessEnvironment::systemEnvironment();
-    updateInputs.appVersion = app.applicationVersion();
-    updateInputs.cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
-    updateInputs.tempDir = QDir::tempPath();
-    gitbolt::ui::UpdateSetup updateSetup = gitbolt::ui::setUpUpdates(updateInputs);
-    if (!updateSetup.problem.isEmpty())
-        qWarning("In-app updates: %s", qPrintable(updateSetup.problem));
-    // A test feed's downloads folder is this session's own (setUpUpdates):
-    // handed on to the install helper and the copy it relaunches, which
-    // reads the helper's install-result there.
-    if (updateSetup.gate == gitbolt::ui::UpdateGate::TestFeed)
-        qputenv(gitbolt::ui::kTestUpdateDirEnv, QFile::encodeName(updateSetup.config.downloadDir));
-    // How this copy was installed decides what Install and Restart
-    // downloads, and whether it can (update/Package.h).
-    if (updateSetup.on())
-        updateSetup.package = gitbolt::update::detectPackage(gitbolt::update::currentProbe());
-
     // Create and show the main window. Inject the app-wide theme
     // service so the Settings dialog can list and switch themes
     // from one shared instance (rather than MainWindow creating a
@@ -701,6 +758,10 @@ int main(int argc, char* argv[]) {
         window.show();
         window.raise();
         window.activateWindow();
+        // An update's result that came while this GitBolt ran (it was
+        // started during the update): said now, not at the next start.
+        if (auto* updates = window.findChild<gitbolt::ui::UpdateController*>())
+            updates->checkInstallResult();
         if (!path.isEmpty())
             window.openRepositoryAtPath(path);
     };

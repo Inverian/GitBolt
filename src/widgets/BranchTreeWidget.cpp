@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QHBoxLayout>
+#include <QScrollBar>
 #include <QVBoxLayout>
 
 namespace gitbolt::widgets {
@@ -21,8 +22,15 @@ BranchTreeWidget::BranchTreeWidget(QWidget* parent)
     setupToolbar();
     layout->addWidget(toolbar_);
 
-    // Filter proxy wraps the tree model
+    // A reload resets the model, which collapses the tree and drops the
+    // selection: kept across it. Slots run in the order they were
+    // connected, so the state is saved before the proxy hands the reset
+    // to the view (which then knows no rows) and put back after.
+    connect(model_, &QAbstractItemModel::modelAboutToBeReset,
+            this, &BranchTreeWidget::saveViewState);
     filterProxy_->setSourceModel(model_);
+    connect(model_, &QAbstractItemModel::modelReset,
+            this, &BranchTreeWidget::restoreViewState);
     filterProxy_->setRecursiveFilteringEnabled(true);
     filterProxy_->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
@@ -48,9 +56,7 @@ BranchTreeWidget::BranchTreeWidget(QWidget* parent)
     connect(filterInput_, &QLineEdit::textChanged,
             this, &BranchTreeWidget::onFilterChanged);
 
-    // Expand local branches by default when model resets
-    connect(model_, &QAbstractItemModel::modelReset,
-            this, &BranchTreeWidget::expandLocalBranches);
+    expandLocalBranches();
 }
 
 void BranchTreeWidget::setBranches(std::vector<git::BranchInfo> branches) {
@@ -72,25 +78,114 @@ void BranchTreeWidget::setStashes(std::vector<git::StashEntry> stashes) {
 void BranchTreeWidget::clear() {
     if (filterInput_)
         filterInput_->clear();
+    keepView_ = false;
     model_->clear();
+    keepView_ = true;
 }
 
 void BranchTreeWidget::setCategoryVisible(int rootCategory, bool visible) {
-    // Top-level categories live as direct children of the invisible
-    // root model index. The proxy's row order matches the source
-    // model since we don't reorder. Map the source row to its
-    // proxy row and call setRowHidden on the tree view.
-    if (!model_ || !filterProxy_ || !treeView_) return;
     if (rootCategory < 0 ||
         rootCategory >= static_cast<int>(
             models::BranchModel::RootCategory::Count))
         return;
-    const QModelIndex srcIdx = model_->index(rootCategory, 0,
-                                             QModelIndex());
-    if (!srcIdx.isValid()) return;
-    const QModelIndex proxyIdx = filterProxy_->mapFromSource(srcIdx);
-    if (!proxyIdx.isValid()) return;
-    treeView_->setRowHidden(proxyIdx.row(), QModelIndex(), !visible);
+    if (visible)
+        hiddenCategories_.remove(rootCategory);
+    else
+        hiddenCategories_.insert(rootCategory);
+    applyHiddenCategories();
+}
+
+void BranchTreeWidget::applyHiddenCategories() {
+    // The view forgets hidden rows on a reset, and a category the filter
+    // took out and put back comes back shown: so set again each time.
+    for (int cat = 0; cat < static_cast<int>(models::BranchModel::RootCategory::Count); ++cat) {
+        const QModelIndex proxyIdx = filterProxy_->mapFromSource(model_->index(cat, 0));
+        if (proxyIdx.isValid())
+            treeView_->setRowHidden(proxyIdx.row(), QModelIndex(), hiddenCategories_.contains(cat));
+    }
+}
+
+void BranchTreeWidget::saveViewState() {
+    savedView_.reset();
+    if (!keepView_)
+        return;
+    const auto key = [](const QModelIndex& index) {
+        return index.data(models::BranchModel::ItemKeyRole).toString();
+    };
+    ViewState state;
+    collectExpanded(QModelIndex(), state.expanded);
+    for (int row = 0, rows = filterProxy_->rowCount(); row < rows; ++row)
+        state.categories << key(filterProxy_->index(row, 0));
+    state.current = key(treeView_->currentIndex());
+    if (const QModelIndexList selected = treeView_->selectionModel()->selectedIndexes();
+        !selected.isEmpty())
+        state.selected = key(selected.first());
+    if (const QModelIndex top = treeView_->indexAt(QPoint(0, 0)); top.isValid()) {
+        state.top = key(top);
+        state.topHidden = -treeView_->visualRect(top).top();
+    }
+    state.vScroll = treeView_->verticalScrollBar()->value();
+    state.hScroll = treeView_->horizontalScrollBar()->value();
+    savedView_ = std::move(state);
+}
+
+void BranchTreeWidget::restoreViewState() {
+    applyHiddenCategories();
+    if (!savedView_) {
+        expandLocalBranches();
+        return;
+    }
+    const ViewState state = std::move(*savedView_);
+    savedView_.reset();
+
+    for (const QString& key : state.expanded) {
+        if (const QModelIndex index = viewIndexForKey(key); index.isValid())
+            treeView_->expand(index);
+    }
+    // A category the filter lets in with this reload (its first match)
+    // opens, as the filter opened the others: closed, it hid the match.
+    for (int row = 0, rows = filterProxy_->rowCount(); row < rows; ++row) {
+        const QModelIndex index = filterProxy_->index(row, 0);
+        if (!state.categories.contains(index.data(models::BranchModel::ItemKeyRole).toString()))
+            treeView_->expand(index);
+    }
+    // Without auto-scroll: making a row current scrolls to it, and
+    // expands a collapsed category to show it.
+    const bool autoScroll = treeView_->hasAutoScroll();
+    treeView_->setAutoScroll(false);
+    auto* selection = treeView_->selectionModel();
+    if (const QModelIndex current = viewIndexForKey(state.current); current.isValid())
+        selection->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
+    if (const QModelIndex selected = viewIndexForKey(state.selected); selected.isValid())
+        selection->select(selected, QItemSelectionModel::ClearAndSelect);
+    treeView_->setAutoScroll(autoScroll);
+
+    // The row that was at the top stays there, rows added above it or
+    // not; the old offset where it is gone.
+    treeView_->doItemsLayout();
+    QScrollBar* vBar = treeView_->verticalScrollBar();
+    if (const QModelIndex top = viewIndexForKey(state.top); top.isValid()) {
+        treeView_->scrollTo(top, QAbstractItemView::PositionAtTop);
+        if (treeView_->verticalScrollMode() == QAbstractItemView::ScrollPerPixel)
+            vBar->setValue(vBar->value() + state.topHidden);
+    } else {
+        vBar->setValue(state.vScroll);
+    }
+    treeView_->horizontalScrollBar()->setValue(state.hScroll);
+}
+
+void BranchTreeWidget::collectExpanded(const QModelIndex& parent, QStringList& keys) const {
+    for (int row = 0, rows = filterProxy_->rowCount(parent); row < rows; ++row) {
+        const QModelIndex index = filterProxy_->index(row, 0, parent);
+        if (!treeView_->isExpanded(index))
+            continue;
+        keys << index.data(models::BranchModel::ItemKeyRole).toString();
+        collectExpanded(index, keys);
+    }
+}
+
+QModelIndex BranchTreeWidget::viewIndexForKey(const QString& key) const {
+    return filterProxy_->mapFromSource(model_->indexForKey(key));
 }
 
 void BranchTreeWidget::setupToolbar() {
@@ -286,6 +381,7 @@ void BranchTreeWidget::setupContextMenu(const QModelIndex& index, const QPoint& 
 
 void BranchTreeWidget::onFilterChanged(const QString& text) {
     filterProxy_->setFilterFixedString(text);
+    applyHiddenCategories();
 
     // When filtering, expand everything so matches are visible
     if (!text.isEmpty()) {

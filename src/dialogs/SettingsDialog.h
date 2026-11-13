@@ -75,6 +75,13 @@ public:
                             conf::ThemeService* theme,
                             QWidget* parent = nullptr);
 
+    /// Git › Git Config's objectName, the page the Commit dialog's Set
+    /// name and email… opens at.
+    static constexpr char kGitConfigPage[] = "settings.page.git-config";
+    /// Shows the page named `page` (its objectName), as if picked in
+    /// the tree. False, and the page stays, if none is shown by that name.
+    bool showPage(const QString& page);
+
 private slots:
     void apply();
     void onAccepted();

@@ -6,12 +6,15 @@
 
 #include <QLineEdit>
 #include <QMenu>
+#include <QSet>
 #include <QSortFilterProxyModel>
+#include <QStringList>
 #include <QToolBar>
 #include <QTreeView>
 #include <QWidget>
 
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace gitbolt::widgets {
@@ -21,10 +24,15 @@ class BranchTreeWidget : public QWidget {
 public:
     explicit BranchTreeWidget(QWidget* parent = nullptr);
 
+    // Each reload keeps what the tree shows: its expanded rows, the
+    // selection and the scroll position, by the rows' keys
+    // (BranchModel::ItemKeyRole), so only what changed shows.
     void setBranches(std::vector<gitbolt::git::BranchInfo> branches);
     void setTags(std::vector<gitbolt::git::TagInfo> tags);
     void setSubmodules(std::vector<gitbolt::git::SubmoduleInfo> submodules);
     void setStashes(std::vector<gitbolt::git::StashEntry> stashes);
+    /// Empties the tree for another repository: the default view again,
+    /// Local Branches expanded.
     void clear();
 
     /// Show or hide a top-level category (Local/Remote branches,
@@ -32,7 +40,7 @@ public:
     /// View menu's "Show remote branches / Show tags / Show
     /// stashes" toggles. Hiding via QTreeView::setRowHidden so
     /// the underlying model is left untouched — toggling back on
-    /// is instant.
+    /// is instant. It stays so across reloads and the filter.
     void setCategoryVisible(int rootCategory, bool visible);
 
     models::BranchModel* branchModel() const { return model_; }
@@ -91,9 +99,26 @@ private slots:
     void onNewBranchClicked();
 
 private:
+    // What a model reset would lose, by key (BranchModel::ItemKeyRole).
+    struct ViewState {
+        QStringList expanded;
+        QStringList categories;   // those the filter let in
+        QString current;
+        QString selected;
+        QString top;          // the row at the top of the view
+        int topHidden = 0;    // pixels of it scrolled out of sight
+        int vScroll = 0;
+        int hScroll = 0;
+    };
+
     void setupToolbar();
     void setupContextMenu(const QModelIndex& index, const QPoint& globalPos);
     void expandLocalBranches();
+    void saveViewState();
+    void restoreViewState();
+    void collectExpanded(const QModelIndex& parent, QStringList& keys) const;
+    QModelIndex viewIndexForKey(const QString& key) const;
+    void applyHiddenCategories();
 
     QTreeView* treeView_ = nullptr;
     models::BranchModel* model_ = nullptr;
@@ -103,6 +128,9 @@ private:
     QAction* newBranchAction_ = nullptr;
     bool repoActionsEnabled_ = true;
     std::function<std::string()> keySource_;
+    std::optional<ViewState> savedView_;   // from a reset's start to its end
+    bool keepView_ = true;                 // off while clear() resets
+    QSet<int> hiddenCategories_;           // setCategoryVisible(…, false)
 };
 
 } // namespace gitbolt::widgets

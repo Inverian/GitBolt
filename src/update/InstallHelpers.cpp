@@ -96,6 +96,23 @@ QString powerShellQuote(const QString& text) {
     return quoted;
 }
 
+QString windowsArgument(const QString& text) {
+    QString quoted = QStringLiteral("\"");
+    qsizetype backslashes = 0;
+    for (const QChar c : text) {
+        if (c == u'\\') {
+            ++backslashes;
+            continue;
+        }
+        // Backslashes count only before a quote: there each is doubled,
+        // and the quote escaped.
+        quoted += QString(c == u'"' ? 2 * backslashes + 1 : backslashes, u'\\');
+        quoted += c;
+        backslashes = 0;
+    }
+    return quoted + QString(2 * backslashes, u'\\') + u'"';
+}
+
 QByteArray powerShellEncodedCommand(const QString& script) {
     QByteArray utf16le;
     utf16le.reserve(script.size() * 2);
@@ -136,13 +153,14 @@ Failure installResultFailure(const QString& status, const QString& reason) {
         {"the new copy couldn't be moved into place, nor the old one back", Failure::RollbackFailed},
         {"pkexec couldn't authenticate", Failure::ElevationFailed},
         {"apt-get failed with status", Failure::AptFailed},
-        {"another GitBolt kept running", Failure::InUse},
+        {"another GitBolt window was still open", Failure::InUse},
         {"the installer could not be started", Failure::InstallerNotStarted},
         {"the installer ran, but GitBolt.exe is not version", Failure::WrongVersion},
         {"the administrator part of the update failed", Failure::ElevatedError},
         {"the installer exited with code", Failure::InstallerExit},
         {"the administrator part of the update did not finish within", Failure::ElevatedTimeout},
         {"the administrator part of the update ended without a result", Failure::ElevatedNoResult},
+        {"the installer ran, but Uninstall.exe is missing", Failure::UninstallerMissing},
     };
     for (const auto& known : kReasons) {
         if (reason.startsWith(QLatin1String(known.start)))
@@ -158,17 +176,27 @@ QString macHelperScript(const HelperInputs& in) {
     const QString values = shellLine("target", in.target) + shellLine("staged", in.staged)
                            + shellLine("aside", folder + QStringLiteral("/.") + oldName + QStringLiteral(".app.old"))
                            + shellLine("trash", in.trashDir) + shellLine("trash_name", oldName)
-                           + shellLine("binary", in.executable)
+                           + shellLine("binary", in.executable) + shellLine("reopen", in.reopen)
                            + QStringLiteral("exec_directly=%1\n").arg(in.execDirectly ? 1 : 0);
     return shellPreamble("macOS", in, values)
            + QStringLiteral(
-               "# Starts GitBolt from the bundle $1, which ends the helper.\n"
+               "# Starts GitBolt from the bundle $1, which ends the helper: with\n"
+               "# the repository it had open, and marked as the helper's (open\n"
+               "# passes no environment on, but by then the result is there).\n"
                "start() {\n"
                "    say \"starting $1\"\n"
+               "    app=$1\n"
+               "    set --\n"
+               "    [ -z \"$reopen\" ] || set -- \"$reopen\"\n"
+               "    GITBOLT_UPDATE_RELAUNCH=1\n"
+               "    export GITBOLT_UPDATE_RELAUNCH\n"
                "    if [ \"$exec_directly\" = 1 ]; then\n"
-               "        exec \"$1/$binary\"\n"
+               "        exec \"$app/$binary\" \"$@\"\n"
                "    fi\n"
-               "    exec /usr/bin/open \"$1\"\n"
+               "    [ $# -eq 0 ] || set -- --args \"$@\"\n"
+               "    # -n: a copy turned away during the update may not have\n"
+               "    # exited yet, and open alone would bring that one forward.\n"
+               "    exec /usr/bin/open -n \"$app\" \"$@\"\n"
                "}\n"
                "\n"
                "say \"GitBolt update helper: $target, to be replaced by $staged\"\n")
@@ -225,7 +253,7 @@ QString macHelperScript(const HelperInputs& in) {
 
 QString debHelperScript(const HelperInputs& in) {
     const QString values = shellLine("deb", in.staged) + shellLine("pkexec", in.pkexec)
-                           + shellLine("relaunch", in.executable);
+                           + shellLine("relaunch", in.executable) + shellLine("reopen", in.reopen);
     return shellPreamble("deb", in, values)
            + QStringLiteral("say \"GitBolt update helper: installing $deb\"\n")
            + shellWait(QStringLiteral("rm -f \"$deb\""))
@@ -260,7 +288,13 @@ QString debHelperScript(const HelperInputs& in) {
                "    report failed \"apt-get failed with status $status\"\n"
                "    ;;\n"
                "esac\n"
+               "# With the repository it had open, marked as the helper's.\n"
                "say \"starting $relaunch\"\n"
+               "GITBOLT_UPDATE_RELAUNCH=1\n"
+               "export GITBOLT_UPDATE_RELAUNCH\n"
+               "if [ -n \"$reopen\" ]; then\n"
+               "    exec \"$relaunch\" \"$reopen\"\n"
+               "fi\n"
                "exec \"$relaunch\"\n");
 }
 
@@ -424,6 +458,10 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("            $code = %1").arg(kWindowsExitWrongVersion),
         QStringLiteral("        }"),
         QStringLiteral("    }"),
+        // The uninstall key runs it: without it, Installed apps can't remove GitBolt.
+        QStringLiteral("    if ($code -eq 0 -and -not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {"),
+        QStringLiteral("        $code = %1").arg(kWindowsExitNoUninstaller),
+        QStringLiteral("    }"),
         QStringLiteral("} catch {"),
         QStringLiteral("    $code = %1").arg(kWindowsExitError),
         QStringLiteral("    Write-Log ('the administrator part failed: ' + $_.Exception.Message)"),
@@ -440,11 +478,13 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("    Write-Log ('GitBolt did not quit within ' + $waitSeconds + ' seconds: giving up, nothing was changed')"),
         QStringLiteral("    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitInUse),
-        QStringLiteral("    $reason = 'another GitBolt kept running from the install folder'"),
+        QStringLiteral("    $reason = 'another GitBolt window was still open'"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitNoInstaller),
         QStringLiteral("    $reason = 'the installer could not be started'"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitWrongVersion),
         QStringLiteral("    $reason = 'the installer ran, but GitBolt.exe is not version ' + $version"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitNoUninstaller),
+        QStringLiteral("    $reason = 'the installer ran, but Uninstall.exe is missing'"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitError),
         QStringLiteral("    $reason = 'the administrator part of the update failed'"),
         QStringLiteral("} else {"),
@@ -468,6 +508,11 @@ QString windowsElevatedScript(const HelperInputs& in) {
 }
 
 QString windowsHelperScript(const HelperInputs& in) {
+    // 5.1's Start-Process passes ArgumentList's one string on as it is.
+    const QString start = in.reopen.isEmpty()
+                              ? QStringLiteral("    Start-Process -FilePath $app")
+                              : QStringLiteral("    Start-Process -FilePath $app -ArgumentList ")
+                                    + powerShellQuote(windowsArgument(windowsPath(in.reopen)));
     QStringList lines = {
         QStringLiteral("# GitBolt's update helper (Windows), written by GitBolt"),
         QStringLiteral("# (src/update/InstallHelpers.cpp) and started hidden just before it quits, once"),
@@ -516,10 +561,12 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("    }"),
         QStringLiteral("    Start-Sleep -Milliseconds 250"),
         QStringLiteral("}"),
-        // Either way: the new copy, or the old one if it didn't install.
+        // Either way: the new copy, or the old one if it didn't install;
+        // with the repository it had open, marked as the helper's.
+        QStringLiteral("$env:%1 = '1'").arg(QLatin1String(kRelaunchEnv)),
         QStringLiteral("Write-Log ('starting ' + $app)"),
         QStringLiteral("try {"),
-        QStringLiteral("    Start-Process -FilePath $app"),
+        start,
         QStringLiteral("} catch {"),
         QStringLiteral("    Write-Log ('could not start GitBolt: ' + $_.Exception.Message)"),
         QStringLiteral("}"),
@@ -527,6 +574,13 @@ QString windowsHelperScript(const HelperInputs& in) {
         QStringLiteral("Write-Log ''"),
     };
     return lines.join(u'\n') + u'\n';
+}
+
+QString windowsNoticeScript(const QString& text, int seconds) {
+    // WScript.Shell's Popup is MessageBox: 64 an information icon, 4096
+    // system modal, which keeps it in front.
+    return QStringLiteral("(New-Object -ComObject WScript.Shell).Popup(%1, %2, 'GitBolt', 4160) | Out-Null\n")
+        .arg(powerShellQuote(text), QString::number(seconds));
 }
 
 } // namespace gitbolt::update

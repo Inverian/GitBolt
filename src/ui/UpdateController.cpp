@@ -12,14 +12,17 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QTimer>
+#include <QUrl>
 #include <QWidget>
 
 #include <cstdlib>
+#include <utility>
 
 namespace gitbolt::ui {
 
@@ -33,6 +36,9 @@ constexpr qsizetype kMaxReasonChars = 300;
 // How much of install.log the dialog shows, from its end.
 constexpr int kLogTailLines = 10;
 constexpr qint64 kLogTailBytes = 16 * 1024;
+// How much later than the marker's time its helper may seem to have
+// started: the clocks' rounding, and a small step of the system's.
+constexpr qint64 kHelperStartSlackSeconds = 10;
 
 struct InstallResult {
     QString status;   ///< ok, declined, failed or gave-up
@@ -92,19 +98,42 @@ struct InstallMarker {
     QString from;   ///< the version that launched the helper
     QString to;     ///< the version it installs
     qint64 at = 0;  ///< when, in seconds since the epoch
+    qint64 helperPid = 0;   ///< 0: unknown
 };
 
-// "<from> <to> <unix-seconds>\n", strictly.
+// "<from> <to> <unix-seconds> <helper-pid>\n", strictly; without the pid
+// as before 1.0.
 std::optional<InstallMarker> parseInstallMarker(const QByteArray& bytes)
 {
     if (bytes.size() > kMaxResultBytes)
         return std::nullopt;
     const QStringList parts = QString::fromUtf8(bytes).trimmed().split(QLatin1Char(' '));
-    bool ok = false;
-    const qint64 at = parts.size() == 3 ? parts.at(2).toLongLong(&ok) : 0;
-    if (!ok || !isPlainVersion(parts.at(0)) || !isPlainVersion(parts.at(1)))
+    if (parts.size() != 3 && parts.size() != 4)
         return std::nullopt;
-    return InstallMarker{parts.at(0), parts.at(1), at};
+    bool ok = false;
+    const qint64 at = parts.at(2).toLongLong(&ok);
+    bool pidOk = true;
+    const qint64 pid = parts.size() == 4 ? parts.at(3).toLongLong(&pidOk) : 0;
+    if (!ok || !pidOk || pid < 0 || !isPlainVersion(parts.at(0)) || !isPlainVersion(parts.at(1)))
+        return std::nullopt;
+    return InstallMarker{parts.at(0), parts.at(1), at, pid};
+}
+
+// The marker in `downloads`, unless it is missing, a link or not one.
+std::optional<InstallMarker> readInstallMarker(const QDir& downloads)
+{
+    const QString path = downloads.filePath(QLatin1String(UpdateController::kInstallMarkerFile));
+    QFile file(path);
+    if (QFileInfo(path).isSymLink() || !file.open(QIODevice::ReadOnly))
+        return std::nullopt;
+    return parseInstallMarker(file.read(kMaxResultBytes + 1));
+}
+
+// x.y.z's release page, built from a version Version::parse accepted:
+// no text from GitHub goes into it.
+QUrl releasePage(const QString& version)
+{
+    return QUrl(dialogs::UpdateDialog::releasesPageUrl().toString() + QStringLiteral("/tag/v") + version);
 }
 
 // update_result's package for this kind of install.
@@ -212,6 +241,10 @@ UpdateController::UpdateController(UpdateSetup setup, conf::SettingsService* set
             if (const auto version = update::Version::parse(bar_->version()))
                 dismissed_ = version;
         });
+        connect(bar_, &widgets::UpdateNoticeBar::whatsNewRequested, this, [](const QString& version) {
+            if (isPlainVersion(version))
+                QDesktopServices::openUrl(releasePage(version));
+        });
     }
 }
 
@@ -234,6 +267,28 @@ void UpdateController::setLaunchHook(LaunchHook hook)
     launchHook_ = std::move(hook);
 }
 
+void UpdateController::setReopenPath(std::function<QString()> path)
+{
+    reopenPath_ = std::move(path);
+}
+
+bool UpdateController::updateInstalling(const QString& downloadDir, const std::function<qint64(qint64)>& startTime)
+{
+    if (downloadDir.isEmpty())
+        return false;
+    const QDir downloads(downloadDir);
+    const auto marker = readInstallMarker(downloads);
+    if (!marker || marker->helperPid <= 0 || marker->helperPid == QCoreApplication::applicationPid()
+        || std::llabs(QDateTime::currentSecsSinceEpoch() - marker->at) > kResultPatienceSeconds)
+        return false;
+    // The helper starts before the launch writes the marker.
+    const qint64 started = startTime ? startTime(marker->helperPid) : update::processStartTime(marker->helperPid);
+    if (started <= 0 || started > marker->at + kHelperStartSlackSeconds)
+        return false;
+    const QFileInfo result(downloads.filePath(QLatin1String(kInstallResultFile)));
+    return !result.exists() && !result.isSymLink();
+}
+
 dialogs::UpdateDialog* UpdateController::dialog() const
 {
     return dialog_;
@@ -253,7 +308,13 @@ void UpdateController::start()
         timer_->start(kFirstCheckDelayMs);
 }
 
-void UpdateController::reportEarlierInstall()
+void UpdateController::checkInstallResult()
+{
+    if (!installing() && !launched_)
+        reportEarlierInstall(true);
+}
+
+void UpdateController::reportEarlierInstall(bool running)
 {
     const QDir downloads(setup_.config.downloadDir);
     // The marker the launch left: who launched it, for what, and when.
@@ -308,21 +369,31 @@ void UpdateController::reportEarlierInstall()
         // GitBolt: stale.
         if (result->version >= current) {
             reportResult("ok", "install", update::Failure::None, from, version);
-            emit statusMessage(tr("GitBolt was updated to %1.").arg(version));
+            // Running all along, this process isn't the new version.
+            const bool restart = running && result->version > current;
+            if (restart)
+                installedMeanwhile_ = result->version;
+            if (bar_)
+                bar_->showUpdated(version, restart);
         }
         return;
     }
-    // This version, or a newer one, runs now: whatever went wrong then
-    // was put right since.
-    if (!(result->version > current))
-        return;
     const update::Failure failure = update::installResultFailure(result->status, result->reason);
+    // This version, or a newer one, runs now: whatever went wrong then
+    // was put right since. Except a missing Uninstall.exe: it comes with
+    // the new GitBolt.exe already in place.
+    if (!(result->version > current)
+        && !(result->version == current && failure == update::Failure::UninstallerMissing))
+        return;
     // Once the installer ran, some of its files may be in place: GitBolt
-    // was left half updated, not unchanged.
+    // was left half updated, not unchanged. So was a Mac whose old copy
+    // couldn't be put back.
     const bool maybeChanged = failure == update::Failure::InstallerExit || failure == update::Failure::WrongVersion
+                              || failure == update::Failure::UninstallerMissing
                               || failure == update::Failure::ElevatedError
                               || failure == update::Failure::ElevatedTimeout
-                              || failure == update::Failure::ElevatedNoResult;
+                              || failure == update::Failure::ElevatedNoResult
+                              || failure == update::Failure::RollbackFailed;
     if (result->status == QLatin1String("gave-up"))
         reportResult("gave_up", "quit", failure, from, version);
     else
@@ -363,8 +434,7 @@ void UpdateController::reportEarlierInstall()
                                     .arg(asset);
         // The installer can't replace files another GitBolt has open.
         if (failure == update::Failure::InUse)
-            byHand = tr("Close GitBolt wherever else it is open on this computer, in other users' sessions too, "
-                        "then click Try Again.");
+            byHand = tr("Close every other GitBolt window, in other users' sessions too, then click Try Again.");
         break;
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "
@@ -425,7 +495,8 @@ void UpdateController::onUpToDate(const update::Version& latest, bool manual)
     // A release the bar offered, or would, is gone (GitHub took it down).
     if (pendingRelease_ && pendingRelease_->version > latest)
         pendingRelease_.reset();
-    if (bar_ && !bar_->isHidden()) {
+    // (Not the bar's word that an update went in: it offers nothing.)
+    if (bar_ && !bar_->isHidden() && !bar_->version().isEmpty()) {
         const auto offered = update::Version::parse(bar_->version());
         if (!offered || *offered > latest)
             bar_->hide();
@@ -476,6 +547,9 @@ void UpdateController::onAvailable(const update::Release& release, bool manual)
 
 void UpdateController::offerInBar(const update::Release& release, bool manual)
 {
+    // Already installed: the bar goes on saying to start GitBolt again.
+    if (installedMeanwhile_ && release.version <= *installedMeanwhile_)
+        return;
     // Skip This Version and the bar's × silence the automatic check
     // only.
     if (!manual) {
@@ -558,6 +632,11 @@ void UpdateController::install()
     const QString assetName = update::assetNameFor(package.kind, release.version);
     retryChecks_ = false;
     installStage_ = "download";
+    // Nothing is downloaded that couldn't go in.
+    if (const QString why = othersInTheWay(); !why.isEmpty()) {
+        blockInstall("download", why);
+        return;
+    }
     openDialog()->showDownloading(0, release.asset(assetName)->size);
     downloader_->start(release, assetName);
 }
@@ -586,6 +665,8 @@ void UpdateController::onDownloaded(const QString& path)
 
 void UpdateController::onPrepared()
 {
+    if (launching_)
+        return;   // re-entered while Windows' prompt waits
     // The helper waits for this pid to exit before it touches anything:
     // the instance lock goes with this process, so the new copy can't
     // be folded into this one (SingleInstance.h). A false says why
@@ -593,18 +674,30 @@ void UpdateController::onPrepared()
     // UAC's prompt is owned by the window in front: a modal over the
     // dialog, else the dialog (a disabled owner may leave it on the taskbar).
     const qint64 pid = hooks_.pid ? hooks_.pid() : QCoreApplication::applicationPid();
-    declined_ = false;
+    retryLaunch_ = false;
     installStage_ = "launch";
+    // Opened since the download began: the update stays prepared, as
+    // after Windows' No.
+    if (const QString why = othersInTheWay(); !why.isEmpty()) {
+        retryLaunch_ = true;
+        blockInstall("launch", why);
+        return;
+    }
+    installer_->setReopenPath(reopenPath());
     QWidget* owner = dialog_.data();
     if (QWidget* modal = QApplication::activeModalWidget(); modal && modal->isVisible())
         owner = modal;
-#ifdef Q_OS_WIN
-    if (dialog_)
-        dialog_->showPreparing(tr("Windows is asking for permission. If no prompt comes up, click the flashing "
-                                  "shield button on the taskbar."));
-#endif
+    if (dialog_ && setup_.package.kind == update::PackageKind::WindowsInstall)
+        dialog_->showAskingPermission();
+    // Windows' prompt runs the event loop until it is answered: a Cancel,
+    // close or quit meanwhile waits for the answer (stopInstall), and a
+    // Yes wins over it, as the installer then already runs.
+    launching_ = true;
     const bool started = launchHook_ ? launchHook_(*installer_, pid, owner)
                                      : installer_->launchHelper(pid, owner ? quintptr(owner->winId()) : 0);
+    launching_ = false;
+    if (std::exchange(stopAfterLaunch_, false) && !started)
+        stopInstall();
     if (!started)
         return;
     launched_ = true;
@@ -621,7 +714,7 @@ void UpdateController::onDeclined(const QString& howToInstall)
 {
     // Nothing was started: GitBolt doesn't quit, and the checked
     // download stays for Try Again (closing the dialog deletes it).
-    declined_ = true;
+    retryLaunch_ = true;
     reportResult("declined", "launch", update::Failure::PermissionDeclined, setup_.config.current.toString(),
                  shownRelease_ ? shownRelease_->version.toString() : QString());
     if (dialog_)
@@ -726,10 +819,46 @@ void UpdateController::failInstall(const QString& message)
         qWarning("Update: %s", qPrintable(message));
 }
 
+QString UpdateController::othersInTheWay() const
+{
+    if (setup_.package.kind != update::PackageKind::WindowsInstall)
+        return {};
+    const update::FolderUsers users =
+        update::gitBoltsUsing(hooks_.programs ? hooks_.programs() : update::runningGitBolts(), setup_.package.target,
+                              QCoreApplication::applicationPid());
+    if (users.running > 0)
+        return tr("Another GitBolt window is open, and the installer can't replace GitBolt's files while it runs. "
+                  "Close the other GitBolt windows, then click Try Again.");
+    if (users.unknown > 0)
+        return tr("GitBolt is open in another user's session on this computer, and the installer can't replace "
+                  "its files while it runs. Ask them to close it, or sign them out, then click Try Again.");
+    return {};
+}
+
+void UpdateController::blockInstall(const char* stage, const QString& why)
+{
+    reportResult("failed", stage, update::Failure::InUse, setup_.config.current.toString(),
+                 shownRelease_ ? shownRelease_->version.toString() : QString());
+    openDialog()->showInstallFailed(why);
+}
+
+QString UpdateController::reopenPath() const
+{
+    const QString path = reopenPath_ ? reopenPath_() : QString();
+    return !path.isEmpty() && QDir::isAbsolutePath(path) && QFileInfo(path).isDir() ? QDir::cleanPath(path)
+                                                                                     : QString();
+}
+
 void UpdateController::stopInstall()
 {
     if (launched_)
         return;
+    // Not while Windows' prompt waits: the launch is still on the stack,
+    // and a Yes runs the download. onPrepared stops it after a No.
+    if (launching_) {
+        stopAfterLaunch_ = true;
+        return;
+    }
     downloader_->cancel();
     if (installer_) {
         installer_->cancel();
@@ -765,9 +894,11 @@ void UpdateController::writeInstallMarker()
     if (!shownRelease_)
         return;
     const QString path = QDir(setup_.config.downloadDir).filePath(QLatin1String(kInstallMarkerFile));
-    const QByteArray line = QStringLiteral("%1 %2 %3\n")
+    // The helper's pid tells a later launch that the update is going in.
+    const QByteArray line = QStringLiteral("%1 %2 %3 %4\n")
                                 .arg(setup_.config.current.toString(), shownRelease_->version.toString())
                                 .arg(QDateTime::currentSecsSinceEpoch())
+                                .arg(installer_ ? installer_->helperPid() : 0)
                                 .toUtf8();
     // Without it the outcome still comes, from the result alone.
     QSaveFile file(path);
@@ -807,9 +938,9 @@ dialogs::UpdateDialog* UpdateController::openDialog()
                 showRelease(*shownRelease_);
         });
         connect(dialog_, &dialogs::UpdateDialog::retryClicked, this, [this] {
-            // After Windows' No: ask it again, for the update that is
-            // still prepared.
-            if (declined_ && installer_) {
+            // After Windows' No, or another GitBolt in the way: launch
+            // the update that is still prepared again.
+            if (retryLaunch_ && installer_) {
                 onPrepared();
                 return;
             }

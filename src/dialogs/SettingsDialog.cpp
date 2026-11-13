@@ -37,6 +37,7 @@
 #include <QTableWidget>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
+#include <QTreeWidgetItemIterator>
 #include <QVBoxLayout>
 
 namespace gitbolt::dialogs {
@@ -233,6 +234,19 @@ QTreeWidgetItem* SettingsDialog::addSubsection(QTreeWidgetItem* parent,
     // up in O(1) — no need for a separate map.
     item->setData(0, Qt::UserRole, index);
     return item;
+}
+
+bool SettingsDialog::showPage(const QString& page)
+{
+    for (QTreeWidgetItemIterator it(nav_); *it; ++it) {
+        const QVariant index = (*it)->data(0, Qt::UserRole);
+        QWidget* widget = index.isValid() ? pages_->widget(index.toInt()) : nullptr;
+        if (widget && widget->objectName() == page && !(*it)->isHidden()) {
+            nav_->setCurrentItem(*it);
+            return true;
+        }
+    }
+    return false;
 }
 
 void SettingsDialog::onTreeSelectionChanged()
@@ -753,6 +767,7 @@ QWidget* SettingsDialog::createUiDesignPage()
 QWidget* SettingsDialog::createGitConfigPage()
 {
     auto* page = new QWidget(this);
+    page->setObjectName(QLatin1String(kGitConfigPage));
     auto* form = new QFormLayout(page);
 
     // [320, 360] px comfortably fits typical names, emails, and
