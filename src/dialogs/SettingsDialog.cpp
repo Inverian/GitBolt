@@ -7,6 +7,7 @@
 #include "conf/ThemeService.h"
 #include "git/GitProcess.h"
 #include "git/GitVersion.h"
+#include "widgets/WindowPlacement.h"
 
 #include <QAction>
 #include <QApplication>
@@ -1405,9 +1406,13 @@ void SettingsDialog::apply()
         // constructed standalone).
         if (QWidget* p = parentWidget()) {
             QWidget* top = p->window();
-            if (top)
+            if (top) {
                 top->resize(startupWidthSpin_->value(),
                             startupHeightSpin_->value());
+                // A size above the screen's (the spin boxes start at
+                // 1024 x 700) mustn't push the window past its edge.
+                widgets::fitOnScreen(top);
+            }
         }
     }
 

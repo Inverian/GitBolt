@@ -49,6 +49,7 @@
 #include "widgets/RevisionGraphWidget.h"
 #include "widgets/SubmoduleWidget.h"
 #include "widgets/TerminalWidget.h"
+#include "widgets/WindowPlacement.h"
 #include "widgets/WorktreeWidget.h"
 #include "models/CommitLogModel.h"
 
@@ -83,6 +84,7 @@
 #include <QMessageBox>
 #include <QFile>
 #include <QProcess>
+#include <QShowEvent>
 #include <QStackedWidget>
 #include <QTextBrowser>
 #include <QStatusBar>
@@ -342,6 +344,18 @@ void MainWindow::closeEvent(QCloseEvent* e)
 {
     persistLayout();
     QMainWindow::closeEvent(e);
+}
+
+// Before the system shows the window (QWidget sends ShowEvent first), so
+// it never appears past the screen's edge: neither resize() to the
+// startup size nor restoreGeometry() keeps it on a small screen.
+void MainWindow::showEvent(QShowEvent* e)
+{
+    QMainWindow::showEvent(e);
+    if (!fittedOnScreen_ && !e->spontaneous()) {
+        fittedOnScreen_ = true;
+        widgets::fitOnScreen(this);
+    }
 }
 
 // Idempotent: safe to call from both closeEvent and aboutToQuit.

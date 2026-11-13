@@ -121,6 +121,12 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Ubuntu: Nautilus's Open in GitBolt** needs python3-nautilus, which
   the .deb now recommends, so apt installs it. Restart Nautilus
   (`nautilus -q`) after the first install.
+- **Small screens**: on a screen such as 1024×768, the window opens
+  fully on screen, and the welcome screen's cards no longer get cut
+  off: they narrow to fit, and the welcome screen scrolls when the
+  window is smaller than it. With "Restore previous window size on
+  launch" off, GitBolt now opens at the default size set in Settings,
+  not the last session's.
 
 ## [0.9.12] — 2026-11-09
 

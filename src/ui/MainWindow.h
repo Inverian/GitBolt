@@ -104,6 +104,9 @@ public:
 
 protected:
     void closeEvent(QCloseEvent* e) override;
+    /// The first show puts the window fully on its screen
+    /// (widgets::fitOnScreen).
+    void showEvent(QShowEvent* e) override;
     /// Right-click menus' entries, counted as each menu opens (set up by
     /// instrumentActionsForTelemetry).
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -393,6 +396,7 @@ private:
         }
     } pendingOpen_;
 
+    bool fittedOnScreen_ = false;
     QStackedWidget* centralStack_  = nullptr;
     DashboardView*  dashboardView_ = nullptr;
     RepositoryView* repoView_      = nullptr;

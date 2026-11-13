@@ -1,0 +1,14 @@
+{
+    "screens": [
+        {
+            "name": "Small",
+            "x": 0,
+            "y": 0,
+            "width": 819,
+            "height": 566,
+            "logicalDpi": 96,
+            "logicalBaseDpi": 96,
+            "dpr": 1
+        }
+    ]
+}

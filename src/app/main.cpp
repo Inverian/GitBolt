@@ -655,14 +655,10 @@ int main(int argc, char* argv[]) {
     window.setTelemetry(telemetryService.get(), telemetryGate);
     window.setUpdates(updateSetup);
 
-    // Restore window geometry from previous session. (Dock/toolbar
-    // state via QMainWindow::saveState is no longer persisted — the
-    // window has no dock widgets and the toolbar is non-movable, so
-    // there's nothing left for saveState to encode.)
-    QByteArray geometry = settings.restoreWindowGeometry();
-    if (!geometry.isEmpty())
-        window.restoreGeometry(geometry);
-
+    // The window sizes itself: the last session's geometry or the
+    // startup size, as Settings says, fitted to the screen as it shows.
+    // (Restoring here as well brought back the last size even with
+    // "Restore previous window size on launch" off.)
     window.show();
 
     // Only once the window is up: nothing touches the network on the

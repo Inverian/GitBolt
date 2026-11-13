@@ -5,6 +5,7 @@
 
 class QLabel;
 class QPushButton;
+class QScrollArea;
 class QToolButton;
 class QTreeWidget;
 
@@ -34,18 +35,18 @@ protected:
     /// resizeEvent fires BEFORE the nested tree widget gets laid out,
     /// so its viewport() width is stale at that moment; watching the
     /// tree directly catches the moment it actually gets its real size.
+    /// And page_'s, for placeCornerBolt().
     bool eventFilter(QObject* watched, QEvent* event) override;
-    /// The decorative bolt logo isn't in the main layout — it's a
-    /// floating child anchored to the bottom-right corner of the
-    /// view. We reposition it on every resize so it stays in the
-    /// corner regardless of window size.
-    void resizeEvent(QResizeEvent* event) override;
     /// A theme switch: the cards' descriptions take the theme's colour
     /// (applyCardColors()).
     void changeEvent(QEvent* event) override;
 
 private:
     void setupUi();
+    /// The decorative bolt logo isn't in the page's layout — it's a
+    /// floating child kept in the page's bottom-right corner, at every
+    /// size of the page.
+    void placeCornerBolt();
     /// Apply the percentage split to the tree's columns. Pulled out of
     /// eventFilter() so it can also be invoked after refresh when the
     /// item set changes (scrollbar visibility may shift the viewport).
@@ -66,6 +67,9 @@ private:
 
     conf::SettingsService* settings_ = nullptr;
 
+    /// Everything on the dashboard is on page_, in scrollArea_.
+    QScrollArea* scrollArea_ = nullptr;
+    QWidget* page_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QPushButton* openBtn_ = nullptr;
     QPushButton* cloneBtn_ = nullptr;
@@ -85,9 +89,9 @@ private:
     QPushButton* clearRecentBtn_ = nullptr;
     QLabel* noRecentLabel_ = nullptr;
 
-    // Floating decorative bolt — parented to DashboardView (not to
-    // any layout) so it sits "on top of" the dashboard at an
-    // absolute position that resizeEvent keeps pinned to the
+    // Floating decorative bolt — parented to page_ (not to any
+    // layout) so it sits "on top of" the dashboard at an absolute
+    // position that placeCornerBolt() keeps pinned to the
     // bottom-right corner regardless of window size.
     QWidget* cornerBolt_ = nullptr;
 };
