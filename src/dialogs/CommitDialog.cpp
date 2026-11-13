@@ -71,6 +71,11 @@ QString missingIdentityNote()
 }
 } // namespace
 
+QString CommitDialog::failureText(const QString& gitMessage)
+{
+    return missingIdentity(gitMessage) ? missingIdentityNote() : tr("Commit failed: %1").arg(gitMessage);
+}
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -1027,7 +1032,7 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
     } else {
         pushAfterCommit_ = false;
         const bool noIdentity = missingIdentity(message);
-        errorLabel_->setText(noIdentity ? missingIdentityNote() : tr("Commit failed: %1").arg(message));
+        errorLabel_->setText(failureText(message));
         errorLabel_->show();
         // git knows best: libgit2 still reads a ~/.gitconfig deleted
         // while GitBolt ran, and the footer said who would commit.

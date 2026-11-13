@@ -25,13 +25,14 @@ RecentRepoInfo probeRecentRepo(const QString& path)
     //
     // headBranchName() returns the short name (e.g. "main"). If HEAD is
     // detached, it'll fail / be empty — we mark detachedHead in that case
-    // so the UI can show "(detached)" instead of a blank cell.
+    // so the UI can show "(detached)" instead of a blank cell. A new
+    // repository's branch has no commit yet, but has a name.
     if (repo.isHeadDetached()) {
         out.detachedHead = true;
+    } else if (auto nameRes = repo.headBranchName(); nameRes.ok()) {
+        out.branch = QString::fromStdString(nameRes.value());
     } else {
-        auto nameRes = repo.headBranchName();
-        if (nameRes.ok())
-            out.branch = QString::fromStdString(nameRes.value());
+        out.branch = QString::fromStdString(repo.unbornBranchName());
     }
 
     // --- Dirty file count --------------------------------------------

@@ -67,6 +67,10 @@ public:
     /// MainWindow follows its busy state with this.
     void setLocalOpBusy(bool busy);
 
+    /// What a failed commit says, here and in the status bar: a missing
+    /// name and email point to Settings, not to git's own advice.
+    static QString failureText(const QString& gitMessage);
+
 signals:
     /// Emitted after a "Commit & Push" commit lands successfully.
     /// MainWindow triggers its toolbar Push action in response, so

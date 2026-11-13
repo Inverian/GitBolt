@@ -561,6 +561,9 @@ private slots:
                  qPrintable(error->text()));
         QVERIFY2(error->text().endsWith(QStringLiteral("Settings › Git Config, then commit again.")),
                  qPrintable(error->text()));
+        // The status bar says the same (MainWindow shows failureText).
+        QCOMPARE(CommitDialog::failureText(QStringLiteral("Run\n  git config --global user.email ...")),
+                 error->text());
 
         // Opened again, the note is stale: gone, though the footer still asks.
         dialog.close();

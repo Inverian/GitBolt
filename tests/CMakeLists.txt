@@ -253,6 +253,9 @@ target_compile_definitions(test_git_service PRIVATE
 # 40 s here, but up to 146 s on windows-latest, too close to 180 s.
 set_tests_properties(test_git_service PROPERTIES TIMEOUT 420)
 
+gitbolt_add_test(test_recent_repo_probe services/TestRecentRepoProbe.cpp)
+target_link_libraries(test_recent_repo_probe PRIVATE gitbolt_services)
+
 # widgets/ tests. The terminal runs its shell under ConPTY on Windows
 # and under a PTY elsewhere. Each backend's end-to-end tests are a QSKIP
 # on the other platforms (so all of TestConPtyProcess is, off Windows),

@@ -5064,7 +5064,7 @@ void MainWindow::setupConnections()
                 if (success) {
                     statusBar()->showMessage(message, 3000);
                 } else {
-                    statusBar()->showMessage(tr("Commit failed: ") + message, 5000);
+                    statusBar()->showMessage(dialogs::CommitDialog::failureText(message), 5000);
                     // The kind only; the message never leaves.
                     if (telemetry_)
                         telemetry_->recordError(telemetry::ErrorKind::CommitFailed);

@@ -136,9 +136,9 @@ need a newer version of macOS, Windows or Ubuntu.
   the registry, so a program at `C:\Program.exe` can't run in its
   place.
 - **Committing without a name and email** for git failed with git's
-  advice to run `git config`. The Commit dialog now says to set them in
-  Tools › Settings › Git Config (GitBolt › Settings on macOS), and its
-  footer says so before you commit. Opened again, the dialog no longer
+  advice to run `git config`. The Commit dialog and the status bar now
+  say to set them in Tools › Settings › Git Config (GitBolt › Settings
+  on macOS), and the dialog's footer says so before you commit. Opened again, the dialog no longer
   shows the last commit's error.
 - **The Commit dialog in a new repository** said "(no branch)" until
   the first commit; it names the branch now.
@@ -146,7 +146,8 @@ need a newer version of macOS, Windows or Ubuntu.
   after the first commit the toolbar's branch list and the sidebar
   stayed empty until Refresh. It now says "Branch: main (no commits
   yet)", and the branch appears with the first commit, made in GitBolt
-  or not. A detached HEAD said "Branch: HEAD", with another branch
+  or not. The welcome screen's Recent Repositories names that branch
+  too. A detached HEAD said "Branch: HEAD", with another branch
   picked in the toolbar; it now says "HEAD (detached)". A checkout made
   outside GitBolt shows without Refresh.
 - **Tools › Settings › Git Config** showed no Credential Helper when
