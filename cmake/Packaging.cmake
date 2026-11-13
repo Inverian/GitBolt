@@ -95,18 +95,37 @@ elseif(WIN32)
     set(CPACK_NSIS_DELETE_ICONS_EXTRA
         "Delete '$SMPROGRAMS\\\\$START_MENU\\\\GitBolt.lnk'")
 
-    # Explorer context menu integration via registry
+    # Explorer context menu integration via registry. The program is
+    # quoted: unquoted, Windows tries C:\Program.exe first (CWE-428).
     set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
         WriteRegStr HKCR 'Directory\\\\shell\\\\gitbolt' '' 'Open in GitBolt'
         WriteRegStr HKCR 'Directory\\\\shell\\\\gitbolt' 'Icon' '$INSTDIR\\\\bin\\\\GitBolt.exe'
-        WriteRegStr HKCR 'Directory\\\\shell\\\\gitbolt\\\\command' '' '$INSTDIR\\\\bin\\\\GitBolt.exe \\\"%V\\\"'
+        WriteRegStr HKCR 'Directory\\\\shell\\\\gitbolt\\\\command' '' '\\\"$INSTDIR\\\\bin\\\\GitBolt.exe\\\" \\\"%V\\\"'
         WriteRegStr HKCR 'Directory\\\\Background\\\\shell\\\\gitbolt' '' 'Open in GitBolt'
         WriteRegStr HKCR 'Directory\\\\Background\\\\shell\\\\gitbolt' 'Icon' '$INSTDIR\\\\bin\\\\GitBolt.exe'
-        WriteRegStr HKCR 'Directory\\\\Background\\\\shell\\\\gitbolt\\\\command' '' '$INSTDIR\\\\bin\\\\GitBolt.exe \\\"%V\\\"'
+        WriteRegStr HKCR 'Directory\\\\Background\\\\shell\\\\gitbolt\\\\command' '' '\\\"$INSTDIR\\\\bin\\\\GitBolt.exe\\\" \\\"%V\\\"'
     ")
+    # First, before anything is deleted: a running GitBolt.exe can't be
+    # opened for writing, and its files would be left behind while the
+    # uninstaller reports success. Not when silent: the update's
+    # installer runs it so, once its administrator part saw GitBolt quit.
+    # Software\GitBolt\GitBolt goes early so its empty parent can go too.
     set(CPACK_NSIS_EXTRA_UNINSTALL_COMMANDS "
+        IfSilent gitbolt_not_running
+        IfFileExists '$INSTDIR\\\\bin\\\\GitBolt.exe' 0 gitbolt_not_running
+      gitbolt_check_running:
+        ClearErrors
+        FileOpen $0 '$INSTDIR\\\\bin\\\\GitBolt.exe' a
+        IfErrors 0 gitbolt_closed
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION 'GitBolt is running. Quit GitBolt, then click Retry.' IDRETRY gitbolt_check_running
+        Abort
+      gitbolt_closed:
+        FileClose $0
+      gitbolt_not_running:
         DeleteRegKey HKCR 'Directory\\\\shell\\\\gitbolt'
         DeleteRegKey HKCR 'Directory\\\\Background\\\\shell\\\\gitbolt'
+        DeleteRegKey SHCTX 'Software\\\\GitBolt\\\\GitBolt'
+        DeleteRegKey /ifempty SHCTX 'Software\\\\GitBolt'
     ")
 
 # ============================================================================

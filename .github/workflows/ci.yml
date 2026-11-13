@@ -1071,6 +1071,14 @@ jobs:
                          'plugins\tls\qschannelbackend.dll', 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt') {
             if (-not (Test-Path (Join-Path $dest $f))) { $bad += "missing $f" }
           }
+          # 1a) Explorer's Open in GitBolt runs the quoted program
+          #     (cmake/Packaging.cmake): unquoted, C:\Program.exe would go first.
+          $verb = '"{0}" "%V"' -f (Join-Path $bin 'GitBolt.exe')
+          foreach ($key in 'Directory\shell\gitbolt\command', 'Directory\Background\shell\gitbolt\command') {
+            $item = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$key" -ErrorAction SilentlyContinue
+            $said = if ($item) { [string]$item.GetValue('') } else { '<missing>' }
+            if ($said -ne $verb) { $bad += "HKCR\$key is '$said', expected '$verb'" }
+          }
 
           # 2) Import closure (dumpbin from the MSVC env). The VC++ runtime
           #    only counts if it is in bin\: the runner has it in System32, a

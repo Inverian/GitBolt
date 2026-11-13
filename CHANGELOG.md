@@ -128,6 +128,13 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Restore previous window size on launch** turned off now opens
   GitBolt at the default size set in Settings; it used to bring back
   the last session's size anyway.
+- **Windows: uninstalling while GitBolt ran** left GitBolt.exe and its
+  libraries in Program Files, though the uninstaller said it had
+  finished. It now asks you to quit GitBolt first, and no longer leaves
+  an empty GitBolt key in the registry.
+- **Windows: Explorer's Open in GitBolt** now quotes GitBolt's path in
+  the registry, so a program at `C:\Program.exe` can't run in its
+  place.
 
 ## [0.9.12] — 2026-11-09
 
