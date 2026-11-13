@@ -535,12 +535,12 @@ private slots:
             {GitErrorCode::Uncommitted, "uncommitted"}, {GitErrorCode::Directory, "directory"},
             {GitErrorCode::MergeConflict, "merge_conflict"},
             {GitErrorCode::ProcessFailed, "process_failed"},
-            {GitErrorCode::CheckoutFailed, "checkout_failed"},
+            {GitErrorCode::CheckoutFailed, "checkout_failed"}, {GitErrorCode::Owner, "owner"},
         };
         for (const auto& [code, name] : table)
             QCOMPARE(openErrorName(int(code)), QString::fromLatin1(name));
         QCOMPARE(openErrorName(int(GitErrorCode::Ok)), QStringLiteral("other"));
-        QCOMPARE(openErrorName(int(GitErrorCode::CheckoutFailed) + 1), QStringLiteral("other"));
+        QCOMPARE(openErrorName(int(GitErrorCode::Owner) + 1), QStringLiteral("other"));
         QCOMPARE(openErrorName(-1), QStringLiteral("other"));
     }
 

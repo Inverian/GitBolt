@@ -1,6 +1,7 @@
 #include "dialogs/WorktreeDialog.h"
 #include "conf/SettingsService.h"
 
+#include <QDir>
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -33,7 +34,8 @@ QString WorktreeDialog::worktreeName() const {
 }
 
 QString WorktreeDialog::worktreePath() const {
-    return pathEdit_->text().trimmed();
+    // Shown with the system's separators; Qt and git take '/' everywhere.
+    return QDir::fromNativeSeparators(pathEdit_->text().trimmed());
 }
 
 QString WorktreeDialog::branch() const {
@@ -52,7 +54,7 @@ void WorktreeDialog::onBrowseClicked() {
     const QString dir = QFileDialog::getExistingDirectory(
         this, tr("Select Worktree Directory"));
     if (!dir.isEmpty())
-        pathEdit_->setText(dir);
+        pathEdit_->setText(QDir::toNativeSeparators(dir));
 }
 
 void WorktreeDialog::onCreateNewBranchToggled(bool checked) {
@@ -97,7 +99,7 @@ void WorktreeDialog::setupUI() {
     // Path with browse button
     auto* pathLayout = new QHBoxLayout;
     pathEdit_ = new QLineEdit(this);
-    pathEdit_->setPlaceholderText(tr("/path/to/worktree"));
+    pathEdit_->setPlaceholderText(QDir::toNativeSeparators(tr("/path/to/worktree")));
     pathLayout->addWidget(pathEdit_);
 
     browseBtn_ = new QPushButton(tr("Browse..."), this);

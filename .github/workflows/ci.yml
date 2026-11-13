@@ -1217,15 +1217,15 @@ jobs:
           #    ShellExecuteExW's runas): over the install's own folder,
           #    with /S /D=<dir> as one ArgumentList string, /D= last and
           #    unquoted, elevated through ShellExecute's runas (no prompt
-          #    with the runner's UAC off). The installer's .onInit runs
-          #    the installed copy's uninstaller first
-          #    (CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL). LICENSE.txt,
-          #    which the installer writes, goes first: back afterwards, it
-          #    shows the update went to $dest, not to Program Files.
-          #    After it: one Uninstall key (whichever registry view; the
-          #    32-bit NSIS stub has no SetRegView 64, so its HKLM writes
-          #    should be WOW6432Node's) naming this version and $dest's
-          #    uninstaller, the version resource, --version.
+          #    with the runner's UAC off). The installer runs the installed
+          #    copy's uninstaller first (cmake/NsisScript.cmake).
+          #    LICENSE.txt, which the installer writes, goes first: back
+          #    afterwards, it shows the update went to $dest, not to
+          #    Program Files. After it: one Uninstall key (whichever
+          #    registry view; the 32-bit NSIS stub has no SetRegView 64, so
+          #    its HKLM writes should be WOW6432Node's) naming this version,
+          #    $dest's uninstaller, $dest and its size, the version
+          #    resource, --version.
           function Get-UninstallKeys {
             $views = @(
               [pscustomobject]@{ Hive = 'LocalMachine'; View = 'Registry64'; Name = 'HKLM, 64-bit view' },
@@ -1247,6 +1247,9 @@ jobs:
                       DisplayName     = $display
                       DisplayVersion  = [string]$key.GetValue('DisplayVersion')
                       UninstallString = [string]$key.GetValue('UninstallString')
+                      InstallLocation = [string]$key.GetValue('InstallLocation')
+                      EstimatedSize   = $key.GetValue('EstimatedSize')
+                      SizeKind        = if ($key.GetValueNames() -contains 'EstimatedSize') { [string]$key.GetValueKind('EstimatedSize') } else { '' }
                       Values          = (@($key.GetValueNames() | ForEach-Object { if ($_) { $_ } else { '(default)' } }) -join ', ')
                     }
                   }
@@ -1290,6 +1293,13 @@ jobs:
               if ($keys[0].UninstallString.Trim('"') -ne $uninstaller) {
                 $bad += "the Uninstall key runs $($keys[0].UninstallString), not $uninstaller"
               }
+              # What Installed apps shows (cmake/NsisScript.cmake): the
+              # folder, and its size in KB as the installer summed it.
+              if ($keys[0].InstallLocation -ne $dest) { $bad += "the Uninstall key's InstallLocation is '$($keys[0].InstallLocation)', not $dest" }
+              $kb = [math]::Floor((Get-ChildItem -LiteralPath $dest -Recurse -File | Measure-Object -Property Length -Sum).Sum / 1KB)
+              if ($keys[0].SizeKind -ne 'DWord' -or [math]::Abs([long]$keys[0].EstimatedSize - $kb) -gt [math]::Max(1024, $kb / 100)) {
+                $bad += "the Uninstall key's EstimatedSize is '$($keys[0].EstimatedSize)' ($($keys[0].SizeKind)), but $dest holds $kb KB"
+              }
             }
             $said = (Get-Item (Join-Path $bin 'GitBolt.exe')).VersionInfo.ProductVersion
             if ($said -ne $version) { $bad += "GitBolt.exe says it is version '$said'" }
@@ -1302,6 +1312,42 @@ jobs:
           Assert-Updated 'updated in place'
           $listedKeys = @(Get-UninstallKeys | Where-Object { $_.DisplayName -and $_.UninstallString })
           Write-Host "::notice::GitBolt's Uninstall key, after an update in place: $($listedKeys[0].Location)"
+
+          # 5a) The installer over an install whose uninstaller fails, or is
+          #     gone (as one of a VM's self-updates left it): it runs the
+          #     registered uninstaller only if it is there, installs over
+          #     the old files if that fails, and writes a new one
+          #     (cmake/NsisScript.cmake). CPack's own showed "Uninstall
+          #     failed.", which /S can't answer. And a file in use fails the
+          #     install with exit code 2 instead of being skipped
+          #     (AllowSkipFiles off), leaving GitBolt registered with its
+          #     uninstaller, so the next install puts it right. Each with a
+          #     timeout, so a message box fails the step, not hangs it.
+          function Install-Over([string]$when, [int]$expect = 0) {
+            $p = Start-Process -FilePath $setup[0].FullName -ArgumentList "/S /D=$dest" -Verb RunAs -PassThru
+            $null = $p.Handle   # so ExitCode can still be read after the wait
+            if (-not $p.WaitForExit(300000)) { $p.Kill($true); throw "${when}: the installer still ran after 5 minutes (a message box?)" }
+            if ($p.ExitCode -ne $expect) { throw "${when}: the installer exited with '$($p.ExitCode)', expected $expect" }
+          }
+          Set-Content -LiteralPath (Join-Path $dest 'Uninstall.exe') -Value 'not a program'
+          Install-Over 'over an uninstaller that fails'
+          Assert-Updated 'installed over an uninstaller that fails'
+          Remove-Item -LiteralPath (Join-Path $dest 'Uninstall.exe')
+          Install-Over 'over a lost uninstaller'
+          Assert-Updated 'installed over a lost uninstaller'
+          $lock = [System.IO.File]::Open($exe, 'Open', 'Read', 'None')
+          try {
+            Install-Over 'with bin\GitBolt.exe in use' 2
+          } finally {
+            $lock.Dispose()
+          }
+          $registered = @(Get-UninstallKeys | Where-Object { $_.DisplayName -and $_.UninstallString })
+          if (-not (Test-Path -LiteralPath (Join-Path $dest 'Uninstall.exe')) -or $registered.Count -ne 1 -or
+              $registered[0].UninstallString.Trim('"') -ne (Join-Path $dest 'Uninstall.exe')) {
+            throw "after the install that failed, GitBolt isn't registered with its uninstaller: $($registered | Format-List | Out-String)"
+          }
+          Install-Over 'after bin\GitBolt.exe was in use'
+          Assert-Updated 'installed again after bin\GitBolt.exe was in use'
 
           # 6) The updater's own Windows update, for real: test_update_helpers'
           #    windowsHelperUpdatesARealInstall (tests/update/

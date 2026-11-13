@@ -1,10 +1,12 @@
 #include "services/GitService.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QScopeGuard>
 
 #include <algorithm>
+#include <string_view>
 
 namespace gitbolt::services {
 
@@ -44,7 +46,7 @@ GitService::GitService(QObject* parent)
     readPool_.setMaxThreadCount(1);
     connect(&watcher_, &watcher::FileWatcher::repositoryChanged, this, [this]() {
         refreshStatus();
-        refreshBranchesIfHeadMoved();
+        refreshRefsIfChanged();
         emit repositoryChanged();
     });
 }
@@ -470,29 +472,98 @@ std::string headTarget(const git::Repository& r) {
     auto branch = r.headBranchName();
     return branch ? *branch : std::string();
 }
+
+// Whether refs changed, cheaply: for the branches (refs/heads and
+// refs/remotes) and the tags, a sum of hashes, one per loose ref file
+// (path and content) and one per packed-refs line, so read order doesn't
+// matter. No object is looked up as listing them does: thousands of tags,
+// packed as a clone's are, cost one read of packed-refs.
+struct RefsSignature {
+    std::size_t branches = 0;
+    std::size_t tags = 0;
+};
+
+RefsSignature refsSignature(const std::string& commonDir) {
+    RefsSignature sig;
+    const std::hash<std::string_view> hash;
+    const QString base = QString::fromStdString(commonDir);   // ends in '/'
+    for (const QString& dir : {QStringLiteral("refs/heads"), QStringLiteral("refs/remotes"),
+                               QStringLiteral("refs/tags")}) {
+        std::size_t& sum = dir.endsWith(QLatin1String("tags")) ? sig.tags : sig.branches;
+        QDirIterator it(base + dir, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            QFile file(path);
+            if (path.endsWith(QLatin1String(".lock")) || !file.open(QIODevice::ReadOnly))
+                continue;
+            const QByteArray entry = path.toUtf8() + '\0' + file.read(4096);
+            sum += hash(std::string_view(entry.constData(), static_cast<size_t>(entry.size())));
+        }
+    }
+    QFile packed(base + QStringLiteral("packed-refs"));
+    if (!packed.open(QIODevice::ReadOnly))
+        return sig;
+    const QByteArray all = packed.readAll();
+    std::size_t* sum = nullptr;   // a "^<id>" line peels the ref above it
+    for (qsizetype start = 0; start < all.size();) {
+        qsizetype end = all.indexOf('\n', start);
+        if (end < 0)
+            end = all.size();
+        const std::string_view line(all.constData() + start, static_cast<size_t>(end - start));
+        start = end + 1;
+        if (line.empty() || line.front() == '#')
+            continue;
+        if (line.front() != '^') {
+            const size_t space = line.find(' ');
+            const std::string_view name =
+                space == std::string_view::npos ? std::string_view() : line.substr(space + 1);
+            sum = name.starts_with("refs/tags/") ? &sig.tags
+                : name.starts_with("refs/heads/") || name.starts_with("refs/remotes/") ? &sig.branches
+                : nullptr;
+        }
+        if (sum)
+            *sum += hash(line);
+    }
+    return sig;
+}
 } // namespace
 
-void GitService::refreshBranches() { listBranches(false); }
+void GitService::refreshBranches() { listRefs(true, false); }
 
-void GitService::refreshBranchesIfHeadMoved() { listBranches(true); }
+void GitService::refreshRefsIfChanged() { listRefs(false, false); }
 
-void GitService::listBranches(bool onlyIfHeadMoved) {
-    if (deferToOwnerThread([this, onlyIfHeadMoved] { listBranches(onlyIfHeadMoved); })) return;
+void GitService::listRefs(bool branches, bool tags) {
+    if (deferToOwnerThread([this, branches, tags] { listRefs(branches, tags); })) return;
     if (!repo_) return;
     std::shared_ptr<git::Repository> r = repo_;
-    runner_.run([this, r, onlyIfHeadMoved]() {
+    runner_.run([this, r, branches, tags]() {
         std::lock_guard<std::mutex> lock(repoMutex_);
         if (r != repo_) return;   // superseded by a repo switch
-        std::string target = headTarget(*r);
-        if (onlyIfHeadMoved && headSeenIn_.lock() == r && target == headSeen_)
-            return;
-        headSeen_ = std::move(target);
-        headSeenIn_ = r;
-        auto result = r->allBranches();
-        if (result)
-            deliverFor(r, [this, branches = std::move(*result)]() mutable {
-                emit branchesReady(std::move(branches));
-            });
+        // Read before the lists: a ref that changes in between is in
+        // them, and differs again at the next check, which lists anew.
+        const RefsSignature sig = refsSignature(r->commonDir());
+        std::string head = headTarget(*r);
+        const bool ifChanged = !branches && !tags;
+        if (branches || (ifChanged && (branchesSeenIn_.lock() != r || head != headSeen_
+                                       || sig.branches != branchRefsSeen_))) {
+            if (auto result = r->allBranches()) {
+                headSeen_ = std::move(head);
+                branchRefsSeen_ = sig.branches;
+                branchesSeenIn_ = r;
+                deliverFor(r, [this, list = std::move(*result)]() mutable {
+                    emit branchesReady(std::move(list));
+                });
+            }
+        }
+        if (tags || (ifChanged && (tagsSeenIn_.lock() != r || sig.tags != tagRefsSeen_))) {
+            if (auto result = r->tags()) {
+                tagRefsSeen_ = sig.tags;
+                tagsSeenIn_ = r;
+                deliverFor(r, [this, list = std::move(*result)]() mutable {
+                    emit tagsReady(std::move(list));
+                });
+            }
+        }
     });
 }
 
@@ -1776,20 +1847,7 @@ void GitService::refreshStashes() {
 // Tags
 // ---------------------------------------------------------------------------
 
-void GitService::refreshTags() {
-    if (deferToOwnerThread([this] { refreshTags(); })) return;
-    if (!repo_) return;
-    std::shared_ptr<git::Repository> r = repo_;
-    runner_.run([this, r]() {
-        std::lock_guard<std::mutex> lock(repoMutex_);
-        if (r != repo_) return;   // superseded by a repo switch
-        auto result = r->tags();
-        if (result)
-            deliverFor(r, [this, tags = std::move(*result)]() mutable {
-                emit tagsReady(std::move(tags));
-            });
-    });
-}
+void GitService::refreshTags() { listRefs(false, true); }
 
 bool GitService::createTag(const QString& name, const QString& target,
                             const QString& message, bool annotated,

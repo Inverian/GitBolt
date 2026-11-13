@@ -20,8 +20,11 @@
 //     UAC, which names Windows PowerShell; a deb's administrator
 //     password), and only there; Windows' No (Declined) says nothing
 //     was installed and how to install by hand, with Try Again;
-//   - once the helper runs nothing can be cancelled: Restarting has no
-//     button, and QuitNeeded offers Quit GitBolt and Close;
+//   - while Windows' prompt waits, Cancel is greyed out; once the helper
+//     runs nothing can be cancelled: Restarting has no button, and
+//     QuitNeeded offers Quit GitBolt and Close;
+//   - every size it takes is one its layout accepts (Windows enlarges
+//     any other itself), and its top edge stays where it is;
 //   - an earlier GitBolt's failed install shows its log where the notes
 //     go, as written, and links that version's release.
 //
@@ -34,6 +37,7 @@
 #include <QPlainTextEdit>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QSignalSpy>
 #include <QTest>
 #include <QUrl>
@@ -44,6 +48,8 @@
 #include "update/Version.h"
 
 #include <algorithm>
+#include <functional>
+#include <utility>
 
 using gitbolt::dialogs::UpdateDialog;
 using gitbolt::update::PackageKind;
@@ -108,6 +114,33 @@ QPushButton* defaultButton(const UpdateDialog& dialog) {
     }
     return nullptr;
 }
+
+// Every size a window takes while shown, those on the way included (a
+// layout's activate() may grow it to a new minimum): the ones its layout
+// refuses, which Windows would enlarge itself.
+class RefusedSizes : public QObject {
+public:
+    explicit RefusedSizes(QWidget* window) : window_(window) { window->installEventFilter(this); }
+    QStringList seen;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == window_ && event->type() == QEvent::Resize) {
+            const QSize size = static_cast<QResizeEvent*>(event)->size();
+            const QSize wanted = QLayout::closestAcceptableSize(window_, size);
+            if (wanted != size)
+                seen << QStringLiteral("%1x%2 (the layout wants %3x%4)")
+                            .arg(size.width())
+                            .arg(size.height())
+                            .arg(wanted.width())
+                            .arg(wanted.height());
+        }
+        return false;
+    }
+
+private:
+    QWidget* window_;
+};
 
 QString headline(const UpdateDialog& dialog) {
     return child<QLabel>(dialog, "updateDialog.headline")->text();
@@ -433,6 +466,33 @@ private slots:
         QCOMPARE(child<QProgressBar>(dialog, "updateDialog.progress")->maximum(), 0);
     }
 
+    // While Windows' prompt waits nothing can be stopped: Cancel shows,
+    // greyed out, and the text says where the prompt may be.
+    void askingPermissionGreysOutCancel() {
+        UpdateDialog dialog;
+        dialog.showAvailable(release(), v(0, 1, 0), {}, PackageKind::WindowsInstall);
+        dialog.showPreparing(QStringLiteral("Checking the download…"));
+        auto* cancel = child<QPushButton>(dialog, "updateDialog.cancel");
+        QVERIFY(cancel->isEnabled());
+        dialog.showAskingPermission();
+        QCOMPARE(dialog.state(), State::Preparing);
+        QCOMPARE(shownButtons(dialog), QStringList{QStringLiteral("updateDialog.cancel")});
+        QVERIFY(!cancel->isEnabled());
+        QCOMPARE(dialog.shownText(),
+                 QStringLiteral("Installing GitBolt 0.1.1…\n"
+                                "Windows is asking for permission. If no prompt comes up, click the flashing shield "
+                                "button on the taskbar.\n"
+                                "Waiting for Windows' permission prompt…"));
+        // Answered No, then asked again: Cancel works between the two.
+        dialog.showDeclined(QStringLiteral("Install it yourself."));
+        dialog.showPreparing(QStringLiteral("Checking the download…"));
+        QVERIFY(cancel->isEnabled());
+        dialog.showAskingPermission();
+        QVERIFY(!cancel->isEnabled());
+        dialog.showPreparing(QStringLiteral("Checking the download…"));
+        QVERIFY(cancel->isEnabled());
+    }
+
     void checkFailedOffersRetryAndTheReleasesPage() {
         UrlCatcher catcher;
         UpdateDialog dialog;
@@ -499,6 +559,55 @@ private slots:
         QTest::keyClick(&dialog, Qt::Key_Escape);
         QVERIFY(!dialog.isVisible());
         QCOMPARE(finished.count(), 3);
+    }
+
+    // Every size it gives itself is one its layout accepts: on Windows a
+    // smaller height is enlarged in WM_WINDOWPOSCHANGING (QLayout::
+    // closestAcceptableSize), which logged "Unable to set geometry" at
+    // each change and could move the top edge. The top edge stays put.
+    void everySizeIsOneTheLayoutAccepts() {
+        UpdateDialog dialog;
+        dialog.showChecking();
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const int top = dialog.geometry().top();
+        const QString longMessage = QStringLiteral(
+            "Windows couldn't start GitBolt's installer as an administrator: Access is denied. To install it, "
+            "an administrator can download GitBolt-0.1.1-Windows-AMD64.exe from the release page and run it.");
+        const QList<std::pair<const char*, std::function<void()>>> steps{
+            {"checking", [&] { dialog.showChecking(); }},
+            {"available", [&] { dialog.showAvailable(release(), v(0, 1, 0), {}, PackageKind::WindowsInstall); }},
+            {"downloading", [&] { dialog.showDownloading(1000, 2000); }},
+            {"preparing", [&] { dialog.showPreparing(QStringLiteral("Checking the download…")); }},
+            {"asking permission", [&] { dialog.showAskingPermission(); }},
+            {"declined", [&] { dialog.showDeclined(longMessage); }},
+            {"failed", [&] { dialog.showInstallFailed(longMessage); }},
+            {"up to date", [&] { dialog.showUpToDate(v(0, 1, 1), v(0, 1, 1)); }},
+            {"not installable", [&] { dialog.showAvailable(release(), v(0, 1, 0), longMessage); }},
+            {"check failed", [&] { dialog.showCheckFailed(longMessage); }},
+            {"restarting", [&] { dialog.showRestarting(); }},
+            {"quit needed", [&] { dialog.showQuitNeeded(); }},
+            {"earlier install", [&] {
+                 dialog.showEarlierInstallFailed(QStringLiteral("0.1.1"), longMessage, QStringLiteral("one\ntwo"));
+             }},
+            {"available again", [&] { dialog.showAvailable(release(), v(0, 1, 0)); }},
+        };
+        RefusedSizes refused(&dialog);
+        for (const auto& [name, step] : steps) {
+            step();
+            const QSize size = dialog.size();
+            const QSize wanted = QLayout::closestAcceptableSize(&dialog, size);
+            QVERIFY2(wanted == size, qPrintable(QStringLiteral("%1: %2x%3, the layout wants %4x%5")
+                                                    .arg(QLatin1String(name))
+                                                    .arg(size.width())
+                                                    .arg(size.height())
+                                                    .arg(wanted.width())
+                                                    .arg(wanted.height())));
+            QVERIFY2(refused.seen.isEmpty(),
+                     qPrintable(QStringLiteral("%1, on the way: %2")
+                                    .arg(QLatin1String(name), refused.seen.join(QStringLiteral(", ")))));
+            QCOMPARE(dialog.geometry().top(), top);
+        }
     }
 
     // The notes take the room: a state without them is shorter, and

@@ -41,9 +41,10 @@ struct PackageProbe {
     QString pkexec;
     /// Windows: the UninstallString values (as stored, quotes and all)
     /// of HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GitBolt
-    /// in the 32- and 64-bit registry views: where the installed GitBolt
-    /// is, which is the one the NSIS installer uninstalls before it
-    /// installs. Empty when there is none.
+    /// in the 32- and 64-bit registry views (the 32-bit installer writes
+    /// the 32-bit one, WOW6432Node; cmake/NsisScript.cmake names the key):
+    /// where the installed GitBolt is, which is the one the NSIS installer
+    /// uninstalls before it installs. Empty when there is none.
     QStringList registeredUninstallers;
     /// Whether a path may be written; null means QFileInfo::isWritable.
     std::function<bool(const QString&)> writable;
@@ -58,11 +59,12 @@ struct PackageProbe {
 ///     a disk image (/Volumes/) or from App Translocation's read-only
 ///     copy, and only if both the bundle and its folder are writable:
 ///     the swap renames the bundle within its folder.
-///   - WindowsInstall: appDirPath is …\bin and ..\Uninstall.exe exists
-///     (the NSIS installer's). Installable (UAC is asked to let it run,
-///     while GitBolt is still open) unless the registry names another
-///     install: a copied install folder isn't the registered one, and
-///     the installer would uninstall that one and move it here.
+///   - WindowsInstall: appDirPath is …\bin, and ..\Uninstall.exe (the
+///     NSIS installer's) exists or the registry names it, missing: the
+///     update's installer puts it back. Installable (UAC is asked to let
+///     it run, while GitBolt is still open) unless the registry names
+///     another install: a copied install folder isn't the registered one,
+///     and the installer would uninstall that one and move it here.
 ///   - Deb: appDirPath ends in /lib/gitbolt and dpkg lists the package
 ///     (gitbolt.list). Installable when pkexec is there to ask for
 ///     root; otherwise whyNot gives the command.

@@ -34,16 +34,26 @@
 //     has given up (a short deadline here), the install is over and
 //     failed, and checks and Install work again;
 //   - after an install, start() reads the helper's install-result
-//     once: ok goes to the status bar; declined, failed or gave-up for
-//     a newer version open the dialog on why, the end of install.log
-//     and how to install by hand for this kind of package; a stale or
-//     unreadable one is dropped;
+//     once, and so does a launch handed over later: ok goes to the
+//     notice bar, with What's New (the release's page), until dismissed;
+//     declined, failed or gave-up for a newer version open the dialog on
+//     why, the end of install.log and how to install by hand (or repair)
+//     for this kind of package; a stale or unreadable one is dropped;
+//   - main()'s check that an update is going in: the marker's helper
+//     still runs (and started before the marker), no result yet;
+//   - Windows: another GitBolt running from the install folder (a list
+//     the test hands in) stops Install and Restart before the download,
+//     or before the prompt if it opened meanwhile, and Try Again goes on
+//     once it is closed; the helper is given the repository on screen;
 //   - Windows' UAC refusing (a No, or an error), which comes back while
 //     GitBolt runs (the launch hook stands in for the prompt): GitBolt
 //     doesn't quit, the dialog says how to install it by hand, and
 //     after a No, Try Again asks again for the same checked download;
 //     the prompt's owner is a modal opened over the dialog meanwhile,
-//     else the dialog;
+//     else the dialog; while the prompt waits (the event loop running),
+//     a close, Check for Updates, Install, Try Again or Cancel neither
+//     deletes the download or the Installer nor launches twice, and a
+//     No then does what the close asked;
 //   - every attempt's outcome, for usage statistics (updateResult): at
 //     start() from install-result and the pending-install marker the
 //     launch leaves (a marker alone, past its patience, is no_result),
@@ -95,11 +105,13 @@
 #include <QVersionNumber>
 
 #include "../TestProcessHelper.h"
+#include "../TestRepoHelper.h"
 #include "../update/FakeApps.h"
 #include "AppMenuWatcher.h"
 #include "../update/HttpServer.h"
 #include "conf/SettingsService.h"
 #include "dialogs/UpdateDialog.h"
+#include "services/GitService.h"
 #include "telemetry/EventSchema.h"
 #include "ui/MainWindow.h"
 #include "ui/UpdateController.h"
@@ -108,6 +120,7 @@
 #include "update/Downloader.h"
 #include "update/Installer.h"
 #include "update/Package.h"
+#include "update/Processes.h"
 #include "widgets/UpdateNoticeBar.h"
 
 using gitbolt::conf::SettingsService;
@@ -120,6 +133,7 @@ using gitbolt::ui::UpdateGate;
 using gitbolt::ui::UpdateSetup;
 using gitbolt::update::PackageInfo;
 using gitbolt::update::PackageKind;
+using gitbolt::update::RunningProgram;
 using gitbolt::widgets::UpdateNoticeBar;
 using State = UpdateDialog::State;
 
@@ -229,6 +243,17 @@ bool writeFile(const QString& path, const QByteArray& bytes, bool executable = f
 QStringList shownButtons(const UpdateDialog* dialog) {
     QStringList names;
     for (const QPushButton* b : dialog->findChildren<QPushButton*>()) {
+        if (!b->isHidden())
+            names << b->objectName();
+    }
+    names.sort();
+    return names;
+}
+
+// The buttons the notice bar shows, by objectName.
+QStringList shownBarButtons(const UpdateNoticeBar* bar) {
+    QStringList names;
+    for (const QAbstractButton* b : bar->findChildren<QAbstractButton*>()) {
         if (!b->isHidden())
             names << b->objectName();
     }
@@ -965,6 +990,100 @@ private slots:
         QCOMPARE(quits, 0);
     }
 
+    // Windows' prompt runs the event loop until it is answered (the hook
+    // stands in, turning it): closing the dialog, Check for Updates,
+    // Install, Try Again and Cancel meanwhile neither delete the download
+    // the installer is about to run, nor the Installer under the launch,
+    // nor start anything twice; the dialog says what it waits for. A Yes
+    // then installs; a No does what the close asked.
+    void aWaitingPromptHoldsTheRest_data() {
+        QTest::addColumn<bool>("yes");
+        QTest::addColumn<bool>("reopened");
+        QTest::newRow("yes") << true << false;
+        QTest::newRow("no") << false << false;
+        QTest::newRow("no, the dialog open again") << false << true;
+    }
+    void aWaitingPromptHoldsTheRest() {
+        QFETCH(bool, yes);
+        QFETCH(bool, reopened);
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        const QByteArray exePath = "/download/v0.1.1/GitBolt-0.1.1-Windows-AMD64.exe";
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        const QString downloaded = QDir(h.controller->setup().config.downloadDir)
+                                       .filePath(QStringLiteral("0.1.1/GitBolt-0.1.1-Windows-AMD64.exe"));
+        int quits = 0;
+        int launches = 0;
+        QStringList problems;
+        QString waiting;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 300});
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget*) {
+            if (++launches > 1) {
+                emit installer.declined(QStringLiteral("Install it yourself."));
+                return false;
+            }
+            const QPointer<gitbolt::update::Installer> alive(&installer);
+            waiting = h.dialog()->shownText();
+            if (h.button("updateDialog.cancel")->isEnabled())
+                problems << QStringLiteral("Cancel is on");
+            h.button("updateDialog.cancel")->click();
+            emit h.dialog()->cancelClicked();   // greyed out, yet held should it come
+            h.dialog()->reject();
+            h.controller->checkNow();   // shows it again, as it is
+            emit h.dialog()->installClicked();
+            emit h.dialog()->retryClicked();
+            if (!reopened)
+                h.dialog()->reject();
+            QTest::qWait(100);   // deferred deletes too
+            if (!alive) {
+                problems << QStringLiteral("the Installer was deleted");
+                return false;
+            }
+            if (!QFile::exists(downloaded))
+                problems << QStringLiteral("the download was deleted");
+            if (h.dialog()->state() != State::Preparing)
+                problems << QStringLiteral("the dialog left Preparing");
+            if (!yes)
+                emit installer.declined(QStringLiteral("Install it yourself."));
+            return yes;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE(launches, 1);
+        QVERIFY2(problems.isEmpty(), qPrintable(problems.join(u'\n')));
+        QVERIFY2(waiting.contains(QStringLiteral("Waiting for Windows' permission prompt…")), qPrintable(waiting));
+        QCOMPARE(server.hits(exePath), 1);
+
+        if (yes) {
+            // Installing: the download is the installer's, and GitBolt quits.
+            QCOMPARE(h.dialog()->state(), State::Restarting);
+            QCOMPARE(quits, 1);
+            QVERIFY(QFile::exists(downloaded));
+            return;
+        }
+        QTest::qWait(400);   // past the quit grace
+        QCOMPARE(quits, 0);
+        // The close's stop, now: nothing left, and checks work again.
+        QVERIFY(!QFile::exists(downloaded));
+        QTRY_VERIFY(!h.window.findChild<gitbolt::update::Installer*>());
+        QVERIFY(h.results.contains(QStringLiteral("declined launch permission_declined 0.1.0 0.1.1 nsis")));
+        if (!reopened) {
+            QVERIFY(!h.dialog()->isVisible());
+            h.controller->checkNow();
+            QTRY_COMPARE(h.dialog()->state(), State::Available);
+            return;
+        }
+        // Open again meanwhile, it says No; Try Again downloads again.
+        QVERIFY(h.dialog()->isVisible());
+        QCOMPARE(h.dialog()->state(), State::Declined);
+        h.button("updateDialog.retry")->click();
+        QTRY_COMPARE(launches, 2);
+        QCOMPARE(server.hits(exePath), 2);
+    }
+
     // ---- what the dialog shows is what is acted on ----------------------------
 
     // The bar offers 0.1.1; a manual check is still out when the user
@@ -1119,6 +1238,7 @@ private slots:
             stand.waitForFinished();
         });
         QString downloaded;
+        QString downloadDir;
         {
             Harness h(testSetup(server, cache_->path(), deb()));
             int quits = 0;
@@ -1135,6 +1255,13 @@ private slots:
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install-helper.sh"))));
             QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install.log"))));
             downloaded = downloads.filePath(QStringLiteral("0.1.1/") + kDebAsset);
+            downloadDir = downloads.path();
+            // The marker names the helper: a launch now is turned away.
+            const QStringList marker = QString::fromUtf8(contents(downloads.filePath(
+                QLatin1String(UpdateController::kInstallMarkerFile)))).trimmed().split(u' ');
+            QCOMPARE(marker.size(), 4);
+            QVERIFY(gitbolt::update::processStartTime(marker.at(3).toLongLong()) > 0);
+            QVERIFY(UpdateController::updateInstalling(downloads.path()));
             // Watched until the helper's own wait is over, and a margin.
             auto* deadline = h.window.findChild<QTimer*>(QStringLiteral("updateHelperDeadline"));
             QVERIFY(deadline && deadline->isActive());
@@ -1170,6 +1297,8 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(started()), 15000);
         QCOMPARE(contents(started()), QByteArray("new\n"));
         QCOMPARE(contents(launcher()), script);
+        // The result came first: no launch is turned away any more.
+        QVERIFY(!UpdateController::updateInstalling(downloadDir));
 #endif
     }
 
@@ -1266,10 +1395,11 @@ private slots:
             << "Windows will ask for permission for Windows PowerShell to install it." << false;
         // The installer never ran: a copy open elsewhere kept its files.
         QTest::newRow("Windows: in use")
-            << QByteArray("failed 0.1.1 another GitBolt kept running from the install folder\n")
+            << QByteArray("failed 0.1.1 another GitBolt window was still open\n")
             << int(PackageKind::WindowsInstall)
-            << QStringList{QStringLiteral("GitBolt wasn't changed.\n\nClose GitBolt wherever else it is open on "
-                                          "this computer, in other users' sessions too, then click Try Again.")}
+            << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: another GitBolt "
+                                          "window was still open. GitBolt wasn't changed.\n\nClose every other "
+                                          "GitBolt window, in other users' sessions too, then click Try Again.")}
             << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
@@ -1301,6 +1431,20 @@ private slots:
                            QStringLiteral("download GitBolt-0.1.1-Darwin-arm64.dmg from the release page, open it, "
                                           "and drag GitBolt into your Applications folder.")}
             << "restarts GitBolt with it." << true;
+        QTest::newRow("Windows: no Uninstall.exe")
+            << QByteArray("failed 0.1.1 the installer ran, but Uninstall.exe is missing\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("Uninstall.exe is missing. GitBolt may be incomplete now.\n"),
+                           QStringLiteral("To repair it")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << false;
+        // Neither copy where GitBolt was: it was changed.
+        QTest::newRow("macOS: neither copy in place")
+            << QByteArray("failed 0.1.1 the new copy couldn't be moved into place, nor the old one back\n")
+            << int(PackageKind::MacBundle)
+            << QStringList{QStringLiteral("nor the old one back. GitBolt may be incomplete now.\n"),
+                           QStringLiteral("download GitBolt-0.1.1-Darwin-arm64.dmg from the release page, open it, "
+                                          "and drag GitBolt into your Applications folder.")}
+            << "restarts GitBolt with it." << false;
         // What the helpers write: the reason, in seconds, isn't repeated.
         QTest::newRow("deb: gave up")
             << QByteArray("gave-up 0.1.1 GitBolt didn't quit within 600 seconds\n") << int(PackageKind::Deb)
@@ -1329,7 +1473,6 @@ private slots:
         QVERIFY(writeFile(downloads.filePath(QStringLiteral("install.log")), log));
 
         Harness h(setup);
-        QSignalSpy status(h.controller, &UpdateController::statusMessage);
         h.controller->start();
         QVERIFY(h.dialog() && h.dialog()->isVisible());
         QCOMPARE(h.dialog()->state(), State::Failed);
@@ -1348,7 +1491,7 @@ private slots:
         QCOMPARE(lines.size(), 10);
         QVERIFY(lines.first().endsWith(QStringLiteral("step 6")));
         QVERIFY(lines.last().endsWith(QStringLiteral("step 15")));
-        QCOMPARE(status.count(), 0);
+        QVERIFY(h.bar->isHidden());
         // Read once: gone, and nothing asked of the network.
         QVERIFY(!QFile::exists(downloads.filePath(QStringLiteral("install-result"))));
         QVERIFY(QFile::exists(downloads.filePath(QStringLiteral("install.log"))));
@@ -1403,11 +1546,16 @@ private slots:
         const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
         QVERIFY(writeFile(path, result));
         Harness h(setup);
-        QSignalSpy status(h.controller, &UpdateController::statusMessage);
         h.controller->start();
-        QCOMPARE(status.count(), says.isEmpty() ? 0 : 1);
-        if (!says.isEmpty())
-            QCOMPARE(status.first().first().toString(), says);
+        // The bar says it, with What's New, until dismissed; it offers
+        // nothing.
+        QCOMPARE(h.bar->isHidden(), says.isEmpty());
+        if (!says.isEmpty()) {
+            QCOMPARE(h.bar->text(), says);
+            QCOMPARE(shownBarButtons(h.bar), (QStringList{QStringLiteral("updateNotice.dismiss"),
+                                                          QStringLiteral("updateNotice.whatsNew")}));
+            QCOMPARE(h.bar->version(), QString());
+        }
         QVERIFY(!h.dialog());
         QVERIFY(!QFile::exists(path));
     }
@@ -1438,10 +1586,9 @@ private slots:
         const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
         QVERIFY(writeFile(path, result));
         Harness h(setup);
-        QSignalSpy status(h.controller, &UpdateController::statusMessage);
         h.controller->start();
         QVERIFY(!h.dialog());
-        QCOMPARE(status.count(), 0);
+        QVERIFY(h.bar->isHidden());
         QVERIFY(!QFile::exists(path));
     }
 
@@ -1485,6 +1632,11 @@ private slots:
                                                            << "no_result install no_result 0.1.0 0.1.1 deb" << false;
         QTest::newRow("a stale result") << QByteArray("failed 0.1.0 the installer exited with code 2\n")
                                         << QByteArray("0.0.9 0.1.0 <now>") << deb << "" << false;
+        // The new GitBolt.exe runs, but Windows can't uninstall it.
+        QTest::newRow("Windows: this version, without Uninstall.exe")
+            << QByteArray("failed 0.1.0 the installer ran, but Uninstall.exe is missing\n")
+            << QByteArray("0.0.9 0.1.0 <now>") << int(PackageKind::WindowsInstall)
+            << "failed install uninstaller_missing 0.0.9 0.1.0 nsis" << false;
         QTest::newRow("a marker for another version")
             << QByteArray("failed 0.1.1 apt-get failed with status 100\n") << QByteArray("0.1.0 0.1.2 <now>") << deb
             << "failed install apt_failed unknown 0.1.1 deb" << false;
@@ -1541,8 +1693,9 @@ private slots:
             h.button("updateDialog.install")->click();
             QTRY_COMPARE(h.dialog()->state(), State::Restarting);
             const QStringList line = QString::fromUtf8(contents(markerPath)).trimmed().split(u' ');
-            QCOMPARE(line.size(), 3);
+            QCOMPARE(line.size(), 4);
             QCOMPARE(line.mid(0, 2), (QStringList{QStringLiteral("0.1.0"), QStringLiteral("0.1.1")}));
+            QCOMPARE(line.at(3), QStringLiteral("0"));   // no helper ran
             QVERIFY(line.at(2).toLongLong() >= before && line.at(2).toLongLong() <= QDateTime::currentSecsSinceEpoch());
             QCOMPARE(h.results, QStringList{});   // nothing to say yet
         }
@@ -1558,6 +1711,315 @@ private slots:
         late.controller->start();
         QCOMPARE(late.results, QStringList{QStringLiteral("no_result install no_result 0.1.0 0.1.1 nsis")});
         QVERIFY(!QFileInfo::exists(markerPath));
+    }
+
+    // ---- an update going in -------------------------------------------------------
+
+    // main() turns a launch away while the marker's helper runs: younger
+    // than the patience, a pid not this process's, whose process started
+    // no later than the marker was written (with a few seconds' slack),
+    // and no result yet. Anything else lets it start.
+    void anUpdateGoingInIsTold_data() {
+        QTest::addColumn<QByteArray>("marker");   // <now>, <old>, <self>; empty: none
+        QTest::addColumn<bool>("result");
+        QTest::addColumn<qint64>("startedAfter");   // the helper's start, from the marker's; 0: gone
+        QTest::addColumn<bool>("installing");
+        QTest::newRow("its helper at work") << QByteArray("0.1.0 0.1.1 <now> 4321\n") << false << qint64(-1) << true;
+        QTest::newRow("the clock's rounding") << QByteArray("0.1.0 0.1.1 <now> 4321\n") << false << qint64(5) << true;
+        QTest::newRow("its result is in") << QByteArray("0.1.0 0.1.1 <now> 4321\n") << true << qint64(-1) << false;
+        QTest::newRow("its helper is gone") << QByteArray("0.1.0 0.1.1 <now> 4321\n") << false << qint64(0) << false;
+        QTest::newRow("another process took its pid")
+            << QByteArray("0.1.0 0.1.1 <now> 4321\n") << false << qint64(60) << false;
+        QTest::newRow("past the patience") << QByteArray("0.1.0 0.1.1 <old> 4321\n") << false << qint64(-1) << false;
+        QTest::newRow("this process: the helper became it")
+            << QByteArray("0.1.0 0.1.1 <now> <self>\n") << false << qint64(-1) << false;
+        QTest::newRow("no helper known") << QByteArray("0.1.0 0.1.1 <now> 0\n") << false << qint64(-1) << false;
+        QTest::newRow("no pid (before 1.0)") << QByteArray("0.1.0 0.1.1 <now>\n") << false << qint64(-1) << false;
+        QTest::newRow("a bad pid") << QByteArray("0.1.0 0.1.1 <now> -4\n") << false << qint64(-1) << false;
+        QTest::newRow("not a marker") << QByteArray("0.1.0 0.1.1 <now> 4321 more\n") << false << qint64(-1) << false;
+        QTest::newRow("no marker") << QByteArray() << false << qint64(-1) << false;
+    }
+    void anUpdateGoingInIsTold() {
+        QFETCH(QByteArray, marker);
+        QFETCH(bool, result);
+        QFETCH(qint64, startedAfter);
+        QFETCH(bool, installing);
+        const QString dir = cache_->path();
+        const qint64 now = QDateTime::currentSecsSinceEpoch();
+        qint64 at = now;
+        if (marker.contains("<old>"))
+            at = now - UpdateController::kResultPatienceSeconds - 60;
+        marker.replace("<now>", QByteArray::number(now)).replace("<old>", QByteArray::number(at));
+        marker.replace("<self>", QByteArray::number(QCoreApplication::applicationPid()));
+        if (!marker.isEmpty())
+            QVERIFY(writeFile(QDir(dir).filePath(QLatin1String(UpdateController::kInstallMarkerFile)), marker));
+        if (result)
+            QVERIFY(writeFile(QDir(dir).filePath(QLatin1String(UpdateController::kInstallResultFile)), "ok 0.1.1\n"));
+        QList<qint64> asked;
+        const auto startTime = [&](qint64 pid) {
+            asked << pid;
+            return startedAfter == 0 ? qint64(0) : at + startedAfter;
+        };
+        QCOMPARE(UpdateController::updateInstalling(dir, startTime), installing);
+        if (installing)
+            QCOMPARE(asked, QList<qint64>{4321});
+        QVERIFY(!UpdateController::updateInstalling(QString(), startTime));
+    }
+
+    // The same with real processes: one that started before the marker,
+    // then is gone. A link where the marker goes is no marker.
+    void anUpdateGoingInIsToldByItsHelper() {
+#if !defined(Q_OS_UNIX)
+        QSKIP("a /bin/sleep stands in for the helper");
+#else
+        QProcess helper;
+        helper.start(QStringLiteral("/bin/sleep"), {QStringLiteral("60")});
+        QVERIFY(helper.waitForStarted());
+        auto stop = qScopeGuard([&] {
+            helper.kill();
+            helper.waitForFinished();
+        });
+        const QDir dir(cache_->path());
+        const QByteArray line = "0.1.0 0.1.1 " + QByteArray::number(QDateTime::currentSecsSinceEpoch()) + ' '
+                                + QByteArray::number(helper.processId()) + '\n';
+        QVERIFY(writeFile(dir.filePath(QStringLiteral("elsewhere")), line));
+        QVERIFY(QFile::link(dir.filePath(QStringLiteral("elsewhere")),
+                            dir.filePath(QLatin1String(UpdateController::kInstallMarkerFile))));
+        QVERIFY(!UpdateController::updateInstalling(dir.path()));
+        QVERIFY(QFile::remove(dir.filePath(QLatin1String(UpdateController::kInstallMarkerFile))));
+        QVERIFY(writeFile(dir.filePath(QLatin1String(UpdateController::kInstallMarkerFile)), line));
+        QVERIFY(UpdateController::updateInstalling(dir.path()));
+        helper.kill();
+        helper.waitForFinished();
+        QVERIFY(!UpdateController::updateInstalling(dir.path()));
+#endif
+    }
+
+    // A launch handed over to this GitBolt: an install result that came
+    // while it ran is said then. One that went in while this process ran
+    // isn't this process: the bar says to start GitBolt again. Not while
+    // this copy's own install is under way.
+    void aHandedOverLaunchSaysWhatCameMeanwhile() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        const UpdateSetup setup = testSetup(
+            server, cache_->path(),
+            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
+        const QDir downloads(setup.config.downloadDir);
+        const QString result = downloads.filePath(QLatin1String(UpdateController::kInstallResultFile));
+        Harness h(setup);
+        h.controller->start();
+        QVERIFY(h.bar->isHidden());
+
+        QVERIFY(writeFile(result, "ok 0.1.1\n"));
+        h.controller->checkInstallResult();
+        QCOMPARE(h.bar->text(),
+                 QStringLiteral("GitBolt 0.1.1 was installed. Quit GitBolt and open it again to use it."));
+        QCOMPARE(h.results, QStringList{QStringLiteral("ok install none unknown 0.1.1 nsis")});
+        QVERIFY(!QFile::exists(result));
+        // A check that finds that version doesn't offer it in its place.
+        h.settings.setUpdateLastCheck({});
+        h.fire();
+        QTRY_VERIFY(h.settings.updateLastCheck().isValid());
+        QCOMPARE(server.hits(kFeedPath), 1);
+        QCOMPARE(h.bar->text(),
+                 QStringLiteral("GitBolt 0.1.1 was installed. Quit GitBolt and open it again to use it."));
+        QVERIFY(writeFile(result, "ok 0.1.0\n"));
+        h.controller->checkInstallResult();
+        QCOMPARE(h.bar->text(), QStringLiteral("GitBolt was updated to 0.1.0."));
+        QVERIFY(writeFile(result, "failed 0.1.1 the installer exited with code 2\n"));
+        h.controller->checkInstallResult();
+        QVERIFY(h.dialog() && h.dialog()->isVisible());
+        QCOMPARE(h.dialog()->state(), State::Failed);
+        QVERIFY2(h.dialog()->shownText().contains(QStringLiteral("GitBolt may be incomplete now.")),
+                 qPrintable(h.dialog()->shownText()));
+        h.dialog()->reject();
+
+        // Its own install launched: the marker and result are the
+        // helper's to write, and the next start's to read.
+        int quits = 0;
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [&] { ++quits; }, 60000});
+        h.controller->setLaunchHook([](gitbolt::update::Installer&, qint64, QWidget*) { return true; });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE(h.dialog()->state(), State::Restarting);
+        QVERIFY(writeFile(result, "ok 0.1.1\n"));
+        const qsizetype reported = h.results.size();
+        h.controller->checkInstallResult();
+        QVERIFY(QFile::exists(result));
+        QVERIFY(QFile::exists(downloads.filePath(QLatin1String(UpdateController::kInstallMarkerFile))));
+        QCOMPARE(h.results.size(), reported);
+        QCOMPARE(h.dialog()->state(), State::Restarting);
+    }
+
+    // What's New opens the release's page; × lasts, but silences no
+    // offer; a check that finds nothing newer leaves the bar alone; and a
+    // newer version found takes its place.
+    void theUpdatedBarLastsUntilDismissed() {
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.0"), kEveryInstaller);
+        UrlCatcher catcher;
+        UpdateSetup setup = testSetup(server, cache_->path(), deb());
+        const QString result = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
+        QVERIFY(writeFile(result, "ok 0.1.0\n"));
+        {
+            Harness h(setup);
+            h.controller->start();
+            QCOMPARE(h.bar->text(), QStringLiteral("GitBolt was updated to 0.1.0."));
+            h.bar->findChild<QAbstractButton*>(QStringLiteral("updateNotice.whatsNew"))->click();
+            QCOMPARE(catcher.urls,
+                     QList<QUrl>{QUrl(QStringLiteral("https://github.com/Inverian/GitBolt/releases/tag/v0.1.0"))});
+            QVERIFY(h.bar->isHidden());
+            QCOMPARE(h.commands, QStringList{QStringLiteral("updateNotice.whatsNew")});
+        }
+        QVERIFY(writeFile(result, "ok 0.1.0\n"));
+        Harness h(setup);
+        h.controller->start();
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::UpToDate);
+        QVERIFY(!h.bar->isHidden());
+        QCOMPARE(h.bar->text(), QStringLiteral("GitBolt was updated to 0.1.0."));
+        h.dialog()->reject();
+        h.bar->findChild<QAbstractButton*>(QStringLiteral("updateNotice.dismiss"))->click();
+        QVERIFY(h.bar->isHidden());
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        h.settings.setUpdateLastCheck({});
+        h.fire();
+        QTRY_COMPARE(h.bar->text(), QStringLiteral("GitBolt 0.1.1 is available."));
+        QCOMPARE(shownBarButtons(h.bar), (QStringList{QStringLiteral("updateNotice.dismiss"),
+                                                      QStringLiteral("updateNotice.view")}));
+        QCOMPARE(catcher.urls.size(), 1);
+    }
+
+    // ---- Windows: another GitBolt in the way --------------------------------------
+
+    // Another GitBolt running from the install folder keeps its files:
+    // Install and Restart stops before the download, says to close it,
+    // and Try Again goes on once it is closed. This process, and a
+    // GitBolt from another folder, are no trouble. One whose path this
+    // process may not read is another user's, counted as in the way.
+    void anotherGitBoltStopsTheInstall_data() {
+        QTest::addColumn<QString>("path");
+        QTest::addColumn<QString>("says");
+        QTest::newRow("from the install folder") << QStringLiteral("<target>/bin/GitBolt.exe")
+                                                 << "Close the other GitBolt windows, then click Try Again.";
+        QTest::newRow("another user's") << QString() << "GitBolt is open in another user's session on this computer";
+    }
+    void anotherGitBoltStopsTheInstall() {
+        QFETCH(QString, path);
+        QFETCH(QString, says);
+        HttpServer server;
+        const QString exe = QStringLiteral("GitBolt-0.1.1-Windows-AMD64.exe");
+        serve(server, QStringLiteral("0.1.1"), {{exe, "exe"}});
+        const QString target = QDir(cache_->path()).filePath(QStringLiteral("Program Files/GitBolt"));
+        path.replace(QStringLiteral("<target>"), target.toUpper());   // Windows' paths: any case
+        Harness h(testSetup(server, cache_->path(), {PackageKind::WindowsInstall, target, true, {}}));
+        QList<RunningProgram> programs{
+            {qint64(QCoreApplication::applicationPid()), QStringLiteral("GitBolt.exe"),
+             target + QStringLiteral("/bin/GitBolt.exe")},
+            {7001, QStringLiteral("GitBolt.exe"), QStringLiteral("C:/Other/bin/GitBolt.exe")},
+            {7002, QStringLiteral("gitbolt.EXE"), path},
+        };
+        int quits = 0;
+        int launches = 0;
+        UpdateController::RestartHooks hooks{[] { return qint64(4321); }, [&] { ++quits; }, 60000};
+        hooks.programs = [&] { return programs; };
+        h.controller->setRestartHooks(hooks);
+        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64, QWidget*) {
+            ++launches;
+            return true;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QCOMPARE(h.dialog()->state(), State::Failed);
+        QVERIFY2(h.dialog()->shownText().contains(says), qPrintable(h.dialog()->shownText()));
+        QCOMPARE(server.hits(QStringLiteral("/download/v0.1.1/%1").arg(exe).toUtf8()), 0);
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed download in_use 0.1.0 0.1.1 nsis")});
+        QCOMPARE(quits + launches, 0);
+
+        programs.removeLast();
+        h.button("updateDialog.retry")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::Restarting, 15000);
+        QCOMPARE(launches, 1);
+        QCOMPARE(quits, 1);
+    }
+
+    // One opened while the download ran: stopped before Windows' prompt,
+    // with the checked download kept, which Try Again launches.
+    void aGitBoltOpenedMeanwhileStopsTheLaunch() {
+        HttpServer server;
+        const QString exe = QStringLiteral("GitBolt-0.1.1-Windows-AMD64.exe");
+        serve(server, QStringLiteral("0.1.1"), {{exe, "exe"}});
+        const QString target = QDir(cache_->path()).filePath(QStringLiteral("GitBolt"));
+        Harness h(testSetup(server, cache_->path(), {PackageKind::WindowsInstall, target, true, {}}));
+        int asked = 0;
+        UpdateController::RestartHooks hooks{[] { return qint64(4321); }, [] {}, 60000};
+        hooks.programs = [&] {
+            return ++asked == 2 ? QList<RunningProgram>{{7001, QStringLiteral("GitBolt.exe"),
+                                                         target + QStringLiteral("\\bin\\GitBolt.exe")}}
+                                : QList<RunningProgram>{};
+        };
+        h.controller->setRestartHooks(hooks);
+        int launches = 0;
+        h.controller->setLaunchHook([&](gitbolt::update::Installer&, qint64, QWidget*) {
+            ++launches;
+            return true;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE_WITH_TIMEOUT(h.dialog()->state(), State::Failed, 15000);
+        QVERIFY2(h.dialog()->shownText().contains(QStringLiteral("Close the other GitBolt windows")),
+                 qPrintable(h.dialog()->shownText()));
+        QCOMPARE(asked, 2);
+        QCOMPARE(launches, 0);
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed launch in_use 0.1.0 0.1.1 nsis")});
+        QCOMPARE(h.downloads(), QStringList{exe});
+
+        h.button("updateDialog.retry")->click();
+        QTRY_COMPARE(h.dialog()->state(), State::Restarting);
+        QCOMPARE(launches, 1);
+        QCOMPARE(server.hits(QStringLiteral("/download/v0.1.1/%1").arg(exe).toUtf8()), 1);
+    }
+
+    // ---- the repository on screen ---------------------------------------------------
+
+    // The helper is given the window's repository, for the GitBolt it
+    // starts: an absolute path to a folder, cleaned; nothing else.
+    void theRepositoryGoesToTheHelper_data() {
+        QTest::addColumn<QString>("given");
+        QTest::addColumn<QString>("handed");
+        QTest::newRow("a repository") << QStringLiteral("<repo>/./") << QStringLiteral("<repo>");
+        QTest::newRow("none") << QString() << QString();
+        QTest::newRow("relative") << QStringLiteral("my repo") << QString();
+        QTest::newRow("gone") << QStringLiteral("<repo>-gone") << QString();
+    }
+    void theRepositoryGoesToTheHelper() {
+        QFETCH(QString, given);
+        QFETCH(QString, handed);
+        const QString repo = QDir(cache_->path()).filePath(QStringLiteral("my repo"));
+        QVERIFY(QDir().mkpath(repo));
+        given.replace(QStringLiteral("<repo>"), repo);
+        handed.replace(QStringLiteral("<repo>"), repo);
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        Harness h(testSetup(server, cache_->path(),
+                            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")),
+                             true, {}}));
+        h.controller->setRestartHooks({[] { return qint64(4321); }, [] {}, 60000});
+        h.controller->setReopenPath([&] { return given; });
+        QString reopen = QStringLiteral("<not launched>");
+        h.controller->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget*) {
+            reopen = installer.reopenPath();
+            return true;
+        });
+        h.controller->checkNow();
+        QTRY_COMPARE(h.dialog()->state(), State::Available);
+        h.button("updateDialog.install")->click();
+        QTRY_COMPARE(h.dialog()->state(), State::Restarting);
+        QCOMPARE(reopen, handed);
     }
 
     // While GitBolt runs: a failed download, Windows' No or failure (the
@@ -1731,17 +2193,61 @@ private slots:
 
     // ---- MainWindow -----------------------------------------------------------
 
-    // After an update, the window's status bar says so.
-    void anUpdateIsReportedInTheStatusBar() {
+    // After an update, the window's notice bar says so (the status bar,
+    // whose messages come and go, doesn't).
+    void anUpdateIsReportedInTheNoticeBar() {
         HttpServer server;
         gitbolt::ui::MainWindow window;
         UpdateSetup setup = testSetup(server, cache_->path());
         QVERIFY(writeFile(QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result")), "ok 0.1.0\n"));
         window.setUpdates(setup);
         window.startUpdates();
-        QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("GitBolt was updated to 0.1.0."));
+        auto* bar = window.findChild<UpdateNoticeBar*>(QStringLiteral("updateNotice"));
+        QVERIFY(bar && !bar->isHidden());
+        QCOMPARE(bar->text(), QStringLiteral("GitBolt was updated to 0.1.0."));
+        QVERIFY(!window.statusBar()->currentMessage().contains(QLatin1String("updated")));
         QCOMPARE(window.updateDownloadDir(), setup.config.downloadDir);
         QVERIFY(!window.findChild<UpdateDialog*>());
+    }
+
+    // The window hands the repository it shows to the update's helper,
+    // and nothing from the home screen.
+    void theWindowsRepositoryIsReopened() {
+        gitbolt::test::TestRepo repo;
+        repo.writeFile("a.txt", "a\n");
+        repo.stageAll();
+        QVERIFY(repo.commit("first").ok());
+        HttpServer server;
+        serve(server, QStringLiteral("0.1.1"), kEveryInstaller);
+        gitbolt::ui::MainWindow window;
+        window.setUpdates(testSetup(server, cache_->path(),
+                                    {PackageKind::WindowsInstall,
+                                     QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}}));
+        auto* updates = window.findChild<UpdateController*>();
+        QVERIFY(updates);
+        updates->setRestartHooks({[] { return qint64(4321); }, [] {}, 60000});
+        QStringList handed;
+        updates->setLaunchHook([&](gitbolt::update::Installer& installer, qint64, QWidget*) {
+            handed << installer.reopenPath();
+            emit installer.declined(QString());   // stays prepared: Try Again launches again
+            return false;
+        });
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        window.openRepositoryAtPath(repo.path());
+        auto* svc = window.findChild<gitbolt::services::GitService*>();
+        QVERIFY(svc);
+        QTRY_VERIFY_WITH_TIMEOUT(svc->isOpen() && !svc->openPending(), 15000);
+        updates->checkNow();
+        QTRY_COMPARE(updates->dialog()->state(), State::Available);
+        updates->dialog()->findChild<QPushButton*>(QStringLiteral("updateDialog.install"))->click();
+        QTRY_COMPARE(handed.size(), 1);
+        QCOMPARE(QFileInfo(handed.first()).canonicalFilePath(), QFileInfo(repo.path()).canonicalFilePath());
+        // Home: the repository stays open, off screen.
+        window.findChild<QAction*>(QStringLiteral("file.home"))->trigger();
+        updates->dialog()->findChild<QPushButton*>(QStringLiteral("updateDialog.retry"))->click();
+        QTRY_COMPARE(handed.size(), 2);
+        QCOMPARE(handed.at(1), QString());
     }
 
     // Without the in-app check, both Check for Updates items are greyed

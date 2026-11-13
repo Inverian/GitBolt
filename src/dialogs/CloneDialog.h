@@ -64,6 +64,9 @@ private slots:
 
 private:
     void setBusy(bool busy, const QString& message = QString());
+    void growToContents();
+    /// The "Clone to" field's path, with '/' separators.
+    QString destination() const;
     void applyStatusColor();
     void requestCancel();
     void forgetKeptClone();

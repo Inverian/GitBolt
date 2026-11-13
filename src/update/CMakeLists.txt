@@ -15,6 +15,7 @@ set(SOURCES
     InstallHelpers.cpp
     Installer.cpp
     Package.cpp
+    Processes.cpp
     Release.cpp
     Request.cpp
     UpdateConfig.cpp
@@ -25,6 +26,7 @@ set(SOURCES
     InstallHelpers.h
     Installer.h
     Package.h
+    Processes.h
     Release.h
     Request.h
     UpdateConfig.h

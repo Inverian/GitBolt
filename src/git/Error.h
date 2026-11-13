@@ -33,6 +33,7 @@ enum class GitErrorCode {
     MergeConflict,
     ProcessFailed,
     CheckoutFailed,     // clone fetched, but its checkout or post-checkout hook failed; repo kept
+    Owner,              // repository another user owns (git's "dubious ownership"); see safe.directory
 };
 
 class GitError {
@@ -53,6 +54,21 @@ private:
     GitErrorCode code_ = GitErrorCode::Ok;
     std::string message_;
 };
+
+/// For an Owner error: the folder git's safe.directory takes to trust
+/// the repository, as libgit2's message names it (its work tree, or a
+/// bare repository's folder). Empty if the message names none, or only
+/// a linked worktree's or submodule's git dir.
+std::string ownerSafeDirectory(const std::string& message);
+
+/// `git config --global --add safe.directory <dir>`, with `dir` quoted
+/// where a Windows (cmd, PowerShell) or POSIX shell needs it, and on
+/// Windows a share's //server/... behind %(prefix)/ for Git for Windows.
+#ifdef _WIN32
+std::string safeDirectoryCommand(const std::string& dir, bool windows = true);
+#else
+std::string safeDirectoryCommand(const std::string& dir, bool windows = false);
+#endif
 
 template <typename T>
 class Result {

@@ -60,7 +60,15 @@ struct HelperInputs {
     /// the administrator part's install result. Then it writes failed
     /// itself and starts GitBolt anyway.
     int installSeconds = 15 * 60;
+    /// The repository GitBolt had open, an absolute path: the GitBolt
+    /// started afterwards gets it as its argument. Empty: none.
+    QString reopen;
 };
+
+/// Set (to 1) for the GitBolt a helper starts: main() never turns that
+/// one away as started during the update (UpdateController::
+/// updateInstalling), and unsets it at once.
+inline constexpr char kRelaunchEnv[] = "GITBOLT_UPDATE_RELAUNCH";
 
 /// The install result: `resultFile`, one UTF-8 line written once, just
 /// before GitBolt starts again or the helper gives up:
@@ -100,7 +108,8 @@ QString windowsHelperScript(const HelperInputs& in);
 /// NSIS replaces no file in use (only elevated does it see other sessions'
 /// GitBolts and open protected files). Then it runs '/S /D=<dir>' (/D= last
 /// and unquoted, as NSIS requires), checks bin\GitBolt.exe's version and
-/// writes the result. Exits 0, a kWindowsExit* code, or the installer's.
+/// that Uninstall.exe is there (the uninstall key runs it), and writes the
+/// result. Exits 0, a kWindowsExit* code, or the installer's.
 QString windowsElevatedScript(const HelperInputs& in);
 
 /// The start of both Windows parts: shared values, Write-Log and
@@ -132,10 +141,16 @@ inline constexpr int kWindowsExitNoInstaller = 1002;   ///< the installer didn't
 inline constexpr int kWindowsExitWrongVersion = 1003;  ///< installed, but GitBolt.exe isn't newVersion
 inline constexpr int kWindowsExitError = 1004;         ///< the script itself failed
 inline constexpr int kWindowsExitGaveUp = 1005;        ///< GitBolt didn't quit within waitSeconds
+inline constexpr int kWindowsExitNoUninstaller = 1006; ///< installed, but Uninstall.exe is missing
 
 /// `text` as one POSIX shell word: in single quotes, each ' written as
 /// '\''. Safe for any text, newlines included.
 QString shellQuote(const QString& text);
+/// `text` as one argument of a Windows command line, as
+/// CommandLineToArgvW and the C runtime read it back: in double quotes,
+/// with a " escaped and the backslashes before one, or before the
+/// closing quote, doubled.
+QString windowsArgument(const QString& text);
 /// `text` as a PowerShell single-quoted string. PowerShell ends one at
 /// any of ' ‘ ’ ‚ ‛ (U+0027, U+2018-U+201B), so each of them is doubled;
 /// nothing else is special inside one.
@@ -152,5 +167,11 @@ QStringList powerShellArguments(const QString& script);
 QString powerShellParameters(const QString& script);
 /// What CreateProcess allows on a command line, the program included.
 inline constexpr int kWindowsCommandLineLimit = 32767;
+
+/// Windows: a script that shows `text` in a box titled GitBolt, in front,
+/// which closes itself after `seconds`: for a GitBolt started while an
+/// update goes in, which mustn't stay to show it (its files are the ones
+/// the installer replaces). Nothing shows in Constrained Language mode.
+QString windowsNoticeScript(const QString& text, int seconds);
 
 } // namespace gitbolt::update

@@ -244,7 +244,7 @@ QString openErrorName(int gitErrorCode) {
         "conflict",       "locked",         "modified",        "auth",
         "certificate",    "applied",        "peel",            "eof",
         "invalid",        "uncommitted",    "directory",       "merge_conflict",
-        "process_failed", "checkout_failed",
+        "process_failed", "checkout_failed", "owner",
     };
     constexpr int count = int(sizeof(names) / sizeof(names[0]));
     if (gitErrorCode <= 0 || gitErrorCode >= count)
@@ -263,8 +263,9 @@ QString updateReason(const QString& code) {
         "not_ready",          "no_pkexec",         "helper_start_failed", "elevation_failed",
         "permission_declined", "quit_timeout",     "new_copy_missing",    "move_aside_failed",
         "move_into_place_failed", "rollback_failed", "apt_failed",        "in_use",
-        "installer_not_started", "installer_exit", "wrong_version",       "elevated_error",
-        "elevated_timeout",   "elevated_no_result", "no_result",          "none",
+        "installer_not_started", "installer_exit", "wrong_version",       "uninstaller_missing",
+        "elevated_error",     "elevated_timeout",  "elevated_no_result",  "no_result",
+        "none",
     });
 }
 

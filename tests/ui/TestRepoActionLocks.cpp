@@ -423,7 +423,7 @@ private slots:
         QCOMPARE(combo->currentIndex(), -1);
 
         // A commit on the detached HEAD rewrites .git/HEAD, but HEAD
-        // still names no branch: the sidebar isn't reloaded (collapsed).
+        // still names no branch and no ref moved: no reload.
         auto* branches = window.findChild<gitbolt::models::BranchModel*>();
         auto* log = window.findChild<QTableView*>(QStringLiteral("log.view"));
         QVERIFY(branches && log);

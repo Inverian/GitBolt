@@ -102,6 +102,62 @@ bool powerShellLiterals(const QString& line, QStringList* literals) {
     return true;
 }
 
+// The arguments of a Windows command line, as CommandLineToArgvW (and
+// the C runtime since 2008) read them: 2n backslashes before a quote are
+// n and the quote delimits, 2n+1 are n and a literal quote; "" inside
+// quotes is a literal quote; elsewhere a backslash is itself.
+QStringList commandLineArguments(const QString& line) {
+    QStringList arguments;
+    QString current;
+    bool inQuotes = false;
+    bool started = false;
+    for (qsizetype i = 0; i < line.size(); ++i) {
+        const QChar c = line[i];
+        if (c == u'\\') {
+            qsizetype n = 0;
+            while (i < line.size() && line[i] == u'\\') {
+                ++n;
+                ++i;
+            }
+            if (i < line.size() && line[i] == u'"') {
+                current += QString(n / 2, u'\\');
+                if (n % 2 == 1)
+                    current += u'"';
+                else
+                    --i;   // the quote delimits: read it next
+            } else {
+                current += QString(n, u'\\');
+                --i;
+            }
+            started = true;
+        } else if (c == u'"') {
+            if (inQuotes && i + 1 < line.size() && line[i + 1] == u'"') {
+                current += u'"';
+                ++i;
+            } else {
+                inQuotes = !inQuotes;
+            }
+            started = true;
+        } else if (!inQuotes && (c == u' ' || c == u'\t')) {
+            if (started)
+                arguments << current;
+            current.clear();
+            started = false;
+        } else {
+            current += c;
+            started = true;
+        }
+    }
+    if (started)
+        arguments << current;
+    return arguments;
+}
+
+// A repository path no naive quoting survives, for the helpers' relaunch.
+QString awkwardRepository(const QString& in) {
+    return in + QStringLiteral("/my repo/it's \"q\" $HOME `id` $(id) \u00fcn\u00efc\u00f8d\u00e9 \u2019q\u2019\nline");
+}
+
 #if defined(Q_OS_WIN)
 // Windows PowerShell by absolute path, as Installer::launchHelper runs
 // it (CreateProcess looks in the application's folder first).
@@ -626,6 +682,30 @@ private slots:
         // The result: ok, no reason, written before the new copy started.
         QCOMPARE(readFile(result()), QStringLiteral("ok 0.1.1 \n"));
         QCOMPARE(resultAtRelaunch(), QStringLiteral("ok 0.1.1 \n"));
+        // No repository was open: no argument. Marked as the helper's.
+        QCOMPARE(readFile(marker() + QStringLiteral(".args")), QString());
+        QVERIFY2(started.endsWith(QLatin1String(" relaunch=1\n")), qPrintable(started));
+#endif
+    }
+
+    void macRelaunchOpensTheRepository_data() { addShellRows(); }
+
+    // The repository GitBolt had open reaches the copy the helper starts
+    // as one argument, as it was, whatever it holds.
+    void macRelaunchOpensTheRepository() {
+#if !defined(Q_OS_MACOS)
+        QSKIP("macOS only");
+#else
+        QFETCH(QString, shell);
+        HelperInputs in = macInputs(startWaited());
+        in.reopen = awkwardRepository(path(QStringLiteral("repos")));
+        QVERIFY(layOutMac(in));
+        QVERIFY(startHelper(shell, macHelperScript(in)));
+        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
+        QVERIFY2(readFile(marker()).startsWith(QLatin1String("0.1.1 ")), qPrintable(diagnostics()));
+        QCOMPARE(readFile(marker() + QStringLiteral(".args")), u'[' + in.reopen + QStringLiteral("]\n"));
 #endif
     }
 
@@ -778,13 +858,19 @@ private slots:
     }
 
     // Outside test sessions the bundle is opened as Finder would (no
-    // test runs that: it would really launch something).
+    // test runs that: it would really launch something), as a new
+    // instance, whatever copy is still on its way out.
     void macOpensTheBundleOutsideTests() {
         HelperInputs in = nastyInputs();
         in.execDirectly = false;
         const QString script = macHelperScript(in);
         QVERIFY(script.contains(QLatin1String("\nexec_directly=0\n")));
-        QVERIFY(script.contains(QLatin1String("    exec /usr/bin/open \"$1\"\n")));
+        QVERIFY(script.contains(QLatin1String("    [ $# -eq 0 ] || set -- --args \"$@\"\n")));
+        QVERIFY(script.contains(QLatin1String("    exec /usr/bin/open -n \"$app\" \"$@\"\n")));
+        QVERIFY(script.contains(QLatin1String("\nreopen=''\n")));
+        in.reopen = QStringLiteral("/Users/o'brien/my repo");
+        QVERIFY(macHelperScript(in).contains(QLatin1String("\nreopen='/Users/o'\\''brien/my repo'\n")));
+        in.reopen.clear();
         in.execDirectly = true;
         QVERIFY(macHelperScript(in).contains(QLatin1String("\nexec_directly=1\n")));
         // The names it moves things to, from the target's folder and
@@ -886,6 +972,25 @@ private slots:
         // And the result, before the relaunch.
         QCOMPARE(readFile(result()), outcome);
         QCOMPARE(resultAtRelaunch(), outcome);
+        // No repository, no argument; marked as the helper's.
+        QCOMPARE(readFile(marker() + QStringLiteral(".args")), QString());
+        QVERIFY2(readFile(marker()).endsWith(QLatin1String(" relaunch=1\n")), qPrintable(diagnostics()));
+#endif
+    }
+
+    void debRelaunchOpensTheRepository() {
+#if !defined(Q_OS_UNIX)
+        QSKIP("POSIX sh only");
+#else
+        HelperInputs in = debInputs(startWaited());
+        in.reopen = awkwardRepository(path(QStringLiteral("repos")));
+        QVERIFY(layOutDeb(in, 0));
+        QVERIFY(startHelper(QStringLiteral("/bin/sh"), debHelperScript(in)));
+        QVERIFY2(helperIsWaiting(), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(helperFinished(), qPrintable(diagnostics()));
+        QVERIFY2(readFile(marker()).startsWith(QLatin1String("relaunched ")), qPrintable(diagnostics()));
+        QCOMPARE(readFile(marker() + QStringLiteral(".args")), u'[' + in.reopen + QStringLiteral("]\n"));
 #endif
     }
 
@@ -932,12 +1037,14 @@ private slots:
                "isn't set up to allow it)"
             << "elevation_failed";
         QTest::newRow("deb: apt") << "failed 0.1.1 apt-get failed with status 100" << "apt_failed";
-        QTest::newRow("Windows: in use") << "failed 0.1.1 another GitBolt kept running from the install folder"
+        QTest::newRow("Windows: in use") << "failed 0.1.1 another GitBolt window was still open"
                                          << "in_use";
         QTest::newRow("Windows: not started") << "failed 0.1.1 the installer could not be started"
                                               << "installer_not_started";
         QTest::newRow("Windows: wrong version")
             << "failed 0.1.1 the installer ran, but GitBolt.exe is not version 0.1.1" << "wrong_version";
+        QTest::newRow("Windows: no uninstaller") << "failed 0.1.1 the installer ran, but Uninstall.exe is missing"
+                                                 << "uninstaller_missing";
         QTest::newRow("Windows: elevated error") << "failed 0.1.1 the administrator part of the update failed"
                                                  << "elevated_error";
         QTest::newRow("Windows: exit code") << "failed 0.1.1 the installer exited with code 2" << "installer_exit";
@@ -992,7 +1099,7 @@ private slots:
                 status = QStringLiteral("failed");
             }
         }
-        QCOMPARE(written.size() - shell, 9);
+        QCOMPARE(written.size() - shell, 10);
         for (const auto& [status, reason] : std::as_const(written)) {
             const Failure failure = installResultFailure(status, reason);
             QVERIFY2(failure != Failure::Other, qPrintable(status + QLatin1Char(' ') + reason));
@@ -1210,7 +1317,8 @@ private slots:
     // The administrator part waits until no other GitBolt runs from the
     // folder and GitBolt.exe opens with no sharing (else NSIS would
     // install a mix around the locked files; only a sharing or lock
-    // violation counts as in use), then installs and checks the version.
+    // violation counts as in use), then installs and checks the version,
+    // then that the uninstaller is there.
     void windowsElevatedScriptWaitsUntilTheInstallIsFree() {
         const QString elevated = windowsElevatedScript(windowsInputs());
         const qsizetype loop =
@@ -1241,17 +1349,22 @@ private slots:
             "        $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion\n"
             "        if ($found.Trim() -ne $version) {\n"));
         const qsizetype wrongVersion = elevated.indexOf(QStringLiteral("$code = %1\n").arg(kWindowsExitWrongVersion));
+        const qsizetype uninstaller = elevated.indexOf(QStringLiteral(
+            "    if ($code -eq 0 -and -not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {\n"
+            "        $code = %1\n"
+            "    }\n").arg(kWindowsExitNoUninstaller));
         const qsizetype failed = elevated.indexOf(QStringLiteral("} catch {\n    $code = %1\n").arg(kWindowsExitError));
         QVERIFY(elevated.contains(QLatin1String("\n$version = '0.1.1'\n")));
+        QVERIFY(elevated.contains(QLatin1String("\n$prefix = 'C:\\Program Files\\GitBolt\\'\n")));
         for (const qsizetype at : {loop, others, exclusive, sharing, busy, pause, install, noInstaller, itsCode, version,
-                                   wrongVersion, failed})
+                                   wrongVersion, uninstaller, failed})
             QVERIFY2(at > 0, qPrintable(elevated));
         QVERIFY(loop < others && others < exclusive && exclusive < sharing && sharing < busy && busy < pause);
         QVERIFY(pause < install && install < noInstaller && noInstaller < itsCode && itsCode < version);
-        QVERIFY(version < wrongVersion && wrongVersion < failed);
+        QVERIFY(version < wrongVersion && wrongVersion < uninstaller && uninstaller < failed);
         // The codes it can end with are distinct, and none is NSIS's.
         const QList<int> codes = {kWindowsExitInUse, kWindowsExitNoInstaller, kWindowsExitWrongVersion,
-                                  kWindowsExitError, kWindowsExitGaveUp};
+                                  kWindowsExitError, kWindowsExitGaveUp, kWindowsExitNoUninstaller};
         for (const int code : codes) {
             QVERIFY(code > 2);
             QCOMPARE(codes.count(code), 1);
@@ -1275,11 +1388,13 @@ private slots:
         QVERIFY(branch(QStringLiteral("$code -eq 0"), QStringLiteral("    $status = 'ok'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitGaveUp), QStringLiteral("    $status = 'gave-up'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitInUse),
-                       QStringLiteral("    $reason = 'another GitBolt kept running from the install folder'\n")));
+                       QStringLiteral("    $reason = 'another GitBolt window was still open'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitNoInstaller),
                        QStringLiteral("    $reason = 'the installer could not be started'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitWrongVersion),
                        QStringLiteral("    $reason = 'the installer ran, but GitBolt.exe is not version ' + $version\n")));
+        QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitNoUninstaller),
+                       QStringLiteral("    $reason = 'the installer ran, but Uninstall.exe is missing'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitError),
                        QStringLiteral("    $reason = 'the administrator part of the update failed'\n")));
         QVERIFY(elevated.contains(QLatin1String(
@@ -1474,6 +1589,7 @@ private slots:
         in.resultFile = QStringLiteral("C:/Users/") + longName
                         + QStringLiteral("/AppData/Local/GitBolt/cache/updates/install-result");
         in.newVersion = QStringLiteral("999999.999999.999999");
+        in.reopen = QStringLiteral("C:/Users/") + longName + QStringLiteral("/source/repos/") + longName;
         const QString powershell = QStringLiteral("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
         const qsizetype helper = commandLineLength(powershell, powerShellArguments(windowsHelperScript(in)));
         const qsizetype elevated = shellExecuteLength(powershell, powerShellParameters(windowsElevatedScript(in)));
@@ -1488,6 +1604,69 @@ private slots:
         QVERIFY2(usualElevated < kWindowsCommandLineLimit * 2 / 3, qPrintable(QString::number(usualElevated)));
         qInfo("command lines: helper %lld, administrator part %lld characters with long paths; usually %lld and %lld",
               qint64(helper), qint64(elevated), qint64(usualHelper), qint64(usualElevated));
+    }
+
+    // One argument of a command line: what CommandLineToArgvW reads back
+    // is the text, whatever it holds.
+    void windowsArgumentRoundTrips() {
+        QCOMPARE(windowsArgument(QStringLiteral("plain")), QStringLiteral("\"plain\""));
+        QCOMPARE(windowsArgument(QString()), QStringLiteral("\"\""));
+        // Backslashes are themselves, but before a quote, the closing one
+        // included: a drive root.
+        QCOMPARE(windowsArgument(QStringLiteral("C:\\Program Files\\x")), QStringLiteral("\"C:\\Program Files\\x\""));
+        QCOMPARE(windowsArgument(QStringLiteral("D:\\")), QStringLiteral("\"D:\\\\\""));
+        QCOMPARE(windowsArgument(QStringLiteral("a\"b")), QStringLiteral("\"a\\\"b\""));
+        QCOMPARE(windowsArgument(QStringLiteral("a\\\"b")), QStringLiteral("\"a\\\\\\\"b\""));
+        const QStringList texts = {QStringLiteral("D:\\"), QStringLiteral("C:\\Users\\Bob\\my repo"),
+                                   QStringLiteral("C:\\it's \u2018q\u2019 $(x) `n %PATH% ^&|<>"),
+                                   QStringLiteral("\\\\server\\share\\repo\\"), QStringLiteral("a\\\\\"b\"\"c\\"),
+                                   QStringLiteral(" lead and trail "), QStringLiteral("tab\there"),
+                                   QStringLiteral("\u00fcn\u00efc\u00f8d\u00e9 \u4e2d"), QString()};
+        for (const QString& text : texts) {
+            QCOMPARE(commandLineArguments(QStringLiteral("GitBolt.exe ") + windowsArgument(text)),
+                     (QStringList{QStringLiteral("GitBolt.exe"), text}));
+        }
+    }
+
+    // The helper starts GitBolt with the repository it had open, through
+    // Start-Process, whose one ArgumentList string 5.1 passes on as it is:
+    // quoted for the command line, then as a PowerShell literal. Without
+    // a repository, no ArgumentList (an empty one is an error).
+    void windowsHelperReopensTheRepository() {
+        HelperInputs in = windowsInputs();
+        QVERIFY(windowsHelperScript(in).contains(
+            QLatin1String("\ntry {\n    Start-Process -FilePath $app\n} catch {\n")));
+        in.reopen = QStringLiteral("D:/Repos/Bob's \u2018repo\u2019 $(x) \u00fc \"q/");
+        const QString script = windowsHelperScript(in);
+        const QString start = QStringLiteral("    Start-Process -FilePath $app -ArgumentList ");
+        const qsizetype at = script.indexOf(QStringLiteral("\ntry {\n") + start);
+        QVERIFY2(at > 0, qPrintable(script));
+        const QString line = script.mid(at + 7).section(u'\n', 0, 0);
+        QStringList literals;
+        QVERIFY(powerShellLiterals(line, &literals));
+        QCOMPARE(literals.size(), 1);
+        QCOMPARE(commandLineArguments(literals.first()),
+                 QStringList{QStringLiteral("D:\\Repos\\Bob's \u2018repo\u2019 $(x) \u00fc \"q\\")});
+        // Marked as the helper's, just before.
+        QVERIFY(script.contains(QStringLiteral("\n$env:%1 = '1'\nWrite-Log ('starting ' + $app)\ntry {\n")
+                                    .arg(QLatin1String(kRelaunchEnv))));
+        // Only the helper starts GitBolt.
+        QVERIFY(!windowsElevatedScript(in).contains(QLatin1String("Repos")));
+    }
+
+    // The box a GitBolt started during an update leaves to Windows
+    // PowerShell: the text as one literal, whatever it holds, a timeout,
+    // and nothing interpolated.
+    void windowsNoticeShowsTheTextAsItIs() {
+        const QString text = QStringLiteral("GitBolt is being updated: it's ‘soon’ \"now\" $(x) %2");
+        const QString script = windowsNoticeScript(text, 20);
+        QCOMPARE(script.count(u'\n'), 1);
+        QVERIFY(script.startsWith(QLatin1String("(New-Object -ComObject WScript.Shell).Popup('")));
+        QVERIFY(script.endsWith(QLatin1String(", 20, 'GitBolt', 4160) | Out-Null\n")));
+        QStringList literals;
+        QVERIFY(powerShellLiterals(script, &literals));
+        QCOMPARE(literals, (QStringList{text, QStringLiteral("GitBolt")}));
+        QVERIFY(powerShellArguments(script).size() == 6);
     }
 
     // ShellExecuteExW gets the administrator part's arguments as one
@@ -1960,7 +2139,7 @@ private slots:
         QVERIFY2(readFile(log()).contains(QStringLiteral("nothing was installed (code %1)").arg(kWindowsExitInUse)),
                  qPrintable(diagnostics()));
         QCOMPARE(readFile(result()),
-                 QStringLiteral("failed %1 another GitBolt kept running from the install folder\n")
+                 QStringLiteral("failed %1 another GitBolt window was still open\n")
                      .arg(version->toString()));
         QVERIFY2(lastLine().endsWith(startingApp), qPrintable(diagnostics()));
         QVERIFY(gitbolt::test::processAlive(otherPid));

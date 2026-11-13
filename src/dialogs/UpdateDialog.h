@@ -8,7 +8,6 @@
 #include <QString>
 #include <QUrl>
 
-class QBoxLayout;
 class QLabel;
 class QPlainTextEdit;
 class QProgressBar;
@@ -79,6 +78,10 @@ public:
     /// Getting the download ready (Installer::status()), then
     /// restarting.
     void showPreparing(const QString& status);
+    /// Preparing while Windows' permission prompt (UAC) waits for an
+    /// answer: Cancel is greyed out, as nothing can stop until it is
+    /// answered (UpdateController holds a close until then).
+    void showAskingPermission();
     /// The check failed: `message` says why (Checker::failed()).
     void showCheckFailed(const QString& message);
     /// Downloading or installing failed: `message` says why.
@@ -120,6 +123,10 @@ signals:
 
 private:
     void enterState(State state);
+    /// Sizes it for what it shows: `snug`, to its contents; otherwise
+    /// the size it has, grown where the layout needs more. The top edge
+    /// stays.
+    void fit(bool snug);
     void setProgressText(const QString& text);
 
     State state_ = State::Checking;
@@ -128,8 +135,6 @@ private:
     /// The Failed state shows an earlier install's log in the notes.
     bool showsLog_ = false;
 
-    QBoxLayout* top_ = nullptr;      ///< icon | column
-    QBoxLayout* column_ = nullptr;   ///< the texts, the bar, the notes
     QLabel* icon_ = nullptr;
     QLabel* headline_ = nullptr;
     QLabel* message_ = nullptr;

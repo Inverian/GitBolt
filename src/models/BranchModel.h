@@ -29,6 +29,10 @@ public:
         BranchTypeRole,
         IsHeadRole,
         ObjectIdRole,
+        /// The row's key, the same across reloads: a branch's or tag's
+        /// full ref name, "category:<n>", "submodule:<name>" or
+        /// "stash:<id>". The sidebar keeps its view state by it.
+        ItemKeyRole,
     };
 
     explicit BranchModel(QObject* parent = nullptr);
@@ -58,8 +62,11 @@ public:
     /// the short name for branches, "refs/tags/<name>" for tags.
     QString checkoutRefAt(const QModelIndex& index) const;
     bool isCategoryIndex(const QModelIndex& index) const;
+    /// The row whose ItemKeyRole is `key` now, or an invalid index.
+    QModelIndex indexForKey(const QString& key) const;
 
 private:
+    QString keyAt(const QModelIndex& index) const;
     bool isRootIndex(const QModelIndex& index) const;
     int categoryChildCount(RootCategory cat) const;
 

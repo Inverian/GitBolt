@@ -142,17 +142,56 @@ static bool handleProcessResult(QWidget* parent,
 namespace gitbolt::ui {
 
 namespace {
+// HEAD's branch, as the status bar and Statistics name it: the branch,
+// or a new repository's before its first commit. Empty when HEAD is
+// detached or names no branch.
+QString headBranchText(const git::Repository& r)
+{
+    if (r.isHeadDetached())
+        return {};
+    if (auto branch = r.headBranchName(); branch && !branch->empty())
+        return QString::fromStdString(*branch);
+    if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
+        return MainWindow::tr("%1 (no commits yet)").arg(QString::fromStdString(unborn));
+    return {};
+}
+
 // The status bar's HEAD: its branch, a new repository's branch before
 // its first commit, or detached.
 QString headLabel(const git::Repository& r)
 {
     if (r.isHeadDetached())
         return MainWindow::tr("HEAD (detached)");
-    if (auto branch = r.headBranchName(); branch && !branch->empty())
-        return MainWindow::tr("Branch: %1").arg(QString::fromStdString(*branch));
-    if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
-        return MainWindow::tr("Branch: %1 (no commits yet)").arg(QString::fromStdString(unborn));
-    return MainWindow::tr("No branch");
+    const QString branch = headBranchText(r);
+    return branch.isEmpty() ? MainWindow::tr("No branch") : MainWindow::tr("Branch: %1").arg(branch);
+}
+
+// `box` for a repository libgit2 refused as another user's (git's
+// "dubious ownership"): what happened and how to trust it, rather than
+// libgit2's text. The command names the folder as libgit2 compares it.
+void showOwnerRefusal(QMessageBox& box, const QString& path, const QString& error)
+{
+    std::string dir = git::ownerSafeDirectory(error.toStdString());
+    if (dir.empty())
+        dir = QDir::fromNativeSeparators(path).toStdString();
+    box.setWindowTitle(MainWindow::tr("Repository Owned by Another User"));
+    box.setText(MainWindow::tr("The repository at %1 belongs to another user account, so GitBolt "
+                               "didn't open it.")
+                    .arg(QDir::toNativeSeparators(QString::fromStdString(dir))));
+    box.setInformativeText(MainWindow::tr("If you trust it, add it to git's safe.directory list "
+                                          "with this command, then open it again:")
+                           + QStringLiteral("\n\n")
+                           + QString::fromStdString(git::safeDirectoryCommand(dir)));
+    // Plain text, as the path is anyone's, and selectable, to copy the
+    // command: in Qt's own box, as the platform's (an NSAlert on macOS)
+    // takes neither.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+    box.setOption(QMessageBox::Option::DontUseNativeDialog);
+#endif
+    if (auto* label = box.findChild<QLabel*>(QStringLiteral("qt_msgbox_informativelabel"))) {
+        label->setTextFormat(Qt::PlainText);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    }
 }
 } // namespace
 
@@ -884,7 +923,7 @@ void MainWindow::buildRepositoryMenu()
                         if (!QFileInfo::exists(QDir(folder).filePath(QStringLiteral(".git")))) {
                             widgets::PlainMessageBox::information(dlg, tr("Open Submodule"),
                                 tr("The submodule %1 is not checked out. Initialize and "
-                                   "update it first.").arg(p));
+                                   "update it first.").arg(QDir::toNativeSeparators(p)));
                             return;
                         }
                         // A link to another repository is no submodule
@@ -1133,7 +1172,7 @@ void MainWindow::buildRepositoryMenu()
             if (f.exists()) {
                 if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
                     widgets::PlainMessageBox::warning(this, title,
-                        tr("Could not open %1 for reading.").arg(fullPath));
+                        tr("Could not open %1 for reading.").arg(QDir::toNativeSeparators(fullPath)));
                     return;
                 }
                 original = QString::fromUtf8(f.readAll());
@@ -1142,7 +1181,7 @@ void MainWindow::buildRepositoryMenu()
 
             dialogs::TextEditorDialog dlg(this);
             dlg.setTitle(title);
-            dlg.setLabel(fullPath);
+            dlg.setLabel(QDir::toNativeSeparators(fullPath));
             dlg.setContents(original);
             if (dlg.exec() != QDialog::Accepted) return;
 
@@ -1157,7 +1196,7 @@ void MainWindow::buildRepositoryMenu()
             if (!f.open(QIODevice::WriteOnly | QIODevice::Text |
                         QIODevice::Truncate)) {
                 widgets::PlainMessageBox::warning(this, title,
-                    tr("Could not write %1.").arg(fullPath));
+                    tr("Could not write %1.").arg(QDir::toNativeSeparators(fullPath)));
                 return;
             }
             f.write(updated.toUtf8());
@@ -3199,7 +3238,7 @@ void MainWindow::buildCommandsMenu()
                 [this, outDir](bool written) {
                     if (written)
                         statusBar()->showMessage(
-                            tr("Patches written to %1").arg(outDir), 5000);
+                            tr("Patches written to %1").arg(QDir::toNativeSeparators(outDir)), 5000);
                 });
         });
         cmdMenu->addAction(a);
@@ -3633,7 +3672,8 @@ void MainWindow::buildPluginsMenu()
                 int branchCount = 0;
                 int tagCount = 0;
                 int remoteCount = 0;
-                QString headBranch;
+                QString headBranch;     // headBranchText()
+                bool detached = false;
             };
             const RepoStats stats = gitService_->withRepository(
                 [](git::Repository& repo) {
@@ -3665,9 +3705,8 @@ void MainWindow::buildPluginsMenu()
                     if (auto rm = repo.remotes(); rm.ok())
                         s.remoteCount =
                             static_cast<int>(rm.value().size());
-                    if (auto hb = repo.headBranchName(); hb.ok())
-                        s.headBranch =
-                            QString::fromStdString(hb.value());
+                    s.headBranch = headBranchText(repo);
+                    s.detached = repo.isHeadDetached();
                     s.ok = true;
                     return s;
                 });
@@ -3698,7 +3737,10 @@ void MainWindow::buildPluginsMenu()
                 topLines << QStringLiteral("  %1 (%2)")
                     .arg(top[i].first).arg(top[i].second);
 
-            const QString headBranch = stats.headBranch;
+            // As the status bar has it: detached only when HEAD is.
+            const QString headBranch = !stats.headBranch.isEmpty() ? stats.headBranch
+                                       : stats.detached            ? tr("(detached)")
+                                                                   : tr("(none)");
 
             const QString text = tr(
                 "Repository statistics\n"
@@ -3716,10 +3758,10 @@ void MainWindow::buildPluginsMenu()
              .arg(branchCount)
              .arg(remoteCount)
              .arg(tagCount)
-             .arg(headBranch.isEmpty() ? tr("(detached)") : headBranch)
-             .arg(topLines.join('\n'));
+             .arg(headBranch, topLines.join('\n'));   // one pass: a "%7" in a name stays
 
             QDialog dlg(this);
+            dlg.setObjectName(QStringLiteral("dlg.statistics"));
             dlg.setWindowTitle(tr("Repository Statistics"));
             dlg.resize(520, 360);
             auto* layout = new QVBoxLayout(&dlg);
@@ -3857,8 +3899,8 @@ void MainWindow::buildToolsMenu()
                 return QStringLiteral("%1 %2ms  $ git %3   (in %4)")
                     .arg(tag)
                     .arg(ms, 5)
-                    .arg(args.join(' '))
-                    .arg(workdir);
+                    // One pass: a "%4" in an argument stays.
+                    .arg(args.join(' '), QDir::toNativeSeparators(workdir));
             };
 
             // Replay the ring buffer first so users opening the
@@ -5360,7 +5402,7 @@ void MainWindow::openRepositoryAtPath(const QString& path)
     dropHeldRemoteOp();
 
     const QString repoName = QDir(path).dirName();
-    setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? path : repoName));
+    setWindowTitle(tr("Opening %1…").arg(repoName.isEmpty() ? QDir::toNativeSeparators(path) : repoName));
     centralStack_->setCurrentWidget(repoView_);
 
     // Clear every model/pane that still shows the previous repo —
@@ -5381,7 +5423,7 @@ void MainWindow::openRepositoryAtPath(const QString& path)
         branchCombo_->setProperty("currentBranch", QString());
     }
     branchLabel_->setText(tr("Opening…"));
-    repoPathLabel_->setText(path);
+    repoPathLabel_->setText(QDir::toNativeSeparators(path));
 
     // Block repo-dependent operations until the open lands — a
     // Pull/Commit fired now would hit the previous repository. That
@@ -5393,7 +5435,7 @@ void MainWindow::openRepositoryAtPath(const QString& path)
 
     if (repoView_)
         repoView_->showLoading(tr("Opening repository…"));
-    statusBar()->showMessage(tr("Opening %1…").arg(path));
+    statusBar()->showMessage(tr("Opening %1…").arg(QDir::toNativeSeparators(path)));
 
     // Timed for usage statistics from here (see PendingOpen). An open
     // that supersedes one still in flight restarts the clock: the
@@ -5447,7 +5489,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     const QString repoName = QDir(path).dirName();
     setWindowTitle(
         (repoName.isEmpty() ? QStringLiteral("GitBolt") : repoName) +
-        QStringLiteral("  -  ") + path);
+        QStringLiteral("  -  ") + QDir::toNativeSeparators(path));
     centralStack_->setCurrentWidget(repoView_);
     settingsService_->addRecentRepository(path);   // File > Recent follows
 
@@ -5524,7 +5566,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     // Light up every item under Navigate / View / Commands.
     setRepoOnlyMenusEnabled(true);
 
-    repoPathLabel_->setText(path);
+    repoPathLabel_->setText(QDir::toNativeSeparators(path));
 
     branchLabel_->setText(gitService_->withRepository(
         [](git::Repository& r) { return headLabel(r); }));
@@ -5534,7 +5576,7 @@ void MainWindow::onRepositoryOpened(const QString& path)
     gitService_->refreshSubmodules();
     gitService_->refreshTags();
 
-    statusBar()->showMessage(tr("Opened: %1").arg(path), 3000);
+    statusBar()->showMessage(tr("Opened: %1").arg(QDir::toNativeSeparators(path)), 3000);
 
     // A fetch a Fetch click revealed is cancelled once its repository
     // has been replaced; not when the open began, since an open that
@@ -5632,9 +5674,10 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
         repoPathLabel_->setText(QString());
     }
 
-    statusBar()->showMessage(tr("Failed to open %1").arg(path), 4000);
+    const QString shownPath = QDir::toNativeSeparators(path);
+    statusBar()->showMessage(tr("Failed to open %1").arg(shownPath), 4000);
     QMessageBox box(QMessageBox::Warning, tr("Error"),
-                    tr("Failed to open repository at %1\n\n%2").arg(path, error),
+                    tr("Failed to open repository at %1\n\n%2").arg(shownPath, error),
                     QMessageBox::Ok, this);
     box.setObjectName(QStringLiteral("dlg.openFailed"));
     box.setTextFormat(Qt::PlainText);
@@ -5644,8 +5687,10 @@ void MainWindow::onRepositoryOpenFailed(const QString& path, const QString& erro
     // have opened it).
     if (errorCode == static_cast<int>(git::GitErrorCode::NotFound) && QFileInfo(path).isDir()) {
         box.setWindowTitle(tr("Not a Git Repository"));
-        box.setText(tr("%1 is not in a Git repository.").arg(QDir::toNativeSeparators(path)));
+        box.setText(tr("%1 is not in a Git repository.").arg(shownPath));
         box.setInformativeText(tr("Open the folder of a repository, or any folder inside one."));
+    } else if (errorCode == static_cast<int>(git::GitErrorCode::Owner)) {
+        showOwnerRefusal(box, path, error);
     }
     box.exec();
 }
@@ -5658,13 +5703,21 @@ void MainWindow::onBranchesReady(std::vector<gitbolt::git::BranchInfo> branches)
     // to mean "user picked a branch", not "we refreshed the list").
     if (branchCombo_) {
         const QSignalBlocker blocker(branchCombo_);
-        branchCombo_->clear();
+        QStringList names;
         QString currentBranch;
         for (const auto& b : branches) {
             if (b.type != git::BranchType::Local) continue;
-            const QString name = QString::fromStdString(b.name);
-            branchCombo_->addItem(name);
-            if (b.isHead) currentBranch = name;
+            names << QString::fromStdString(b.name);
+            if (b.isHead) currentBranch = names.last();
+        }
+        // Refilled only when the local branches differ: a reload for a
+        // remote branch or a new commit leaves it, an open list included.
+        QStringList shown;
+        for (int i = 0; i < branchCombo_->count(); ++i)
+            shown << branchCombo_->itemText(i);
+        if (shown != names) {
+            branchCombo_->clear();
+            branchCombo_->addItems(names);
         }
         branchCombo_->setProperty("currentBranch", currentBranch);
         // Detached or unborn, no branch is current: shown blank, rather
@@ -5721,6 +5774,9 @@ void MainWindow::showSettingsDialog()
     if (updates_ && updates_->setup().envOptOut)
         updatesLockedReason = tr("Turned off by the GITBOLT_UPDATE_CHECK environment variable.");
     dlg.setUpdates(updates_ != nullptr, updatesLockedReason);
+    // The Commit dialog's Set name and email…: at Git Config.
+    if (commitDialog_ && sender() == commitDialog_)
+        dlg.showPage(QLatin1String(dialogs::SettingsDialog::kGitConfigPage));
     dlg.exec();
 }
 
@@ -5766,11 +5822,15 @@ void MainWindow::setUpdates(const UpdateSetup& setup)
     updateGate_ = setup.gate;
     if (!updates_ && setup.on()) {   // once only
         updates_ = new UpdateController(setup, settingsService_, updateNotice_, this);
-        // "GitBolt was updated to <v>.", at startup after an update. Until
-        // the next message: GitBolt starts again by itself, perhaps while
-        // the user looks elsewhere, and 10 s went unseen.
-        connect(updates_, &UpdateController::statusMessage, this,
-                [this](const QString& text) { statusBar()->showMessage(text); });
+        // The repository on screen, which the GitBolt an update starts
+        // opens again (a bare one by its git folder).
+        updates_->setReopenPath([this] {
+            if (centralStack_->currentWidget() != repoView_)
+                return QString();
+            return gitService_->withRepository([](git::Repository& r) {
+                return QString::fromStdString(r.isBare() ? r.path() : r.workdir());
+            });
+        });
         // Usage statistics (setTelemetry, which main() calls first):
         // outcomes, a check's failure code, the dialog's and bar's buttons.
         connect(updates_, &UpdateController::updateResult, this, [this](const telemetry::UpdateResult& result) {
@@ -5897,7 +5957,7 @@ void MainWindow::createNewRepository()
     if (!res.ok()) {
         widgets::PlainMessageBox::warning(this, tr("Init Failed"),
             tr("Could not initialize a repository at:\n%1\n\n%2")
-                .arg(dir, QString::fromStdString(res.error().message())));
+                .arg(QDir::toNativeSeparators(dir), QString::fromStdString(res.error().message())));
         return;
     }
     openRepositoryAtPath(dir);
@@ -5944,6 +6004,8 @@ void MainWindow::showCommitDialog()
             statusBar()->showMessage(tr("Another repository was opened; %1").arg(notDone),
                                      5000);
         });
+        connect(commitDialog_, &dialogs::CommitDialog::identitySettingsRequested,
+                this, &MainWindow::showSettingsDialog);
     }
     commitDialog_->show();
     commitDialog_->raise();

@@ -15,6 +15,7 @@
 #include "widgets/PlainTextDialogs.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QDir>
@@ -388,7 +389,22 @@ void CommitDialog::setupUi()
     committerLabel_->setTextFormat(Qt::PlainText);
     branchStatusLabel_->setTextFormat(Qt::PlainText);
 
-    statusLayout->addWidget(committerLabel_, 1);
+    // A link, not a button: it goes to Settings, where they are set.
+    setIdentityBtn_ = new QPushButton(tr("Set name and email…"), statusStrip);
+    setIdentityBtn_->setObjectName(QStringLiteral("commit.setIdentity"));
+    setIdentityBtn_->setFlat(true);
+    setIdentityBtn_->setAutoDefault(false);
+    setIdentityBtn_->setCursor(Qt::PointingHandCursor);
+    conf::ThemeService::keepThemedStyleSheet(setIdentityBtn_, [](bool) {
+        return QStringLiteral("QPushButton { color: %1; border: none; background: transparent; padding: 0; } "
+                              "QPushButton:hover { text-decoration: underline; }")
+            .arg(QApplication::palette().color(QPalette::Link).name());
+    });
+    setIdentityBtn_->hide();
+
+    statusLayout->addWidget(committerLabel_);
+    statusLayout->addWidget(setIdentityBtn_);
+    statusLayout->addStretch(1);
     statusLayout->addWidget(branchStatusLabel_, 0, Qt::AlignCenter);
     statusLayout->addWidget(stagedCountLabel_, 0, Qt::AlignRight);
 
@@ -417,6 +433,11 @@ void CommitDialog::wireConnections()
             if (isVisible())
                 readCommitterFromConfig();
         });
+    // Settings opens modal, so it has closed when the signal returns.
+    connect(setIdentityBtn_, &QPushButton::clicked, this, [this] {
+        emit identitySettingsRequested();
+        readCommitterFromConfig();
+    });
 
     // ---- View interactions -----------------------------------------------
     connect(unstagedView_->selectionModel(), &QItemSelectionModel::selectionChanged,
@@ -690,22 +711,27 @@ void CommitDialog::readCommitterFromConfig()
     if (!committerLabel_) return;
     if (!svc_ || !svc_->isOpen()) {
         committerLabel_->setText(tr("Committer: (no repository)"));
+        setIdentityBtn_->hide();
         return;
     }
 
-    const auto [name, email] = svc_->withRepository(
-        [](git::Repository& r) {
-            auto cfg = r.config();
-            return std::make_pair(cfg.userName(), cfg.userEmail());
-        });
+    // Read anew each time: the repository's cached config keeps the
+    // values of a ~/.gitconfig deleted since (git::Config::identity).
+    const git::Config::Identity id = svc_->withRepository(
+        [](git::Repository& r) { return r.config().identity(); });
+    showCommitter(id.name, id.email);
+    // Set meanwhile: the note asking for them goes.
+    if (id.name && id.email && errorLabel_->text() == missingIdentityNote())
+        errorLabel_->hide();
+}
 
+void CommitDialog::showCommitter(const std::optional<std::string>& name, const std::optional<std::string>& email)
+{
+    setIdentityBtn_->setVisible(!name || !email);
     if (name && email) {
         committerLabel_->setText(tr("Committer: %1 <%2>")
             .arg(QString::fromStdString(*name),
                  QString::fromStdString(*email)));
-        // Set meanwhile: the note asking for them goes.
-        if (errorLabel_->text() == missingIdentityNote())
-            errorLabel_->hide();
     } else if (name) {
         committerLabel_->setText(tr("Committer: %1")
             .arg(QString::fromStdString(*name)));
@@ -713,7 +739,7 @@ void CommitDialog::readCommitterFromConfig()
         committerLabel_->setText(tr("Committer: <%1>")
             .arg(QString::fromStdString(*email)));
     } else {
-        committerLabel_->setText(tr("Committer: not set (%1)").arg(identitySettings()));
+        committerLabel_->setText(tr("Committer: not set"));   // the link next to it says where
     }
 }
 
@@ -1034,10 +1060,10 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
         const bool noIdentity = missingIdentity(message);
         errorLabel_->setText(failureText(message));
         errorLabel_->show();
-        // git knows best: libgit2 still reads a ~/.gitconfig deleted
-        // while GitBolt ran, and the footer said who would commit.
+        // git knows best, should its config differ from what the
+        // footer read (GIT_CONFIG_GLOBAL, say).
         if (noIdentity)
-            committerLabel_->setText(tr("Committer: not set (%1)").arg(identitySettings()));
+            showCommitter({}, {});
     }
 }
 

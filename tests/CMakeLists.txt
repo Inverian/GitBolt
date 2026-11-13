@@ -57,6 +57,8 @@ endfunction()
 
 # git/ core tests — exercise the libgit2 wrapper against a temporary repo
 gitbolt_add_test(test_repository     git/TestRepository.cpp)
+# git::Config::identity() follows ~/.gitconfig deleted, created and edited
+gitbolt_add_test(test_config         git/TestConfig.cpp)
 gitbolt_add_test(test_revwalk        git/TestRevWalk.cpp)
 gitbolt_add_test(test_diff           git/TestDiff.cpp)
 gitbolt_add_test(test_status         git/TestStatus.cpp)
@@ -66,6 +68,9 @@ gitbolt_add_test(test_git_process    git/TestGitProcess.cpp)
 # What GitBolt makes of `git --version`, and the advisories it warns
 # about (git/GitVersion.h).
 gitbolt_add_test(test_git_version    git/TestGitVersion.cpp)
+# A repository another user owns (libgit2's GIT_EOWNER): its error code,
+# the safe.directory folder its message names and the command to add it.
+gitbolt_add_test(test_owner_error    git/TestOwnerError.cpp)
 
 # Clone through the git CLI. The cancel test clones from a "server"
 # that never answers — StallTransport, run by git via ext:: — whose
@@ -98,6 +103,11 @@ add_test(NAME test_patch_libgit2
 # which no CI build exercises: they all bundle it.
 add_test(NAME test_libgit2_floor
     COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestLibgit2Floor.cmake)
+# The Windows installer's own script (cmake/NsisScript.cmake) as NSIS
+# gets it, and the hooks it needs in this CMake's NSIS template. Needs no
+# NSIS, so it runs on every OS.
+add_test(NAME test_nsis_script
+    COMMAND ${CMAKE_COMMAND} -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/TestNsisScript.cmake)
 
 # The Linux install step that keeps each private library under its
 # soname alone (src/app/platform/linux/FlattenLibraryLinks.cmake). Not
@@ -192,6 +202,11 @@ if(WIN32)
     target_sources(test_update_installer PRIVATE update/NeedsNewerWindows.rc)
 endif()
 set_tests_properties(test_update_installer PROPERTIES TIMEOUT 300)
+# The running GitBolts that keep a Windows install folder in use (path
+# matching by Windows' rules, everywhere), and when a process started,
+# which tells an update's helper from a process that took its pid.
+gitbolt_add_test(test_update_processes update/TestProcesses.cpp)
+target_link_libraries(test_update_processes PRIVATE gitbolt_update)
 add_executable(gitbolt_crash_helper telemetry/CrashHelper.cpp)
 # dladdr, as for gitbolt_util: in libdl before glibc 2.34 (empty on Windows)
 target_link_libraries(gitbolt_crash_helper PRIVATE gitbolt_util ${CMAKE_DL_LIBS})
@@ -282,6 +297,15 @@ if(APPLE)
 elseif(UNIX)
     set_property(TEST test_file_tree APPEND PROPERTY ENVIRONMENT "MALLOC_PERTURB_=85")
 endif()
+# The sidebar's refs tree keeps its expanded categories, selection,
+# scroll position and hidden categories across reloads. Off screen.
+gitbolt_add_test(test_branch_tree_widget widgets/TestBranchTreeWidget.cpp)
+target_link_libraries(test_branch_tree_widget PRIVATE gitbolt_widgets)
+set_property(TEST test_branch_tree_widget APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# The repository view's loading veil, made under hidden parents. Off screen.
+gitbolt_add_test(test_loading_overlay widgets/TestLoadingOverlay.cpp)
+target_link_libraries(test_loading_overlay PRIVATE gitbolt_widgets)
+set_property(TEST test_loading_overlay APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # The Rebase dialog, its plan list and the repository view's in-progress bar
 gitbolt_add_test(test_rebase_widgets widgets/TestRebaseWidgets.cpp)
 target_link_libraries(test_rebase_widgets PRIVATE gitbolt_dialogs)
@@ -322,7 +346,7 @@ set_property(TEST test_update_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATF
 # The Commit dialog against a real repository: Amend held back while an
 # operation waits for its commit, a hook's refusal shown. Off screen.
 gitbolt_add_test(test_commit_dialog dialogs/TestCommitDialog.cpp)
-target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs)
+target_link_libraries(test_commit_dialog PRIVATE gitbolt_dialogs gitbolt_ui)
 set_property(TEST test_commit_dialog APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # Commands › Cherry pick and Revert commit's dialog: each mode's texts,
 # OK only with a preview, a merge's parent chooser for a revert. Off screen.
@@ -385,6 +409,14 @@ set_property(TEST test_git_notice APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=o
 gitbolt_add_test(test_dashboard_recent ui/TestDashboardRecent.cpp)
 target_link_libraries(test_dashboard_recent PRIVATE gitbolt_ui)
 set_property(TEST test_dashboard_recent APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# Paths with the system's separators (title, status bar, Recent, Clone,
+# the Git Command Log), a repository another user owns refused with the
+# safe.directory fix, and Repository Statistics' branch as the status
+# bar names it.
+gitbolt_add_test(test_shown_paths ui/TestShownPaths.cpp)
+target_sources(test_shown_paths PRIVATE ${PROJECT_SOURCE_DIR}/src/app/resources/gitbolt.qrc)
+target_link_libraries(test_shown_paths PRIVATE gitbolt_ui)
+set_property(TEST test_shown_paths APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # A small screen (fixtures/small-screen.json: Windows at 1024x768 and
 # 125%): the window and its dialogs open whole on it, with a repository
 # too, and the welcome screen's cards fit a window 800 px wide. The
@@ -437,6 +469,12 @@ set_property(TEST test_repo_action_locks APPEND PROPERTY ENVIRONMENT "QT_QPA_PLA
 # to do what they mustn't: about a minute here, so more room than the
 # 180 s the others get, for a slow runner.
 set_tests_properties(test_repo_action_locks PROPERTIES TIMEOUT 420)
+# Branches, tags and remote branches made or deleted outside GitBolt
+# show in the sidebar without Refresh, the sidebar kept as it was; a
+# status-only change reloads no refs. A real MainWindow, off screen.
+gitbolt_add_test(test_sidebar_refs ui/TestSidebarRefs.cpp)
+target_link_libraries(test_sidebar_refs PRIVATE gitbolt_ui)
+set_property(TEST test_sidebar_refs APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # Text a repository, a remote or git wrote, shown as written: message
 # boxes, prompts, labels and tooltips render none of its markup, and a
 # link in a message box's text opens nothing (its URLs go to a handler

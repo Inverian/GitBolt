@@ -86,6 +86,11 @@ need a newer version of macOS, Windows or Ubuntu.
 - macOS: a second GitBolt started for a folder (by Finder, say, or with
   `open -n`) waits for macOS to hand the folder over, at most 3 s,
   before passing it on to the GitBolt that is open.
+- **After an in-app update**, GitBolt opens the repository you had
+  open.
+- **Windows: installing over an installed GitBolt** no longer asks
+  whether to uninstall the old version first. The installer removes it
+  and installs the new one.
 
 ### Removed
 
@@ -138,8 +143,11 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Committing without a name and email** for git failed with git's
   advice to run `git config`. The Commit dialog and the status bar now
   say to set them in Tools › Settings › Git Config (GitBolt › Settings
-  on macOS), and the dialog's footer says so before you commit. Opened again, the dialog no longer
-  shows the last commit's error.
+  on macOS), and the dialog's footer says so before you commit, with
+  **Set name and email…**, which opens that page. Opened again, the
+  dialog no longer shows the last commit's error. It also no longer
+  shows the name and email of a `~/.gitconfig` deleted while GitBolt
+  runs.
 - **The Commit dialog in a new repository** said "(no branch)" until
   the first commit; it names the branch now.
 - **The status bar in a new repository** said "HEAD (detached)", and
@@ -159,8 +167,60 @@ need a newer version of macOS, Windows or Ubuntu.
   comes up as usual. Should it still show only on the taskbar, the
   update window says to click that button. An update there that failed after the installer ran said GitBolt
   wasn't changed; it now says GitBolt may be incomplete, and how to
-  repair it. On every system, "GitBolt was updated to …" stays in the
-  status bar until the next message, instead of 10 seconds.
+  repair it. So does an update on a Mac that could put back neither
+  the new GitBolt nor the old one. On every system, "GitBolt was
+  updated to …" now shows in a bar at the top of the window until you
+  close it, with What's New, which opens the release page.
+- **Windows: starting GitBolt while an update was installing** could
+  leave a mix of old and new files. A GitBolt started then now says
+  "GitBolt is being updated and starts again by itself in a moment."
+  and closes; the update starts GitBolt once it is done. macOS and
+  Linux do the same (macOS without the message).
+- **Windows: with GitBolt also open in another window** from the same
+  install, or in another user's session, Install and Restart quit
+  GitBolt, waited a minute and then failed. It now asks you to close
+  the other windows first, then Try Again.
+- **Windows: while Windows asks for permission to install an update**,
+  Cancel is greyed out, and closing the update window or quitting
+  GitBolt waits for your answer: Yes installs the update, No stops it.
+  Before, either could delete the installer Windows was about to run,
+  so a Yes closed GitBolt without updating it, or GitBolt could crash.
+- **A GitBolt that stayed open while an update went in** now says how
+  the update went when you next start GitBolt, which brings that
+  window forward. Before, it said so only after you quit it and opened
+  it again.
+- **Windows: an install that lost its Uninstall.exe** couldn't update
+  itself (GitBolt said it "wasn't installed from a GitBolt release
+  package"). Running the installer by hand stopped at "Uninstall
+  failed.", and a silent run, as updates use, waited on that message
+  forever. GitBolt now updates such an install, and the installer
+  repairs it. An update that ends without Uninstall.exe now says so.
+- **Windows: a file in use during an install or update** was skipped,
+  and the installer still said it had finished. The installer now
+  stops with an error instead, and GitBolt stays listed in Installed
+  apps, so the next update or a run of the installer repairs it.
+- **Windows: paths** in the window title, the status bar, the Clone
+  dialog, Recent Repositories, the Worktrees window, the Git command
+  log and messages now use backslashes, as Windows does. The Recent
+  list's shortened paths (Settings › Recent Repositories › Shortening
+  strategy) now work on Windows too; until now the full path was
+  always shown there.
+- **A repository owned by another user account** (git's "dubious
+  ownership", for example one an elevated program created, or one on a
+  network share) failed to open with libgit2's error text. GitBolt now
+  says whose it is, and gives the `git config --global --add
+  safe.directory` command that trusts it.
+- **Repository Statistics** said "Current branch: (detached)" in a new
+  repository before its first commit; it now names the branch.
+- **Branches, tags and remote branches made or deleted outside
+  GitBolt** (in a terminal, say) now show in the sidebar and in the
+  toolbar's branch list without Refresh. The sidebar no longer
+  collapses when it updates: open categories, the selected branch or
+  tag and the scroll position stay as they were. Categories hidden
+  from the View menu (tags, remote branches, stashes) no longer come
+  back when it updates or when the branch filter is cleared.
+- **A crash** that could happen when a repository was opened while
+  GitBolt's window was hidden.
 
 ## [0.9.12] — 2026-11-09
 

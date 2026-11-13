@@ -91,7 +91,9 @@ public:
     /// prepared, so launchHelper() may be called again. Any other
     /// refusal or failure: false with failed(). Both say how to install
     /// it by hand. GitBolt goes on running either way. Elsewhere
-    /// `window` is unused.
+    /// `window` is unused. While the prompt waits the event loop runs:
+    /// cancel() does nothing then, prepare() is refused, and another
+    /// launchHelper() returns false at once.
     bool launchHelper(qint64 pid, quintptr window = 0);
 
     /// prepare() is running.
@@ -113,6 +115,14 @@ public:
     /// folder, so removeOldDownloads leaves it; launchHelper() deletes
     /// an old one first.
     QString resultPath() const;
+    /// The repository the GitBolt started after the update opens (the
+    /// helper's HelperInputs::reopen): set before launchHelper(). Empty:
+    /// none.
+    void setReopenPath(const QString& path) { reopen_ = path; }
+    QString reopenPath() const { return reopen_; }
+    /// After launchHelper(): the pid of the helper that starts GitBolt
+    /// again (Windows: else the administrator part's), or 0 if unknown.
+    qint64 helperPid() const { return helperPid_; }
 
 signals:
     void prepared();
@@ -171,6 +181,8 @@ private:
     PackageInfo package_;
     Version current_;
     QString workDir_;
+    QString reopen_;          ///< setReopenPath()
+    qint64 helperPid_ = 0;    ///< helperPid()
 
     QString file_;            ///< what prepare() was given
     Version version_;
@@ -186,6 +198,7 @@ private:
     bool busy_ = false;
     bool ready_ = false;      ///< prepared() was emitted, launchHelper() not yet called
     bool launched_ = false;
+    bool launching_ = false;  ///< Windows: launchHelper() waits for UAC's prompt, the event loop running
 };
 
 /// How launchWindowsUpdate went.

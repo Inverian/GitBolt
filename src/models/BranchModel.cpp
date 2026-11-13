@@ -72,6 +72,8 @@ int BranchModel::columnCount(const QModelIndex& /*parent*/) const {
 QVariant BranchModel::data(const QModelIndex& index, int role) const {
     if (!index.isValid())
         return {};
+    if (role == ItemKeyRole)
+        return keyAt(index);
 
     // Root category nodes
     if (index.internalId() == kRootInternalId) {
@@ -409,6 +411,53 @@ QString BranchModel::checkoutRefAt(const QModelIndex& index) const {
 
 bool BranchModel::isCategoryIndex(const QModelIndex& index) const {
     return index.isValid() && index.internalId() == kRootInternalId;
+}
+
+QModelIndex BranchModel::indexForKey(const QString& key) const {
+    if (key.isEmpty())
+        return {};
+    const int categories = static_cast<int>(RootCategory::Count);
+    for (int cat = 0; cat < categories; ++cat) {
+        if (keyAt(index(cat, 0)) == key)
+            return index(cat, 0);
+    }
+    for (int cat = 0; cat < categories; ++cat) {
+        const QModelIndex category = index(cat, 0);
+        for (int row = 0, rows = rowCount(category); row < rows; ++row) {
+            const QModelIndex child = index(row, 0, category);
+            if (keyAt(child) == key)
+                return child;
+        }
+    }
+    return {};
+}
+
+QString BranchModel::keyAt(const QModelIndex& index) const {
+    if (!index.isValid())
+        return {};
+    if (index.internalId() == kRootInternalId)
+        return QStringLiteral("category:%1").arg(index.row());
+    const auto row = static_cast<size_t>(index.row());
+    switch (static_cast<RootCategory>(index.internalId())) {
+    case RootCategory::LocalBranches:
+        return row < localBranches_.size() ? QString::fromStdString(localBranches_[row].fullRefName)
+                                           : QString();
+    case RootCategory::RemoteBranches:
+        return row < remoteBranches_.size() ? QString::fromStdString(remoteBranches_[row].fullRefName)
+                                            : QString();
+    case RootCategory::Tags:
+        return row < tags_.size() ? QString::fromStdString(tags_[row].fullRefName) : QString();
+    case RootCategory::Submodules:
+        return row < submodules_.size()
+                   ? QStringLiteral("submodule:") + QString::fromStdString(submodules_[row].name)
+                   : QString();
+    case RootCategory::Stashes:
+        return row < stashes_.size()
+                   ? QStringLiteral("stash:") + QString::fromStdString(stashes_[row].id.toHex())
+                   : QString();
+    default:
+        return {};
+    }
 }
 
 int BranchModel::categoryChildCount(RootCategory cat) const {

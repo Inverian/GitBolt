@@ -18,6 +18,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFontDatabase>
@@ -25,6 +26,8 @@
 #include <QFontMetrics>
 #include <QLabel>
 #include <QLayout>
+#include <QLineEdit>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QScreen>
 #include <QScrollArea>
@@ -347,7 +350,8 @@ private slots:
     // The dialogs a first launch reaches (Clone, on the welcome screen;
     // Settings; Commit, once a repository is open) open inside the screen:
     // their default size (1000 x 800), or a saved one larger than the
-    // screen, is fitted as they show. QDialog only moves a dialog.
+    // screen, is fitted as they show. QDialog only moves a dialog. Clone
+    // sizes itself from its contents now, and ignores a saved size.
     void dialogsFitTheScreen_data() {
         QTest::addColumn<QString>("dialog");
         QTest::addColumn<bool>("saved");
@@ -457,7 +461,105 @@ private slots:
         QVERIFY2(avail.contains(window.frameGeometry()), qPrintable(str(window.frameGeometry())));
     }
 
+    // The Clone dialog is as large as its two fields need, rather than
+    // the big dialogs' 1000 x 800 (all of this screen), and grows to show
+    // what a clone says: its progress, then git's error over a few lines.
+    void cloneDialogFitsItsContents() {
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        gitbolt::dialogs::CloneDialog dialog(&window);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const QRect avail = window.screen()->availableGeometry();
+        QVERIFY2(dialog.height() <= dialog.sizeHint().height(),
+                 qPrintable(QStringLiteral("%1 tall, needs %2")
+                                .arg(dialog.height()).arg(dialog.sizeHint().height())));
+        QVERIFY2(avail.contains(dialog.frameGeometry()), qPrintable(str(dialog.frameGeometry())));
+        auto* url = dialog.findChild<QLineEdit*>(QStringLiteral("clone.url"));
+        auto* path = dialog.findChild<QLineEdit*>(QStringLiteral("clone.path"));
+        auto* status = dialog.findChild<QLabel*>(QStringLiteral("clone.status"));
+        auto* progress = dialog.findChild<QProgressBar*>();
+        QVERIFY(url && path && status && progress);
+        QVERIFY2(url->width() >= url->fontMetrics().averageCharWidth() * 50,
+                 qPrintable(QString::number(url->width())));
+        QVERIFY(allShown(&dialog));
+
+        // A clone git turns down: progress at once, then its error.
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        url->setText(scratch.filePath(QStringLiteral("no-such-repository-%1").arg(QString(40, u'x'))));
+        path->setText(QDir::toNativeSeparators(scratch.filePath(QStringLiteral("clone"))));
+        QPushButton* clone = nullptr;
+        for (QPushButton* button : dialog.findChildren<QPushButton*>()) {
+            if (button->text() == QStringLiteral("Clone"))
+                clone = button;
+        }
+        QVERIFY(clone);
+        clone->click();
+        QVERIFY(progress->isVisible() && status->isVisible());
+        QTRY_VERIFY(allShown(&dialog));
+        QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(), 30000);
+        QVERIFY2(status->text().startsWith(QStringLiteral("Clone failed: ")),
+                 qPrintable(status->text()));
+        QTRY_VERIFY(allShown(&dialog));
+        QVERIFY2(avail.contains(dialog.frameGeometry()), qPrintable(str(dialog.frameGeometry())));
+    }
+
+    // A message taller than the screen ("Connecting to <url>...", then
+    // git's error naming it) is cut short instead: the dialog, its
+    // buttons too, stays on the screen.
+    void cloneDialogStaysOnTheScreen() {
+        MainWindow window;
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        gitbolt::dialogs::CloneDialog dialog(&window);
+        dialog.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+        const QRect avail = window.screen()->availableGeometry();
+        auto* url = dialog.findChild<QLineEdit*>(QStringLiteral("clone.url"));
+        auto* path = dialog.findChild<QLineEdit*>(QStringLiteral("clone.path"));
+        auto* progress = dialog.findChild<QProgressBar*>();
+        auto* buttons = dialog.findChild<QDialogButtonBox*>();
+        QVERIFY(url && path && progress && buttons);
+
+        QTemporaryDir scratch;
+        QVERIFY(scratch.isValid());
+        url->setText(QStringLiteral("no such repository ").repeated(200).trimmed());
+        path->setText(QDir::toNativeSeparators(scratch.filePath(QStringLiteral("clone"))));
+        buttons->button(QDialogButtonBox::Ok)->click();
+        QVERIFY(progress->isVisible());
+        QVERIFY2(avail.contains(dialog.frameGeometry()), qPrintable(str(dialog.frameGeometry())));
+        QVERIFY2(dialog.rect().contains(rectIn(buttons, &dialog)), qPrintable(str(rectIn(buttons, &dialog))));
+
+        QTRY_VERIFY_WITH_TIMEOUT(!progress->isVisible(), 30000);
+        QVERIFY2(avail.contains(dialog.frameGeometry()), qPrintable(str(dialog.frameGeometry())));
+        QTRY_VERIFY2(dialog.rect().contains(rectIn(buttons, &dialog)),
+                     qPrintable(str(rectIn(buttons, &dialog))));
+    }
+
 private:
+    // Every visible widget of `dialog` inside it, at its full height: a
+    // wrapped label as tall as its text needs.
+    static bool allShown(const QWidget* dialog) {
+        for (const QWidget* child : dialog->findChildren<QWidget*>()) {
+            if (!child->isVisibleTo(dialog) || child->isWindow())
+                continue;
+            if (!dialog->rect().contains(rectIn(child, dialog))) {
+                qWarning("%s at %s is outside %s", child->metaObject()->className(),
+                         qPrintable(str(rectIn(child, dialog))), qPrintable(str(dialog->rect())));
+                return false;
+            }
+            const auto* label = qobject_cast<const QLabel*>(child);
+            if (label && label->wordWrap() && label->height() < label->heightForWidth(label->width())) {
+                qWarning("%s is %d tall, needs %d", qPrintable(label->text()), label->height(),
+                         label->heightForWidth(label->width()));
+                return false;
+            }
+        }
+        return true;
+    }
+
     // The cards equally tall, and each one's labels (icon, title,
     // description) where the first card's are.
     static bool cardsLineUp(const QWidget* view) {

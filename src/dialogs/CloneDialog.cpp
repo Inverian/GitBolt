@@ -1,5 +1,5 @@
 #include "dialogs/CloneDialog.h"
-#include "conf/SettingsService.h"
+#include "conf/WindowPlacement.h"
 #include "git/GitProcess.h"
 
 #include <QApplication>
@@ -16,6 +16,7 @@
 #include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QShortcut>
 #include <QStandardPaths>
 #include <QVBoxLayout>
 #include <QtConcurrent>
@@ -26,10 +27,6 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
 {
     setWindowTitle(tr("Clone Repository"));
     setModal(true);
-    // Global dialog default + per-dialog restore — see
-    // Settings → UI Design → Default Dialog Size. Helper sets
-    // initial size and wires up save-on-close.
-    conf::SettingsService::applyConfiguredSize(this, "clone");
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 16, 16, 12);
@@ -50,7 +47,7 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
     pathRow->setSpacing(6);
     pathEdit_ = new QLineEdit(this);
     pathEdit_->setObjectName(QStringLiteral("clone.path"));
-    pathEdit_->setPlaceholderText(defaultParentDir());
+    pathEdit_->setPlaceholderText(QDir::toNativeSeparators(defaultParentDir()));
     pathRow->addWidget(pathEdit_);
     browseBtn_ = new QPushButton(tr("Browse..."), this);
     pathRow->addWidget(browseBtn_);
@@ -98,6 +95,16 @@ CloneDialog::CloneDialog(QWidget* parent) : QDialog(parent)
             this, &CloneDialog::forgetKeptClone);
     connect(pathEdit_, &QLineEdit::textChanged,
             this, &CloneDialog::forgetKeptClone);
+
+    // As large as its two fields need, wide enough for a long path: not
+    // the big dialogs' default size (1000 x 800), which left it mostly
+    // empty. It grows when the status line needs more (growToContents).
+    const int wide = fontMetrics().averageCharWidth() * 72;
+    resize(sizeHint().expandedTo(QSize(wide, 0)));
+    conf::fitOnScreenWhenShown(this);
+    // Cmd+W / Ctrl+W, as the other dialogs have it.
+    auto* closeShortcut = new QShortcut(QKeySequence::Close, this);
+    connect(closeShortcut, &QShortcut::activated, this, &QDialog::close);
 }
 
 CloneDialog::~CloneDialog()
@@ -125,14 +132,13 @@ void CloneDialog::onUrlChanged(const QString& url)
         pathEdit_->setText(QString{});
         return;
     }
-    pathEdit_->setText(QDir(defaultParentDir()).filePath(name));
+    pathEdit_->setText(QDir::toNativeSeparators(QDir(defaultParentDir()).filePath(name)));
 }
 
 void CloneDialog::onBrowse()
 {
-    const QString start = pathEdit_->text().isEmpty()
-        ? defaultParentDir()
-        : QFileInfo(pathEdit_->text()).absolutePath();
+    const QString typed = destination();
+    const QString start = typed.isEmpty() ? defaultParentDir() : QFileInfo(typed).absolutePath();
     const QString dir = QFileDialog::getExistingDirectory(
         this, tr("Select destination parent directory"), start);
     if (dir.isEmpty())
@@ -142,7 +148,7 @@ void CloneDialog::onBrowse()
     // name (from the current URL) so the user gets a sensible
     // <parent>/<repo> destination by default.
     const QString name = repoNameFromUrl(urlEdit_->text());
-    pathEdit_->setText(name.isEmpty() ? dir : QDir(dir).filePath(name));
+    pathEdit_->setText(QDir::toNativeSeparators(name.isEmpty() ? dir : QDir(dir).filePath(name)));
     pathEditedByUser_ = true;
 }
 
@@ -170,7 +176,7 @@ void CloneDialog::onCloneClicked()
     }
 
     const QString url  = urlEdit_->text().trimmed();
-    const QString path = pathEdit_->text().trimmed();
+    const QString path = destination();
 
     if (url.isEmpty()) {
         setBusy(false, tr("Please enter a repository URL."));
@@ -189,13 +195,15 @@ void CloneDialog::onCloneClicked()
         && (!target.isDir()
             || !QDir(path).isEmpty(QDir::AllEntries | QDir::NoDotAndDotDot
                                    | QDir::Hidden | QDir::System))) {
-        setBusy(false, tr("Destination already exists and is not empty: %1").arg(path));
+        setBusy(false, tr("Destination already exists and is not empty: %1")
+                           .arg(QDir::toNativeSeparators(path)));
         return;
     }
 
     setBusy(true, tr("Connecting to %1...").arg(url));
     progressBar_->setRange(0, 0);   // indeterminate until we hear back
     progressBar_->show();
+    growToContents();
     progressThrottle_.restart();
     lastPhase_ = -1;
 
@@ -449,6 +457,28 @@ void CloneDialog::setBusy(bool busy, const QString& message)
     statusBusy_ = busy;
     applyStatusColor();
     statusLabel_->show();
+    growToContents();
+}
+
+// Taller when what is shown needs it (a long error wraps over several
+// lines), never shorter, nor wider: the user may have sized it. Kept on
+// the screen, its buttons too, if a very long message is cut short.
+void CloneDialog::growToContents()
+{
+    if (QLayout* top = layout())
+        top->activate();
+    const int needed = hasHeightForWidth() ? heightForWidth(width()) : sizeHint().height();
+    if (height() >= needed)
+        return;
+    resize(width(), needed);
+    if (isVisible())
+        conf::fitOnScreen(this);
+}
+
+QString CloneDialog::destination() const
+{
+    // Shown with the system's separators; Qt and git take '/' everywhere.
+    return QDir::fromNativeSeparators(pathEdit_->text().trimmed());
 }
 
 void CloneDialog::applyStatusColor()

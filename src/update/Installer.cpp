@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QOperatingSystemVersion>
+#include <QPointer>
 #include <QProcess>
 #include <QRandomGenerator>
 #include <QRegularExpression>
@@ -221,14 +222,14 @@ void Installer::finishLater(const std::function<void()>& emitter) {
 }
 
 void Installer::prepare(const QString& downloadedFile, const Version& version) {
-    if (busy_ || launched_) {
+    if (busy_ || launched_ || launching_) {
         const quint64 run = run_;
         finishLater([this, run] {
             if (run != run_)
                 return;
             failure_ = Failure::Busy;
-            emit failed(launched_ ? tr("The update is already being installed.")
-                                  : tr("GitBolt is already getting an update ready."));
+            emit failed(launched_ || launching_ ? tr("The update is already being installed.")
+                                                : tr("GitBolt is already getting an update ready."));
         });
         return;
     }
@@ -336,8 +337,9 @@ void Installer::fail(Failure failure, const QString& message) {
 }
 
 void Installer::cancel() {
-    // Once launched, the staged copy is the helper's.
-    if (launched_)
+    // Once launched, or while Windows' prompt asks whether to run it,
+    // the staged copy is the helper's.
+    if (launched_ || launching_)
         return;
     ++run_;
     // This waits only if the background cleanup can't be started.
@@ -354,7 +356,7 @@ void Installer::cancel() {
 }
 
 void Installer::cancelNow() {
-    if (launched_)
+    if (launched_ || launching_)
         return;
     ++run_;
     if (QProcess* process = std::exchange(process_, nullptr)) {
@@ -768,6 +770,7 @@ QString Installer::helperScript(qint64 pid) const {
     in.staged = staged_;
     in.newVersion = version_.toString();
     in.resultFile = resultPath();
+    in.reopen = reopen_;
     switch (package_.kind) {
     case PackageKind::MacBundle:
         in.oldVersion = current_.toString();
@@ -798,6 +801,9 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
         emit failed(message);
         return false;
     };
+    // Called again while Windows' prompt waits: the first call says how it went.
+    if (launching_)
+        return false;
     if (!ready_ || launched_ || pid <= 0)
         return failWith(Failure::NotReady, tr("There's no update ready to install."));
     if (package_.kind == PackageKind::Deb && QStandardPaths::findExecutable(QStringLiteral("pkexec")).isEmpty())
@@ -817,13 +823,21 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     // Both parts start now, while GitBolt is still in front for UAC.
     HelperInputs in;
     in.pid = pid;
+    in.reopen = reopen_;
     in.waitSeconds = kHelperWaitSeconds;
     in.logFile = logPath();
     in.target = package_.target;
     in.staged = staged_;
     in.newVersion = version_.toString();
     in.resultFile = resultPath();
+    // ShellExecuteExW runs the event loop until the prompt is answered.
+    // Anything that deleted this meanwhile hears nothing more from it.
+    launching_ = true;
+    const QPointer<Installer> alive(this);
     const WindowsLaunch launch = launchWindowsUpdate(in, window, QProcessEnvironment::systemEnvironment());
+    if (!alive)
+        return launch.outcome == WindowsLaunch::Outcome::Started;
+    launching_ = false;
     // The installer asks for permission itself. Where Windows won't
     // elevate (a standard user under "deny elevation requests"), only an
     // administrator can install it.
@@ -867,9 +881,12 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
     helper.setProgram(QStringLiteral("/bin/sh"));
     helper.setArguments({helperScriptPath()});
     detachFromGitBolt(helper);
-    if (!helper.startDetached())
+    if (!helper.startDetached(&helperPid_))
         return failWith(Failure::HelperStartFailed,
                         tr("Couldn't start the installer helper: %1").arg(helper.errorString()));
+#endif
+#if defined(Q_OS_WIN)
+    helperPid_ = launch.helperPid > 0 ? launch.helperPid : launch.elevatedPid;
 #endif
     launched_ = true;
     ready_ = false;

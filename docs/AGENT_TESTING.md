@@ -185,10 +185,16 @@ the dialog is up: `checking`, `up-to-date`, `available`,
 (the notice bar's text while it shows), and
 `pid` and `appPath` (which process answers, from where: an install test
 tells the relaunched copy from the one it replaced). After an update,
-`statusMessage` is "GitBolt was updated to <v>.". The dialog's buttons
+`updateNotice` is "GitBolt was updated to <v>." (a copy that was
+running all along, told by a handed-over launch: "GitBolt <v> was
+installed. Quit GitBolt and open it again to use it."). While Windows'
+permission prompt waits, `updateDialog` stays `preparing`,
+`updateDialogText` includes "Waiting for Windows' permission prompt…",
+and `updateDialog.cancel` is disabled. The dialog's buttons
 are `updateDialog.install`, `.skip`, `.later`, `.viewOnGitHub`,
 `.openReleasePage`, `.close`, `.cancel`, `.retry` and `.quit`; the bar's
-`updateNotice.view` and `updateNotice.dismiss`; the Settings switch
+`updateNotice.view`, `updateNotice.whatsNew` (after an update) and
+`updateNotice.dismiss`; the Settings switch
 `settings.check-for-updates`.
 
 `fire-timer` emits a running `QTimer`'s timeout (found by
@@ -338,7 +344,7 @@ build reads after the update:
   `click updateDialog.install`, `dump-state` and `quit`, and the
   widget names they use;
 - `dump-state`'s keys `updates`, `updateDialog`, `updateDialogText`,
-  `updateDir`, `pid`, `appPath` and `statusMessage`;
+  `updateDir`, `pid`, `appPath` and `updateNotice`;
 - the `install-result` and `pending-install` lines, and `install.log`
   beside them.
 

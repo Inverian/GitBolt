@@ -46,6 +46,7 @@ enum class Failure {
     InstallerNotStarted,
     InstallerExit,
     WrongVersion,
+    UninstallerMissing,  ///< Windows: installed, but without Uninstall.exe
     ElevatedError,
     ElevatedTimeout,
     ElevatedNoResult,
@@ -91,6 +92,7 @@ constexpr const char* failureName(Failure failure) {
     case Failure::InstallerNotStarted: return "installer_not_started";
     case Failure::InstallerExit: return "installer_exit";
     case Failure::WrongVersion: return "wrong_version";
+    case Failure::UninstallerMissing: return "uninstaller_missing";
     case Failure::ElevatedError: return "elevated_error";
     case Failure::ElevatedTimeout: return "elevated_timeout";
     case Failure::ElevatedNoResult: return "elevated_no_result";

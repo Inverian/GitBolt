@@ -414,14 +414,14 @@ void RepositoryView::openFileExternally(const QString& path)
     if (workdir.isEmpty()) {
         widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("This repository is bare: it has no working tree to open "
-               "%1 from.").arg(path));
+               "%1 from.").arg(QDir::toNativeSeparators(path)));
         return;
     }
     const QString full = QDir(workdir).filePath(path);
     if (!QFileInfo::exists(full)) {
         widgets::PlainMessageBox::information(this, tr("Open Externally"),
             tr("%1 does not exist in the working tree (it may only "
-               "exist at an older commit).").arg(path));
+               "exist at an older commit).").arg(QDir::toNativeSeparators(path)));
         return;
     }
 

@@ -16,11 +16,13 @@ UpdateNoticeBar::UpdateNoticeBar(QWidget* parent)
     : QFrame(parent)
     , message_(new QLabel(this))
     , viewButton_(new QPushButton(tr("View"), this))
+    , whatsNewButton_(new QPushButton(tr("What's New"), this))
     , dismissButton_(new QToolButton(this))
 {
     setObjectName(QStringLiteral("updateNotice"));
     message_->setObjectName(QStringLiteral("updateNotice.message"));
     viewButton_->setObjectName(QStringLiteral("updateNotice.view"));
+    whatsNewButton_->setObjectName(QStringLiteral("updateNotice.whatsNew"));
     dismissButton_->setObjectName(QStringLiteral("updateNotice.dismiss"));
     setAutoFillBackground(true);
 
@@ -31,6 +33,9 @@ UpdateNoticeBar::UpdateNoticeBar(QWidget* parent)
     row->addWidget(message_, 1);
     viewButton_->setAutoDefault(false);
     row->addWidget(viewButton_);
+    whatsNewButton_->setAutoDefault(false);
+    whatsNewButton_->hide();
+    row->addWidget(whatsNewButton_);
     // A flat ×, as notification bars have it: Dismiss in words is
     // GitNoticeBar's, whose note may matter more.
     dismissButton_->setText(QStringLiteral("×"));
@@ -42,6 +47,10 @@ UpdateNoticeBar::UpdateNoticeBar(QWidget* parent)
     connect(viewButton_, &QPushButton::clicked, this, [this] {
         hide();
         emit viewRequested();
+    });
+    connect(whatsNewButton_, &QPushButton::clicked, this, [this] {
+        hide();
+        emit whatsNewRequested(updated_);
     });
     connect(dismissButton_, &QToolButton::clicked, this, [this] {
         hide();
@@ -56,6 +65,19 @@ void UpdateNoticeBar::showVersion(const QString& version)
 {
     version_ = version;
     message_->setText(tr("GitBolt %1 is available.").arg(version));
+    whatsNewButton_->hide();
+    viewButton_->show();
+    show();
+}
+
+void UpdateNoticeBar::showUpdated(const QString& version, bool restart)
+{
+    version_.clear();
+    updated_ = version;
+    message_->setText(restart ? tr("GitBolt %1 was installed. Quit GitBolt and open it again to use it.").arg(version)
+                              : tr("GitBolt was updated to %1.").arg(version));
+    viewButton_->hide();
+    whatsNewButton_->show();
     show();
 }
 

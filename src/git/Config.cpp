@@ -119,16 +119,46 @@ Result<void> Config::remove(const std::string& key, ConfigLevel level) {
     return Result<void>::success();
 }
 
+namespace {
+std::optional<std::string> stringOf(git_config* cfg, const char* key) {
+    git_buf buf = GIT_BUF_INIT;
+    std::optional<std::string> value;
+    if (git_config_get_string_buf(&buf, cfg, key) == 0)
+        value = std::string(buf.ptr, buf.size);
+    git_buf_dispose(&buf);
+    return value;
+}
+} // namespace
+
+Config::Identity Config::identity() const {
+    // libgit2 rereads a config file that changed, but keeps the values
+    // of one that was deleted (git_config_refresh too). The repository
+    // opened again loads every level anew, includes and includeIf too.
+    const char* where = git_repository_workdir(repo_);
+    if (!where)
+        where = git_repository_path(repo_);
+    git_repository* fresh = nullptr;
+    git_config* cfg = nullptr;
+    if (!where || git_repository_open_ext(&fresh, where, GIT_REPOSITORY_OPEN_NO_SEARCH, nullptr) < 0
+        || git_repository_config(&cfg, fresh) < 0) {
+        // Gone meanwhile: what the repository's own config says.
+        git_repository_free(fresh);
+        fresh = nullptr;
+        if (git_repository_config(&cfg, repo_) < 0)
+            return {};
+    }
+    Identity id{stringOf(cfg, "user.name"), stringOf(cfg, "user.email")};
+    git_config_free(cfg);
+    git_repository_free(fresh);
+    return id;
+}
+
 std::optional<std::string> Config::userName() const {
-    auto r = getString("user.name");
-    if (r.ok()) return r.value();
-    return std::nullopt;
+    return identity().name;
 }
 
 std::optional<std::string> Config::userEmail() const {
-    auto r = getString("user.email");
-    if (r.ok()) return r.value();
-    return std::nullopt;
+    return identity().email;
 }
 
 } // namespace gitbolt::git

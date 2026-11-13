@@ -4,6 +4,7 @@
 #include "ui/UpdateSetup.h"
 #include "update/Failure.h"
 #include "update/Installer.h"
+#include "update/Processes.h"
 #include "update/Release.h"
 #include "update/Version.h"
 
@@ -58,9 +59,15 @@ namespace gitbolt::ui {
 /// <version>/ (a test session: its private gitbolt-updates-XXXXXX in
 /// the temporary folder, UpdateSetup.h); the Installer checks and stages
 /// it; its helper is started with this process's pid, and GitBolt
-/// quits, which the helper waits for. (Windows asks UAC first, over the
+/// quits, which the helper waits for, and starts GitBolt again with the
+/// repository the window showed. (Windows asks UAC first, over the
 /// dialog: a No leaves GitBolt running, the dialog Declined, and the
-/// update ready for Try Again.) Cancel, closing the dialog, a failure,
+/// update ready for Try Again. While the prompt waits, Cancel is greyed
+/// out, and closing the dialog or quitting waits for the answer: a Yes
+/// installs, a No then stops. Before the download and again before UAC,
+/// another GitBolt running from the install folder, whose files the
+/// installer couldn't replace, stops it: the dialog says to close it and
+/// Try Again.) Cancel, closing the dialog, a failure,
 /// or quitting first stops wherever it is and deletes what was
 /// downloaded: nothing installs later. Once the helper runs there is nothing left
 /// to cancel: the dialog says GitBolt restarts, and if GitBolt is still
@@ -78,9 +85,10 @@ namespace gitbolt::ui {
 /// After an install: every helper leaves <downloads>/install-result,
 /// one line "<status> <version> <reason>" (status ok, declined, failed
 /// or gave-up), before it relaunches GitBolt or gives up. start() reads
-/// it once and deletes it: ok says so in the status bar (statusMessage);
-/// anything else, for a version newer than this one, opens the dialog
-/// on why, the end of install.log, and how to install by hand.
+/// it once and deletes it, as checkInstallResult() does later: ok says
+/// so in the notice bar, with What's New, until dismissed; anything
+/// else, for a version newer than this one, opens the dialog on why, the
+/// end of install.log, and how to install by hand or repair GitBolt.
 ///
 /// Usage statistics, fixed codes only: updateResult once per attempt (at
 /// once, or at the next start() for one the helper finishes), checkFailed
@@ -103,7 +111,8 @@ public:
     /// keeps them).
     static constexpr char kInstallResultFile[] = "install-result";
     static constexpr char kInstallLogFile[] = "install.log";
-    /// Also there, left by the launch: "<from> <to> <unix time>". With no
+    /// Also there, left by the launch: "<from> <to> <unix time> <helper
+    /// pid>" (the pid 0 if unknown, and missing before 1.0). With no
     /// result once kResultPatienceSeconds are over, the attempt is no_result.
     static constexpr char kInstallMarkerFile[] = "pending-install";
     /// How long a marker without a result may be a helper still at work
@@ -120,6 +129,8 @@ public:
         std::function<void()> quit;
         int quitGraceMs = kQuitGraceMs;
         int helperDeadlineMs = kHelperDeadlineMs;
+        /// The GitBolts running now; null: update::runningGitBolts().
+        std::function<QList<update::RunningProgram>()> programs = {};
     };
 
     /// `setup` is on(). `settings` and `bar` are the window's, and live
@@ -137,6 +148,18 @@ public:
     /// Installer's declined() or failed() and return false, as a No does.
     using LaunchHook = std::function<bool(update::Installer& installer, qint64 pid, QWidget* owner)>;
     void setLaunchHook(LaunchHook hook);
+    /// The repository the window shows, which the GitBolt the update
+    /// starts opens; empty: none.
+    void setReopenPath(std::function<QString()> path);
+
+    /// main(), before this launch runs as the GitBolt: an update is going
+    /// in now. The marker in `downloadDir` is younger than the patience,
+    /// names a helper that runs and isn't this process (a helper that
+    /// execs GitBolt becomes it), and no result is there yet.
+    /// `startTime` (null: update::processStartTime) must put the helper's
+    /// start before the marker's: not a process that took its pid since.
+    static bool updateInstalling(const QString& downloadDir,
+                                 const std::function<qint64(qint64)>& startTime = {});
 
     /// Once the window is up: says how the last install went (the
     /// helper's install-result), deletes the installers of this version
@@ -146,13 +169,15 @@ public:
     /// Help › Check for Updates: shows the dialog and asks GitHub. While
     /// an install runs, shows the dialog as it is.
     void checkNow();
+    /// A launch was handed over to this GitBolt: says how an update that
+    /// went in while it ran ended, as start() would have. Not while this
+    /// copy's own install is under way.
+    void checkInstallResult();
 
     /// The dialog, once it has been shown; null before.
     dialogs::UpdateDialog* dialog() const;
 
 signals:
-    /// A line for the window's status bar: "GitBolt was updated to <v>."
-    void statusMessage(const QString& text);
     /// How an install attempt ended (fixed codes only).
     void updateResult(const gitbolt::telemetry::UpdateResult& result);
     /// A check GitHub answered with an error, a rate limit or something
@@ -166,8 +191,8 @@ private:
     void onUpToDate(const update::Version& latest, bool manual);
     void onAvailable(const update::Release& release, bool manual);
     void onCheckFailed(const QString& message, bool manual);
-    /// The notice bar for `release`, unless (automatic) it was skipped
-    /// or its bar dismissed.
+    /// The notice bar for `release`, unless it went in meanwhile, or
+    /// (automatic) it was skipped or its bar dismissed.
     void offerInBar(const update::Release& release, bool manual);
     /// The dialog's Available or NotInstallable state for `release`,
     /// which Install and Skip then act on. Not while installing.
@@ -193,9 +218,18 @@ private:
     /// system, Installer::needsNewerSystem), or empty.
     QString refusedForThisSystem(const update::Version& version) const;
     void failInstall(const QString& message);
-    /// start(): reads and deletes the helper's install-result, and the
-    /// pending-install marker with it.
-    void reportEarlierInstall();
+    /// Windows: why another GitBolt running from the install folder keeps
+    /// the installer from replacing its files, or empty.
+    QString othersInTheWay() const;
+    /// An install othersInTheWay() stopped at `stage`: reported, and the
+    /// dialog says `why`.
+    void blockInstall(const char* stage, const QString& why);
+    /// The window's repository, if it is an absolute path to a folder.
+    QString reopenPath() const;
+    /// start(), checkInstallResult(): reads and deletes the helper's
+    /// install-result, and the pending-install marker with it. `running`:
+    /// this process ran while the update went in.
+    void reportEarlierInstall(bool running = false);
     /// Logs and emits updateResult; `from` and `to` as x.y.z or empty.
     void reportResult(const char* status, const char* stage, update::Failure failure, const QString& from,
                       const QString& to);
@@ -222,6 +256,7 @@ private:
     QPointer<dialogs::UpdateDialog> dialog_;
     RestartHooks hooks_;
     LaunchHook launchHook_;
+    std::function<QString()> reopenPath_;
 
     /// The newest release the feed offered this session (the bar's).
     std::optional<update::Release> release_;
@@ -240,10 +275,18 @@ private:
     bool dialogWaits_ = false;
     /// What Try Again does: check again, or install again.
     bool retryChecks_ = false;
-    /// Windows said no to the prepared update: Try Again asks again.
-    bool declined_ = false;
+    /// Try Again launches the prepared update again: Windows said no, or
+    /// another GitBolt was in the way.
+    bool retryLaunch_ = false;
+    /// The launch waits for Windows' prompt, the event loop running; and
+    /// a stopInstall() meanwhile, held until it is answered.
+    bool launching_ = false;
+    bool stopAfterLaunch_ = false;
     /// The bar was dismissed for this version (and older) this session.
     std::optional<update::Version> dismissed_;
+    /// Installed while this older process ran (the bar says to start
+    /// GitBolt again): the bar offers neither it nor an older one.
+    std::optional<update::Version> installedMeanwhile_;
     /// The helper runs: GitBolt is quitting, and it owns the download.
     bool launched_ = false;
     /// The quit went through (aboutToQuit): GitBolt is on its way out.
