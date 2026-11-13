@@ -50,7 +50,6 @@
 #include "services/GitService.h"
 #include "ui/DashboardView.h"
 #include "ui/MainWindow.h"
-#include "widgets/BoltLogoWidget.h"
 
 using gitbolt::conf::SettingsService;
 using gitbolt::ui::DashboardView;
@@ -203,8 +202,8 @@ private slots:
     // At every width, each card whole on the page (it scrolls sideways
     // below its least width), its labels whole, the cards' icons, titles
     // and descriptions in line across the row although titles wrap at
-    // some widths, and the corner bolt clear of the Contribute row's
-    // links (with large text the row is the page's widest).
+    // some widths, and the Contribute row's links on the page (with
+    // large text the row is the page's widest).
     void dashboardIsWhole_data() {
         QTest::addColumn<int>("width");
         for (int width : {640, 700, 730, 760, 800, 900, 1000, 1400})
@@ -224,19 +223,12 @@ private slots:
         QVERIFY(cardsShown(&view, page));
         QVERIFY(cardsLineUp(&view));
 
-        const auto* bolt = page->findChild<gitbolt::widgets::BoltLogoWidget*>();
-        QVERIFY(bolt && bolt->isVisible());
-        QVERIFY2(page->rect().contains(bolt->geometry()), qPrintable(str(bolt->geometry())));
         for (const QAbstractButton* button :
              page->findChildren<QAbstractButton*>(Qt::FindDirectChildrenOnly)) {
             if (!button->isVisible())
                 continue;
             QVERIFY2(page->rect().contains(button->geometry()),
                      qPrintable(button->text() + QLatin1Char(' ') + str(button->geometry())));
-            QVERIFY2(!bolt->geometry().intersects(button->geometry()),
-                     qPrintable(QStringLiteral("the bolt %1 is over \"%2\" %3")
-                                    .arg(str(bolt->geometry()), button->text(),
-                                         str(button->geometry()))));
         }
     }
 

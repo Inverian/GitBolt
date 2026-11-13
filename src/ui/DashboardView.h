@@ -35,7 +35,6 @@ protected:
     /// resizeEvent fires BEFORE the nested tree widget gets laid out,
     /// so its viewport() width is stale at that moment; watching the
     /// tree directly catches the moment it actually gets its real size.
-    /// And page_'s, for placeCornerBolt().
     bool eventFilter(QObject* watched, QEvent* event) override;
     /// A theme switch: the cards' descriptions take the theme's colour
     /// (applyCardColors()).
@@ -43,10 +42,6 @@ protected:
 
 private:
     void setupUi();
-    /// The decorative bolt logo isn't in the page's layout — it's a
-    /// floating child kept in the page's bottom-right corner, at every
-    /// size of the page.
-    void placeCornerBolt();
     /// Apply the percentage split to the tree's columns. Pulled out of
     /// eventFilter() so it can also be invoked after refresh when the
     /// item set changes (scrollbar visibility may shift the viewport).
@@ -88,12 +83,6 @@ private:
     QTreeWidget* recentList_ = nullptr;
     QPushButton* clearRecentBtn_ = nullptr;
     QLabel* noRecentLabel_ = nullptr;
-
-    // Floating decorative bolt — parented to page_ (not to any
-    // layout) so it sits "on top of" the dashboard at an absolute
-    // position that placeCornerBolt() keeps pinned to the
-    // bottom-right corner regardless of window size.
-    QWidget* cornerBolt_ = nullptr;
 };
 
 } // namespace gitbolt::ui
