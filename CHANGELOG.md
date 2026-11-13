@@ -135,6 +135,16 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Windows: Explorer's Open in GitBolt** now quotes GitBolt's path in
   the registry, so a program at `C:\Program.exe` can't run in its
   place.
+- **Committing without a name and email** for git failed with git's
+  advice to run `git config`. The Commit dialog now says to set them in
+  Tools › Settings › Git Config (GitBolt › Settings on macOS), and its
+  footer says so before you commit. Opened again, the dialog no longer
+  shows the last commit's error.
+- **The Commit dialog in a new repository** said "(no branch)" until
+  the first commit; it names the branch now.
+- **Tools › Settings › Git Config** showed no Credential Helper when
+  git's is set in its system settings, as Git for Windows does; it now
+  shows that one, marked "(system)".
 
 ## [0.9.12] — 2026-11-09
 

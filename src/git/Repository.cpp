@@ -411,6 +411,21 @@ Result<std::string> Repository::headBranchName() const {
     return result;
 }
 
+std::string Repository::unbornBranchName() const {
+    if (!isHeadUnborn()) return {};
+    git_reference* head = nullptr;
+    if (git_reference_lookup(&head, repo_, "HEAD") < 0) return {};
+    std::string name;
+    if (git_reference_type(head) == GIT_REFERENCE_SYMBOLIC) {
+        constexpr std::string_view heads = "refs/heads/";
+        const std::string_view target = git_reference_symbolic_target(head);
+        if (target.size() > heads.size() && target.substr(0, heads.size()) == heads)
+            name = target.substr(heads.size());
+    }
+    git_reference_free(head);
+    return name;
+}
+
 Result<ObjectId> Repository::resolveRef(const std::string& spec) const {
     // git_revparse_single handles every flavor of revision spec we
     // care about: full / short SHAs, branch names, tag names, HEAD,

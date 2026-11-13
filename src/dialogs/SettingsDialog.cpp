@@ -43,13 +43,13 @@ namespace gitbolt::dialogs {
 
 namespace {
 
-// `git config --global <args>` as GitProcess runs every git: by its full
-// path, without git's repository variables (an exported GIT_CONFIG makes
-// git refuse), and in the home folder so no repository's config comes in.
-// Its output, trimmed; empty when it failed.
-QString globalGitConfig(const QStringList& args)
+// `git config --global <args>` (or another `scope`) as GitProcess runs
+// every git: by its full path, without git's repository variables (an
+// exported GIT_CONFIG makes git refuse), and in the home folder so no
+// repository's config comes in. Its output, trimmed; empty when it failed.
+QString globalGitConfig(const QStringList& args, const char* scope = "--global")
 {
-    std::vector<std::string> argv{"config", "--global"};
+    std::vector<std::string> argv{"config", scope};
     for (const QString& arg : args)
         argv.push_back(arg.toStdString());
     const auto result = git::GitProcess(QDir::homePath().toStdString()).run(argv, 3000);
@@ -792,6 +792,7 @@ QWidget* SettingsDialog::createGitConfigPage()
     auto* credForm = new QFormLayout(credGroup);
     credForm->setFieldGrowthPolicy(QFormLayout::FieldsStayAtSizeHint);
     credentialHelperEdit_ = new QLineEdit(credGroup);
+    credentialHelperEdit_->setObjectName(QStringLiteral("settings.git-credential-helper"));
     credentialHelperEdit_->setReadOnly(true);
     credentialHelperEdit_->setPlaceholderText(tr("(not configured)"));
     sizeEdit(credentialHelperEdit_);
@@ -1338,6 +1339,13 @@ void SettingsDialog::loadGitConfig()
         id.name  = globalGitConfig({QStringLiteral("user.name")});
         id.email = globalGitConfig({QStringLiteral("user.email")});
         id.credentialHelper = globalGitConfig({QStringLiteral("credential.helper")});
+        // Else the system's, which git uses then: Git for Windows sets
+        // its helper (manager) there.
+        if (id.credentialHelper.isEmpty()) {
+            const QString system = globalGitConfig({QStringLiteral("credential.helper")}, "--system");
+            if (!system.isEmpty())
+                id.credentialHelper = tr("%1 (system)").arg(system);
+        }
         return id;
     }));
 }

@@ -44,6 +44,23 @@ constexpr const char* kGeometryKey      = "commitDialogGeom/v2";
 constexpr const char* kMainSplitterKey  = "commitMainSplitter/v2";
 constexpr const char* kLeftSplitterKey  = "commitLeftSplitter/v2";
 constexpr const char* kRightSplitterKey = "commitRightSplitter/v2";
+
+// Where GitBolt sets git's user.name and user.email.
+QString identitySettings()
+{
+#ifdef Q_OS_MACOS
+    return CommitDialog::tr("GitBolt › Settings › Git Config");
+#else
+    return CommitDialog::tr("Tools › Settings › Git Config");
+#endif
+}
+
+// git's hint for a commit without a name or email quotes this command in
+// every language.
+bool missingIdentity(const QString& gitMessage)
+{
+    return gitMessage.contains(QLatin1String("git config --global user.email"));
+}
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -348,8 +365,10 @@ void CommitDialog::setupUi()
     statusLayout->setSpacing(16);
 
     committerLabel_ = new QLabel(statusStrip);
+    committerLabel_->setObjectName(QStringLiteral("commit.committer"));
     committerLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     branchStatusLabel_ = new QLabel(statusStrip);
+    branchStatusLabel_->setObjectName(QStringLiteral("commit.branch"));
     stagedCountLabel_  = new QLabel(statusStrip);
     // The branch's name (a clone's comes from the server) and the
     // configured "name <email>".
@@ -620,6 +639,9 @@ void CommitDialog::updateTitle()
                 t.branch = QString::fromStdString(branchRes.value());
             else if (r.isHeadDetached())
                 t.branch = tr("(detached HEAD)");
+            else if (const std::string unborn = r.unbornBranchName(); !unborn.empty())
+                // A new repository's branch, before its first commit.
+                t.branch = tr("%1 (first commit)").arg(QString::fromStdString(unborn));
             else
                 t.branch = tr("(no branch)");
             return t;
@@ -666,7 +688,7 @@ void CommitDialog::readCommitterFromConfig()
         committerLabel_->setText(tr("Committer: <%1>")
             .arg(QString::fromStdString(*email)));
     } else {
-        committerLabel_->setText(tr("Committer: (user.name / user.email not set)"));
+        committerLabel_->setText(tr("Committer: not set (%1)").arg(identitySettings()));
     }
 }
 
@@ -984,7 +1006,11 @@ void CommitDialog::onCommitComplete(bool success, const QString& message)
             emit pushAfterCommitRequested();
     } else {
         pushAfterCommit_ = false;
-        errorLabel_->setText(tr("Commit failed: %1").arg(message));
+        errorLabel_->setText(missingIdentity(message)
+                                 ? tr("Commit failed: git doesn't know your name and email yet. Set them in "
+                                      "%1, then commit again.")
+                                       .arg(identitySettings())
+                                 : tr("Commit failed: %1").arg(message));
         errorLabel_->show();
     }
 }
@@ -1111,6 +1137,12 @@ void CommitDialog::showEvent(QShowEvent* e)
         restored_ = true;
     }
 
+    // Opened again: what it said last time (a failed commit, say) is
+    // stale. refresh() brings back what still holds.
+    if (!e->spontaneous() && !pendingCommit_) {
+        errorLabel_->hide();
+        statusFailure_.clear();
+    }
     refresh();
 }
 

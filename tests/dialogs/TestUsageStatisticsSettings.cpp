@@ -14,7 +14,9 @@
 //     selected; shown, the page reflects the setting, Apply writes it once,
 //     Cancel writes nothing, an environment lock disables the switch
 //     and says why, and opening it never creates an install ID;
-//   - Copy puts the install ID on the clipboard.
+//   - Copy puts the install ID on the clipboard;
+//   - the Git Config page's Credential Helper is the global one, else
+//     the system's, marked so.
 //
 // Settings live in a folder of the test's own (QSettings::setPath),
 // and Apply's git config writes go to a temporary global config: never
@@ -291,6 +293,43 @@ private slots:
         auto* name = dialog.findChild<QLineEdit*>(QStringLiteral("settings.git-user-name"));
         QVERIFY(name);
         QTRY_COMPARE_WITH_TIMEOUT(name->text(), QStringLiteral("Global Name"), 10000);
+    }
+
+    // Git for Windows sets credential.helper=manager in git's system
+    // config: the field, which read only --global, came up empty.
+    void credentialHelperFallsBackToTheSystemOne() {
+        const QString systemPath = homeDir_.filePath(QStringLiteral("system-gitconfig"));
+        QFile system(systemPath);
+        QVERIFY(system.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        system.write("[credential]\n\thelper = manager-test\n");
+        system.close();
+        QFile global(homeDir_.filePath(QStringLiteral("gitconfig")));
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.close();
+        const QByteArray noSystem = qgetenv("GIT_CONFIG_NOSYSTEM");
+        qunsetenv("GIT_CONFIG_NOSYSTEM");
+        qputenv("GIT_CONFIG_SYSTEM", QFile::encodeName(systemPath));
+        const auto restore = qScopeGuard([noSystem] {
+            qunsetenv("GIT_CONFIG_SYSTEM");
+            if (!noSystem.isNull())
+                qputenv("GIT_CONFIG_NOSYSTEM", noSystem);
+        });
+
+        SettingsService settings;
+        {
+            SettingsDialog dialog(&settings, nullptr);
+            auto* helper = child<QLineEdit>(dialog, "settings.git-credential-helper");
+            QVERIFY(helper);
+            QTRY_COMPARE_WITH_TIMEOUT(helper->text(), QStringLiteral("manager-test (system)"), 10000);
+        }
+        // The global one is what git uses, when there is one.
+        QVERIFY(global.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        global.write("[credential]\n\thelper = store\n");
+        global.close();
+        SettingsDialog dialog(&settings, nullptr);
+        auto* helper = child<QLineEdit>(dialog, "settings.git-credential-helper");
+        QVERIFY(helper);
+        QTRY_COMPARE_WITH_TIMEOUT(helper->text(), QStringLiteral("store"), 10000);
     }
 
     void copyPutsTheIdOnTheClipboard() {
