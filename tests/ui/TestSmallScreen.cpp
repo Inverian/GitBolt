@@ -89,10 +89,14 @@ private slots:
         // Real fonts too: without any, each glyph is a box as wide as the
         // font is tall, and every width here is wrong.
         const QFont font = QApplication::font();
+        const QFontMetrics metrics(font);
         qInfo("Font: %s, %d px; \"Clone a Repository\" is %d px wide",
               qPrintable(QFontInfo(font).family()), QFontInfo(font).pixelSize(),
-              QFontMetrics(font).horizontalAdvance(QStringLiteral("Clone a Repository")));
+              metrics.horizontalAdvance(QStringLiteral("Clone a Repository")));
         QVERIFY2(!QFontDatabase::families().isEmpty(), "no fonts: on Windows, see QT_QPA_FONTDIR");
+        QVERIFY2(metrics.horizontalAdvance(QStringLiteral("iiii")) * 2
+                     < metrics.horizontalAdvance(QStringLiteral("WWWW")),
+                 "an i is as wide as a W: the glyphs are boxes");
     }
 
     // Every test starts from an empty GitBolt.ini.
