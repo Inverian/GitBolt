@@ -234,7 +234,7 @@ void UpdateDialog::enterState(State state)
                        || state == State::QuitNeeded || state == State::Declined);
     cancel_->setVisible(state == State::Downloading || state == State::Preparing);
     cancel_->setEnabled(true);   // showAskingPermission greys it out
-    retry_->setVisible(state == State::Failed || state == State::Declined);
+    retry_->setVisible((state == State::Failed && canRetry_) || state == State::Declined);
     install_->setVisible(state == State::Available);
     quit_->setVisible(state == State::QuitNeeded);
     layout()->setEnabled(true);
@@ -248,7 +248,7 @@ void UpdateDialog::enterState(State state)
     case State::NotInstallable: primary = openReleasePage_; break;
     case State::Downloading:
     case State::Preparing: primary = cancel_; break;
-    case State::Failed:
+    case State::Failed: primary = canRetry_ ? retry_ : openReleasePage_; break;
     case State::Declined: primary = retry_; break;
     case State::Restarting: primary = nullptr; break;   // nothing to do but wait
     case State::QuitNeeded: primary = quit_; break;
@@ -381,6 +381,7 @@ void UpdateDialog::showAskingPermission()
 void UpdateDialog::showCheckFailed(const QString& message)
 {
     showsLog_ = false;
+    canRetry_ = true;
     headline_->setText(tr("Couldn't check for updates"));
     message_->setText(message);
     pageUrl_ = releasesPageUrl();
@@ -390,6 +391,7 @@ void UpdateDialog::showCheckFailed(const QString& message)
 void UpdateDialog::showInstallFailed(const QString& message)
 {
     showsLog_ = false;
+    canRetry_ = true;
     headline_->setText(tr("Couldn't install GitBolt %1").arg(version_));
     message_->setText(message + QLatin1Char('\n') + QLatin1Char('\n')
                       + tr("GitBolt wasn't changed. You can try again, or download the new version "
@@ -398,9 +400,10 @@ void UpdateDialog::showInstallFailed(const QString& message)
 }
 
 void UpdateDialog::showEarlierInstallFailed(const QString& version, const QString& message,
-                                            const QString& log)
+                                            const QString& log, bool canRetry)
 {
     version_ = version;
+    canRetry_ = canRetry;
     // That version's own release page. Built here, from a version
     // Version::parse accepted: no text from GitHub goes into it.
     pageUrl_ = QUrl(releasesPageUrl().toString() + QStringLiteral("/tag/v") + version);

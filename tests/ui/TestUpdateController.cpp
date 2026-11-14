@@ -1401,6 +1401,22 @@ private slots:
                                           "window was still open. GitBolt wasn't changed.\n\nClose every other "
                                           "GitBolt window, in other users' sessions too, then click Try Again.")}
             << "Windows will ask for permission for Windows PowerShell to install it." << true;
+        // Nor did it while another program had a file open, which it names.
+        QTest::newRow("Windows: a file in use")
+            << QByteArray("failed 0.1.1 another program was using bin\\Qt6Core.dll\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: another program was "
+                                          "using bin\\Qt6Core.dll. GitBolt wasn't changed.\n\nClose the program "
+                                          "that is using files in "),
+                           QStringLiteral(", then click Try Again. If you can't tell which program it is, restart "
+                                          "Windows, then choose Help › Check for Updates.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
+        // The installer's own check: it stopped before changing anything.
+        QTest::newRow("Windows: the installer found a file in use")
+            << QByteArray("failed 0.1.1 another program was using GitBolt files\n") << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("failed after GitBolt quit: another program was using GitBolt files. "
+                                          "GitBolt wasn't changed.\n\nClose the program that is using files in ")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
             << QByteArray("\xEF\xBB\xBF" "declined 0.1.1 the request for permission was cancelled\r\n")
@@ -1560,10 +1576,50 @@ private slots:
         QVERIFY(!QFile::exists(path));
     }
 
+    // At this version (the helper's relaunch, after the installer ran)
+    // the release page is the way to repair it: Try Again would only find
+    // GitBolt up to date. A copy started otherwise only logs it.
+    void aFailureAtThisVersionOffersTheReleasePage_data() {
+        QTest::addColumn<bool>("startedByUpdate");
+        QTest::newRow("the helper's relaunch") << true;
+        QTest::newRow("started otherwise") << false;
+    }
+    void aFailureAtThisVersionOffersTheReleasePage() {
+        QFETCH(bool, startedByUpdate);
+        HttpServer server;
+        UpdateSetup setup = testSetup(
+            server, cache_->path(),
+            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
+        setup.startedByUpdate = startedByUpdate;
+        const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
+        QVERIFY(writeFile(path, "failed 0.1.0 the installer exited with code 2\n"));
+        Harness h(setup);
+        h.controller->start();
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed install installer_exit unknown 0.1.0 nsis")});
+        QVERIFY(!QFile::exists(path));
+        if (!startedByUpdate) {
+            QVERIFY(!h.dialog());
+            return;
+        }
+        QVERIFY(h.dialog() && h.dialog()->isVisible());
+        QCOMPARE(h.dialog()->state(), State::Failed);
+        QCOMPARE(headline(h.dialog()), QStringLiteral("Couldn't install GitBolt 0.1.0"));
+        const QString shown = h.dialog()->shownText();
+        QVERIFY2(shown.contains(QStringLiteral("GitBolt may be incomplete now.")), qPrintable(shown));
+        QVERIFY2(shown.contains(QStringLiteral("To repair it")), qPrintable(shown));
+        QVERIFY(h.button("updateDialog.retry")->isHidden());
+        QVERIFY(!h.button("updateDialog.openReleasePage")->isHidden());
+        QVERIFY(h.button("updateDialog.openReleasePage")->isDefault());
+        QCOMPARE(server.requests().size(), 0);
+    }
+
     void aStaleOrUnreadableResultIsDropped_data() {
         QTest::addColumn<QByteArray>("result");
-        // Stale: this version, or an older one, runs now.
-        QTest::newRow("failed, this version") << QByteArray("failed 0.1.0 the installer exited with code 2\n");
+        // Stale: an older version, or this one after a failure that changed
+        // nothing (one after the installer ran is shown).
+        QTest::newRow("failed, an older one") << QByteArray("failed 0.0.9 the installer exited with code 2\n");
+        QTest::newRow("failed, this version, nothing changed")
+            << QByteArray("failed 0.1.0 another GitBolt window was still open\n");
         QTest::newRow("declined, an older one") << QByteArray("declined 0.0.9\n");
         QTest::newRow("gave up, this version") << QByteArray("gave-up 0.1.0\n");
         // Not an install result.
@@ -1630,13 +1686,29 @@ private slots:
         QTest::newRow("a marker and an unreadable result") << QByteArray("garbage\n")
                                                            << QByteArray("0.1.0 0.1.1 <now>") << deb
                                                            << "no_result install no_result 0.1.0 0.1.1 deb" << false;
-        QTest::newRow("a stale result") << QByteArray("failed 0.1.0 the installer exited with code 2\n")
-                                        << QByteArray("0.0.9 0.1.0 <now>") << deb << "" << false;
+        QTest::newRow("a stale result") << QByteArray("failed 0.0.9 the installer exited with code 2\n")
+                                        << QByteArray("0.0.8 0.0.9 <now>") << deb << "" << false;
+        // This version runs: a failure that changed nothing was put right
+        // since; one after the installer ran may have left it incomplete.
+        QTest::newRow("Windows: this version, a file in use")
+            << QByteArray("failed 0.1.0 another program was using bin\\Qt6Core.dll\n")
+            << QByteArray("0.0.9 0.1.0 <now>") << int(PackageKind::WindowsInstall) << "" << false;
+        QTest::newRow("Windows: this version, the installer failed")
+            << QByteArray("failed 0.1.0 the installer exited with code 2\n") << QByteArray("0.0.9 0.1.0 <now>")
+            << int(PackageKind::WindowsInstall) << "failed install installer_exit 0.0.9 0.1.0 nsis" << false;
+        QTest::newRow("Windows: this version, the administrator part failed")
+            << QByteArray("failed 0.1.0 the administrator part of the update failed\n")
+            << QByteArray("0.0.9 0.1.0 <now>") << int(PackageKind::WindowsInstall)
+            << "failed install elevated_error 0.0.9 0.1.0 nsis" << false;
         // The new GitBolt.exe runs, but Windows can't uninstall it.
         QTest::newRow("Windows: this version, without Uninstall.exe")
             << QByteArray("failed 0.1.0 the installer ran, but Uninstall.exe is missing\n")
             << QByteArray("0.0.9 0.1.0 <now>") << int(PackageKind::WindowsInstall)
             << "failed install uninstaller_missing 0.0.9 0.1.0 nsis" << false;
+        QTest::newRow("Windows: a file in use")
+            << QByteArray("failed 0.1.1 another program was using bin\\Qt6Core.dll\n")
+            << QByteArray("0.1.0 0.1.1 <now>") << int(PackageKind::WindowsInstall)
+            << "failed install file_in_use 0.1.0 0.1.1 nsis" << false;
         QTest::newRow("a marker for another version")
             << QByteArray("failed 0.1.1 apt-get failed with status 100\n") << QByteArray("0.1.0 0.1.2 <now>") << deb
             << "failed install apt_failed unknown 0.1.1 deb" << false;

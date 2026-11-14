@@ -535,6 +535,7 @@ int main(int argc, char* argv[]) {
     updateInputs.cacheDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     updateInputs.tempDir = QDir::tempPath();
     gitbolt::ui::UpdateSetup updateSetup = gitbolt::ui::setUpUpdates(updateInputs);
+    updateSetup.startedByUpdate = startedByUpdate;
     if (!updateSetup.problem.isEmpty())
         qWarning("In-app updates: %s", qPrintable(updateSetup.problem));
     // A test feed's downloads folder is this session's own (setUpUpdates):

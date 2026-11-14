@@ -80,6 +80,9 @@ struct UpdateSetup {
     /// Why a test variable was refused or ignored, for main()'s log;
     /// empty when there is nothing to say.
     QString problem;
+    /// An update's helper started this copy (update::kRelaunchEnv):
+    /// main() sets it.
+    bool startedByUpdate = false;
 
     /// Help › Check for Updates asks the feed (it's greyed out
     /// otherwise), and Settings › Updates is shown.

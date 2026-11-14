@@ -8,6 +8,10 @@
 
 namespace gitbolt::update {
 
+/// How long the Windows administrator part waits, by default, for the
+/// install folder to be free before it gives up and installs nothing.
+inline constexpr int kWindowsInUseSeconds = 60;
+
 /// What a helper script needs to finish an update after GitBolt quits.
 /// Every helper waits up to `waitSeconds` for `pid` to exit (else it
 /// removes `staged` and changes nothing), logs to `logFile`, writes the
@@ -60,6 +64,9 @@ struct HelperInputs {
     /// the administrator part's install result. Then it writes failed
     /// itself and starts GitBolt anyway.
     int installSeconds = 15 * 60;
+    /// Windows: how long the administrator part waits, once GitBolt has
+    /// quit, for the install folder to be free.
+    int inUseSeconds = kWindowsInUseSeconds;
     /// The repository GitBolt had open, an absolute path: the GitBolt
     /// started afterwards gets it as its argument. Empty: none.
     QString reopen;
@@ -73,16 +80,16 @@ inline constexpr char kRelaunchEnv[] = "GITBOLT_UPDATE_RELAUNCH";
 /// The install result: `resultFile`, one UTF-8 line written once, just
 /// before GitBolt starts again or the helper gives up:
 /// "<status> <newVersion> <reason>\n". `reason` is short plain English,
-/// maybe empty, with no newline, path or tool output. `status`: ok,
+/// maybe empty, with no newline or tool output, and no path but a file's
+/// within the install folder (bin\Qt6Core.dll). `status`: ok,
 /// declined (pkexec's dialog dismissed), failed (the new version isn't in
 /// place) or gave-up (GitBolt didn't quit in time). The next GitBolt reads
-/// and deletes it, and reports anything but ok for a newer version.
+/// and deletes it, and reports anything but ok (UpdateController).
 
 /// The fixed code for an install result: by status (ok: None, gave-up:
 /// QuitTimeout, declined: PermissionDeclined), and for failed by the
-/// start of the helpers' own reason (Other when none matches). A failed
-/// result is read by the version that wrote it (the old copy starts
-/// again), so the helpers' words need no other format.
+/// start of the helpers' own reason (Other when none matches). The new
+/// version may read an older helper's result, so a reason keeps its start.
 Failure installResultFailure(const QString& status, const QString& reason);
 
 /// macOS: after GitBolt quits, rename the old bundle aside in its folder
@@ -104,12 +111,15 @@ QString debHelperScript(const HelperInputs& in);
 QString windowsHelperScript(const HelperInputs& in);
 /// Windows: the administrator part. It waits up to waitSeconds for `pid`
 /// to quit (else deletes the installer and writes gave-up), then up to
-/// kWindowsInUseSeconds until no GitBolt runs from the install folder, so
-/// NSIS replaces no file in use (only elevated does it see other sessions'
-/// GitBolts and open protected files). Then it runs '/S /D=<dir>' (/D= last
-/// and unquoted, as NSIS requires), checks bin\GitBolt.exe's version and
-/// that Uninstall.exe is there (the uninstall key runs it), and writes the
-/// result. Exits 0, a kWindowsExit* code, or the installer's.
+/// inUseSeconds until no other GitBolt runs from the install folder and no
+/// file of it (the folder's own, bin's, plugins') is open so that NSIS
+/// couldn't overwrite it, logging what it waits for (only elevated does it
+/// see other sessions' GitBolts and open protected files). Then it runs
+/// '/S /D=<dir>' (/D= last and unquoted, as NSIS requires), checks
+/// bin\GitBolt.exe's version and that Uninstall.exe is there (the uninstall
+/// key runs it; missing after a run that went well or stopped (2), it runs
+/// the installer once more), and writes the result. Exits 0, a
+/// kWindowsExit* code, or the installer's.
 QString windowsElevatedScript(const HelperInputs& in);
 
 /// The start of both Windows parts: shared values, Write-Log and
@@ -127,21 +137,22 @@ QString windowsScriptPreamble(const HelperInputs& in, bool onlyFirst);
 /// kWindowsHelperExtraSeconds so that part's result comes first.
 inline constexpr int kWindowsLogPatienceSeconds = 3;
 
-/// How long the administrator part waits for the install folder to be
-/// free before it gives up and installs nothing.
-inline constexpr int kWindowsInUseSeconds = 60;
 /// How much longer than waitSeconds the Windows helper waits for
 /// GitBolt to quit: the administrator part, started first, has decided
 /// by then whether it gave up.
 inline constexpr int kWindowsHelperExtraSeconds = 15;
 /// The administrator part's exit codes besides 0 (installed and checked)
 /// and the installer's own (NSIS: 1 cancelled, 2 aborted).
-inline constexpr int kWindowsExitInUse = 1001;         ///< still in use after kWindowsInUseSeconds
+inline constexpr int kWindowsExitInUse = 1001;         ///< another GitBolt still ran after inUseSeconds
 inline constexpr int kWindowsExitNoInstaller = 1002;   ///< the installer didn't start
 inline constexpr int kWindowsExitWrongVersion = 1003;  ///< installed, but GitBolt.exe isn't newVersion
 inline constexpr int kWindowsExitError = 1004;         ///< the script itself failed
 inline constexpr int kWindowsExitGaveUp = 1005;        ///< GitBolt didn't quit within waitSeconds
-inline constexpr int kWindowsExitNoUninstaller = 1006; ///< installed, but Uninstall.exe is missing
+inline constexpr int kWindowsExitNoUninstaller = 1006; ///< Uninstall.exe missing, after a second run too
+inline constexpr int kWindowsExitFileInUse = 1007;     ///< another program had a file of it open after inUseSeconds
+/// The installer's own exit code when it found a file of the install in
+/// use and changed nothing (cmake/NsisScript.cmake; TestNsisScript pins it).
+inline constexpr int kWindowsInstallerExitInUse = 3;
 
 /// `text` as one POSIX shell word: in single quotes, each ' written as
 /// '\''. Safe for any text, newlines included.

@@ -379,12 +379,6 @@ void UpdateController::reportEarlierInstall(bool running)
         return;
     }
     const update::Failure failure = update::installResultFailure(result->status, result->reason);
-    // This version, or a newer one, runs now: whatever went wrong then
-    // was put right since. Except a missing Uninstall.exe: it comes with
-    // the new GitBolt.exe already in place.
-    if (!(result->version > current)
-        && !(result->version == current && failure == update::Failure::UninstallerMissing))
-        return;
     // Once the installer ran, some of its files may be in place: GitBolt
     // was left half updated, not unchanged. So was a Mac whose old copy
     // couldn't be put back.
@@ -394,11 +388,21 @@ void UpdateController::reportEarlierInstall(bool running)
                               || failure == update::Failure::ElevatedTimeout
                               || failure == update::Failure::ElevatedNoResult
                               || failure == update::Failure::RollbackFailed;
+    // A newer version runs now, or this one after a failure that changed
+    // nothing: whatever went wrong was put right since. Not so once the
+    // installer ran: the new GitBolt.exe may run without the rest.
+    if (!(result->version > current) && !(result->version == current && maybeChanged))
+        return;
     if (result->status == QLatin1String("gave-up"))
         reportResult("gave_up", "quit", failure, from, version);
     else
         reportResult(result->status == QLatin1String("declined") ? "declined" : "failed", "install", failure, from,
                      version);
+    // At this version, only the copy the helper started says so: a later
+    // start may come after a reinstall by hand (a Mac's helper starts none).
+    const bool thisVersion = !(result->version > current);
+    if (thisVersion && !setup_.startedByUpdate)
+        return;
 
     const auto withReason = [&](const QString& what) {
         return result->reason.isEmpty() ? what + QLatin1Char('.')
@@ -432,9 +436,14 @@ void UpdateController::reportEarlierInstall(bool running)
                               : tr("To install it yourself, download %1 from the release page and open it; "
                                    "Windows asks for administrator permission.")
                                     .arg(asset);
-        // The installer can't replace files another GitBolt has open.
+        // The installer can't replace files another GitBolt has open, nor
+        // those another program has (the reason names one).
         if (failure == update::Failure::InUse)
             byHand = tr("Close every other GitBolt window, in other users' sessions too, then click Try Again.");
+        else if (failure == update::Failure::FileInUse)
+            byHand = tr("Close the program that is using files in %1, then click Try Again. If you can't tell "
+                        "which program it is, restart Windows, then choose Help › Check for Updates.")
+                         .arg(QDir::toNativeSeparators(setup_.package.target));
         break;
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "
@@ -454,9 +463,10 @@ void UpdateController::reportEarlierInstall(bool running)
     if (QFileInfo::exists(logPath))
         message += QStringLiteral("\n\n") + tr("The installer's log is %1.").arg(QDir::toNativeSeparators(logPath));
     // Try Again checks again, which offers the release (and Install)
-    // once more.
+    // once more; at this version it would find GitBolt up to date, so
+    // the release page is all it offers.
     retryChecks_ = true;
-    openDialog()->showEarlierInstallFailed(version, message, log);
+    openDialog()->showEarlierInstallFailed(version, message, log, !thisVersion);
 }
 
 void UpdateController::tick()

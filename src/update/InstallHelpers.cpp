@@ -154,6 +154,7 @@ Failure installResultFailure(const QString& status, const QString& reason) {
         {"pkexec couldn't authenticate", Failure::ElevationFailed},
         {"apt-get failed with status", Failure::AptFailed},
         {"another GitBolt window was still open", Failure::InUse},
+        {"another program was using", Failure::FileInUse},
         {"the installer could not be started", Failure::InstallerNotStarted},
         {"the installer ran, but GitBolt.exe is not version", Failure::WrongVersion},
         {"the administrator part of the update failed", Failure::ElevatedError},
@@ -403,64 +404,110 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("        Start-Sleep -Milliseconds 250"),
         QStringLiteral("    }"),
         QStringLiteral("    if ($code -eq 0) {"),
-        QStringLiteral("        $deadline = (Get-Date).AddSeconds(%1)").arg(kWindowsInUseSeconds),
+        QStringLiteral("        $deadline = (Get-Date).AddSeconds(%1)").arg(in.inUseSeconds),
+        QStringLiteral("        $said = ''"),
         QStringLiteral("        while ($true) {"),
+        QStringLiteral("            $busy = ''"),
         // A case-insensitive prefix by -eq: Constrained Language refuses
         // [StringComparison].
         QStringLiteral("            $inUse = @(Get-Process -Name GitBolt -ErrorAction SilentlyContinue | Where-Object {"),
         QStringLiteral("                try { $_.Id -ne $appPid -and $_.Path -and $_.Path.Length -ge $prefix.Length -and "
                        "$_.Path.Substring(0, $prefix.Length) -eq $prefix } catch { $false }"),
         QStringLiteral("            }).Count -gt 0"),
-        QStringLiteral("            if (-not $inUse -and (Test-Path -LiteralPath $app)) {"),
-        // In use only on a sharing or lock violation (32, 33). Where
-        // Constrained Language refuses [IO.File], the process list decides.
-        QStringLiteral("                try {"),
-        QStringLiteral("                    [IO.File]::Open($app, 'Open', 'ReadWrite', 'None').Dispose()"),
-        QStringLiteral("                } catch {"),
-        QStringLiteral("                    $e = $_.Exception"),
-        QStringLiteral("                    while ($e.InnerException) {"),
-        QStringLiteral("                        $e = $e.InnerException"),
+        // GitBolt's files: the folder's own, and all of bin and plugins
+        // (never a whole drive, should it be installed at a root).
+        QStringLiteral("            if (-not $inUse) {"),
+        QStringLiteral("                $files = @(Get-ChildItem -LiteralPath $prefix -File -Force -ErrorAction SilentlyContinue) + "
+                       "@(Get-ChildItem -LiteralPath ($prefix + 'bin'), ($prefix + 'plugins') -Recurse -File -Force "
+                       "-ErrorAction SilentlyContinue)"),
+        QStringLiteral("                foreach ($file in $files) {"),
+        // Opened as NSIS's File opens it (write, sharing reads only), so
+        // a loaded DLL counts, a reader that shares writing doesn't. In use
+        // only on a sharing or lock violation (32, 33); where Constrained
+        // Language refuses [IO.File], the process list and the installer's
+        // own check decide.
+        QStringLiteral("                    try {"),
+        QStringLiteral("                        [IO.File]::Open($file.FullName, 'Open', 'Write', 'Read').Dispose()"),
+        QStringLiteral("                    } catch {"),
+        QStringLiteral("                        $e = $_.Exception"),
+        QStringLiteral("                        while ($e.InnerException) {"),
+        QStringLiteral("                            $e = $e.InnerException"),
+        QStringLiteral("                        }"),
+        QStringLiteral("                        if ($busy -eq '' -and @(32, 33) -contains ($e.HResult -band 0xFFFF)) {"),
+        QStringLiteral("                            $busy = $file.FullName.Replace($prefix, '')"),
+        QStringLiteral("                        }"),
         QStringLiteral("                    }"),
-        QStringLiteral("                    $inUse = @(32, 33) -contains ($e.HResult -band 0xFFFF)"),
         QStringLiteral("                }"),
         QStringLiteral("            }"),
-        QStringLiteral("            if (-not $inUse) {"),
+        QStringLiteral("            if (-not $inUse -and $busy -eq '') {"),
         QStringLiteral("                break"),
+        QStringLiteral("            }"),
+        // What it waits for, logged when that changes.
+        QStringLiteral("            $now = 'another GitBolt window to close'"),
+        QStringLiteral("            if ($busy) {"),
+        QStringLiteral("                $now = 'another program to close ' + $busy"),
+        QStringLiteral("            }"),
+        QStringLiteral("            if ($now -ne $said) {"),
+        QStringLiteral("                Write-Log ('waiting for ' + $now)"),
+        QStringLiteral("                $said = $now"),
         QStringLiteral("            }"),
         QStringLiteral("            if ((Get-Date) -ge $deadline) {"),
         QStringLiteral("                $code = %1").arg(kWindowsExitInUse),
+        QStringLiteral("                if ($busy) {"),
+        QStringLiteral("                    $code = %1").arg(kWindowsExitFileInUse),
+        QStringLiteral("                }"),
         QStringLiteral("                break"),
         QStringLiteral("            }"),
         QStringLiteral("            Start-Sleep -Seconds 1"),
         QStringLiteral("        }"),
         QStringLiteral("    }"),
+        // Run twice at most: again if Uninstall.exe, which the uninstall
+        // key runs, is missing after a run that went well or gave up (2).
+        QStringLiteral("    foreach ($run in 1, 2) {"),
         // /D= last and unquoted: NSIS takes the rest as the folder.
-        QStringLiteral("    if ($code -eq 0) {"),
-        QStringLiteral("        Write-Log ('running ' + $installer)"),
-        QStringLiteral("        try {"),
-        QStringLiteral("            $setup = Start-Process -FilePath $installer -ArgumentList ")
+        QStringLiteral("        if ($code -eq 0) {"),
+        QStringLiteral("            Write-Log ('running ' + $installer)"),
+        QStringLiteral("            try {"),
+        QStringLiteral("                $setup = Start-Process -FilePath $installer -ArgumentList ")
             + powerShellQuote(QStringLiteral("/S /D=") + dir) + QStringLiteral(" -Wait -PassThru"),
-        QStringLiteral("        } catch {"),
-        QStringLiteral("            $code = %1").arg(kWindowsExitNoInstaller),
-        QStringLiteral("            Write-Log ('the installer could not be started: ' + $_.Exception.Message)"),
+        QStringLiteral("            } catch {"),
+        QStringLiteral("                $code = %1").arg(kWindowsExitNoInstaller),
+        QStringLiteral("                Write-Log ('the installer could not be started: ' + $_.Exception.Message)"),
+        QStringLiteral("            }"),
         QStringLiteral("        }"),
-        QStringLiteral("    }"),
         // No exit code at all: the version below decides.
-        QStringLiteral("    if ($code -eq 0) {"),
-        QStringLiteral("        $setupCode = $setup.ExitCode"),
-        QStringLiteral("        if ($null -ne $setupCode -and $setupCode -ne 0) {"),
-        QStringLiteral("            $code = $setupCode"),
+        QStringLiteral("        if ($code -eq 0) {"),
+        QStringLiteral("            $setupCode = $setup.ExitCode"),
+        QStringLiteral("            if ($null -ne $setupCode -and $setupCode -ne 0) {"),
+        QStringLiteral("                $code = $setupCode"),
+        QStringLiteral("            }"),
         QStringLiteral("        }"),
-        QStringLiteral("    }"),
-        QStringLiteral("    if ($code -eq 0) {"),
-        QStringLiteral("        $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion"),
-        QStringLiteral("        if ($found.Trim() -ne $version) {"),
-        QStringLiteral("            $code = %1").arg(kWindowsExitWrongVersion),
+        QStringLiteral("        if ($code -eq 0) {"),
+        QStringLiteral("            $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion"),
+        QStringLiteral("            if ($found.Trim() -ne $version) {"),
+        QStringLiteral("                $code = %1").arg(kWindowsExitWrongVersion),
+        QStringLiteral("            }"),
         QStringLiteral("        }"),
-        QStringLiteral("    }"),
-        // The uninstall key runs it: without it, Installed apps can't remove GitBolt.
-        QStringLiteral("    if ($code -eq 0 -and -not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {"),
-        QStringLiteral("        $code = %1").arg(kWindowsExitNoUninstaller),
+        // Read, not Test-Path: one deleted while another program holds it
+        // is still listed, and Test-Path throws on it.
+        QStringLiteral("        $uninstaller = $true"),
+        QStringLiteral("        try {"),
+        QStringLiteral("            $null = Get-Content -LiteralPath ($prefix + 'Uninstall.exe') -Encoding Byte -TotalCount 1"),
+        QStringLiteral("        } catch {"),
+        QStringLiteral("            $uninstaller = $false"),
+        QStringLiteral("        }"),
+        // After a second run, whatever stopped it: the first one installed.
+        QStringLiteral("        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and -not $uninstaller) {"),
+        QStringLiteral("            if ($code -ne 0) {"),
+        QStringLiteral("                Write-Log ('Uninstall.exe is missing, and the run ended with code ' + $code)"),
+        QStringLiteral("            }"),
+        QStringLiteral("            $code = %1").arg(kWindowsExitNoUninstaller),
+        QStringLiteral("        }"),
+        QStringLiteral("        if ($code -ne %1 -or $run -eq 2) {").arg(kWindowsExitNoUninstaller),
+        QStringLiteral("            break"),
+        QStringLiteral("        }"),
+        QStringLiteral("        $code = 0"),
+        QStringLiteral("        Write-Log 'the installer ran, but Uninstall.exe is missing: running it again'"),
         QStringLiteral("    }"),
         QStringLiteral("} catch {"),
         QStringLiteral("    $code = %1").arg(kWindowsExitError),
@@ -479,6 +526,10 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("    Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitInUse),
         QStringLiteral("    $reason = 'another GitBolt window was still open'"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitFileInUse),
+        QStringLiteral("    $reason = 'another program was using ' + $busy"),
+        QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsInstallerExitInUse),
+        QStringLiteral("    $reason = 'another program was using GitBolt files'"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitNoInstaller),
         QStringLiteral("    $reason = 'the installer could not be started'"),
         QStringLiteral("} elseif ($code -eq %1) {").arg(kWindowsExitWrongVersion),
@@ -490,9 +541,14 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("} else {"),
         QStringLiteral("    $reason = 'the installer exited with code ' + $code"),
         QStringLiteral("}"),
-        // Nothing was installed only if the installer never ran; else, as
-        // UpdateController says, GitBolt may be incomplete.
-        QStringLiteral("if ($code -eq %1 -or $code -eq %2) {").arg(kWindowsExitInUse).arg(kWindowsExitNoInstaller),
+        // Nothing was installed only if the installer never ran, or stopped
+        // before changing anything; else, as UpdateController says,
+        // GitBolt may be incomplete.
+        QStringLiteral("if (@(%1, %2, %3, %4) -contains $code) {")
+            .arg(kWindowsExitInUse)
+            .arg(kWindowsExitFileInUse)
+            .arg(kWindowsInstallerExitInUse)
+            .arg(kWindowsExitNoInstaller),
         QStringLiteral("    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)"),
         QStringLiteral("} elseif ($status -eq 'failed') {"),
         QStringLiteral("    Write-Log ('GitBolt may be incomplete (code ' + $code + '): ' + $reason)"),

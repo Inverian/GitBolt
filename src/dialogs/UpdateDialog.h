@@ -91,8 +91,10 @@ public:
     /// install-result at startup): `message` says why and what to do
     /// instead, and `log`, the end of the helper's install.log, is
     /// shown as written where the notes go (hidden when empty). Open
-    /// Release Page goes to that version's release.
-    void showEarlierInstallFailed(const QString& version, const QString& message, const QString& log);
+    /// Release Page goes to that version's release; without `canRetry`
+    /// (that version runs already) it is the main button, no Try Again.
+    void showEarlierInstallFailed(const QString& version, const QString& message, const QString& log,
+                                  bool canRetry = true);
     /// The helper is running and GitBolt quits: nothing can be
     /// cancelled any more, so no button is offered.
     void showRestarting();
@@ -134,6 +136,7 @@ private:
     QString version_;   ///< of the release last shown
     /// The Failed state shows an earlier install's log in the notes.
     bool showsLog_ = false;
+    bool canRetry_ = true;   // Failed offers Try Again
 
     QLabel* icon_ = nullptr;
     QLabel* headline_ = nullptr;
