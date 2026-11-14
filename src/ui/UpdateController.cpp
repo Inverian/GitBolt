@@ -398,6 +398,11 @@ void UpdateController::reportEarlierInstall(bool running)
     else
         reportResult(result->status == QLatin1String("declined") ? "declined" : "failed", "install", failure, from,
                      version);
+    // At this version, only the copy the helper started says so: a later
+    // start may come after a reinstall by hand (a Mac's helper starts none).
+    const bool thisVersion = !(result->version > current);
+    if (thisVersion && !setup_.startedByUpdate)
+        return;
 
     const auto withReason = [&](const QString& what) {
         return result->reason.isEmpty() ? what + QLatin1Char('.')
@@ -458,9 +463,10 @@ void UpdateController::reportEarlierInstall(bool running)
     if (QFileInfo::exists(logPath))
         message += QStringLiteral("\n\n") + tr("The installer's log is %1.").arg(QDir::toNativeSeparators(logPath));
     // Try Again checks again, which offers the release (and Install)
-    // once more.
+    // once more; at this version it would find GitBolt up to date, so
+    // the release page is all it offers.
     retryChecks_ = true;
-    openDialog()->showEarlierInstallFailed(version, message, log);
+    openDialog()->showEarlierInstallFailed(version, message, log, !thisVersion);
 }
 
 void UpdateController::tick()

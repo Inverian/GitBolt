@@ -1576,6 +1576,43 @@ private slots:
         QVERIFY(!QFile::exists(path));
     }
 
+    // At this version (the helper's relaunch, after the installer ran)
+    // the release page is the way to repair it: Try Again would only find
+    // GitBolt up to date. A copy started otherwise only logs it.
+    void aFailureAtThisVersionOffersTheReleasePage_data() {
+        QTest::addColumn<bool>("startedByUpdate");
+        QTest::newRow("the helper's relaunch") << true;
+        QTest::newRow("started otherwise") << false;
+    }
+    void aFailureAtThisVersionOffersTheReleasePage() {
+        QFETCH(bool, startedByUpdate);
+        HttpServer server;
+        UpdateSetup setup = testSetup(
+            server, cache_->path(),
+            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
+        setup.startedByUpdate = startedByUpdate;
+        const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
+        QVERIFY(writeFile(path, "failed 0.1.0 the installer exited with code 2\n"));
+        Harness h(setup);
+        h.controller->start();
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed install installer_exit unknown 0.1.0 nsis")});
+        QVERIFY(!QFile::exists(path));
+        if (!startedByUpdate) {
+            QVERIFY(!h.dialog());
+            return;
+        }
+        QVERIFY(h.dialog() && h.dialog()->isVisible());
+        QCOMPARE(h.dialog()->state(), State::Failed);
+        QCOMPARE(headline(h.dialog()), QStringLiteral("Couldn't install GitBolt 0.1.0"));
+        const QString shown = h.dialog()->shownText();
+        QVERIFY2(shown.contains(QStringLiteral("GitBolt may be incomplete now.")), qPrintable(shown));
+        QVERIFY2(shown.contains(QStringLiteral("To repair it")), qPrintable(shown));
+        QVERIFY(h.button("updateDialog.retry")->isHidden());
+        QVERIFY(!h.button("updateDialog.openReleasePage")->isHidden());
+        QVERIFY(h.button("updateDialog.openReleasePage")->isDefault());
+        QCOMPARE(server.requests().size(), 0);
+    }
+
     void aStaleOrUnreadableResultIsDropped_data() {
         QTest::addColumn<QByteArray>("result");
         // Stale: an older version, or this one after a failure that changed

@@ -87,7 +87,8 @@ namespace gitbolt::ui {
 /// or gave-up), before it relaunches GitBolt or gives up. start() reads
 /// it once and deletes it, as checkInstallResult() does later: ok says
 /// so in the notice bar, with What's New, until dismissed; anything
-/// else, for a version newer than this one, opens the dialog on why, the
+/// else, for a version newer than this one (or this one, in the copy the
+/// helper started, once the installer ran), opens the dialog on why, the
 /// end of install.log, and how to install by hand or repair GitBolt.
 ///
 /// Usage statistics, fixed codes only: updateResult once per attempt (at

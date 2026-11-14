@@ -84,13 +84,12 @@ inline constexpr char kRelaunchEnv[] = "GITBOLT_UPDATE_RELAUNCH";
 /// within the install folder (bin\Qt6Core.dll). `status`: ok,
 /// declined (pkexec's dialog dismissed), failed (the new version isn't in
 /// place) or gave-up (GitBolt didn't quit in time). The next GitBolt reads
-/// and deletes it, and reports anything but ok for a newer version.
+/// and deletes it, and reports anything but ok (UpdateController).
 
 /// The fixed code for an install result: by status (ok: None, gave-up:
 /// QuitTimeout, declined: PermissionDeclined), and for failed by the
-/// start of the helpers' own reason (Other when none matches). A failed
-/// result is read by the version that wrote it (the old copy starts
-/// again), so the helpers' words need no other format.
+/// start of the helpers' own reason (Other when none matches). The new
+/// version may read an older helper's result, so a reason keeps its start.
 Failure installResultFailure(const QString& status, const QString& reason);
 
 /// macOS: after GitBolt quits, rename the old bundle aside in its folder
