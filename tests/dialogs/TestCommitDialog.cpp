@@ -562,8 +562,8 @@ private slots:
         gitbolt::git::GitProcess git(repo.path().toStdString());
         QVERIFY(succeeded(git.run({"config", "--unset", "user.name"})));
         QVERIFY(succeeded(git.run({"config", "--unset", "user.email"})));
-        // Else git may make one up from the computer's name.
-        QVERIFY(succeeded(git.run({"config", "user.useConfigOnly", "true"})));
+        // Not user.useConfigOnly here: GitBolt's commit refuses a name and
+        // email git would make up from the computer's (a Mac's passes).
         QList<QPair<QByteArray, QByteArray>> saved;
         for (const char* name : {"EMAIL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME",
                                  "GIT_COMMITTER_EMAIL"}) {
@@ -597,11 +597,8 @@ private slots:
         commit->click();
 
         QTRY_VERIFY_WITH_TIMEOUT(error->isVisible(), 15000);
-        QVERIFY2(error->text().startsWith(QStringLiteral("Commit failed: git doesn't know your name and email "
-                                                         "yet. Set them in ")),
-                 qPrintable(error->text()));
-        QVERIFY2(error->text().endsWith(QStringLiteral("Settings › Git Config, then commit again.")),
-                 qPrintable(error->text()));
+        QCOMPARE(error->text(), QStringLiteral("Commit failed: git doesn't know your name and email yet. Set them "
+                                               "in Tools › Settings › Git Config, then commit again."));
         // The status bar says the same (MainWindow shows failureText).
         QCOMPARE(CommitDialog::failureText(QStringLiteral("Run\n  git config --global user.email ...")),
                  error->text());

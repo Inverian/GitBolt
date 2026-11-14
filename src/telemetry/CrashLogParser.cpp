@@ -29,9 +29,10 @@ struct RawFrame {
     QString symbol;           // empty when the line had "?"
 };
 
+// The whole name, whatever alternatives the pattern has.
 QRegularExpression anchored(const char* pattern,
                             QRegularExpression::PatternOptions options = {}) {
-    return QRegularExpression(QStringLiteral("^%1$").arg(QLatin1String(pattern)), options);
+    return QRegularExpression(QStringLiteral("^(?:%1)$").arg(QLatin1String(pattern)), options);
 }
 
 // Modules whose name may be sent; first entry is GitBolt itself. File

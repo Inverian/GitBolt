@@ -496,6 +496,45 @@ private slots:
         QCOMPARE(linuxEvent->frames.last().function, QStringLiteral("pthread_kill"));
     }
 
+    // Only a whole name is allowed: one that merely contains, starts or
+    // ends with an allowed name (UIFoundation, a GitBolt plugin) is
+    // <other>, with no position or function.
+    void moduleNamesMatchWhole() {
+        const QStringList others = {
+            QStringLiteral("UIFoundation"),     QStringLiteral("libswiftFoundation.dylib"),
+            QStringLiteral("AcmeAppKitHelper.dylib"), QStringLiteral("GitBoltPlugin.dylib"),
+            QStringLiteral("foo-gitbolt"),      QStringLiteral("Xdyld"),
+            QStringLiteral("x_kernel32.dll"),   QStringLiteral("hook_ucrtbase.dll"),
+            QStringLiteral("NTDLL.dll.bak")};
+        const QStringList allowed = {
+            QStringLiteral("GitBolt"),      QStringLiteral("gitbolt"),       QStringLiteral("AppKit"),
+            QStringLiteral("Foundation"),   QStringLiteral("CoreFoundation"), QStringLiteral("HIToolbox"),
+            QStringLiteral("dyld"),         QStringLiteral("libdyld.dylib"), QStringLiteral("ntdll.dll"),
+            QStringLiteral("KERNELBASE.dll"), QStringLiteral("kernel32.dll"), QStringLiteral("ucrtbase.dll"),
+            QStringLiteral("vcruntime140.dll"), QStringLiteral("msvcp140.dll")};
+        // #0 and #1 are the handler's own, dropped by position.
+        QStringList lines = {QStringLiteral("#0 GitBolt +0x10 ?"), QStringLiteral("#1 libsystem_platform.dylib +0x20 ?")};
+        int index = 2;
+        for (const QString& name : others + allowed) {
+            lines << QStringLiteral("#%1 %2 +0x40 secret_hook+0x4").arg(index).arg(name);
+            ++index;
+        }
+        const std::optional<CrashEvent> event = CrashLogParser::parse(report(officialHeader(), lines));
+        QVERIFY(event);
+        QStringList packages;
+        for (const CrashFrame& frame : event->frames) {
+            packages.prepend(frame.package);   // newest last
+            if (frame.package == QLatin1String("<other>")) {
+                QVERIFY(!frame.offset);
+                QVERIFY(frame.function.isEmpty());
+                QVERIFY(!frame.inApp);
+            }
+        }
+        QStringList expected(others.size(), QStringLiteral("<other>"));
+        expected += allowed;
+        QCOMPARE(packages, expected);
+    }
+
     void frameLineVariants() {
         const std::optional<CrashEvent> event = CrashLogParser::parse(report(
             officialHeader(),

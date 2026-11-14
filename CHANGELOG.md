@@ -14,10 +14,10 @@ need a newer version of macOS, Windows or Ubuntu.
   pick...), or Revert This Commit... on a commit's right-click menu in
   the history. GitBolt stages the changes that undo the commit, with
   git's message, and doesn't commit them: the bar that says a revert is
-  in progress has Commit…, which finishes it with that message, and
-  Abort, which goes back. A conflict offers the conflict resolver. For
-  a merge commit the dialog asks which parent to revert against (the
-  first by default), as `git revert -m` does.
+  in progress has Commit…, which opens the Commit dialog with that
+  message to finish it, and Abort, which goes back. A conflict offers
+  the conflict resolver. For a merge commit the dialog asks which parent
+  to revert against (the first by default), as `git revert -m` does.
 - **The history has a right-click menu**: Revert This Commit... and
   Cherry-Pick This Commit... open those dialogs for the commit you
   clicked. Commands › Cherry pick... and Revert commit... now start
@@ -51,10 +51,12 @@ need a newer version of macOS, Windows or Ubuntu.
 
 ### Changed
 
-- **Supported platforms**: Windows 11, macOS 13 (Ventura) or later on
-  Apple Silicon, and Ubuntu 24.04 or later. GitBolt still installs and
-  updates on Windows 10 (version 1809 or later), but Windows 10 isn't
-  supported.
+- **Supported platforms**: Windows 11 (x64), macOS 13 (Ventura) or
+  later on Apple Silicon, and Ubuntu 24.04 or later (x86-64). GitBolt
+  still installs and updates on Windows 10 (version 1809 or later), but
+  Windows 10 isn't supported. The .deb also installs on Debian 13 and
+  on distributions based on Ubuntu 24.04 or Debian 13, such as Linux
+  Mint 22, but they aren't supported either.
 - **First launch**: the Windows installer isn't signed yet, and the Mac
   app isn't notarized by Apple, so the first time you open a download,
   your system asks you to confirm it. On macOS: System Settings ›
@@ -77,17 +79,18 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Usage statistics** also count right-click menu commands, each by
   its fixed internal name (never the text it shows, which can be a
   branch name), the buttons of the update window and of the bar that
-  says an update is out, and on macOS the GitBolt menu's About GitBolt
-  and Check for Updates…. They also say how each in-app update ended.
-  A failed update or update check, and an unexpected error in
-  background work, are reported as errors, with fixed codes and the
-  error's type only; an update check that fails because you are
+  says an update is out or went in, and on macOS the GitBolt menu's
+  About GitBolt and Check for Updates…. They also say how each in-app
+  update ended. A failed update or update check, and an unexpected
+  error in background work, are reported as errors, with fixed codes
+  and the error's type only; an update check that fails because you are
   offline is never reported. PRIVACY.md lists what each carries.
 - macOS: a second GitBolt started for a folder (by Finder, say, or with
   `open -n`) waits for macOS to hand the folder over, at most 3 s,
   before passing it on to the GitBolt that is open.
 - **After an in-app update**, GitBolt opens the repository you had
-  open.
+  open. The update from 0.9.12 to this version doesn't yet: 0.9.12
+  runs that update, and starts GitBolt without a repository.
 - **Windows: installing over an installed GitBolt** no longer asks
   whether to uninstall the old version first. The installer removes it
   and installs the new one.
@@ -123,9 +126,10 @@ need a newer version of macOS, Windows or Ubuntu.
   like a crash on the main thread, without an error dialog from
   Windows. A crash report is also saved when the Windows user folder's
   name has non-Latin letters.
-- **Ubuntu: Nautilus's Open in GitBolt** needs python3-nautilus, which
-  the .deb now recommends, so apt installs it. Restart Nautilus
-  (`nautilus -q`) after the first install.
+- **Ubuntu: Nautilus's Open in GitBolt** didn't show unless
+  python3-nautilus was installed. The .deb now recommends it, so apt
+  installs it with GitBolt. Restart Nautilus once (`nautilus -q`) after
+  installing or updating to this version.
 - **Small screens**: on a screen such as 1024×768, the window and its
   dialogs open fully on screen, and the welcome screen's cards no
   longer get cut off: they narrow to fit, and the welcome screen
@@ -141,9 +145,11 @@ need a newer version of macOS, Windows or Ubuntu.
   the registry, so a program at `C:\Program.exe` can't run in its
   place.
 - **Committing without a name and email** for git failed with git's
-  advice to run `git config`. The Commit dialog and the status bar now
-  say to set them in Tools › Settings › Git Config (GitBolt › Settings
-  on macOS), and the dialog's footer says so before you commit, with
+  advice to run `git config`; on a Mac, git instead made up a name and
+  email from your account and computer names, and committed with them.
+  GitBolt now refuses such a commit, and the Commit dialog and the
+  status bar say to set them in Tools › Settings › Git Config. Before
+  you commit, the dialog's footer says when they aren't set, with
   **Set name and email…**, which opens that page. Opened again, the
   dialog no longer shows the last commit's error. It also no longer
   shows the name and email of a `~/.gitconfig` deleted while GitBolt
@@ -165,12 +171,17 @@ need a newer version of macOS, Windows or Ubuntu.
   only as a flashing button on the taskbar while another GitBolt
   dialog, such as Settings, was open over the update window; it now
   comes up as usual. Should it still show only on the taskbar, the
-  update window says to click that button. An update there that failed after the installer ran said GitBolt
-  wasn't changed; it now says GitBolt may be incomplete, and how to
-  repair it, even when the new version starts. So does an update on a Mac that could put back neither
-  the new GitBolt nor the old one. On every system, "GitBolt was
-  updated to …" now shows in a bar at the top of the window until you
-  close it, with What's New, which opens the release page.
+  update window says to click that button. An update on Windows that
+  failed after the installer ran said GitBolt wasn't changed; it now
+  says GitBolt may be incomplete, and how to repair it, even in the
+  new version the update starts. So does an update on a Mac that could
+  put back neither the new GitBolt nor the old one. On every system,
+  "GitBolt was updated to …" now shows in a bar at the top of the
+  window until you close it, with What's New, which opens the release
+  page. The fixes to how an update runs, here and below, apply to
+  updates that 1.0.0 or later installs: the update to 1.0.0 itself is
+  still run by the version it replaces. The installer's own checks
+  apply at once.
 - **Windows: starting GitBolt while an update was installing** could
   leave a mix of old and new files. A GitBolt started then now says
   "GitBolt is being updated and starts again by itself in a moment."
@@ -195,40 +206,41 @@ need a newer version of macOS, Windows or Ubuntu.
   install couldn't update itself (GitBolt said it "wasn't installed
   from a GitBolt release package"), running the installer by hand
   stopped at "Uninstall failed.", and a silent run, as updates use,
-  waited on that message forever. The installer now waits until
-  Uninstall.exe is written in full, GitBolt updates an install that
-  lost it, and the installer repairs it. An update that ends without
-  Uninstall.exe runs the installer once more, and says so if that
-  didn't bring it back.
+  waited on that message forever. The installer now checks that
+  Uninstall.exe was written in full and writes it again if not; if it
+  still can't, the install fails instead of saying it finished.
+  GitBolt updates an install that lost it, and the installer repairs
+  it. An update that ends without Uninstall.exe runs the installer
+  once more, and says so if that didn't bring it back.
 - **Windows: a file in use during an install or update** (GitBolt
-  still running, or another program holding one of its files) was
-  skipped, and the installer still said it had finished. The installer
-  now checks GitBolt's files before it changes anything: if one is in
-  use, it names it and changes nothing (click Retry once it is
-  closed). An update waits up to a minute for it, then says which file
-  it was and leaves GitBolt as it was.
+  still running, or another program holding one of its files) could
+  leave GitBolt broken or half updated. An update skipped the file and
+  still said it had finished. Run by hand, the installer stopped at
+  "Error opening file for writing", with the old version already
+  partly removed. The installer now checks GitBolt's files before it
+  changes anything: if one is in use, it names it and changes nothing
+  (close it, then click Retry). An update waits up to a minute for it,
+  then says which file it was and leaves GitBolt as it was.
 - **Windows: paths** in the window title, the status bar, the Clone
   dialog, Recent Repositories, the Worktrees window, the Git command
-  log and messages now use backslashes, as Windows does. The Recent
-  list's shortened paths (Settings › Recent Repositories › Shortening
-  strategy) now work on Windows too; until now the full path was
-  always shown there.
+  log's folders and GitBolt's own messages now use backslashes, as
+  Windows does. The Recent list's shortened paths (Tools › Settings ›
+  Recent Repositories › Shortening strategy) now work on Windows too;
+  until now the full path was always shown there.
 - **A repository owned by another user account** (git's "dubious
-  ownership", for example one an elevated program created, or one on a
-  network share) failed to open with libgit2's error text. GitBolt now
-  says whose it is, and gives the `git config --global --add
+  ownership", for example one on a network share) failed to open with
+  libgit2's error text. GitBolt now says the repository belongs to
+  another user account, and gives the `git config --global --add
   safe.directory` command that trusts it.
 - **Repository Statistics** said "Current branch: (detached)" in a new
   repository before its first commit; it now names the branch.
 - **Branches, tags and remote branches made or deleted outside
-  GitBolt** (in a terminal, say) now show in the sidebar and in the
-  toolbar's branch list without Refresh. The sidebar no longer
-  collapses when it updates: open categories, the selected branch or
-  tag and the scroll position stay as they were. Categories hidden
-  from the View menu (tags, remote branches, stashes) no longer come
-  back when it updates or when the branch filter is cleared.
-- **A crash** that could happen when a repository was opened while
-  GitBolt's window was hidden.
+  GitBolt** (in a terminal, say) now show in the sidebar without
+  Refresh, and branches in the toolbar's branch list too. The sidebar
+  no longer collapses when it updates: open categories, the selected
+  branch or tag and the scroll position stay as they were. Categories
+  hidden from the View menu (tags, remote branches, stashes) no longer
+  come back when it updates or when the branch filter is cleared.
 
 ## [0.9.12] — 2026-11-09
 

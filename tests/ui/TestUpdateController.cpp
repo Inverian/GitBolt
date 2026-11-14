@@ -1578,35 +1578,62 @@ private slots:
 
     // At this version (the helper's relaunch, after the installer ran)
     // the release page is the way to repair it: Try Again would only find
-    // GitBolt up to date. A copy started otherwise only logs it.
+    // GitBolt up to date. A copy started otherwise only logs it, but for
+    // 0.9.x's Windows helper, which marks nothing: a fresh result without
+    // a marker is its relaunch's.
     void aFailureAtThisVersionOffersTheReleasePage_data() {
         QTest::addColumn<bool>("startedByUpdate");
-        QTest::newRow("the helper's relaunch") << true;
-        QTest::newRow("started otherwise") << false;
+        QTest::addColumn<bool>("marker");   // a 1.0 launch's pending-install
+        QTest::addColumn<int>("kind");
+        QTest::addColumn<bool>("aged");     // the result older than the patience
+        QTest::addColumn<bool>("shown");
+        const int windows = int(PackageKind::WindowsInstall);
+        QTest::newRow("the helper's relaunch") << true << true << windows << false << true;
+        QTest::newRow("started otherwise") << false << true << windows << false << false;
+        QTest::newRow("Windows: 0.9.x's helper") << false << false << windows << false << true;
+        QTest::newRow("Windows: an old result, no marker") << false << false << windows << true << false;
+        QTest::newRow("macOS: no marker") << false << false << int(PackageKind::MacBundle) << false << false;
     }
     void aFailureAtThisVersionOffersTheReleasePage() {
         QFETCH(bool, startedByUpdate);
+        QFETCH(bool, marker);
+        QFETCH(int, kind);
+        QFETCH(bool, aged);
+        QFETCH(bool, shown);
         HttpServer server;
         UpdateSetup setup = testSetup(
             server, cache_->path(),
-            {PackageKind::WindowsInstall, QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
+            {PackageKind(kind), QDir(cache_->path()).filePath(QStringLiteral("target")), true, {}});
         setup.startedByUpdate = startedByUpdate;
-        const QString path = QDir(setup.config.downloadDir).filePath(QStringLiteral("install-result"));
+        const QDir downloads(setup.config.downloadDir);
+        const QString path = downloads.filePath(QStringLiteral("install-result"));
         QVERIFY(writeFile(path, "failed 0.1.0 the installer exited with code 2\n"));
+        if (aged) {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::ReadWrite));
+            QVERIFY(file.setFileTime(QDateTime::currentDateTime().addSecs(-UpdateController::kResultPatienceSeconds - 60),
+                                     QFileDevice::FileModificationTime));
+        }
+        if (marker)
+            QVERIFY(writeFile(downloads.filePath(QLatin1String(UpdateController::kInstallMarkerFile)),
+                              "0.0.9 0.1.0 " + QByteArray::number(QDateTime::currentSecsSinceEpoch()) + "\n"));
         Harness h(setup);
         h.controller->start();
-        QCOMPARE(h.results, QStringList{QStringLiteral("failed install installer_exit unknown 0.1.0 nsis")});
+        QCOMPARE(h.results, QStringList{QStringLiteral("failed install installer_exit %1 0.1.0 %2")
+                                            .arg(marker ? QStringLiteral("0.0.9") : QStringLiteral("unknown"),
+                                                 kind == int(PackageKind::MacBundle) ? QStringLiteral("dmg")
+                                                                                     : QStringLiteral("nsis"))});
         QVERIFY(!QFile::exists(path));
-        if (!startedByUpdate) {
+        if (!shown) {
             QVERIFY(!h.dialog());
             return;
         }
         QVERIFY(h.dialog() && h.dialog()->isVisible());
         QCOMPARE(h.dialog()->state(), State::Failed);
         QCOMPARE(headline(h.dialog()), QStringLiteral("Couldn't install GitBolt 0.1.0"));
-        const QString shown = h.dialog()->shownText();
-        QVERIFY2(shown.contains(QStringLiteral("GitBolt may be incomplete now.")), qPrintable(shown));
-        QVERIFY2(shown.contains(QStringLiteral("To repair it")), qPrintable(shown));
+        const QString text = h.dialog()->shownText();
+        QVERIFY2(text.contains(QStringLiteral("GitBolt may be incomplete now.")), qPrintable(text));
+        QVERIFY2(text.contains(QStringLiteral("To repair it")), qPrintable(text));
         QVERIFY(h.button("updateDialog.retry")->isHidden());
         QVERIFY(!h.button("updateDialog.openReleasePage")->isHidden());
         QVERIFY(h.button("updateDialog.openReleasePage")->isDefault());

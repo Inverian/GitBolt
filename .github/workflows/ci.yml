@@ -1175,6 +1175,11 @@ jobs:
           #     and the entry point found by llvm-symbolizer.
           python tools/symbolize.py --check "build/GitBolt-$version-Windows-AMD64-symbols.zip" $exe
           if ($LASTEXITCODE) { $bad += "the symbol files don't match bin\GitBolt.exe" }
+          #     It holds a copy of GitBolt.exe, so the licences go with it.
+          $zipped = python -c "import sys, zipfile; print('\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" "build/GitBolt-$version-Windows-AMD64-symbols.zip"
+          foreach ($name in 'LICENSE.txt', 'THIRD-PARTY-NOTICES.txt') {
+            if ($zipped -notcontains $name) { $bad += "the symbols zip has no $name" }
+          }
           if ($bad) {
             Get-ChildItem $dest -Recurse -File | ForEach-Object { $_.FullName.Substring($dest.Length + 1) }
             throw "NSIS payload check failed:`n$($bad -join "`n")"

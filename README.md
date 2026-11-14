@@ -132,9 +132,8 @@ or GitBolt on a Mac), your system asks you to confirm it.
 - **Ubuntu**: nothing more to do.
 
 Before your first commit, enter your name and email in **Tools ›
-Settings › Git Config** (on macOS **GitBolt › Settings › Git
-Config**), unless git already has them; the Commit dialog's **Set
-name and email…** opens that page. GitBolt saves them as git's
+Settings › Git Config**, unless git already has them; the Commit
+dialog's **Set name and email…** opens that page. GitBolt saves them as git's
 `user.name` and `user.email`, which every commit records.
 
 ### Updating

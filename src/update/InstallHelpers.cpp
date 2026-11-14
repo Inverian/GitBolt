@@ -289,14 +289,15 @@ QString debHelperScript(const HelperInputs& in) {
                "    report failed \"apt-get failed with status $status\"\n"
                "    ;;\n"
                "esac\n"
-               "# With the repository it had open, marked as the helper's.\n"
+               "# With the repository it had open, marked as the helper's; its\n"
+               "# output goes to its own log, not into this one.\n"
                "say \"starting $relaunch\"\n"
                "GITBOLT_UPDATE_RELAUNCH=1\n"
                "export GITBOLT_UPDATE_RELAUNCH\n"
                "if [ -n \"$reopen\" ]; then\n"
-               "    exec \"$relaunch\" \"$reopen\"\n"
+               "    exec \"$relaunch\" \"$reopen\" >/dev/null 2>&1\n"
                "fi\n"
-               "exec \"$relaunch\"\n");
+               "exec \"$relaunch\" >/dev/null 2>&1\n");
 }
 
 namespace {

@@ -1123,7 +1123,9 @@ private slots:
         QVERIFY(script.contains(QLatin1String("\nrelaunch='/usr/bin/gitbolt'\n")));
         QVERIFY(script.contains(
             QLatin1String("\n\"$pkexec\" /usr/bin/apt-get install -y -o DPkg::Lock::Timeout=60 \"$deb\"\n")));
-        QVERIFY(script.endsWith(QLatin1String("exec \"$relaunch\"\n")));
+        // The relaunched copy's output stays out of install.log, whose end
+        // the failure dialog shows.
+        QVERIFY(script.endsWith(QLatin1String("exec \"$relaunch\" >/dev/null 2>&1\n")));
     }
 
     // ---------------------------------------------------------------
