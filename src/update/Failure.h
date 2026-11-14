@@ -43,6 +43,7 @@ enum class Failure {
     RollbackFailed,
     AptFailed,
     InUse,               ///< Windows: another GitBolt ran from the install folder
+    FileInUse,           ///< Windows: another program had a file of the install open
     InstallerNotStarted,
     InstallerExit,
     WrongVersion,
@@ -89,6 +90,7 @@ constexpr const char* failureName(Failure failure) {
     case Failure::RollbackFailed: return "rollback_failed";
     case Failure::AptFailed: return "apt_failed";
     case Failure::InUse: return "in_use";
+    case Failure::FileInUse: return "file_in_use";
     case Failure::InstallerNotStarted: return "installer_not_started";
     case Failure::InstallerExit: return "installer_exit";
     case Failure::WrongVersion: return "wrong_version";

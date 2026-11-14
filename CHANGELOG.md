@@ -189,16 +189,24 @@ need a newer version of macOS, Windows or Ubuntu.
   the update went when you next start GitBolt, which brings that
   window forward. Before, it said so only after you quit it and opened
   it again.
-- **Windows: an install that lost its Uninstall.exe** couldn't update
-  itself (GitBolt said it "wasn't installed from a GitBolt release
-  package"). Running the installer by hand stopped at "Uninstall
-  failed.", and a silent run, as updates use, waited on that message
-  forever. GitBolt now updates such an install, and the installer
-  repairs it. An update that ends without Uninstall.exe now says so.
-- **Windows: a file in use during an install or update** was skipped,
-  and the installer still said it had finished. The installer now
-  stops with an error instead, and GitBolt stays listed in Installed
-  apps, so the next update or a run of the installer repairs it.
+- **Windows: an install could lose its Uninstall.exe** when another
+  program (a virus scan, say) had it open just as the installer
+  replaced it, and the installer still said it had finished. Such an
+  install couldn't update itself (GitBolt said it "wasn't installed
+  from a GitBolt release package"), running the installer by hand
+  stopped at "Uninstall failed.", and a silent run, as updates use,
+  waited on that message forever. The installer now waits until
+  Uninstall.exe is written in full, GitBolt updates an install that
+  lost it, and the installer repairs it. An update that ends without
+  Uninstall.exe runs the installer once more, and says so if that
+  didn't bring it back.
+- **Windows: a file in use during an install or update** (GitBolt
+  still running, or another program holding one of its files) was
+  skipped, and the installer still said it had finished. The installer
+  now checks GitBolt's files before it changes anything: if one is in
+  use, it names it and changes nothing (click Retry once it is
+  closed). An update waits up to a minute for it, then says which file
+  it was and leaves GitBolt as it was.
 - **Windows: paths** in the window title, the status bar, the Clone
   dialog, Recent Repositories, the Worktrees window, the Git command
   log and messages now use backslashes, as Windows does. The Recent

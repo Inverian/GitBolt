@@ -432,9 +432,13 @@ void UpdateController::reportEarlierInstall(bool running)
                               : tr("To install it yourself, download %1 from the release page and open it; "
                                    "Windows asks for administrator permission.")
                                     .arg(asset);
-        // The installer can't replace files another GitBolt has open.
+        // The installer can't replace files another GitBolt has open, nor
+        // those another program has (the reason names one).
         if (failure == update::Failure::InUse)
             byHand = tr("Close every other GitBolt window, in other users' sessions too, then click Try Again.");
+        else if (failure == update::Failure::FileInUse)
+            byHand = tr("Close the program that is using files in %1, or restart Windows, then click Try Again.")
+                         .arg(QDir::toNativeSeparators(setup_.package.target));
         break;
     case update::PackageKind::Deb:
         byHand = tr("To install it yourself, download %1 from the release page, and in its folder run: "

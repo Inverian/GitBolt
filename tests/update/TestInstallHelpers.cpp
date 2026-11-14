@@ -11,6 +11,7 @@
 
 #include <QDeadlineTimer>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -1039,6 +1040,10 @@ private slots:
         QTest::newRow("deb: apt") << "failed 0.1.1 apt-get failed with status 100" << "apt_failed";
         QTest::newRow("Windows: in use") << "failed 0.1.1 another GitBolt window was still open"
                                          << "in_use";
+        QTest::newRow("Windows: a file in use") << "failed 0.1.1 another program was using bin\\Qt6Core.dll"
+                                                << "file_in_use";
+        QTest::newRow("Windows: the installer found a file in use")
+            << "failed 0.1.1 another program was using GitBolt files" << "file_in_use";
         QTest::newRow("Windows: not started") << "failed 0.1.1 the installer could not be started"
                                               << "installer_not_started";
         QTest::newRow("Windows: wrong version")
@@ -1099,7 +1104,7 @@ private slots:
                 status = QStringLiteral("failed");
             }
         }
-        QCOMPARE(written.size() - shell, 10);
+        QCOMPARE(written.size() - shell, 12);
         for (const auto& [status, reason] : std::as_const(written)) {
             const Failure failure = installResultFailure(status, reason);
             QVERIFY2(failure != Failure::Other, qPrintable(status + QLatin1Char(' ') + reason));
@@ -1224,7 +1229,7 @@ private slots:
         HelperInputs in = windowsInputs();
         const QString elevated = windowsElevatedScript(in);
         QVERIFY2(elevated.contains(QLatin1String(
-                     "\n            $setup = Start-Process -FilePath $installer -ArgumentList "
+                     "\n                $setup = Start-Process -FilePath $installer -ArgumentList "
                      "'/S /D=C:\\Program Files\\GitBolt' -Wait -PassThru\n")),
                  qPrintable(elevated));
         QCOMPARE(elevated.count(QLatin1String("Start-Process")), 1);
@@ -1315,10 +1320,12 @@ private slots:
     }
 
     // The administrator part waits until no other GitBolt runs from the
-    // folder and GitBolt.exe opens with no sharing (else NSIS would
-    // install a mix around the locked files; only a sharing or lock
-    // violation counts as in use), then installs and checks the version,
-    // then that the uninstaller is there.
+    // folder and none of GitBolt's files is open as NSIS's File can't
+    // overwrite it (write access, sharing reads only; only a sharing or
+    // lock violation counts), logging what it waits for: else the old
+    // uninstaller would delete what it can and the install stop halfway.
+    // Then it installs, checks the version and the uninstaller, and runs
+    // the installer once more if only Uninstall.exe is missing.
     void windowsElevatedScriptWaitsUntilTheInstallIsFree() {
         const QString elevated = windowsElevatedScript(windowsInputs());
         const qsizetype loop =
@@ -1328,47 +1335,95 @@ private slots:
             "                try { $_.Id -ne $appPid -and $_.Path -and $_.Path.Length -ge $prefix.Length -and "
             "$_.Path.Substring(0, $prefix.Length) -eq $prefix } catch { $false }\n"
             "            }).Count -gt 0\n"));
-        const qsizetype exclusive = elevated.indexOf(QLatin1String(
-            "                try {\n"
-            "                    [IO.File]::Open($app, 'Open', 'ReadWrite', 'None').Dispose()\n"
-            "                } catch {\n"));
+        // The folder's own files, and all of bin and plugins: the
+        // installed layout, which the real-install test pins.
+        const qsizetype files = elevated.indexOf(QLatin1String(
+            "            if (-not $inUse) {\n"
+            "                $files = @(Get-ChildItem -LiteralPath $prefix -File -Force -ErrorAction SilentlyContinue) + "
+            "@(Get-ChildItem -LiteralPath ($prefix + 'bin'), ($prefix + 'plugins') -Recurse -File -Force "
+            "-ErrorAction SilentlyContinue)\n"
+            "                foreach ($file in $files) {\n"));
+        const qsizetype probe = elevated.indexOf(QLatin1String(
+            "                    try {\n"
+            "                        [IO.File]::Open($file.FullName, 'Open', 'Write', 'Read').Dispose()\n"
+            "                    } catch {\n"));
         const qsizetype sharing = elevated.indexOf(QLatin1String(
-            "                    while ($e.InnerException) {\n"
-            "                        $e = $e.InnerException\n"
-            "                    }\n"
-            "                    $inUse = @(32, 33) -contains ($e.HResult -band 0xFFFF)\n"));
-        const qsizetype busy = elevated.indexOf(QStringLiteral("$code = %1\n").arg(kWindowsExitInUse));
+            "                        while ($e.InnerException) {\n"
+            "                            $e = $e.InnerException\n"
+            "                        }\n"
+            "                        if ($busy -eq '' -and @(32, 33) -contains ($e.HResult -band 0xFFFF)) {\n"
+            "                            $busy = $file.FullName.Replace($prefix, '')\n"));
+        const qsizetype free = elevated.indexOf(QLatin1String(
+            "            if (-not $inUse -and $busy -eq '') {\n"
+            "                break\n"
+            "            }\n"));
+        const qsizetype said = elevated.indexOf(QLatin1String(
+            "            $now = 'another GitBolt window to close'\n"
+            "            if ($busy) {\n"
+            "                $now = 'another program to close ' + $busy\n"
+            "            }\n"
+            "            if ($now -ne $said) {\n"
+            "                Write-Log ('waiting for ' + $now)\n"
+            "                $said = $now\n"));
+        const qsizetype busy = elevated.indexOf(QStringLiteral(
+            "                $code = %1\n"
+            "                if ($busy) {\n"
+            "                    $code = %2\n"
+            "                }\n"
+            "                break\n").arg(kWindowsExitInUse).arg(kWindowsExitFileInUse));
         const qsizetype pause = elevated.indexOf(QLatin1String("Start-Sleep -Seconds 1"));
+        const qsizetype runs = elevated.indexOf(QLatin1String("\n    foreach ($run in 1, 2) {\n"));
         const qsizetype install = elevated.indexOf(QLatin1String("Start-Process -FilePath $installer"));
         const qsizetype noInstaller = elevated.indexOf(QStringLiteral("$code = %1\n").arg(kWindowsExitNoInstaller));
         const qsizetype itsCode = elevated.indexOf(QLatin1String(
-            "        $setupCode = $setup.ExitCode\n"
-            "        if ($null -ne $setupCode -and $setupCode -ne 0) {\n"
-            "            $code = $setupCode\n"));
+            "            $setupCode = $setup.ExitCode\n"
+            "            if ($null -ne $setupCode -and $setupCode -ne 0) {\n"
+            "                $code = $setupCode\n"));
         const qsizetype version = elevated.indexOf(QLatin1String(
-            "        $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion\n"
-            "        if ($found.Trim() -ne $version) {\n"));
+            "            $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion\n"
+            "            if ($found.Trim() -ne $version) {\n"));
         const qsizetype wrongVersion = elevated.indexOf(QStringLiteral("$code = %1\n").arg(kWindowsExitWrongVersion));
         const qsizetype uninstaller = elevated.indexOf(QStringLiteral(
-            "    if ($code -eq 0 -and -not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {\n"
-            "        $code = %1\n"
+            "        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and "
+            "-not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {\n"
+            "            if ($code -ne 0) {\n"
+            "                Write-Log ('Uninstall.exe is missing, and the run ended with code ' + $code)\n"
+            "            }\n"
+            "            $code = %1\n"
+            "        }\n"
+            "        if ($code -ne %1 -or $run -eq 2) {\n"
+            "            break\n"
+            "        }\n"
+            "        $code = 0\n"
+            "        Write-Log 'the installer ran, but Uninstall.exe is missing: running it again'\n"
             "    }\n").arg(kWindowsExitNoUninstaller));
         const qsizetype failed = elevated.indexOf(QStringLiteral("} catch {\n    $code = %1\n").arg(kWindowsExitError));
         QVERIFY(elevated.contains(QLatin1String("\n$version = '0.1.1'\n")));
         QVERIFY(elevated.contains(QLatin1String("\n$prefix = 'C:\\Program Files\\GitBolt\\'\n")));
-        for (const qsizetype at : {loop, others, exclusive, sharing, busy, pause, install, noInstaller, itsCode, version,
-                                   wrongVersion, uninstaller, failed})
+        for (const qsizetype at : {loop, others, files, probe, sharing, free, said, busy, pause, runs, install,
+                                   noInstaller, itsCode, version, wrongVersion, uninstaller, failed})
             QVERIFY2(at > 0, qPrintable(elevated));
-        QVERIFY(loop < others && others < exclusive && exclusive < sharing && sharing < busy && busy < pause);
-        QVERIFY(pause < install && install < noInstaller && noInstaller < itsCode && itsCode < version);
-        QVERIFY(version < wrongVersion && wrongVersion < uninstaller && uninstaller < failed);
-        // The codes it can end with are distinct, and none is NSIS's.
+        QVERIFY(loop < others && others < files && files < probe && probe < sharing && sharing < free);
+        QVERIFY(free < said && said < busy && busy < pause && pause < runs && runs < install);
+        QVERIFY(install < noInstaller && noInstaller < itsCode && itsCode < version && version < wrongVersion);
+        QVERIFY(wrongVersion < uninstaller && uninstaller < failed);
+        // One installer run in the script, however often it runs.
+        QCOMPARE(elevated.count(QLatin1String("Start-Process")), 1);
+        // The wait is the inputs': kWindowsInUseSeconds unless a test sets it.
+        QCOMPARE(HelperInputs().inUseSeconds, kWindowsInUseSeconds);
+        HelperInputs quick = windowsInputs();
+        quick.inUseSeconds = 5;
+        QVERIFY(windowsElevatedScript(quick).contains(QLatin1String("\n        $deadline = (Get-Date).AddSeconds(5)\n")));
+        // The codes it can end with are distinct, and none is NSIS's (0-2)
+        // or the installer's own, which cmake/NsisScript.cmake sets.
         const QList<int> codes = {kWindowsExitInUse, kWindowsExitNoInstaller, kWindowsExitWrongVersion,
-                                  kWindowsExitError, kWindowsExitGaveUp, kWindowsExitNoUninstaller};
+                                  kWindowsExitError, kWindowsExitGaveUp, kWindowsExitNoUninstaller,
+                                  kWindowsExitFileInUse};
         for (const int code : codes) {
-            QVERIFY(code > 2);
+            QVERIFY(code > 2 && code != kWindowsInstallerExitInUse);
             QCOMPARE(codes.count(code), 1);
         }
+        QVERIFY(kWindowsInstallerExitInUse > 2);
     }
 
     // The administrator part's result: ok only for 0, gave-up, or failed
@@ -1389,6 +1444,10 @@ private slots:
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitGaveUp), QStringLiteral("    $status = 'gave-up'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitInUse),
                        QStringLiteral("    $reason = 'another GitBolt window was still open'\n")));
+        QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitFileInUse),
+                       QStringLiteral("    $reason = 'another program was using ' + $busy\n")));
+        QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsInstallerExitInUse),
+                       QStringLiteral("    $reason = 'another program was using GitBolt files'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitNoInstaller),
                        QStringLiteral("    $reason = 'the installer could not be started'\n")));
         QVERIFY(branch(QStringLiteral("$code -eq %1").arg(kWindowsExitWrongVersion),
@@ -1401,14 +1460,17 @@ private slots:
             "} else {\n    $reason = 'the installer exited with code ' + $code\n}\n")));
         QVERIFY(elevated.contains(QLatin1String(
             "    Write-Log ('the installer exited with code 0, and GitBolt.exe is now version ' + $version)\n")));
-        // "nothing was installed" only where the installer never ran.
+        // "nothing was installed" only where the installer never ran, or
+        // stopped before it changed anything.
         QVERIFY2(elevated.contains(QStringLiteral(
-                     "if ($code -eq %1 -or $code -eq %2) {\n"
+                     "if (@(%1, %2, %3, %4) -contains $code) {\n"
                      "    Write-Log ('nothing was installed (code ' + $code + '): ' + $reason)\n"
                      "} elseif ($status -eq 'failed') {\n"
                      "    Write-Log ('GitBolt may be incomplete (code ' + $code + '): ' + $reason)\n"
                      "}\n")
                                        .arg(kWindowsExitInUse)
+                                       .arg(kWindowsExitFileInUse)
+                                       .arg(kWindowsInstallerExitInUse)
                                        .arg(kWindowsExitNoInstaller)),
                  qPrintable(elevated));
         QCOMPARE(elevated.count(QLatin1String("Write-Result ")), 1);
@@ -1929,6 +1991,8 @@ private slots:
     // alone. launchWindowsUpdate starts both parts as GitBolt does (the
     // hosted runner has UAC off, so runas is granted with no prompt) for
     // a stand-in GitBolt; the test closes every GitBolt.exe it starts.
+    // Where the installer's own behaviour is the point (Uninstall.exe lost,
+    // its in-use exit code), a .cmd wrapper or stand-in takes its place.
     void windowsHelperUpdatesARealInstall() {
 #if !defined(Q_OS_WIN)
         QSKIP("Windows only: runs a real NSIS installer");
@@ -2005,17 +2069,19 @@ private slots:
                     endProcess(running);
         });
         // Starts both parts as Installer::launchHelper does, with a fresh
-        // log and no result.
-        const auto launch = [&](int waitSeconds) {
+        // log and no result; `installerFile` in the installer's place.
+        const auto launch = [&](int waitSeconds, const QString& installerFile = QString(),
+                                int inUseSeconds = kWindowsInUseSeconds) {
             HelperInputs in;
             in.pid = gitBoltPid;
             in.waitSeconds = waitSeconds;
             in.installSeconds = 5 * 60;
+            in.inUseSeconds = inUseSeconds;
             in.logFile = log();
             in.resultFile = result();
             in.newVersion = version->toString();
             in.target = package.target;
-            in.staged = staged;
+            in.staged = installerFile.isEmpty() ? staged : installerFile;
             QFile::remove(log());
             QFile::remove(result());
             const WindowsLaunch launched = launchWindowsUpdate(in, 0, env);
@@ -2129,14 +2195,16 @@ private slots:
         QVERIFY2(shownGitBolt(0, 60000) == DWORD(otherPid),
                  qPrintable(QStringLiteral("the other GitBolt shows no window\n") + diagnostics()));
         QVERIFY(QFile::copy(installer, staged));
-        const WindowsLaunch blocked = launch(120);
+        const WindowsLaunch blocked = launch(120, QString(), 5);
         QVERIFY2(bothStarted(blocked), qPrintable(blocked.error + QLatin1Char('\n') + diagnostics()));
         QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
         quitWaited();
-        QVERIFY2(finishes(blocked.helperPid, (kWindowsInUseSeconds + 120) * 1000),
+        QVERIFY2(finishes(blocked.helperPid, (5 + 120) * 1000),
                  qPrintable(QStringLiteral("the blocked helper is still running\n") + diagnostics()));
         QVERIFY(ended(blocked.elevatedPid, 30000));
         QVERIFY2(readFile(log()).contains(QStringLiteral("nothing was installed (code %1)").arg(kWindowsExitInUse)),
+                 qPrintable(diagnostics()));
+        QVERIFY2(readFile(log()).contains(QLatin1String(" waiting for another GitBolt window to close")),
                  qPrintable(diagnostics()));
         QCOMPARE(readFile(result()),
                  QStringLiteral("failed %1 another GitBolt window was still open\n")
@@ -2189,6 +2257,171 @@ private slots:
                  qPrintable(QStringLiteral("after a minute, %1 copies of %2 run and none shows a window\n")
                                 .arg(QString::number(processesOf(app).size()), app)
                             + diagnostics()));
+        closeAll();
+        QVERIFY(QFileInfo(app).isFile());
+
+        // The in-use check covers every file of the install: the folder's
+        // own, and all of bin and plugins (InstallHelpers.cpp).
+        QCOMPARE(QDir(package.target)
+                     .entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System,
+                                QDir::Name | QDir::IgnoreCase),
+                 (QStringList{QStringLiteral("bin"), QStringLiteral("plugins")}));
+        const QString qtCore = QDir(package.target).filePath(QStringLiteral("bin/Qt6Core.dll"));
+        const QString uninstaller = QDir(package.target).filePath(QStringLiteral("Uninstall.exe"));
+        QVERIFY2(QFileInfo(qtCore).isFile(), qPrintable(qtCore));
+        // What "nothing was changed" compares: what Installed apps runs,
+        // and every file of the install with its size and time.
+        const auto installState = [&] {
+            QStringList state = registeredWindowsUninstallers();
+            QDirIterator it(package.target, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                const QFileInfo file = it.nextFileInfo();
+                state << QStringLiteral("%1 %2 %3")
+                             .arg(file.filePath())
+                             .arg(file.size())
+                             .arg(file.lastModified().toMSecsSinceEpoch());
+            }
+            state.sort();
+            return state;
+        };
+        // Holds bin\Qt6Core.dll as many a program reads a file: read
+        // access, sharing reads only. NSIS can't overwrite it then, nor its
+        // uninstaller delete it, yet GitBolt still loads it. Tried for up
+        // to 30 s: the GitBolt just closed, or a scanner, may have it.
+        HANDLE held = INVALID_HANDLE_VALUE;
+        const auto hold = [&] {
+            const std::wstring native = QDir::toNativeSeparators(qtCore).toStdWString();
+            const QDeadlineTimer deadline(30000);
+            for (;;) {
+                held = CreateFileW(native.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (held != INVALID_HANDLE_VALUE || deadline.hasExpired())
+                    return held != INVALID_HANDLE_VALUE;
+                QTest::qWait(100);
+            }
+        };
+        const auto letGo = [&] {
+            if (held != INVALID_HANDLE_VALUE)
+                CloseHandle(held);
+            held = INVALID_HANDLE_VALUE;
+        };
+        auto letGoAtEnd = qScopeGuard(letGo);
+        if (!QFileInfo::exists(staged))
+            QVERIFY(QFile::copy(installer, staged));
+
+        // 4. Another program holds bin\Qt6Core.dll: nothing is installed,
+        // the result names the file, and the old copy starts again as it
+        // was (#94: its uninstaller used to remove most of it first).
+        QVERIFY2(hold(), qPrintable(qt_error_string()));
+        const QStringList before = installState();
+        gitBoltPid = startStandIn();
+        QVERIFY(gitBoltPid > 0);
+        const WindowsLaunch fileBlocked = launch(120, QString(), 5);
+        QVERIFY2(bothStarted(fileBlocked), qPrintable(fileBlocked.error + QLatin1Char('\n') + diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(finishes(fileBlocked.helperPid, 2 * 60 * 1000),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        QVERIFY(ended(fileBlocked.elevatedPid, 30000));
+        const QString waitedFor = QStringLiteral(" waiting for another program to close bin\\Qt6Core.dll");
+        QVERIFY2(readFile(log()).contains(waitedFor), qPrintable(diagnostics()));
+        QVERIFY2(readFile(log()).contains(QStringLiteral("nothing was installed (code %1)").arg(kWindowsExitFileInUse)),
+                 qPrintable(diagnostics()));
+        QVERIFY2(!readFile(log()).contains(QLatin1String(" running ")), qPrintable(diagnostics()));
+        QCOMPARE(readFile(result()),
+                 QStringLiteral("failed %1 another program was using bin\\Qt6Core.dll\n").arg(version->toString()));
+        QVERIFY2(lastLine().endsWith(startingApp), qPrintable(diagnostics()));
+        QVERIFY2(shownGitBolt(0, 60000) != 0,
+                 qPrintable(QStringLiteral("the old copy didn't start again\n") + diagnostics()));
+        closeAll();
+        letGo();
+        QCOMPARE(installState(), before);
+
+        // 4b. Uninstall.exe stays lost (a stand-in deletes it and exits 0):
+        // the installer runs twice, no more, and the result says so.
+        const QString losingAlways = path(QStringLiteral("updates/losing-always.cmd"));
+        QVERIFY(writeFile(losingAlways, QStringLiteral("@del \"%1\"\r\n@exit /b 0\r\n")
+                                            .arg(QDir::toNativeSeparators(uninstaller))
+                                            .toLocal8Bit()));
+        gitBoltPid = startStandIn();
+        QVERIFY(gitBoltPid > 0);
+        const WindowsLaunch stillLost = launch(120, losingAlways);
+        QVERIFY2(bothStarted(stillLost), qPrintable(stillLost.error + QLatin1Char('\n') + diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(finishes(stillLost.helperPid, 2 * 60 * 1000),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        QVERIFY(ended(stillLost.elevatedPid, 30000));
+        QCOMPARE(readFile(log()).count(QStringLiteral(" running ") + QDir::toNativeSeparators(losingAlways)), 2);
+        QCOMPARE(readFile(result()), QStringLiteral("failed %1 the installer ran, but Uninstall.exe is missing\n")
+                                         .arg(version->toString()));
+        QVERIFY2(shownGitBolt(0, 60000) != 0,
+                 qPrintable(QStringLiteral("GitBolt didn't start again\n") + diagnostics()));
+        closeAll();
+
+        // 5. Held for a moment: the administrator part waits, saying for
+        // what, and installs once it is free. The installer, behind a
+        // wrapper, loses Uninstall.exe the first time (#63): it is run once
+        // more, which puts it back.
+        const QString loseOnce = path(QStringLiteral("lose-uninstaller"));
+        QVERIFY(writeFile(loseOnce, "once\n"));
+        const QString losing = path(QStringLiteral("updates/losing-installer.cmd"));
+        QVERIFY(writeFile(losing, QStringLiteral("@echo off\r\n"
+                                                 "\"%1\" %*\r\n"
+                                                 "set code=%errorlevel%\r\n"
+                                                 "if exist \"%2\" (\r\n"
+                                                 "    del \"%2\"\r\n"
+                                                 "    del \"%3\"\r\n"
+                                                 ")\r\n"
+                                                 "exit /b %code%\r\n")
+                                      .arg(QDir::toNativeSeparators(staged), QDir::toNativeSeparators(loseOnce),
+                                           QDir::toNativeSeparators(uninstaller))
+                                      .toLocal8Bit()));
+        QVERIFY2(hold(), qPrintable(qt_error_string()));
+        gitBoltPid = startStandIn();
+        QVERIFY(gitBoltPid > 0);
+        const WindowsLaunch waiting = launch(120, losing);
+        QVERIFY2(bothStarted(waiting), qPrintable(waiting.error + QLatin1Char('\n') + diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(QTest::qWaitFor([&] { return readFile(log()).contains(waitedFor); }, 30000),
+                 qPrintable(QStringLiteral("the administrator part didn't wait for bin\\Qt6Core.dll\n") + diagnostics()));
+        letGo();
+        QVERIFY2(finishes(waiting.helperPid, 4 * 60 * 1000),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        QVERIFY(ended(waiting.elevatedPid, 30000));
+        const QString repaired = readFile(log());
+        QCOMPARE(repaired.count(waitedFor), 1);
+        QCOMPARE(repaired.count(QStringLiteral(" running ") + QDir::toNativeSeparators(losing)), 2);
+        QVERIFY2(repaired.contains(QLatin1String(" the installer ran, but Uninstall.exe is missing: running it again")),
+                 qPrintable(diagnostics()));
+        QCOMPARE(readFile(result()), QStringLiteral("ok %1 \n").arg(version->toString()));
+        QVERIFY(!QFileInfo::exists(loseOnce));
+        QVERIFY(QFileInfo(uninstaller).isFile());
+        QVERIFY2(shownGitBolt(0, 60000) != 0,
+                 qPrintable(QStringLiteral("the updated copy didn't start\n") + diagnostics()));
+        closeAll();
+
+        // 6. The installer's own check found a file in use, so it changed
+        // nothing (kWindowsInstallerExitInUse, cmake/NsisScript.cmake): a
+        // stand-in exits with that code.
+        const QString refusing = path(QStringLiteral("updates/refusing-installer.cmd"));
+        QVERIFY(writeFile(refusing, QStringLiteral("@exit /b %1\r\n").arg(kWindowsInstallerExitInUse).toLatin1()));
+        gitBoltPid = startStandIn();
+        QVERIFY(gitBoltPid > 0);
+        const WindowsLaunch refused = launch(120, refusing);
+        QVERIFY2(bothStarted(refused), qPrintable(refused.error + QLatin1Char('\n') + diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(finishes(refused.helperPid, 2 * 60 * 1000),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        QVERIFY(ended(refused.elevatedPid, 30000));
+        QVERIFY2(readFile(log()).contains(QStringLiteral("nothing was installed (code %1)").arg(kWindowsInstallerExitInUse)),
+                 qPrintable(diagnostics()));
+        QCOMPARE(readFile(result()),
+                 QStringLiteral("failed %1 another program was using GitBolt files\n").arg(version->toString()));
+        QVERIFY2(shownGitBolt(0, 60000) != 0,
+                 qPrintable(QStringLiteral("the old copy didn't start again\n") + diagnostics()));
         closeAll();
         // Anything else of it (a git askpass, say) goes with stopAll.
         QVERIFY(QFileInfo(app).isFile());

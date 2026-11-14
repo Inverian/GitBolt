@@ -1318,11 +1318,8 @@ jobs:
           #     registered uninstaller only if it is there, installs over
           #     the old files if that fails, and writes a new one
           #     (cmake/NsisScript.cmake). CPack's own showed "Uninstall
-          #     failed.", which /S can't answer. And a file in use fails the
-          #     install with exit code 2 instead of being skipped
-          #     (AllowSkipFiles off), leaving GitBolt registered with its
-          #     uninstaller, so the next install puts it right. Each with a
-          #     timeout, so a message box fails the step, not hangs it.
+          #     failed.", which /S can't answer. Each with a timeout, so a
+          #     message box fails the step, not hangs it.
           function Install-Over([string]$when, [int]$expect = 0) {
             $p = Start-Process -FilePath $setup[0].FullName -ArgumentList "/S /D=$dest" -Verb RunAs -PassThru
             $null = $p.Handle   # so ExitCode can still be read after the wait
@@ -1335,19 +1332,139 @@ jobs:
           Remove-Item -LiteralPath (Join-Path $dest 'Uninstall.exe')
           Install-Over 'over a lost uninstaller'
           Assert-Updated 'installed over a lost uninstaller'
-          $lock = [System.IO.File]::Open($exe, 'Open', 'Read', 'None')
+          # An uninstaller deleted while another program still has it open
+          # (a virus scan, say), as WriteUninstaller does when it can't
+          # rewrite one (#63): marked for deletion the pre-POSIX way, it
+          # stays listed but can't be opened until let go, then it is gone.
+          # Let go 6 s after the installer rewrote the Start menu shortcut,
+          # so after it checked the uninstaller: it must wait for it.
+          $shortcut = @(Get-ChildItem -LiteralPath ([Environment]::GetFolderPath('CommonPrograms')) -Recurse -Filter 'GitBolt.lnk')[0].FullName
+          if (-not $shortcut) { throw 'no GitBolt.lnk in the Start menu' }
+          $uninstaller = Join-Path $dest 'Uninstall.exe'
+          $uninstallerLength = (Get-Item -LiteralPath $uninstaller).Length
+          Add-Type -Namespace GitBoltCi -Name Pending -MemberDefinition (
+            '[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern ' +
+            'Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, int access, int share, IntPtr sa, ' +
+            'int disposition, int flags, IntPtr template); [DllImport("kernel32.dll", SetLastError = true)] ' +
+            'public static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle handle, ' +
+            'int infoClass, ref byte deleteFile, int size);')
+          $started = Get-Date
+          # GENERIC_READ | DELETE, shared with all; then FileDispositionInfo (4).
+          $held = [GitBoltCi.Pending]::CreateFileW($uninstaller, 0x80010000, 7, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)
+          if ($held.IsInvalid) { throw "could not open $uninstaller to hold it" }
+          $yes = [byte]1
+          if (-not [GitBoltCi.Pending]::SetFileInformationByHandle($held, 4, [ref]$yes, 1)) {
+            $held.Dispose()
+            throw "could not mark $uninstaller for deletion"
+          }
           try {
-            Install-Over 'with bin\GitBolt.exe in use' 2
+            $p = Start-Process -FilePath $setup[0].FullName -ArgumentList "/S /D=$dest" -Verb RunAs -PassThru
+            $null = $p.Handle
+            $deadline = (Get-Date).AddSeconds(120)
+            while (-not $p.HasExited -and (Get-Date) -lt $deadline -and
+                   -not ((Get-Item -LiteralPath $shortcut -ErrorAction SilentlyContinue).LastWriteTime -gt $started)) {
+              Start-Sleep -Milliseconds 100
+            }
+            Start-Sleep -Seconds 6
           } finally {
-            $lock.Dispose()
+            $held.Dispose()
           }
-          $registered = @(Get-UninstallKeys | Where-Object { $_.DisplayName -and $_.UninstallString })
-          if (-not (Test-Path -LiteralPath (Join-Path $dest 'Uninstall.exe')) -or $registered.Count -ne 1 -or
-              $registered[0].UninstallString.Trim('"') -ne (Join-Path $dest 'Uninstall.exe')) {
-            throw "after the install that failed, GitBolt isn't registered with its uninstaller: $($registered | Format-List | Out-String)"
+          $heldCase = 'with Uninstall.exe held while deleted'
+          if (-not $p.WaitForExit(300000)) { $p.Kill($true); throw "${heldCase}: the installer still ran after 5 minutes (a message box?)" }
+          if ($p.ExitCode -ne 0) { throw "${heldCase}: the installer exited with '$($p.ExitCode)', expected 0" }
+          Assert-Updated $heldCase
+          $length = (Get-Item -LiteralPath $uninstaller).Length
+          if ($length -ne $uninstallerLength) { throw "${heldCase}: Uninstall.exe is $length bytes, not $uninstallerLength" }
+
+          # 5b) A file in use: held by another program (share None), or
+          #     mapped by GitBolt itself running from $dest. The installer
+          #     finds it before it changes anything and exits with
+          #     kWindowsInstallerExitInUse (src/update/InstallHelpers.h):
+          #     the files and their hashes, the uninstall entry, the Start
+          #     menu shortcut and Explorer's verbs stay as they were. Once
+          #     the file is free, it installs.
+          $m = Select-String -Path src\update\InstallHelpers.h -Pattern 'kWindowsInstallerExitInUse = ([0-9]+);'
+          if (-not $m) { throw 'src\update\InstallHelpers.h has no kWindowsInstallerExitInUse' }
+          $inUseCode = [int]$m.Matches[0].Groups[1].Value
+          function Get-InstallState {
+            Get-ChildItem -LiteralPath $dest -Recurse -File | Sort-Object FullName | ForEach-Object {
+              'file {0} {1}' -f $_.FullName.Substring($dest.Length + 1), (Get-FileHash -LiteralPath $_.FullName).Hash
+            }
+            foreach ($view in 'Registry32', 'Registry64') {
+              $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', $view)
+              foreach ($name in 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GitBolt', 'SOFTWARE\GitBolt\GitBolt') {
+                $key = $base.OpenSubKey($name)
+                if (-not $key) { "$view $name missing"; continue }
+                foreach ($value in @($key.GetValueNames() | Sort-Object)) {
+                  '{0} {1} {2} = {3}' -f $view, $name, $value, $key.GetValue($value)
+                }
+                $key.Close()
+              }
+              $base.Close()
+            }
+            "shortcut $shortcut $(Test-Path -LiteralPath $shortcut)"
+            foreach ($verb in 'Directory\shell\gitbolt\command', 'Directory\Background\shell\gitbolt\command') {
+              $item = Get-Item -LiteralPath "Registry::HKEY_CLASSES_ROOT\$verb" -ErrorAction SilentlyContinue
+              "verb $verb = $(if ($item) { $item.GetValue('') } else { '<missing>' })"
+            }
           }
-          Install-Over 'after bin\GitBolt.exe was in use'
-          Assert-Updated 'installed again after bin\GitBolt.exe was in use'
+          # The state to keep: a whole install, shortcut and verbs included.
+          function Get-Intact {
+            $state = @(Get-InstallState)
+            if ($state -notcontains "shortcut $shortcut True" -or @($state -like 'verb * = <missing>').Count) {
+              throw "no Start menu shortcut or Explorer verb to keep:`n$($state -join "`n")"
+            }
+            $state
+          }
+          function Assert-Unchanged([string]$when, [string[]]$before) {
+            $diff = @(Compare-Object $before @(Get-InstallState) -CaseSensitive)
+            if ($diff) {
+              throw "${when}, the install changed:`n$(($diff | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join "`n")"
+            }
+          }
+          foreach ($rel in 'bin\GitBolt.exe', 'bin\Qt6Core.dll') {
+            $before = Get-Intact
+            $lock = [System.IO.File]::Open((Join-Path $dest $rel), 'Open', 'Read', 'None')
+            try {
+              Install-Over "with $rel in use" $inUseCode
+            } finally {
+              $lock.Dispose()
+            }
+            Assert-Unchanged "after the install with $rel in use" $before
+            Install-Over "after $rel was in use"
+            Assert-Updated "installed again after $rel was in use"
+          }
+          # GitBolt as a double-click starts it (a test instance of its own,
+          # no Qt from the build), up once Qt has loaded its platform plugin.
+          $before = Get-Intact
+          $psi = [System.Diagnostics.ProcessStartInfo]::new($exe)
+          $psi.UseShellExecute = $false
+          $psi.WorkingDirectory = $env:RUNNER_TEMP
+          $psi.Environment['PATH'] = "$sys;$env:SystemRoot"
+          foreach ($v in 'QT_PLUGIN_PATH', 'QML2_IMPORT_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QPA_PLATFORM') {
+            [void]$psi.Environment.Remove($v)
+          }
+          $psi.Environment['GITBOLT_INSTANCE_NAME'] = 'ci-installer-in-use'
+          $psi.Environment['GITBOLT_TELEMETRY'] = '0'
+          $psi.Environment['GITBOLT_UPDATE_CHECK'] = '0'
+          $running = [System.Diagnostics.Process]::Start($psi)
+          try {
+            $deadline = (Get-Date).AddSeconds(60)
+            while (-not $running.HasExited) {
+              $modules = @(Get-Process -Id $running.Id -Module -ErrorAction SilentlyContinue | ForEach-Object ModuleName)
+              if ($modules -contains 'qwindows.dll') { break }
+              if ((Get-Date) -ge $deadline) { throw 'GitBolt did not load qwindows.dll within 60 s' }
+              Start-Sleep -Milliseconds 250
+            }
+            if ($running.HasExited) { throw "GitBolt exited with $($running.ExitCode) before it was up" }
+            Install-Over 'while GitBolt runs from the install folder' $inUseCode
+          } finally {
+            if (-not $running.HasExited) { try { $running.Kill($true) } catch { } }
+            [void]$running.WaitForExit(30000)
+          }
+          Assert-Unchanged 'after the install while GitBolt ran' $before
+          Install-Over 'after GitBolt quit'
+          Assert-Updated 'installed again after GitBolt quit'
 
           # 6) The updater's own Windows update, for real: test_update_helpers'
           #    windowsHelperUpdatesARealInstall (tests/update/
@@ -1358,10 +1475,14 @@ jobs:
           #    GitBolt again (hidden powershell.exe -EncodedCommand,
           #    detached), for a stand-in GitBolt. With a 2 s timeout they
           #    must give up and change nothing; with another GitBolt
-          #    running from $dest, install nothing; with time, wait, run
-          #    the installer over $dest, write "ok" and start the installed
-          #    GitBolt.exe again (a test session, with an instance name of
-          #    its own; the test closes it). It runs only when these
+          #    running from $dest, or another program holding
+          #    bin\Qt6Core.dll, install and change nothing; with time,
+          #    wait, run the installer over $dest, write "ok" and start the
+          #    installed GitBolt.exe again (a test session, with an
+          #    instance name of its own; the test closes it). Stand-ins for
+          #    the installer check that a lost Uninstall.exe makes it run
+          #    once more (and only once), and that its in-use exit code
+          #    means nothing was installed. It runs only when these
           #    variables name the installer and the install. The binary
           #    the Test step ran, from ctest's own list; its PASS line
           #    must be there, so a skip fails here.

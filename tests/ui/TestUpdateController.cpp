@@ -1401,6 +1401,21 @@ private slots:
                                           "window was still open. GitBolt wasn't changed.\n\nClose every other "
                                           "GitBolt window, in other users' sessions too, then click Try Again.")}
             << "Windows will ask for permission for Windows PowerShell to install it." << true;
+        // Nor did it while another program had a file open, which it names.
+        QTest::newRow("Windows: a file in use")
+            << QByteArray("failed 0.1.1 another program was using bin\\Qt6Core.dll\n")
+            << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: another program was "
+                                          "using bin\\Qt6Core.dll. GitBolt wasn't changed.\n\nClose the program "
+                                          "that is using files in "),
+                           QStringLiteral(", or restart Windows, then click Try Again.")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
+        // The installer's own check: it stopped before changing anything.
+        QTest::newRow("Windows: the installer found a file in use")
+            << QByteArray("failed 0.1.1 another program was using GitBolt files\n") << int(PackageKind::WindowsInstall)
+            << QStringList{QStringLiteral("failed after GitBolt quit: another program was using GitBolt files. "
+                                          "GitBolt wasn't changed.\n\nClose the program that is using files in ")}
+            << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // PowerShell's way: a BOM, CRLF.
         QTest::newRow("Windows: UAC declined")
             << QByteArray("\xEF\xBB\xBF" "declined 0.1.1 the request for permission was cancelled\r\n")
@@ -1637,6 +1652,10 @@ private slots:
             << QByteArray("failed 0.1.0 the installer ran, but Uninstall.exe is missing\n")
             << QByteArray("0.0.9 0.1.0 <now>") << int(PackageKind::WindowsInstall)
             << "failed install uninstaller_missing 0.0.9 0.1.0 nsis" << false;
+        QTest::newRow("Windows: a file in use")
+            << QByteArray("failed 0.1.1 another program was using bin\\Qt6Core.dll\n")
+            << QByteArray("0.1.0 0.1.1 <now>") << int(PackageKind::WindowsInstall)
+            << "failed install file_in_use 0.1.0 0.1.1 nsis" << false;
         QTest::newRow("a marker for another version")
             << QByteArray("failed 0.1.1 apt-get failed with status 100\n") << QByteArray("0.1.0 0.1.2 <now>") << deb
             << "failed install apt_failed unknown 0.1.1 deb" << false;

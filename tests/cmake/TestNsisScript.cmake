@@ -1,7 +1,8 @@
 # cmake -P this
 # Checks cmake/NsisScript.cmake as NSIS gets it (no box a silent install
-# can't answer, files in use not skipped), and that this CMake's
-# NSIS.template.in still has the hooks it relies on.
+# can't answer, a file in use found before anything changes and never
+# skipped), and that this CMake's NSIS.template.in still has the hooks it
+# relies on.
 
 # Policies as the project's (CMP0053: @VAR@ in quoted arguments stays text).
 cmake_minimum_required(VERSION 3.21)
@@ -45,21 +46,57 @@ file(READ ${CMAKE_CURRENT_LIST_DIR}/../../src/update/Package.h _package)
 _find("${_package}" "\"SOFTWARE\\\\Microsoft\\\\Windows\\\\CurrentVersion\\\\Uninstall\\\\GitBolt\"" _at)
 _check("_at GREATER -1" "src/update/Package.h doesn't read the key the installer writes, ${_key}")
 
+# The in-use exit code, as the updater reads it (src/update/InstallHelpers.h):
+# none of NSIS's own (1, 2) nor the administrator part's (kWindowsExit*).
+file(READ ${CMAKE_CURRENT_LIST_DIR}/../../src/update/InstallHelpers.h _helpers)
+string(REGEX MATCH "kWindowsInstallerExitInUse = ([0-9]+);" _match "${_helpers}")
+set(_in_use_exit "${CMAKE_MATCH_1}")
+string(REGEX MATCHALL "kWindowsExit[A-Za-z]+ = [0-9]+;" _admin_exits "${_helpers}")
+string(REGEX REPLACE "kWindowsExit[A-Za-z]+ = ([0-9]+);" "\\1" _admin_exits "${_admin_exits}")
+if(_in_use_exit STREQUAL "")
+    _check("FALSE" "src/update/InstallHelpers.h has no kWindowsInstallerExitInUse = <code>;")
+else()
+    list(FIND _admin_exits ${_in_use_exit} _at)
+    _check("_in_use_exit GREATER 2 AND _at EQUAL -1"
+           "kWindowsInstallerExitInUse (${_in_use_exit}) is NSIS's own exit code or the administrator part's")
+endif()
+
 foreach(_line "AllowSkipFiles off" "!include FileFunc.nsh" "VIProductVersion '0.1.0.0'"
               "VIAddVersionKey 'GitBoltMinimumWindows' '10.0.19045'")
     _find("${_nsis_DEFINES}" "\n  ${_line}\n" _at)
     _check("_at GREATER -1" "CPACK_NSIS_DEFINES lacks '${_line}'")
 endforeach()
 
-# The registered uninstaller, only if it is there, run from a copy, and
-# installed over if it fails; never a box. Then the new one registered
-# before any file, so an install that stops halfway can be repaired.
+# First GitBolt's files (the folder's own, all of bin and plugins) in the
+# registered folder and $INSTDIR, opened as File opens them but not
+# truncated: a sharing or lock violation is Retry/Cancel, under /S the
+# in-use exit code. Then the registered uninstaller, only if it is there,
+# run from a copy, and installed over if it fails; never a box. Then the
+# new one registered before any file, so an install that stops halfway can
+# be repaired.
 set(_order
     "ReadRegStr $0 HKLM '${_key}' 'UninstallString'"
     "StrCmp $1 '\"' 0 +2"
     "StrCpy $1 $0 '' -14"
-    "StrCmp $1 '\\Uninstall.exe' 0 gitbolt_uninstalled"
-    "IfFileExists $0 0 gitbolt_uninstalled"
+    "StrCmp $1 '\\Uninstall.exe' 0 gitbolt_unregistered"
+    "IfFileExists $0 0 gitbolt_unregistered"
+    "gitbolt_check_in_use:"
+    "StrCpy $5 $1"
+    "FindFirst $3 $4 '$5\\*.*'"
+    "IfFileExists '$6\\*.*' 0 gitbolt_probe"
+    "IntCmp $9 0 0 gitbolt_open_subfolder gitbolt_open_subfolder"
+    "StrCmp $4 'bin' gitbolt_open_subfolder"
+    "StrCmp $4 'plugins' gitbolt_open_subfolder gitbolt_skip_entry"
+    "StrCmp $6 $EXEPATH gitbolt_skip_entry"
+    "System::Call 'kernel32::CreateFile(t r6, i 0x40000000, i 1, p 0, i 3, i 0, p 0) p .r7 ?e'"
+    "StrCmp $8 32 gitbolt_in_use"
+    "StrCmp $8 33 gitbolt_in_use"
+    "IfFileExists '$INSTDIR\\Uninstall.exe' gitbolt_walk_instdir"
+    "IfFileExists '$INSTDIR\\bin\\GitBolt.exe' 0 gitbolt_free"
+    "StrCpy $5 $INSTDIR"
+    "MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION 'GitBolt is running, or another program is using $6. Close it, then click Retry.' /SD IDCANCEL IDRETRY gitbolt_check_in_use"
+    "gitbolt_free:"
+    "StrCmp $0 '' gitbolt_uninstalled"
     "CopyFiles /SILENT $0 '$PLUGINSDIR\\gitbolt-old-uninstaller.exe'"
     "ExecWait '\"$PLUGINSDIR\\gitbolt-old-uninstaller.exe\" /S _?=$1' $2"
     "StrCmp $2 0 gitbolt_uninstalled"
@@ -75,19 +112,56 @@ foreach(_line IN LISTS _order)
     _check("_at GREATER _last" "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS lacks '${_line}', or has it out of order")
     set(_last ${_at})
 endforeach()
+# Cancel, or /S: the error level set just before Abort, which makes it the
+# exit code instead of 2 (NSIS's Main.c).
+string(REGEX MATCH "\n[ \t]*MessageBox [^\n]* /SD IDCANCEL IDRETRY gitbolt_check_in_use\n[ \t]*SetErrorLevel ([0-9]+)\n[ \t]*Abort '[^'\n]*'\n"
+       _match "${_nsis_EXTRA_PREINSTALL_COMMANDS}")
+if(NOT _in_use_exit STREQUAL "")
+    _check("\"${CMAKE_MATCH_1}\" STREQUAL \"${_in_use_exit}\""
+           "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS: the in-use box isn't followed by SetErrorLevel ${_in_use_exit} and Abort")
+endif()
+# Nothing changed until the check passes, so stopping there leaves all as it was.
+_find("${_nsis_EXTRA_PREINSTALL_COMMANDS}" "gitbolt_free:\n" _free)
+if(_free GREATER -1)
+    string(SUBSTRING "${_nsis_EXTRA_PREINSTALL_COMMANDS}" 0 ${_free} _text)
+    string(REPLACE ";" "\\;" _text "${_text}")
+    string(REPLACE "\n" ";" _lines "${_text}")
+    foreach(_line IN LISTS _lines)
+        if(_line MATCHES "^[ \t]*(CopyFiles|Exec|WriteUninstaller|WriteReg|WriteINI|DeleteReg|Delete|RMDir|Rename|File[ \t]|SetOutPath|CreateDirectory|CreateShortCut|SetFileAttributes)")
+            _check("FALSE" "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS changes something before the in-use check passes: '${_line}'")
+        endif()
+    endforeach()
+endif()
 
-# The uninstaller written again if it's missing; what Installed apps shows.
-foreach(_line
-        "WriteRegStr HKCR 'Directory\\shell\\gitbolt\\command' '' '\"$INSTDIR\\bin\\GitBolt.exe\" \"%V\"'"
-        "IfFileExists '$INSTDIR\\Uninstall.exe' gitbolt_have_uninstaller"
-        "WriteUninstaller '$INSTDIR\\Uninstall.exe'"
-        "Abort 'Could not create the uninstaller. Run the installer again.'"
-        "WriteRegStr SHCTX '${_key}' 'InstallLocation' '$INSTDIR'"
-        "\${GetSize} '$INSTDIR' '/S=0K' $0 $1 $2"
-        "WriteRegDWORD SHCTX '${_key}' 'EstimatedSize' $0")
+# The uninstaller opened and measured against a fresh copy, not found by
+# IfFileExists (which a file deleted while held still passes), and written
+# again until it matches; then what Installed apps shows.
+set(_order
+    "WriteRegStr HKCR 'Directory\\shell\\gitbolt\\command' '' '\"$INSTDIR\\bin\\GitBolt.exe\" \"%V\"'"
+    "WriteUninstaller '$PLUGINSDIR\\gitbolt-uninstaller.exe'"
+    "FileSeek $0 0 END $3"
+    "gitbolt_check_uninstaller:"
+    "FileOpen $0 '$INSTDIR\\Uninstall.exe' r"
+    "IfErrors gitbolt_rewrite_uninstaller"
+    "FileSeek $0 0 END $1"
+    "StrCmp $1 $3 gitbolt_have_uninstaller"
+    "gitbolt_rewrite_uninstaller:"
+    "Sleep $4"
+    "WriteUninstaller '$INSTDIR\\Uninstall.exe'"
+    "Goto gitbolt_check_uninstaller"
+    "Abort 'Could not create the uninstaller. Run the installer again.'"
+    "gitbolt_have_uninstaller:"
+    "WriteRegStr SHCTX '${_key}' 'InstallLocation' '$INSTDIR'"
+    "\${GetSize} '$INSTDIR' '/S=0K' $0 $1 $2"
+    "WriteRegDWORD SHCTX '${_key}' 'EstimatedSize' $0")
+set(_last -1)
+foreach(_line IN LISTS _order)
     _find("${_nsis_EXTRA_INSTALL_COMMANDS}" "${_line}\n" _at)
-    _check("_at GREATER -1" "CPACK_NSIS_EXTRA_INSTALL_COMMANDS lacks '${_line}'")
+    _check("_at GREATER _last" "CPACK_NSIS_EXTRA_INSTALL_COMMANDS lacks '${_line}', or has it out of order")
+    set(_last ${_at})
 endforeach()
+_find("${_nsis_EXTRA_INSTALL_COMMANDS}" "IfFileExists" _at)
+_check("_at EQUAL -1" "CPACK_NSIS_EXTRA_INSTALL_COMMANDS checks the uninstaller with IfFileExists, which a file deleted while held open passes")
 
 # Every fragment, line by line: whole quotes (none holds an apostrophe),
 # and a MessageBox has /SD or only shows when not silent.
@@ -104,6 +178,32 @@ foreach(_name IN LISTS _fragments)
             set(_silent_checked TRUE)
         elseif(_line MATCHES "MessageBox" AND NOT _line MATCHES " /SD ID" AND NOT _silent_checked)
             _check("FALSE" "${_name}: a MessageBox a silent install can't answer: '${_line}'")
+        endif()
+    endforeach()
+endforeach()
+
+# A relative jump (+N) counts instructions: each line it passes over must
+# be one, not a label, plugin call or macro, which compile to other counts.
+foreach(_name IN LISTS _fragments)
+    string(REPLACE ";" "\\;" _text "${_nsis_${_name}}")
+    string(REPLACE "\n" ";" _lines "${_text}")
+    list(LENGTH _lines _count)
+    set(_next 0)
+    foreach(_line IN LISTS _lines)
+        math(EXPR _next "${_next} + 1")
+        if(_line MATCHES "^[ \t]*(StrCmp|StrCmpS|IntCmp|IntCmpU|IfErrors|IfFileExists|IfSilent|Goto) .*[ \t]\\+([0-9]+)$")
+            math(EXPR _landing "${_next} + ${CMAKE_MATCH_2} - 1")
+            if(_landing GREATER_EQUAL _count)
+                _check("FALSE" "${_name}: '${_line}' jumps past the end")
+            elseif(_landing GREATER _next)
+                math(EXPR _passed "${_landing} - 1")
+                foreach(_at RANGE ${_next} ${_passed})
+                    list(GET _lines ${_at} _over)
+                    if(_over MATCHES ":[ \t]*$|::|\\$\\{|^[ \t]*(!insertmacro|File )|^[ \t]*$")
+                        _check("FALSE" "${_name}: '${_line}' jumps over '${_over}', which isn't one instruction")
+                    endif()
+                endforeach()
+            endif()
         endif()
     endforeach()
 endforeach()

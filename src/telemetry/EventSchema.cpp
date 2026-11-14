@@ -263,9 +263,9 @@ QString updateReason(const QString& code) {
         "not_ready",          "no_pkexec",         "helper_start_failed", "elevation_failed",
         "permission_declined", "quit_timeout",     "new_copy_missing",    "move_aside_failed",
         "move_into_place_failed", "rollback_failed", "apt_failed",        "in_use",
-        "installer_not_started", "installer_exit", "wrong_version",       "uninstaller_missing",
-        "elevated_error",     "elevated_timeout",  "elevated_no_result",  "no_result",
-        "none",
+        "file_in_use",        "installer_not_started", "installer_exit",  "wrong_version",
+        "uninstaller_missing", "elevated_error",   "elevated_timeout",    "elevated_no_result",
+        "no_result",          "none",
     });
 }
 
