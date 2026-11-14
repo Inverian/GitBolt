@@ -6,7 +6,7 @@ versions follow [Semantic Versioning](https://semver.org): a 1.0.x
 release only fixes bugs, and a 1.x.0 release can also add features or
 need a newer version of macOS, Windows or Ubuntu.
 
-## [Unreleased]
+## [1.0.0] — 2026-11-14
 
 ### Added
 
