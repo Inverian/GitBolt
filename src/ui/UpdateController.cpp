@@ -437,7 +437,8 @@ void UpdateController::reportEarlierInstall(bool running)
         if (failure == update::Failure::InUse)
             byHand = tr("Close every other GitBolt window, in other users' sessions too, then click Try Again.");
         else if (failure == update::Failure::FileInUse)
-            byHand = tr("Close the program that is using files in %1, or restart Windows, then click Try Again.")
+            byHand = tr("Close the program that is using files in %1, then click Try Again. If you can't tell "
+                        "which program it is, restart Windows, then choose Help › Check for Updates.")
                          .arg(QDir::toNativeSeparators(setup_.package.target));
         break;
     case update::PackageKind::Deb:

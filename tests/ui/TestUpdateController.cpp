@@ -1408,7 +1408,8 @@ private slots:
             << QStringList{QStringLiteral("Installing GitBolt 0.1.1 failed after GitBolt quit: another program was "
                                           "using bin\\Qt6Core.dll. GitBolt wasn't changed.\n\nClose the program "
                                           "that is using files in "),
-                           QStringLiteral(", or restart Windows, then click Try Again.")}
+                           QStringLiteral(", then click Try Again. If you can't tell which program it is, restart "
+                                          "Windows, then choose Help › Check for Updates.")}
             << "Windows will ask for permission for Windows PowerShell to install it." << true;
         // The installer's own check: it stopped before changing anything.
         QTest::newRow("Windows: the installer found a file in use")
