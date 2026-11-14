@@ -147,8 +147,8 @@ need a newer version of macOS, Windows or Ubuntu.
 - **Committing without a name and email** for git failed with git's
   advice to run `git config`; on a Mac, git instead made up a name and
   email from your account and computer names, and committed with them.
-  GitBolt now refuses such a commit, and the Commit dialog and the
-  status bar say to set them in Tools › Settings › Git Config. Before
+  The Commit dialog now refuses such a commit, and it and the status
+  bar say to set them in Tools › Settings › Git Config. Before
   you commit, the dialog's footer says when they aren't set, with
   **Set name and email…**, which opens that page. Opened again, the
   dialog no longer shows the last commit's error. It also no longer
