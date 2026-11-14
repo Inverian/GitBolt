@@ -158,10 +158,15 @@ if(GITBOLT_RELEASE_SYMBOLS)
         set(_gitbolt_split COMMAND ${GITBOLT_DSYMUTIL} $<TARGET_FILE:gitbolt> -o symbols/GitBolt.dSYM)
         set(_gitbolt_symbol_files GitBolt.dSYM)
     elseif(WIN32)
-        # llvm-symbolizer wants the .exe beside its .pdb.
-        set(_gitbolt_split COMMAND ${CMAKE_COMMAND} -E copy
-            $<TARGET_FILE:gitbolt> $<TARGET_PDB_FILE:gitbolt> symbols/)
-        set(_gitbolt_symbol_files $<TARGET_FILE_NAME:gitbolt> $<TARGET_PDB_FILE_NAME:gitbolt>)
+        # llvm-symbolizer wants the .exe beside its .pdb. The .exe is a
+        # copy of GitBolt (with libgit2's bundled code), so its licences go
+        # with it, under the installer's names.
+        set(_gitbolt_split
+            COMMAND ${CMAKE_COMMAND} -E copy
+                $<TARGET_FILE:gitbolt> $<TARGET_PDB_FILE:gitbolt> "${GITBOLT_NOTICES_FILE}" symbols/
+            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/LICENSE" symbols/LICENSE.txt)
+        set(_gitbolt_symbol_files $<TARGET_FILE_NAME:gitbolt> $<TARGET_PDB_FILE_NAME:gitbolt>
+            LICENSE.txt THIRD-PARTY-NOTICES.txt)
     else()
         # The binary gets a debug link to gitbolt.debug, which CPack's
         # strip keeps; the old link goes first, so a rerun links the new file.

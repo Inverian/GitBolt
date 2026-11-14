@@ -811,8 +811,7 @@ bool Installer::launchHelper(qint64 pid, quintptr window) {
                         package_.whyNot.isEmpty() ? tr("Installing the update needs pkexec.") : package_.whyNot);
     if (!QDir().mkpath(workDir_))
         return failWith(Failure::DiskError, tr("Couldn't create %1.").arg(workDir_));
-    // One update per log: a relaunched deb copy keeps writing its output
-    // to it.
+    // One update per log.
     if (QFile logFile(logPath()); logFile.open(QIODevice::WriteOnly | QIODevice::Truncate))
         logFile.close();
     // An earlier update's result would pass for this one's.

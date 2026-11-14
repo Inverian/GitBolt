@@ -344,6 +344,7 @@ void UpdateController::reportEarlierInstall(bool running)
             reportResult("no_result", "install", update::Failure::NoResult, marker->from, marker->to);
         return;
     }
+    const qint64 writtenAt = info.lastModified().toSecsSinceEpoch();
     std::optional<InstallResult> result;
     if (QFile file(path); file.open(QIODevice::ReadOnly))
         result = parseInstallResult(file.read(kMaxResultBytes + 1));
@@ -400,8 +401,12 @@ void UpdateController::reportEarlierInstall(bool running)
                      version);
     // At this version, only the copy the helper started says so: a later
     // start may come after a reinstall by hand (a Mac's helper starts none).
+    // 0.9.x's Windows helper marks neither, but starts GitBolt right after
+    // writing a result: a fresh one without a marker is its.
     const bool thisVersion = !(result->version > current);
-    if (thisVersion && !setup_.startedByUpdate)
+    const bool oldHelpersCopy = !markerThere && setup_.package.kind == update::PackageKind::WindowsInstall
+                                && std::llabs(QDateTime::currentSecsSinceEpoch() - writtenAt) <= kResultPatienceSeconds;
+    if (thisVersion && !setup_.startedByUpdate && !oldHelpersCopy)
         return;
 
     const auto withReason = [&](const QString& what) {

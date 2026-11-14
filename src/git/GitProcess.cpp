@@ -1615,8 +1615,13 @@ Result<ProcessOutput> GitProcess::commit(const std::string& message, bool amend)
     // (rejectedRewordMessage()).
     const QString rewordPlan = stoppedRewordMessage();
 
-    // The message is UTF-8, and labelled so (kUtf8Commits).
-    std::vector<std::string> args = {"-c", kUtf8Commits, "commit", "-F", "-"};
+    // The message is UTF-8, and labelled so (kUtf8Commits). No made-up
+    // name and email: git takes them from the account and the computer's
+    // name (a Mac's passes), which a push would publish. EMAIL still counts.
+    std::vector<std::string> args = {"-c", kUtf8Commits};
+    if (qEnvironmentVariableIsEmpty("EMAIL"))
+        args.insert(args.end(), {"-c", "user.useConfigOnly=true"});
+    args.insert(args.end(), {"commit", "-F", "-"});
     if (amend)
         args.emplace_back("--amend");
     auto result = runImpl(args, kCommitTimeoutMs, &message);

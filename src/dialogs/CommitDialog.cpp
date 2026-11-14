@@ -46,14 +46,11 @@ constexpr const char* kMainSplitterKey  = "commitMainSplitter/v2";
 constexpr const char* kLeftSplitterKey  = "commitLeftSplitter/v2";
 constexpr const char* kRightSplitterKey = "commitRightSplitter/v2";
 
-// Where GitBolt sets git's user.name and user.email.
+// Where GitBolt sets git's user.name and user.email: the window's Tools
+// menu on every system (macOS's GitBolt menu has no Settings).
 QString identitySettings()
 {
-#ifdef Q_OS_MACOS
-    return CommitDialog::tr("GitBolt › Settings › Git Config");
-#else
     return CommitDialog::tr("Tools › Settings › Git Config");
-#endif
 }
 
 // git's hint for a commit without a name or email quotes this command in
