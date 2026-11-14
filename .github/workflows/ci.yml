@@ -1482,7 +1482,8 @@ jobs:
           #    instance name of its own; the test closes it). Stand-ins for
           #    the installer check that a lost Uninstall.exe makes it run
           #    once more (and only once), and that its in-use exit code
-          #    means nothing was installed. It runs only when these
+          #    means nothing was installed; with the real installer, that
+          #    an Uninstall.exe deleted while held runs it once more too. It runs only when these
           #    variables name the installer and the install. The binary
           #    the Test step ran, from ctest's own list; its PASS line
           #    must be there, so a skip fails here.

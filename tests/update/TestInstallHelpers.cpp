@@ -1383,9 +1383,15 @@ private slots:
             "            $found = [string](Get-Item -LiteralPath $app).VersionInfo.ProductVersion\n"
             "            if ($found.Trim() -ne $version) {\n"));
         const qsizetype wrongVersion = elevated.indexOf(QStringLiteral("$code = %1\n").arg(kWindowsExitWrongVersion));
+        // Read, not Test-Path, which throws on one deleted while held.
         const qsizetype uninstaller = elevated.indexOf(QStringLiteral(
-            "        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and "
-            "-not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {\n"
+            "        $uninstaller = $true\n"
+            "        try {\n"
+            "            $null = Get-Content -LiteralPath ($prefix + 'Uninstall.exe') -Encoding Byte -TotalCount 1\n"
+            "        } catch {\n"
+            "            $uninstaller = $false\n"
+            "        }\n"
+            "        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and -not $uninstaller) {\n"
             "            if ($code -ne 0) {\n"
             "                Write-Log ('Uninstall.exe is missing, and the run ended with code ' + $code)\n"
             "            }\n"
@@ -2401,6 +2407,47 @@ private slots:
         QVERIFY2(shownGitBolt(0, 60000) != 0,
                  qPrintable(QStringLiteral("the updated copy didn't start\n") + diagnostics()));
         closeAll();
+
+        // 5b. Uninstall.exe deleted while another program holds it (#63):
+        // still listed, but unreadable, so the real installer can't
+        // rewrite it and stops (2); the update runs it once more, then says
+        // so. Let go, it is gone; a copy puts it back for what follows.
+        const QString kept = path(QStringLiteral("Uninstall-kept.exe"));
+        QFile::remove(kept);
+        QVERIFY(QFile::copy(uninstaller, kept));
+        HANDLE pending = CreateFileW(QDir::toNativeSeparators(uninstaller).toStdWString().c_str(),
+                                     GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY2(pending != INVALID_HANDLE_VALUE, qPrintable(qt_error_string()));
+        const auto letGoPending = [&] {
+            if (pending != INVALID_HANDLE_VALUE)
+                CloseHandle(pending);
+            pending = INVALID_HANDLE_VALUE;
+        };
+        auto letGoPendingAtEnd = qScopeGuard(letGoPending);
+        FILE_DISPOSITION_INFO deleting{TRUE};
+        QVERIFY2(SetFileInformationByHandle(pending, FileDispositionInfo, &deleting, sizeof deleting),
+                 qPrintable(qt_error_string()));
+        gitBoltPid = startStandIn();
+        QVERIFY(gitBoltPid > 0);
+        const WindowsLaunch heldDeleted = launch(120);
+        QVERIFY2(bothStarted(heldDeleted), qPrintable(heldDeleted.error + QLatin1Char('\n') + diagnostics()));
+        QVERIFY2(bothWaiting(60000), qPrintable(diagnostics()));
+        quitWaited();
+        QVERIFY2(finishes(heldDeleted.helperPid, 4 * 60 * 1000),
+                 qPrintable(QStringLiteral("the helper is still running\n") + diagnostics()));
+        QVERIFY(ended(heldDeleted.elevatedPid, 30000));
+        const QString unreadable = readFile(log());
+        QCOMPARE(unreadable.count(QStringLiteral(" running ") + QDir::toNativeSeparators(staged)), 2);
+        QCOMPARE(unreadable.count(QLatin1String(" Uninstall.exe is missing, and the run ended with code 2")), 2);
+        QCOMPARE(readFile(result()), QStringLiteral("failed %1 the installer ran, but Uninstall.exe is missing\n")
+                                         .arg(version->toString()));
+        QVERIFY2(shownGitBolt(0, 60000) != 0,
+                 qPrintable(QStringLiteral("GitBolt didn't start again\n") + diagnostics()));
+        closeAll();
+        letGoPending();
+        QVERIFY(QTest::qWaitFor([&] { return !QFileInfo::exists(uninstaller); }, 10000));
+        QVERIFY(QFile::copy(kept, uninstaller));
 
         // 6. The installer's own check found a file in use, so it changed
         // nothing (kWindowsInstallerExitInUse, cmake/NsisScript.cmake): a

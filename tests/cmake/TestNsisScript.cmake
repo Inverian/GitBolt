@@ -117,13 +117,14 @@ foreach(_line IN LISTS _order)
     _check("_at GREATER _last" "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS lacks '${_line}', or has it out of order")
     set(_last ${_at})
 endforeach()
-# Cancel, or /S: the error level set just before Abort, which makes it the
-# exit code instead of 2 (NSIS's Main.c).
-string(REGEX MATCH "\n[ \t]*MessageBox [^\n]* /SD IDCANCEL IDRETRY gitbolt_check_in_use\n[ \t]*SetErrorLevel ([0-9]+)\n[ \t]*Abort '[^'\n]*'\n"
+# Cancel, or /S: the error level set before Abort, which makes it the exit
+# code instead of 2 (NSIS's Main.c); the file in the details, where the
+# aborted page has room for it.
+string(REGEX MATCH "\n[ \t]*MessageBox [^\n]* /SD IDCANCEL IDRETRY gitbolt_check_in_use\n[ \t]*SetErrorLevel ([0-9]+)\n[ \t]*DetailPrint 'In use: \\$6'\n[ \t]*Abort '[^'\n]*'\n"
        _match "${_nsis_EXTRA_PREINSTALL_COMMANDS}")
 if(NOT _in_use_exit STREQUAL "")
     _check("\"${CMAKE_MATCH_1}\" STREQUAL \"${_in_use_exit}\""
-           "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS: the in-use box isn't followed by SetErrorLevel ${_in_use_exit} and Abort")
+           "CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS: the in-use box isn't followed by SetErrorLevel ${_in_use_exit}, DetailPrint 'In use: $6' and Abort")
 endif()
 # Nothing changed until the check passes, so stopping there leaves all as it was.
 _find("${_nsis_EXTRA_PREINSTALL_COMMANDS}" "gitbolt_free:\n" _free)

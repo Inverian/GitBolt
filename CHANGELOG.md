@@ -167,7 +167,7 @@ need a newer version of macOS, Windows or Ubuntu.
   comes up as usual. Should it still show only on the taskbar, the
   update window says to click that button. An update there that failed after the installer ran said GitBolt
   wasn't changed; it now says GitBolt may be incomplete, and how to
-  repair it. So does an update on a Mac that could put back neither
+  repair it, even when the new version starts. So does an update on a Mac that could put back neither
   the new GitBolt nor the old one. On every system, "GitBolt was
   updated to …" now shows in a bar at the top of the window until you
   close it, with What's New, which opens the release page.

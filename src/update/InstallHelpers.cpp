@@ -488,9 +488,16 @@ QString windowsElevatedScript(const HelperInputs& in) {
         QStringLiteral("                $code = %1").arg(kWindowsExitWrongVersion),
         QStringLiteral("            }"),
         QStringLiteral("        }"),
+        // Read, not Test-Path: one deleted while another program holds it
+        // is still listed, and Test-Path throws on it.
+        QStringLiteral("        $uninstaller = $true"),
+        QStringLiteral("        try {"),
+        QStringLiteral("            $null = Get-Content -LiteralPath ($prefix + 'Uninstall.exe') -Encoding Byte -TotalCount 1"),
+        QStringLiteral("        } catch {"),
+        QStringLiteral("            $uninstaller = $false"),
+        QStringLiteral("        }"),
         // After a second run, whatever stopped it: the first one installed.
-        QStringLiteral("        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and "
-                       "-not (Test-Path -LiteralPath ($prefix + 'Uninstall.exe'))) {"),
+        QStringLiteral("        if (($code -eq 0 -or $code -eq 2 -or $run -eq 2) -and -not $uninstaller) {"),
         QStringLiteral("            if ($code -ne 0) {"),
         QStringLiteral("                Write-Log ('Uninstall.exe is missing, and the run ended with code ' + $code)"),
         QStringLiteral("            }"),

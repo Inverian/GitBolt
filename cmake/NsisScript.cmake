@@ -124,7 +124,8 @@ set(CPACK_NSIS_EXTRA_PREINSTALL_COMMANDS "
       gitbolt_ask:
         MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION 'GitBolt is running, or another program is using $6. Close it, then click Retry.' /SD IDCANCEL IDRETRY gitbolt_check_in_use
         SetErrorLevel ${_gitbolt_nsis_in_use_exit}
-        Abort 'GitBolt is running, or another program is using $6, so nothing was installed.'
+        DetailPrint 'In use: $6'
+        Abort 'Nothing was installed: GitBolt or one of its files is in use.'
       gitbolt_free:
         StrCmp $0 '' gitbolt_uninstalled
         DetailPrint 'Removing the installed GitBolt from $1'

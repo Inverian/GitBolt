@@ -379,12 +379,6 @@ void UpdateController::reportEarlierInstall(bool running)
         return;
     }
     const update::Failure failure = update::installResultFailure(result->status, result->reason);
-    // This version, or a newer one, runs now: whatever went wrong then
-    // was put right since. Except a missing Uninstall.exe: it comes with
-    // the new GitBolt.exe already in place.
-    if (!(result->version > current)
-        && !(result->version == current && failure == update::Failure::UninstallerMissing))
-        return;
     // Once the installer ran, some of its files may be in place: GitBolt
     // was left half updated, not unchanged. So was a Mac whose old copy
     // couldn't be put back.
@@ -394,6 +388,11 @@ void UpdateController::reportEarlierInstall(bool running)
                               || failure == update::Failure::ElevatedTimeout
                               || failure == update::Failure::ElevatedNoResult
                               || failure == update::Failure::RollbackFailed;
+    // A newer version runs now, or this one after a failure that changed
+    // nothing: whatever went wrong was put right since. Not so once the
+    // installer ran: the new GitBolt.exe may run without the rest.
+    if (!(result->version > current) && !(result->version == current && maybeChanged))
+        return;
     if (result->status == QLatin1String("gave-up"))
         reportResult("gave_up", "quit", failure, from, version);
     else
